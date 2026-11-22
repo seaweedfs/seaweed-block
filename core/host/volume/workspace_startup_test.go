@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"testing"
 )
@@ -68,5 +69,73 @@ func TestWorkspaceExitAndFenceUseNamedLineages(t *testing.T) {
 	h.applyFact(foreign)
 	if !h.IsCurrentReplicaSuperseded() || h.IsSuperseded("r1", 0, 0) || fencer.calls.Load() != 0 {
 		t.Fatal("foreign8 must supersede observed own7 without changing the unadopted fencing rule")
+	}
+}
+
+// Check at the adoption handoff, not just after applyFact: moving observation
+// after adapter adoption must fail even when the eventual snapshots match.
+type observationCheckedAdoption struct {
+	assignmentConsumer
+	before func(adapter.AssignmentInfo)
+}
+
+func (a observationCheckedAdoption) OnAssignment(info adapter.AssignmentInfo) adapter.ApplyLog {
+	a.before(info)
+	return a.assignmentConsumer.OnAssignment(info)
+}
+
+func TestWorkspaceObservedLineageNeverTrailsAdoption(t *testing.T) {
+	h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "self", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	check := func(epoch, ev uint64) {
+		t.Helper()
+		h.ownAssignmentMu.RLock()
+		defer h.ownAssignmentMu.RUnlock()
+		if h.ownAssignmentEpoch < epoch || h.ownAssignmentEpoch == epoch && h.ownAssignmentEV < ev {
+			t.Fatalf("observation trails adoption handoff: observed=%d/%d adopted=%d/%d", h.ownAssignmentEpoch, h.ownAssignmentEV, epoch, ev)
+		}
+	}
+	adoptions := 0
+	h.adpt = observationCheckedAdoption{h.adpt, func(info adapter.AssignmentInfo) {
+		check(info.Epoch, info.EndpointVersion)
+		adoptions++
+	}}
+	assertAdopted := func(epoch, ev uint64) {
+		t.Helper()
+		p := h.view.EngineProjection()
+		if p.Epoch != epoch || p.EndpointVersion != ev {
+			t.Fatalf("adopted=%d/%d want=%d/%d", p.Epoch, p.EndpointVersion, epoch, ev)
+		}
+		check(p.Epoch, p.EndpointVersion)
+	}
+	own := holderAssignment(t, "self")
+	own.Epoch = 3
+	h.applyFact(own)
+	assertAdopted(3, 1)
+	h.BlockLocalReadiness("local recovery pending")
+	own.Epoch = 7
+	h.applyFact(own)
+	own.EndpointVersion = 2
+	h.applyFact(own)
+	check(7, 2)
+	assertAdopted(3, 1)
+	h.ClearLocalReadinessBlock()
+	h.replayLocalReadinessFactIfReady()
+	assertAdopted(7, 2)
+	foreign := holderAssignment(t, "other")
+	foreign.Epoch = 8
+	h.applyFact(foreign)
+	assertAdopted(7, 2)
+	own.Epoch = 9
+	h.applyFact(own)
+	assertAdopted(9, 2)
+	own.Epoch = 7
+	h.applyFact(own)
+	assertAdopted(9, 2)
+	if adoptions != 3 {
+		t.Fatalf("adoption handoffs=%d want3 (initial, readiness replay, move back)", adoptions)
 	}
 }
