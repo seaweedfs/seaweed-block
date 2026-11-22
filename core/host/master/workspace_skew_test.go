@@ -19,7 +19,7 @@ func (c skewLeaseClient) RenewWorkspaceLease(ctx context.Context, id *control.Wo
 	if err != nil {
 		return nil, err
 	}
-	return leaseFact(id.VolumeId, l), nil
+	return leaseFact(c.p, id.VolumeId, l), nil
 }
 func (skewLeaseClient) AckWorkspaceRevoked(context.Context, *control.WorkspaceRevocationAck, ...grpc.CallOption) (*control.WorkspaceEmpty, error) {
 	panic("expiry must not ACK clean")
@@ -151,7 +151,6 @@ func TestWorkspaceClockSkewConfigReachesLeaseReply(t *testing.T) {
 func TestWorkspaceLeaseFactUsesPublisherClockAndSkew(t *testing.T) {
 	now := time.Unix(1000, 0)
 	p := authority.NewPublisher(nil, authority.WithWorkspaceLeaseConfig(12*time.Second, func() time.Time { return now }), authority.WithWorkspaceMaxClockSkew(4*time.Second))
-	_ = p
 	for _, tc := range []struct {
 		name   string
 		expiry time.Duration
@@ -165,7 +164,7 @@ func TestWorkspaceLeaseFactUsesPublisherClockAndSkew(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := authority.WorkspaceLease{ReplicaID: "r", Epoch: 1, ExpiresAtNS: now.Add(tc.expiry).UnixNano(), MaxClockSkewNS: tc.skew}
-			fact := leaseFact("v", l)
+			fact := leaseFact(p, "v", l)
 			if fact.ValidForNs != int64(tc.want) {
 				t.Fatalf("validity=%s, want %s", time.Duration(fact.ValidForNs), tc.want)
 			}

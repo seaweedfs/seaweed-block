@@ -78,23 +78,9 @@ func workspaceError(err error) error {
 	return status.Error(codes.FailedPrecondition, err.Error())
 }
 
-func leaseFact(volume string, l authority.WorkspaceLease) *control.WorkspaceLeaseFact {
-	// Client anchors this duration to its request START, not response arrival.
-	// The host fences half a skew bound before the stored master expiry.
-	// Never grant more than the server's configured 30s TTL after a restart.
-	skew := time.Duration(l.MaxClockSkewNS)
-	// Older persisted leases predate the bound; use the production default.
-	if skew <= 0 {
-		skew = 20 * time.Second
-	}
-	remaining := time.Until(time.Unix(0, l.ExpiresAtNS).Add(-skew / 2))
-	if remaining > 30*time.Second {
-		remaining = 30 * time.Second
-	}
-	if remaining < 0 {
-		remaining = 0
-	}
-	return &control.WorkspaceLeaseFact{VolumeId: volume, ReplicaId: l.ReplicaID, Epoch: l.Epoch, ExpiresAtNs: l.ExpiresAtNS, ValidForNs: int64(remaining), Revoking: l.Revoking}
+func leaseFact(p *authority.Publisher, volume string, l authority.WorkspaceLease) *control.WorkspaceLeaseFact {
+	// The client anchors this duration to its request START, not response arrival.
+	return &control.WorkspaceLeaseFact{VolumeId: volume, ReplicaId: l.ReplicaID, Epoch: l.Epoch, ExpiresAtNs: l.ExpiresAtNS, ValidForNs: int64(p.WorkspaceLeaseValidity(l)), Revoking: l.Revoking}
 }
 
 // holderMatches implements INV-AUTH-HOLDER-IDENTITY-001 for both holder RPCs.
@@ -125,7 +111,7 @@ func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.Workspace
 	if err != nil {
 		return nil, workspaceError(err)
 	}
-	return leaseFact(q.GetVolumeId(), l), nil
+	return leaseFact(s.host.Publisher(), q.GetVolumeId(), l), nil
 }
 
 func (s *services) RevokeWorkspace(ctx context.Context, q *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
@@ -140,7 +126,7 @@ func (s *services) RevokeWorkspace(ctx context.Context, q *control.WorkspaceIden
 	if !ok {
 		return nil, status.Error(codes.FailedPrecondition, "workspace moved during revocation")
 	}
-	return leaseFact(q.GetVolumeId(), lease), nil
+	return leaseFact(s.host.Publisher(), q.GetVolumeId(), lease), nil
 }
 
 func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.WorkspaceRevocationAck) (*control.WorkspaceEmpty, error) {
@@ -416,7 +402,7 @@ func (s *services) QueryWorkspace(ctx context.Context, q *control.WorkspaceVolum
 		return out, nil
 	}
 	if lease, ok := s.host.Publisher().WorkspaceLeaseReply(q.GetVolumeId()); ok {
-		out.Lease = leaseFact(q.GetVolumeId(), lease) // granted expiry, not the durable horizon
+		out.Lease = leaseFact(s.host.Publisher(), q.GetVolumeId(), lease) // granted expiry, not the durable horizon
 	}
 	if state.Ack != nil {
 		out.RevocationAck = &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: q.GetVolumeId(), ReplicaId: state.Ack.ReplicaID, Epoch: state.Ack.Epoch}, HeadGen: state.Ack.HeadGen}
