@@ -453,7 +453,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 				// INV-WS-STARTUP-RETRY-001: at or above this assignment,
 				// the foreign holder is a supersede proof. A lower epoch is
 				// the existing move-back/stale-root diagnostic, never 78.
-				if head.Epoch >= cfg.Epoch {
+				if claimHeadSupersedes(head, cfg) {
 					err = fmt.Errorf("%w: %w", err, errChunkForeignClaim)
 				}
 				log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
@@ -509,7 +509,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	if err != nil {
 		// INV-WS-STARTUP-RETRY-001: only the claim's exact foreign-holder
 		// proof permits no-retry; a higher epoch of our own holder retries.
-		if errors.Is(err, storage.ErrChunkLayerFenced) && head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder {
+		if errors.Is(err, storage.ErrChunkLayerFenced) && claimHeadSupersedes(head, cfg) {
 			err = errors.Join(err, errChunkForeignClaim)
 		}
 		log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
@@ -1499,4 +1499,10 @@ func (w *cutWaitSlot) status(cutSeq uint64) CutScheduleStatus {
 		st.HostSlotWaitSinceNs = 0
 	}
 	return st
+}
+
+// INV-WS-STARTUP-RETRY-001: a displaced lower-epoch claim fences this
+// attempt, but cannot prove the assigned holder was superseded.
+func claimHeadSupersedes(head storage.ChunkHead, cfg storage.ChunkLayerConfig) bool {
+	return head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder && head.Epoch >= cfg.Epoch
 }
