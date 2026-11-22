@@ -406,3 +406,87 @@ func TestWorkspaceOldLocalHolderForeignHeadChoosesNoRetry(t *testing.T) {
 		})
 	}
 }
+
+// The real claim reads E1/A; a late E2/C wins before E3/B's CAS.
+// The displaced HEAD is a fence for this attempt, not proof E3 was superseded.
+type displacedClaimExitRemote struct {
+	storage.ChunkRemote
+	epoch uint64
+	raced bool
+}
+
+func (r *displacedClaimExitRemote) CASHead(ctx context.Context, prev storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	if !r.raced {
+		r.raced = true
+		late := storage.ChunkHead{Epoch: r.epoch, Holder: "C", State: storage.ChunkHeadActive}
+		if _, err := r.ChunkRemote.CASHead(ctx, prev, late); err != nil {
+			return 0, err
+		}
+	}
+	return r.ChunkRemote.CASHead(ctx, prev, next)
+}
+
+type displacedClaimExitView struct{}
+
+func (displacedClaimExitView) Projection() frontend.Projection {
+	return frontend.Projection{VolumeID: "v", ReplicaID: "B", Epoch: 3, Healthy: true}
+}
+func TestWorkspaceDisplacedClaimUsesAssignedEpoch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		epoch uint64
+		want  int
+	}{
+		{"late lower epoch", 2, 75}, {"equal epoch foreign holder", 3, 78}, {"higher epoch foreign holder", 4, 78},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			h, _ := exitAuthorityHost(t)
+			base := storage.NewMemChunkRemote()
+			if _, err := base.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "A", State: storage.ChunkHeadActive}); err != nil {
+				t.Fatal(err)
+			}
+			remote := &displacedClaimExitRemote{ChunkRemote: base, epoch: tc.epoch}
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, displacedClaimExitView{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := p.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			if _, err = p.EnsureStorage("v"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = p.RecoverVolume(ctx, "v"); !errors.Is(err, storage.ErrChunkLayerFenced) {
+				t.Fatalf("claim error=%v", err)
+			}
+			if !remote.raced {
+				t.Fatal("controlled CAS did not run")
+			}
+			e := newProcessExit(ctx)
+			if !chooseChunkStartupExit(e, flags{workspaceLease: true, durableImpl: "walstore-chunk", volumeID: "v"}, h, p) {
+				t.Fatal("fenced claim did not choose an exit")
+			}
+			select {
+			case out := <-e.decision:
+				if out.code != tc.want {
+					t.Fatalf("displaced E%d/C at assigned E3/B chose %+v, want %d", tc.epoch, out, tc.want)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			head, err := base.GetHead(ctx)
+			if err != nil || head.Gen != 2 || head.Epoch != tc.epoch || head.Holder != "C" || base.Puts() != 0 {
+				t.Fatalf("refused claim mutated HEAD/payload: %+v puts=%d err=%v", head, base.Puts(), err)
+			}
+			for _, status := range p.DurableStatuses() {
+				if status.Operational {
+					t.Fatal("displaced claim served I/O")
+				}
+			}
+		})
+	}
+}
