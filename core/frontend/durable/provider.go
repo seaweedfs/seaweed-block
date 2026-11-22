@@ -564,25 +564,35 @@ const volumeLockCure = "install the tmpfiles.d entry (deploy/systemd/sw-block.tm
 
 // makeVolumeLockDir lays out a missing lock directory as the tmpfiles.d
 // entry does: its parent 0755 (traversable by the unit's user even when root
-// created it) and the directory itself 0700. Existing directories are left
-// as they are. Modes are set explicitly, so the umask cannot narrow them.
+// created it) and the directory itself 0700. Only a directory this call
+// creates is chmod'ed (the umask cannot narrow it); one that exists, or that
+// another process creates meanwhile, keeps its mode. An existing lock path
+// that is not a directory refuses.
 func makeVolumeLockDir(dir string) error {
 	parent := filepath.Dir(dir)
-	if _, err := os.Stat(parent); errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(parent, 0o755); err != nil {
-			return err
-		}
+	if err := os.MkdirAll(filepath.Dir(parent), 0o755); err != nil {
+		return err
+	}
+	if err := os.Mkdir(parent, 0o755); err == nil {
 		if err := os.Chmod(parent, 0o755); err != nil {
 			return err
 		}
-	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil
-		}
+	} else if !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	return os.Chmod(dir, 0o700)
+	if err := os.Mkdir(dir, 0o700); err == nil {
+		return os.Chmod(dir, 0o700)
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s exists and is not a directory", dir)
+	}
+	return nil
 }
 
 // lockVolumeOnHost takes the volume's host lock (nil without
