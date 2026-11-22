@@ -22,3 +22,19 @@ func TestChunkStartupOutcomeRejectsOldGenerationAndCoalescesWake(t *testing.T) {
 		t.Fatal("late old completion overwrote the current result")
 	}
 }
+
+func TestChunkStartupExitRechecksGenerationBeforeChoice(t *testing.T) {
+	h := &volHandle{recoverGen: 2, startupEnded: 2}
+	p := &DurableProvider{volumes: map[string]*volHandle{"v": h}}
+	calls := 0
+	if p.ChooseChunkStartupExit("v", 1, func() { calls++ }) || calls != 0 {
+		t.Fatal("stale observation selected process exit")
+	}
+	if !p.ChooseChunkStartupExit("v", 2, func() { calls++ }) || calls != 1 {
+		t.Fatal("current result was not selectable")
+	}
+	p.closed = true
+	if p.ChooseChunkStartupExit("v", 2, func() { calls++ }) || calls != 1 {
+		t.Fatal("closed provider selected exit")
+	}
+}

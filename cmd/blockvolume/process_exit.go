@@ -110,10 +110,10 @@ func watchChunkStartup(ctx context.Context, e *processExit, f flags, h *volume.H
 		return
 	}
 	for {
-		if _, failed := p.ChunkStartupOutcome(f.volumeID); failed {
-			e.choose(workspaceRetryOutcome(f.volumeID, f.replicaID, "assignment_timeout", h.LastOtherLine()))
+		if chooseChunkStartupExit(e, f, h, p) {
 			return
 		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -163,4 +163,16 @@ func finishWorkspaceLease(e *processExit, f flags, h *volume.Host, done <-chan e
 		fmt.Fprintln(os.Stderr, "blockvolume: workspace lease closeout deadline")
 	}
 	e.choose(workspaceRetryOutcome(f.volumeID, f.replicaID, "lease_expired", h.LastOtherLine()))
+}
+
+func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p *durable.DurableProvider) bool {
+	if !f.workspaceLease || f.durableImpl != "walstore-chunk" {
+		return false
+	}
+	gen, failed := p.ChunkStartupOutcome(f.volumeID)
+	if !failed {
+		return false
+	}
+	out := workspaceRetryOutcome(f.volumeID, f.replicaID, "assignment_timeout", h.LastOtherLine())
+	return p.ChooseChunkStartupExit(f.volumeID, gen, func() { e.choose(out) })
 }

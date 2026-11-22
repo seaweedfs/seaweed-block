@@ -30,3 +30,18 @@ func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64) {
 	default:
 	}
 }
+
+// ChooseChunkStartupExit validates and selects an outcome in one provider-lock
+// section, so recovery cannot change generation between observation and choice.
+// choose must only latch the process outcome; it must not block or call back
+// into the provider. No remote work or resource cleanup belongs in this call.
+func (p *DurableProvider) ChooseChunkStartupExit(volumeID string, gen uint64, choose func()) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.volumes[volumeID]
+	if p.closed || h == nil || h.startupEnded != gen || gen == 0 || h.recoverGen != gen {
+		return false
+	}
+	choose()
+	return true
+}

@@ -760,6 +760,7 @@ func runVolume(f flags, exits *processExit) int {
 		// (wal_corrupt / io_error) faults fail-closed and is reported at
 		// once by a primary assignment; see openAndRecoverDurable.
 		outcome, evidence, sErr := openAndRecoverDurable(dp, h, f.volumeID, 10*time.Second)
+		chooseChunkStartupExit(exits, f, h, dp)
 		switch outcome {
 		case durableStartupFatal:
 			fmt.Fprintln(os.Stderr, "blockvolume: durable storage open:", sErr)
