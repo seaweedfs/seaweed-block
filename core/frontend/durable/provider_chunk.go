@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -651,7 +652,7 @@ const (
 	chunkCutMinSpacing = time.Second
 	chunkCutBackoffMin = time.Second
 	chunkCutBackoffMax = 30 * time.Second
-	chunkSlotJitterMax = 200 * time.Millisecond
+	chunkSlotDelayMax  = 200 * time.Millisecond
 )
 
 // cutPolicy decides when an automatic cut is due. The remote holds
@@ -668,12 +669,29 @@ const (
 //     no-op cut and an explicit cut included) clears the backoff and
 //     restarts the timer;
 //   - an automatic cut refused because every host slot is held ran
-//     nothing: it is retried after the volume's slot jitter, with no
-//     backoff and no minimum spacing, and the wait lasts until a cut
-//     succeeds.
+//     nothing: it is retried after a random delay that shrinks as the
+//     volume falls behind its interval (the latest volume retries
+//     soonest), with no backoff and no minimum spacing, and the wait
+//     lasts until a cut succeeds.
 type cutPolicy struct {
 	interval, minSpacing, backoffMin, backoffMax time.Duration
-	slotJitter                                   time.Duration // this volume's delay before retrying a cut refused for held host slots
+	// slotDelay is the delay before retrying a cut refused for held host
+	// slots, given how late the volume is past its interval; nil retries
+	// at the next poll.
+	slotDelay func(late time.Duration) time.Duration
+}
+
+// newSlotDelay draws a retry delay below chunkSlotDelayMax scaled by
+// interval/(interval+late): a volume one interval late draws below half of
+// it, nine intervals late below a tenth.
+func newSlotDelay(interval time.Duration, r *rand.Rand) func(time.Duration) time.Duration {
+	return func(late time.Duration) time.Duration {
+		limit := float64(chunkSlotDelayMax)
+		if interval > 0 && late > 0 {
+			limit *= float64(interval) / float64(interval+late)
+		}
+		return time.Duration(r.Float64() * limit)
+	}
 }
 
 // cutSchedule runs on in-process monotonic time: every time in it is a
@@ -744,7 +762,11 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, seq u
 		if s.slotWaitSince.IsZero() {
 			s.slotWaitSince = start
 		}
-		s.retryAt = end.Add(pol.slotJitter)
+		var delay time.Duration
+		if pol.slotDelay != nil {
+			delay = pol.slotDelay(max(0, end.Sub(s.lastSuccess.Add(pol.interval))))
+		}
+		s.retryAt = end.Add(delay)
 		return s
 	}
 	s.lastAuto = start
@@ -793,7 +815,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		minSpacing: chunkCutMinSpacing,
 		backoffMin: chunkCutBackoffMin,
 		backoffMax: chunkCutBackoffMax,
-		slotJitter: hostlimit.Phase(volumeID+":slot", chunkSlotJitterMax),
+		slotDelay:  newSlotDelay(p.cfg.ChunkCaptureInterval, rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), uint64(hostlimit.Phase(volumeID, time.Hour))))),
 	}
 	s := initialCutSchedule(volumeID, pol.interval, time.Now(), p.cfg.ChunkStagger, layer.Stats().CutSeq)
 	if wait != nil {

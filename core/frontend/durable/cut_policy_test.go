@@ -6,6 +6,7 @@ package durable
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -217,7 +218,8 @@ func TestCutPolicy_TimerRunsOnObservationTime(t *testing.T) {
 // a cut succeeds. Any other error still backs off.
 func TestCutPolicy_HostSlotBusyIsAWaitNotAFailure(t *testing.T) {
 	pol := testPolicy()
-	pol.slotJitter = 150 * time.Millisecond
+	const delay = 150 * time.Millisecond
+	pol.slotDelay = func(time.Duration) time.Duration { return delay }
 	busy := fmt.Errorf("%w: budget admission: %w", storage.ErrChunkCaptureRefused, hostlimit.ErrSlotsHeld)
 	s := cutSchedule{lastSuccess: t0}
 	now := at(30 * time.Second)
@@ -227,11 +229,11 @@ func TestCutPolicy_HostSlotBusyIsAWaitNotAFailure(t *testing.T) {
 			t.Fatalf("busy refusal %d treated as a cut or a failure: %+v", i, s)
 		}
 		if _, ok := pol.dueNR(s, now.Add(100*time.Millisecond)); ok {
-			t.Fatalf("busy retry %d due before its jitter", i)
+			t.Fatalf("busy retry %d due before its delay", i)
 		}
-		now = now.Add(time.Millisecond + pol.slotJitter)
+		now = now.Add(time.Millisecond + delay)
 		if _, ok := pol.dueNR(s, now); !ok {
-			t.Fatalf("busy retry %d not due after its jitter", i)
+			t.Fatalf("busy retry %d not due after its delay", i)
 		}
 	}
 	if s.slotWaits != 5 || !s.slotWaitSince.Equal(at(30*time.Second)) {
@@ -256,7 +258,7 @@ func TestCutPolicy_HostSlotBusyIsAWaitNotAFailure(t *testing.T) {
 func TestCutPolicy_SuccessDuringSlotWaitDropsTheSlotRetry(t *testing.T) {
 	pol := testPolicy()
 	pol.interval = 100 * time.Millisecond
-	pol.slotJitter = 150 * time.Millisecond
+	pol.slotDelay = func(time.Duration) time.Duration { return 150 * time.Millisecond }
 	busy := fmt.Errorf("%w: budget admission: %w", storage.ErrChunkCaptureRefused, hostlimit.ErrSlotsHeld)
 	s := cutSchedule{lastSuccess: t0, seenSeq: 100}
 	s = pol.after(s, at(time.Second), at(time.Second), busy, 100)
@@ -280,4 +282,82 @@ func TestCutWaitSlot_StatusEndsTheWaitAfterALaterCut(t *testing.T) {
 	if st := w.status(6); st.HostSlotWaitSinceNs != 0 || st.HostSlotWaits != 3 {
 		t.Fatalf("wait reported after a later cut: %+v", st)
 	}
+}
+
+// The slot retry delay is random and shrinks as the volume falls behind:
+// at most chunkSlotDelayMax on time, a tenth of it nine intervals late.
+func TestNewSlotDelay_ShrinksWithLateness(t *testing.T) {
+	d := newSlotDelay(time.Minute, rand.New(rand.NewPCG(1, 2)))
+	var sum time.Duration
+	for i := 0; i < 1000; i++ {
+		on, late := d(0), d(9*time.Minute)
+		if on < 0 || on >= chunkSlotDelayMax || late < 0 || late >= chunkSlotDelayMax/10 {
+			t.Fatalf("delay %s on time, %s nine intervals late", on, late)
+		}
+		sum += on
+	}
+	if avg := sum / 1000; avg < chunkSlotDelayMax/4 || avg > 3*chunkSlotDelayMax/4 {
+		t.Fatalf("on-time delays average %s; want them spread over [0, %s)", avg, chunkSlotDelayMax)
+	}
+}
+
+// V timer loops under the cut policy share one host slot (service T per
+// cut) with every volume due at the same instant, the worst start. With
+// V x T <= c, no volume waits for the slot longer than (V-1) x (T + gap),
+// gap being one poll plus the largest retry delay, and every volume keeps
+// cutting.
+func TestCutPolicy_OneSlotWaitBound(t *testing.T) {
+	const (
+		V      = 10
+		T      = 1400 * time.Millisecond
+		poll   = chunkSchedulePoll
+		runFor = 20 * time.Minute
+	)
+	interval := time.Minute
+	busy := fmt.Errorf("%w: budget admission: %w", storage.ErrChunkCaptureRefused, hostlimit.ErrSlotsHeld)
+	pols := make([]cutPolicy, V)
+	ss := make([]cutSchedule, V)
+	cuts := make([]int, V)
+	for i := range pols {
+		pols[i] = cutPolicy{interval: interval, minSpacing: chunkCutMinSpacing, backoffMin: chunkCutBackoffMin, backoffMax: chunkCutBackoffMax,
+			slotDelay: newSlotDelay(interval, rand.New(rand.NewPCG(1, uint64(i))))}
+		ss[i] = cutSchedule{lastSuccess: t0}
+	}
+	order := rand.New(rand.NewPCG(7, 7))
+	holder, start, seq := -1, time.Time{}, uint64(0)
+	var worst time.Duration
+	for now := t0; now.Before(t0.Add(runFor)); now = now.Add(poll) {
+		if holder >= 0 && !now.Before(start.Add(T)) {
+			seq++
+			ss[holder] = pols[holder].after(ss[holder], start, start.Add(T), nil, seq)
+			cuts[holder]++
+			holder = -1
+		}
+		for _, i := range order.Perm(V) {
+			if i == holder {
+				continue
+			}
+			if _, ok := pols[i].due(ss[i], now, false); !ok {
+				continue
+			}
+			if holder < 0 {
+				if !ss[i].slotWaitSince.IsZero() {
+					worst = max(worst, now.Sub(ss[i].slotWaitSince))
+				}
+				holder, start = i, now
+				continue
+			}
+			ss[i] = pols[i].after(ss[i], now, now, busy, seq)
+		}
+	}
+	bound := (V - 1) * (T + poll + chunkSlotDelayMax)
+	if worst > bound {
+		t.Fatalf("a volume waited %s for the slot; bound (V-1)(T+gap) = %s", worst, bound)
+	}
+	for i, n := range cuts {
+		if n < int(runFor/(interval+bound))-1 {
+			t.Fatalf("volume %d cut %d times in %s", i, n, runFor)
+		}
+	}
+	t.Logf("worst slot wait %s (bound %s); cuts per volume %v", worst, bound, cuts)
 }
