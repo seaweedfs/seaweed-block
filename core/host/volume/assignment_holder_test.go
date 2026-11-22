@@ -1,8 +1,8 @@
 package volume
 
 import (
-	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,60 +130,71 @@ func TestAssignmentHolderIdentityRefusesCarriedEndpointMismatch(t *testing.T) {
 	}
 }
 
-// INV-AUTH-HOLDER-IDENTITY-001 / M3 Unassigned -> Primary: recovery replay
-// of a valid new holder must not inherit a foreign-holder fence from an
-// endpoint-mismatched delivery naming that same server and replica.
-func TestAssignmentHolderIdentityPlannedHandoffBeforeReadiness(t *testing.T) {
-	h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-	h.BlockLocalReadiness("awaiting durable recovery")
-	own := holderAssignment(t, "new-host")
-	h.applyFact(own)
-	mismatch := holderAssignment(t, "new-host")
-	mismatch.DataAddr = "127.0.0.1:9991"
-	h.applyFact(mismatch)
-	if h.realAdpt.Projection().Epoch != 0 {
-		t.Fatal("assignment entered adapter before readiness")
-	}
-	h.ClearLocalReadinessBlock()
-	h.SetReplicationVolume(nil)
-	h.replayLocalReadinessFactIfReady()
-	deadline := time.Now().Add(time.Second)
-	for !h.view.Projection().Healthy && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if p := h.view.Projection(); !p.Healthy || p.Epoch != 2 {
-		t.Fatalf("own clean-move assignment stayed fenced after readiness replay: %+v; other=%+v", p, h.LastOtherLine())
-	}
-}
+type holderFenceCounter struct{ calls atomic.Uint32 }
 
-// A same-holder endpoint refusal can be superseded only by a valid current
-// fact; neither a true foreign holder nor a newer refusal is erased.
-func TestAssignmentHolderIdentityReplayCannotClearForeignOrNewerFence(t *testing.T) {
-	for _, foreign := range []bool{false, true} {
-		t.Run(fmt.Sprint("foreign=", foreign), func(t *testing.T) {
+func (f *holderFenceCounter) FenceAsPrimary(uint64) error { f.calls.Add(1); return nil }
+func (f *holderFenceCounter) AdmitAsReplica(uint64) error { f.calls.Add(1); return nil }
+
+// INV-AUTH-HOLDER-IDENTITY-001 / M3: a recorded foreign fact supersedes
+// only an adopted own lineage and only when it is strictly newer.
+func TestAssignmentHolderIdentityForeignStreamOrdering(t *testing.T) {
+	for _, mode := range []string{"target-old-first", "served-newer-foreign", "served-old-replay", "never-assigned"} {
+		t.Run(mode, func(t *testing.T) {
 			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = h.Close() })
-			h.BlockLocalReadiness("awaiting durable recovery")
-			h.applyFact(holderAssignment(t, "new-host"))
-			refused := holderAssignment(t, "new-host")
-			if foreign {
-				refused.ServerId = "another-host"
-			} else {
-				refused.DataAddr = "127.0.0.1:9991"
-				refused.EndpointVersion = 2
+			fencer := &holderFenceCounter{}
+			if err := h.SetSelfFence(fencer); err != nil {
+				t.Fatal(err)
 			}
-			h.applyFact(refused)
-			h.ClearLocalReadinessBlock()
-			h.replayLocalReadinessFactIfReady()
-			if h.LastOtherLine() == nil || !h.IsSuperseded("r1", 2, 1) || h.view.Projection().Healthy {
-				t.Fatal("replay erased a foreign or newer fence")
+			own := holderAssignment(t, "new-host")
+			foreign := holderAssignment(t, "old-host")
+			foreign.Epoch = 1
+			waitHealthy := func() {
+				t.Helper()
+				deadline := time.Now().Add(time.Second)
+				for !h.view.Projection().Healthy && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+				if p := h.view.Projection(); !p.Healthy || p.Epoch != 2 {
+					t.Fatalf("rightful target did not serve: %+v", p)
+				}
+			}
+			switch mode {
+			case "target-old-first":
+				h.BlockLocalReadiness("awaiting durable recovery")
+				h.applyFact(foreign)
+				if fencer.calls.Load() != 0 || h.IsSuperseded("r1", 0, 0) {
+					t.Fatal("unassigned target was fenced by the current old line")
+				}
+				h.applyFact(own)
+				h.ClearLocalReadinessBlock()
+				h.replayLocalReadinessFactIfReady()
+				waitHealthy()
+			case "never-assigned":
+				h.applyFact(foreign)
+				foreign.Epoch = 2
+				h.applyFact(foreign)
+				if fencer.calls.Load() != 0 || h.realAdpt.Projection().Epoch != 0 || h.view.Projection().Healthy || h.IsSuperseded("r1", 0, 0) || h.LastOtherLine() == nil {
+					t.Fatal("never-assigned process must record, wait, neither adopt nor fence")
+				}
+			default:
+				h.applyFact(own)
+				waitHealthy()
+				before := fencer.calls.Load()
+				if mode == "served-newer-foreign" {
+					foreign.Epoch = 3
+				}
+				h.applyFact(foreign)
+				if mode == "served-newer-foreign" {
+					if fencer.calls.Load() <= before || h.view.Projection().Healthy {
+						t.Fatal("served holder was not fenced by newer foreign line")
+					}
+				} else if fencer.calls.Load() != before || !h.view.Projection().Healthy {
+					t.Fatal("old foreign replay fenced a serving holder")
+				}
 			}
 		})
 	}
