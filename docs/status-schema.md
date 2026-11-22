@@ -28,7 +28,7 @@ The volume's authority and health projection. Go type `volume.StatusProjection`.
 | `Memory.RSSBytes` | uint64 | resident set size from /proc/self/status (VmRSS); 0 off Linux |
 | `Memory.AnonymousRSSBytes` | uint64 | anonymous resident memory (RssAnon); 0 off Linux |
 | `FrontendPrimaryReady` | bool | FrontendPrimaryReady: this replica is the healthy, non-superseded primary, its local durable backend admits I/O, and it may serve guest I/O (INV-FE-PRIMARY-READY-OPERATIONAL-001). |
-| `NotReadyReason` | string | NotReadyReason says why FrontendPrimaryReady is false, first match: the local durable backend admits no I/O (its evidence: attach pending, fenced, detached) or has no status for the volume; the frontend target is not listening yet; this replica is not the healthy primary. Empty when ready. (omitted when empty) |
+| `NotReadyReason` | string | NotReadyReason says why FrontendPrimaryReady is false, first match: a workspace primary holds no granted lease now (NotReadyLeaseNotHeld); the local durable backend admits no I/O (its evidence: attach pending, fenced, detached) or has no status for the volume; the frontend target is not listening yet; this replica is not the healthy primary. Empty when ready. (omitted when empty) |
 | `AuthorityRole` | string | AuthorityRole is primary, superseded or unknown. |
 | `ReplicationRole` | string | ReplicationRole is none (a primary), recovering, not_ready, replica_ready or unknown. |
 | `RoleAdmissionFailure` | string | RoleAdmissionFailure (G1) explains a not-Healthy projection caused by a failed role call on the replica listener; empty otherwise. (omitted when empty) |

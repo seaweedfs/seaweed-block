@@ -46,6 +46,9 @@ type WorkspaceLeaseGuard struct {
 	// Run from its sleep.
 	stopPending bool
 	kick        chan struct{}
+	// refusedBeforeGrant counts failed renewals before the first grant
+	// (under mu), for the one grant log line.
+	refusedBeforeGrant int
 	// after schedules Run's sleep between renewals (time.After; tests
 	// replace it before Run starts to observe the delays chosen).
 	after func(time.Duration) <-chan time.Time
@@ -160,10 +163,23 @@ func (g *WorkspaceLeaseGuard) Projection() frontend.Projection {
 func (g *WorkspaceLeaseGuard) permits(p frontend.Projection) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.heldLocked() && p.VolumeID == g.id.VolumeId && p.ReplicaID == g.id.ReplicaId && p.Epoch == g.id.Epoch
+}
+
+// Held reports whether the lease is granted and valid now (the lease term of
+// permits, without the projection identity). Never call with mu held.
+func (g *WorkspaceLeaseGuard) Held() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.heldLocked()
+}
+
+// heldLocked latches the expiry fence; the caller owns mu.
+func (g *WorkspaceLeaseGuard) heldLocked() bool {
 	if !g.until.IsZero() && !g.now().Before(g.until) {
 		g.fenceLocked(fmt.Sprintf("lease expired at %s without a successful renewal", g.until.UTC().Format(time.RFC3339Nano)))
 	}
-	return !g.fenced && !g.until.IsZero() && p.VolumeID == g.id.VolumeId && p.ReplicaID == g.id.ReplicaId && p.Epoch == g.id.Epoch
+	return !g.fenced && !g.until.IsZero()
 }
 
 // Refresh anchors validity to the request START. Reply latency can only shorten
@@ -197,6 +213,9 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 		elapsed := end.Sub(start).Round(time.Millisecond)
 		hit := renewalLimitHit(start, end, until)
 		g.mu.Lock()
+		if g.until.IsZero() {
+			g.refusedBeforeGrant++
+		}
 		expired := !g.until.IsZero() && !end.Before(g.until)
 		if expired {
 			g.fenceLocked(fmt.Sprintf("lease expired after a failed renewal (renewal failed after %s, %s: %v)", elapsed, hit, err))
@@ -235,6 +254,8 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	case rpcCtx.Err() != nil:
 		g.fenceLocked(fmt.Sprintf("renewal reply arrived after the renewal call's context ended (renewal took %s; lease still valid until %s)", g.now().Sub(start).Round(time.Millisecond), g.until.UTC().Format(time.RFC3339Nano)))
 	}
+	firstGrant := !g.fenced && g.until.IsZero()
+	refused := g.refusedBeforeGrant
 	if !g.fenced {
 		g.until = start.Add(time.Duration(reply.ValidForNs))
 	}
@@ -244,6 +265,17 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	}
 	closed := g.fenced
 	g.mu.Unlock()
+	if firstGrant {
+		// Once per guard: the first grant, or the re-grant after refused
+		// renewals (a restart before the forced-move barrier); unix_ms is the
+		// request start, which the lease validity is anchored to.
+		what := "granted"
+		if refused > 0 {
+			what = fmt.Sprintf("re-granted after %d refused renewal(s)", refused)
+		}
+		log.Printf("workspace lease: %s volume=%s replica=%s epoch=%d valid for %s at unix_ms=%d",
+			what, g.id.VolumeId, g.id.ReplicaId, g.id.Epoch, time.Duration(reply.ValidForNs), start.UnixMilli())
+	}
 	if closed {
 		g.logFence()
 		return g.drain(ctx, reply.Revoking)

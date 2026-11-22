@@ -190,7 +190,8 @@ type StatusProjection struct {
 	// primary, its local durable backend admits I/O, and it may serve guest
 	// I/O (INV-FE-PRIMARY-READY-OPERATIONAL-001).
 	FrontendPrimaryReady bool
-	// NotReadyReason says why FrontendPrimaryReady is false, first match: the
+	// NotReadyReason says why FrontendPrimaryReady is false, first match: a
+	// workspace primary holds no granted lease now (NotReadyLeaseNotHeld); the
 	// local durable backend admits no I/O (its evidence: attach pending,
 	// fenced, detached) or has no status for the volume; the frontend target
 	// is not listening yet; this replica is not the healthy primary. Empty
@@ -490,6 +491,10 @@ func (s *StatusServer) handleStatusNVMe(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(NVMeStatus{VolumeID: p.VolumeID, Stats: src.Stats()})
 }
 
+// NotReadyLeaseNotHeld: a workspace primary without a granted lease holds at
+// the gate (no claim, no listen, not ready); V1-SPEC r2.37.
+const NotReadyLeaseNotHeld = "lease_not_held"
+
 func (s *StatusServer) statusProjection() StatusProjection {
 	p := s.authorityProjection()
 	authorityReady := p.FrontendPrimaryReady
@@ -521,11 +526,14 @@ func (s *StatusServer) statusProjection() StatusProjection {
 			backendReason = "no durable status for volume " + p.VolumeID
 		}
 	}
-	if backendReason != "" {
+	leaseNotHeld := s.view.workspaceLeaseNotHeld()
+	if backendReason != "" || leaseNotHeld {
 		p.FrontendPrimaryReady = false
 	}
 	if !p.FrontendPrimaryReady {
 		switch {
+		case leaseNotHeld:
+			p.NotReadyReason = NotReadyLeaseNotHeld
 		case backendReason != "":
 			p.NotReadyReason = backendReason
 		case nvmePending:
