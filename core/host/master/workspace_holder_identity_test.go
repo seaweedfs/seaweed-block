@@ -1,11 +1,15 @@
 package master
 
 import (
+	"context"
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"reflect"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func leaseHolderIdentity(t *testing.T, epoch uint64, server string) *control.WorkspaceIdentity {
@@ -26,7 +30,13 @@ func leaseHolderIdentity(t *testing.T, epoch uint64, server string) *control.Wor
 }
 
 func TestWorkspaceLeaseRequiresHolderServerForGrantRenewAndRegrant(t *testing.T) {
-	h, conn, ctx := reviewBindingHost(t)
+	var nowNS atomic.Int64
+	nowNS.Store(time.Now().UnixNano())
+	h, conn, ctx := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
+		return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
+	}, func(h *Host) {
+		authority.WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) })(h.Publisher())
+	})
 	reviewCreate(t, conn, ctx, "v")
 	ws := control.NewWorkspaceServiceClient(conn)
 	b := &control.WorkspaceBinding{VolumeId: "v", ServerId: "node-a", DataAddr: "127.0.0.1:10000", CtrlAddr: "127.0.0.1:10001"}
@@ -60,6 +70,11 @@ func TestWorkspaceLeaseRequiresHolderServerForGrantRenewAndRegrant(t *testing.T)
 		t.Fatal("matching server grant", err)
 	}
 	refuse("renew", line.Epoch)
+	nowNS.Add(int64(2 * time.Minute)) // beyond both the old horizon and clock-skew barrier
+	refuse("expired re-grant", line.Epoch)
+	if _, err := ws.RenewWorkspaceLease(ctx, id); err != nil {
+		t.Fatal("matching server expired re-grant", err)
+	}
 	if _, err := ws.RevokeWorkspace(ctx, id); err != nil {
 		t.Fatal(err)
 	}
