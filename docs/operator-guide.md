@@ -22,6 +22,20 @@ that runs it.
 - the `blockmaster` and `blockvolume` settings;
 - a first read-only check, and a write test for a scratch host.
 
+**Host volume lock directory.** Each blockvolume locks `/run/sw-block/locks/<volume id>.lock`, so a host runs at most
+one live blockvolume per volume ([one process per volume](releases/one-process-per-volume.md)).
+- A process run as root creates the directory itself.
+- The shipped unprivileged unit cannot create it, so install the tmpfiles.d entry
+  [`deploy/systemd/sw-block.tmpfiles.conf`](../deploy/systemd/sw-block.tmpfiles.conf):
+
+  ```bash
+  sudo install -m 0644 deploy/systemd/sw-block.tmpfiles.conf /etc/tmpfiles.d/sw-block.conf
+  sudo systemd-tmpfiles --create /etc/tmpfiles.d/sw-block.conf
+  ```
+
+- Without it, blockvolume exits at start with `host volume lock directory unavailable`. Install the entry, or chown
+  the directory to the unit's user.
+
 ## Size a host
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal
@@ -72,8 +86,12 @@ that runs it.
 
 ## When a host is lost
 
-1. Make sure the lost host stays down. The product does not power off an old holder. One that comes back must not
-   be started for the moved volume ([one live process per holder](volume-lifecycle.md#rule-one-live-process-per-holder)).
+1. Make sure the lost host stays down for this volume. The product does not power off an old holder.
+   - If it comes back after the move, its blockvolume gets no assignment, does not serve, and exits with status 75.
+   - The example unit starts it again about every 35 s (30 s of waiting, then `RestartSec=5s`), until its start
+     limit (10 starts in 600 s), and then shows it as failed (`start-limit-hit`).
+   - Stop and disable that unit on the old host. Run `systemctl reset-failed` only after you have dealt with its
+     local root ([do not](volume-lifecycle.md#do-not)).
 2. Run the forced move to another registered node: `--dry-run` first, then the move. See
    [the holder never comes back](volume-lifecycle.md#after-a-crash).
    - It is admitted after the barrier: at most 65 s after the holder stopped, with default flags.
@@ -92,6 +110,9 @@ that runs it.
 - **Unauthenticated control endpoint.** `--chunk-control-endpoint` has no authentication; keep it on loopback.
 - **Destructive SeaweedFS commands.** Never run SeaweedFS `volume.fsck` with its delete flags on a cluster holding
   chunk volumes ([why](standalone-deployment.md#seaweedfs-maintenance-commands-that-destroy-chunk-volumes)).
+- **One live process per volume per host.** The host lock keeps two processes for one volume apart only on one host;
+  two hosts are kept apart by the assignment and the lease. A container needs the host's `/run/sw-block/locks`
+  ([one process per volume](releases/one-process-per-volume.md)).
 - **Manual GC.** Automatic GC is off (`--chunk-maintenance-gc`): run GC passes yourself.
 
 ## Commands and their tests
@@ -114,4 +135,6 @@ Every command on the pages above, and the test that runs it.
 | `sw-block ops chunk restore --source --snapshot --target`, `--volume ... [--status]` | `cmd/sw-block/chunk_restore_test.go` | CLI |
 | `curl STATUS/status?volume=v1` | the status checks in the binary tests above | binary |
 | `nvme connect`, `nvme list`, `nvme disconnect` | not run here: the binary tests use an NVMe/TCP host inside the test | not run |
-| `systemctl ...` with the example units | not run | not run |
+| `blockvolume` under systemd: exit 75 after an expired start, restart, re-grant | `TestSystemdExpiredStartupExits75ThenRegrantServes` (`cmd/blockvolume`, a real systemd manager, tag `systemd_integration`) | binary |
+| The shipped units' start limits (`StartLimitIntervalSec=600`, `StartLimitBurst=10`, `RestartPreventExitStatus=78`) | `TestBlockvolumeUnitsBoundStartupRetries` (`internal/testops`, reads the unit files) | unit files |
+| `systemctl enable`, `stop`, `disable`, `reset-failed`, `systemd-tmpfiles --create` as written on these pages | not run: the tests above start transient units, not the installed ones | not run |
