@@ -552,16 +552,20 @@ func gap1NeverAssignedRetries(t *testing.T, fixture *gap1Fixture, stem, exe stri
 		}
 		return false
 	})
-	waitGAP1(t, "never-assigned foreign identity did not exit75 and restart", 45*time.Second, func() bool {
+	waitGAP1(t, "never-assigned foreign identity did not exit75", 45*time.Second, func() bool {
 		s := gap1Unit(t, unit)
-		n, err := strconv.Atoi(s["NRestarts"])
-		if err != nil {
-			t.Fatalf("invalid restart count: %+v", s)
-		}
 		if s["ExecMainStatus"] == "78" {
 			t.Fatalf("zero-lineage process chose no-retry: %+v", s)
 		}
-		return n >= 1 && s["MainPID"] != "0" && s["ExecMainStatus"] == "75"
+		return s["ExecMainStatus"] == "75"
+	})
+	waitGAP1(t, "never-assigned retry75 did not restart", 15*time.Second, func() bool {
+		s := gap1Unit(t, unit)
+		n, err := strconv.Atoi(s["NRestarts"])
+		if err != nil || n > 2 {
+			t.Fatalf("invalid or unbounded restart count: %+v", s)
+		}
+		return n >= 1 && s["MainPID"] != "0"
 	})
 }
 
