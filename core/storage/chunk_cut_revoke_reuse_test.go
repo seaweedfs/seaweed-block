@@ -18,13 +18,16 @@ func (b *revokingBudget) ReserveCOW(uint64, int64) error { return nil }
 func (b *revokingBudget) Release(uint64)                 {}
 
 // revokeAfterRemote revokes the budget at the PUT after `after` completed
-// ones, and counts the bytes each attempt uploads.
+// ones. Every PUT attempt is counted before it reaches the fake, so a
+// re-send of a completed key is recorded even if the caller then
+// reconciles it.
 type revokeAfterRemote struct {
 	*fakeChunkRemote
 	budget    *revokingBudget
 	after     int // revoke once this many PUTs completed; < 0: never
 	completed int
-	bytes     int
+	bytes     int // bytes of every PUT attempt
+	dups      int // attempts for a key that already completed
 	keys      map[string]bool
 }
 
@@ -34,15 +37,15 @@ func (r *revokeAfterRemote) Put(ctx context.Context, key string, b []byte) error
 		<-ctx.Done()
 		return context.Cause(ctx)
 	}
+	r.bytes += len(b)
+	if r.keys[key] {
+		r.dups++
+	}
 	if err := r.fakeChunkRemote.Put(ctx, key, b); err != nil {
 		return err
 	}
-	if r.keys[key] {
-		return errors.New("test: retransmitted a completed upload")
-	}
 	r.keys[key] = true
 	r.completed++
-	r.bytes += len(b)
 	return nil
 }
 
@@ -77,6 +80,9 @@ func TestCutRevokedMidUploadKeepsItsUploads(t *testing.T) {
 	}
 	if result.Stats.StageRounds != 0 {
 		t.Fatalf("the retry staged (%d rounds); this control is for uploads made after the barrier", result.Stats.StageRounds)
+	}
+	if r.dups != 0 {
+		t.Fatalf("%d PUTs re-sent an already completed key", r.dups)
 	}
 	if r.bytes >= dirty*ctChunkBytes || r.bytes != (dirty-2)*ctChunkBytes {
 		t.Fatalf("retry uploaded %d bytes; want only the %d chunks not yet uploaded (%d bytes), less than the dirty set (%d)",
