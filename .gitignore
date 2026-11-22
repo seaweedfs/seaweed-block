@@ -30,3 +30,6 @@ coverage.out
 
 # MkDocs engineering wiki build output
 /site/
+
+# Windows builds of the binaries (never committed)
+/*.exe

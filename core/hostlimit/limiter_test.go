@@ -80,6 +80,12 @@ func TestSlotsUrgentAndJoinedRelease(t *testing.T) {
 	a.Release(x)
 	a.Release(x)
 	settled(t, a)
+	// A free normal slot is not taken while the urgent cut runs.
+	if _, e = d.Admit(context.Background(), 1, nil); !errors.Is(e, ErrUrgentPending) {
+		t.Fatalf("normal admission during an urgent cut: %v", e)
+	}
+	b.Release(y)
+	settled(t, b)
 	z, e := d.Admit(context.Background(), 1, nil)
 	if e != nil {
 		t.Fatal(e)

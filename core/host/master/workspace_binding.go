@@ -65,18 +65,55 @@ func (h *Host) workspaceEndpointsAvailable(b lifecycle.WorkspaceBinding) error {
 	return nil
 }
 
+// workspaceSourceHost resolves explicit holder membership for
+// INV-AUTH-HOLDER-IDENTITY-001; endpoints never select a server.
 func (h *Host) workspaceSourceHost(volume, replica string, epoch uint64) string {
+	current, _ := h.Publisher().PublishedAuthorityLine(volume)
+	return h.workspaceLineOwner(current, volume, replica, epoch)
+}
+
+// workspaceLineOwner is TERM-HOLDER-001's single owner decision function
+// (INV-AUTH-HOLDER-IDENTITY-001). A captured current line never takes the
+// publisher's store-write lock (INV-WS-RENEW-NONBLOCKING-001); only historical
+// lines need the move journal. Endpoints never identify a server.
+func (h *Host) workspaceLineOwner(current authority.PublishedLine, volume, replica string, epoch uint64) string {
+	if current.ReplicaID == replica && current.Epoch == epoch {
+		if current.OwnerFromMove || current.IssuedHost != "" {
+			return current.IssuedHost
+		}
+		return h.placementSourceHost(volume, replica)
+	}
 	if state := h.Publisher().WorkspaceState(volume); state != nil {
 		for _, r := range state.Moves {
 			if r.Issued && r.NewReplicaID == replica && r.NewEpoch == epoch {
 				return r.NewHost
 			}
+			if r.Issued && r.OldReplicaID == replica && r.OldEpoch == epoch {
+				return r.OldHost
+			}
 		}
 	}
-	if p, ok := h.lifecycle.Placements.GetPlacement(volume); ok {
-		for _, slot := range p.Slots {
-			if slot.ReplicaID == replica {
-				return slot.ServerID
+	return h.placementSourceHost(volume, replica)
+}
+
+// placementSourceHost uses committed membership, never endpoint inference
+// (INV-AUTH-HOLDER-IDENTITY-001, INV-WS-RENEW-NONBLOCKING-001).
+func (h *Host) placementSourceHost(volume, replica string) string {
+	if h.lifecycle != nil {
+		if p, ok := h.lifecycle.Placements.GetPlacementSnapshot(volume); ok {
+			for _, slot := range p.Slots {
+				if slot.ReplicaID == replica {
+					return slot.ServerID
+				}
+			}
+		}
+	}
+	for _, v := range h.topo.Volumes {
+		if v.VolumeID == volume {
+			for _, slot := range v.Slots {
+				if slot.ReplicaID == replica {
+					return slot.ServerID
+				}
 			}
 		}
 	}

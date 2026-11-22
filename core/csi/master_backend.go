@@ -145,6 +145,13 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 	if resp == nil {
 		return PublishTarget{}, false
 	}
+	if fronts, tagged := primaryOwnedFrontends(resp, rejectLoopback); tagged {
+		if len(fronts) == 0 {
+			return PublishTarget{}, false
+		}
+		resp = &control.StatusResponse{VolumeId: resp.GetVolumeId(), ReplicaId: resp.GetReplicaId(), Epoch: resp.GetEpoch(),
+			EndpointVersion: resp.GetEndpointVersion(), Assigned: resp.GetAssigned(), Frontends: fronts}
+	}
 	base := PublishTarget{
 		VolumeID:        resp.GetVolumeId(),
 		ReplicaID:       resp.GetReplicaId(),
@@ -161,20 +168,23 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 			if ft.GetProtocol() != string(ProtocolISCSI) || ft.GetAddr() == "" || ft.GetIqn() == "" || rejectFrontendAddr(ft.GetAddr(), rejectLoopback) {
 				continue
 			}
-			if _, ok := iscsiByIQN[ft.GetIqn()]; !ok {
-				iscsiOrder = append(iscsiOrder, ft.GetIqn())
+			// one multipath target is one IQN AND LUN: paths to another LUN of the same IQN are another unit
+			// (INV-AUTH-HOLDER-IDENTITY-001)
+			key := ft.GetIqn() + "\x00" + strconv.FormatUint(uint64(ft.GetLun()), 10)
+			if _, ok := iscsiByIQN[key]; !ok {
+				iscsiOrder = append(iscsiOrder, key)
 			}
-			iscsiByIQN[ft.GetIqn()] = append(iscsiByIQN[ft.GetIqn()], ft)
+			iscsiByIQN[key] = append(iscsiByIQN[key], ft)
 		}
-		for _, iqn := range iscsiOrder {
-			frontends := iscsiByIQN[iqn]
+		for _, key := range iscsiOrder {
+			frontends := iscsiByIQN[key]
 			if len(frontends) == 0 {
 				continue
 			}
 			out := base
 			out.Protocol = ProtocolISCSI
 			out.ISCSIAddr = frontends[0].GetAddr()
-			out.IQN = iqn
+			out.IQN = frontends[0].GetIqn()
 			out.LUN = frontends[0].GetLun()
 			if len(frontends) > 1 {
 				out.Multipath = true
@@ -245,6 +255,52 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 		return out, true
 	}
 	return PublishTarget{}, false
+}
+
+// primaryOwnedFrontends applies INV-AUTH-HOLDER-IDENTITY-001 when the master tags each frontend with its replica: the
+// usable frontends of the primary replica come first, and another replica's frontend is kept only as an extra path to a
+// target the primary itself serves (same IQN and LUN, or same NQN/NSID/transport). No usable primary frontend: none at all, so
+// a supporting replica is never published under the primary identity. An untagged (older) response is returned as is.
+func primaryOwnedFrontends(resp *control.StatusResponse, rejectLoopback bool) ([]*control.FrontendTarget, bool) {
+	tagged := false
+	for _, ft := range resp.GetFrontends() {
+		if ft != nil && ft.GetReplicaId() != "" {
+			tagged = true
+		}
+	}
+	if !tagged {
+		return nil, false
+	}
+	key := func(ft *control.FrontendTarget) (string, bool) {
+		switch {
+		case ft.GetAddr() == "" || rejectFrontendAddr(ft.GetAddr(), rejectLoopback):
+			return "", false
+		case ft.GetProtocol() == string(ProtocolISCSI) && ft.GetIqn() != "":
+			return "iscsi\x00" + ft.GetIqn() + "\x00" + strconv.FormatUint(uint64(ft.GetLun()), 10), true // IQN AND LUN
+		case ft.GetProtocol() == string(ProtocolNVMe) && ft.GetNqn() != "":
+			return "nvme\x00" + ft.GetNqn() + "\x00" + strconv.FormatUint(uint64(ft.GetNsid()), 10) + "\x00" +
+				string(normalizeFrontendTransport(ProtocolNVMe, FrontendTransport(ft.GetTransport()))), true
+		}
+		return "", false
+	}
+	var out []*control.FrontendTarget
+	served := map[string]bool{}
+	for _, ft := range resp.GetFrontends() {
+		if ft != nil && ft.GetReplicaId() == resp.GetReplicaId() {
+			if k, ok := key(ft); ok {
+				served[k] = true
+				out = append(out, ft)
+			}
+		}
+	}
+	for _, ft := range resp.GetFrontends() {
+		if ft != nil && ft.GetReplicaId() != resp.GetReplicaId() {
+			if k, ok := key(ft); ok && served[k] {
+				out = append(out, ft)
+			}
+		}
+	}
+	return out, true
 }
 
 func rejectFrontendAddr(addr string, rejectLoopback bool) bool {

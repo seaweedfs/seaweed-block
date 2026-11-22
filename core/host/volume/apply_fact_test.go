@@ -132,7 +132,7 @@ func TestHost_ApplyFact_Self_InstallsReplicaSetBeforeAssignment(t *testing.T) {
 		PeerSetGeneration: 42,
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	// Both collaborators called exactly once.
 	if got := r.callCount.Load(); got != 1 {
@@ -188,7 +188,7 @@ func TestHost_ApplyFact_Self_UpdateReplicaSetFailure_SkipsOnAssignment(t *testin
 		PeerSetGeneration: 7,
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	// UpdateReplicaSet was called (once).
 	if got := r.callCount.Load(); got != 1 {
@@ -223,7 +223,7 @@ func TestHost_ApplyFact_Self_LocalReadinessBlocked_SkipsReplicationAndAdapter(t 
 		},
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	if got := r.callCount.Load(); got != 0 {
 		t.Fatalf("local readiness block must skip UpdateReplicaSet: got %d calls", got)
@@ -258,7 +258,7 @@ func TestHost_ApplyFact_SupportingReplica_LocalReadinessBlocked_SkipsAdapter(t *
 		},
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	if got := a.callCount.Load(); got != 0 {
 		t.Fatalf("local readiness block must skip supporting OnAssignment: got %d calls", got)
@@ -294,7 +294,7 @@ func TestHost_ApplyFact_SupportingReplica_ReplaysAfterLocalReadinessClears(t *te
 		}},
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 	h.ClearLocalReadinessBlock()
 	h.replayLocalReadinessFactIfReady()
 
@@ -337,7 +337,7 @@ func TestHost_ApplyFact_Self_ReplaysAfterLocalReadinessClearsWithReplicationFirs
 		}},
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 	h.ClearLocalReadinessBlock()
 	h.replayLocalReadinessFactIfReady()
 
@@ -372,7 +372,7 @@ func TestHost_ApplyFact_Supersede_NeverCallsAdapterOrReplication(t *testing.T) {
 		PeerSetGeneration: 100,
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	if a.callCount.Load() != 0 {
 		t.Fatalf("supersede must not call adapter: got %d calls", a.callCount.Load())
@@ -411,7 +411,7 @@ func TestHost_ApplyFact_SupportingReplica_UsesSelfPeerDescriptorWithoutReplicati
 		PeerSetGeneration: 100,
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	if got := a.callCount.Load(); got != 1 {
 		t.Fatalf("supporting replica should apply self peer lineage once: got %d calls", got)
@@ -454,7 +454,7 @@ func TestHost_ApplyFact_SupportingReplica_UsesSelfPeerDescriptorWithoutReplicati
 		PeerSetGeneration: 101,
 	}
 
-	h.applyFact(primaryFact)
+	h.applyFixtureFact(primaryFact)
 
 	if got := a.callCount.Load(); got != 2 {
 		t.Fatalf("promotion after supporting assignment should apply adapter again: got %d calls", got)
@@ -490,7 +490,7 @@ func TestHost_ApplyFact_SupportingReplica_InvalidSelfPeerDescriptorStaysSupersed
 		}},
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	if got := a.callCount.Load(); got != 0 {
 		t.Fatalf("invalid supporting peer descriptor must not call adapter: got %d calls", got)
@@ -521,7 +521,7 @@ func TestHost_ApplyFact_SupportingReplica_MismatchedSelfPeerLineageStaysSupersed
 		}},
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	if got := a.callCount.Load(); got != 0 {
 		t.Fatalf("mismatched supporting peer lineage must not call adapter: got %d calls", got)
@@ -548,7 +548,7 @@ func TestHost_ApplyFact_SupportingReplica_ReportsReplicaReadyButNotFrontendPrima
 	h.view = NewAdapterProjectionView(a, "vol1", "r2", h)
 	s := NewStatusServer(h.view)
 
-	h.applyFact(&control.AssignmentFact{
+	h.applyFixtureFact(&control.AssignmentFact{
 		VolumeId:        "vol1",
 		ReplicaId:       "r1",
 		Epoch:           7,
@@ -619,7 +619,7 @@ func TestHost_ApplyFact_ObserverOnly_NoReplicationCallsOnAssignment(t *testing.T
 		}},
 	}
 
-	h.applyFact(fact)
+	h.applyFixtureFact(fact)
 
 	if a.callCount.Load() != 1 {
 		t.Fatalf("observer-only must call adapter: got %d", a.callCount.Load())

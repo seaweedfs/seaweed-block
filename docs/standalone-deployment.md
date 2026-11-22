@@ -13,6 +13,13 @@ For a first, read-only try without services, see
 [first volume (read-only check)](#first-volume-read-only-check). For a write
 test, see [write test (scratch host only)](#write-test-scratch-host-only).
 
+## Upgrade order
+
+Upgrade `blockmaster` first, then `blockvolume`. Assignments and workspace
+lease requests require the assigned server id. A new volume against an older
+pre-release master stays not serving until the master is upgraded; an older
+volume must also be upgraded to gain the assignment guard. Do not use endpoint
+matching as a compatibility fallback. See [holder identity and upgrades](releases/holder-identity.md).
 ## Get the matching files
 
 The unit and settings files must come from the same commit as your
@@ -65,12 +72,91 @@ sudo install -m 0640 -g sw-block deploy/config/*.env deploy/config/topology.yaml
 sudo install -m 0644 deploy/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sw-blockmaster sw-blockvolume
-journalctl -u sw-blockvolume -f    # wait for "nvme-listening"
+journalctl -u sw-blockvolume -f    # wait for "adopted as PRIMARY" (see the required setup below)
 ```
 
 The binaries take command-line flags. The `SWB_*` variables are read only by
 the example units, which turn them into flags. blockvolume itself reads only
 `SW_BLOCK_ISCSI_CHAP_USERNAME` and `SW_BLOCK_ISCSI_CHAP_SECRET`.
+
+## Required setup: make the volume known to blockmaster
+
+blockmaster gives a blockvolume an assignment only for a volume and replica
+slot it already knows. It does not learn volumes from heartbeats. Without an
+assignment, blockvolume starts, opens its storage and its listeners, and
+serves no I/O.
+
+Outside Kubernetes, a volume becomes known through the accepted-topology file.
+Do these steps before you start blockvolume:
+
+1. **Write the topology file.** One entry per volume, one slot per replica;
+   `volume_id`, `replica_id` and `server_id` are required. This is
+   [`deploy/config/topology.yaml`](../deploy/config/topology.yaml):
+
+   ```yaml
+   volumes:
+     - volume_id: v1
+       slots:
+         - replica_id: r1
+           server_id: s1
+   ```
+
+2. **Start blockmaster with the file and the matching slot count.**
+   `--expected-slots-per-volume` must equal the number of slots of each
+   volume: `1` here (the default is `3`).
+
+   ```bash
+   blockmaster --authority-store /var/lib/sw-block-master/authority --listen 127.0.0.1:9180 \
+     --topology /etc/sw-block/topology.yaml --expected-slots-per-volume 1
+   ```
+
+   In `blockmaster.env` these are `SWB_MASTER_TOPOLOGY` and
+   `SWB_MASTER_EXPECTED_SLOTS`. blockmaster reads the file only at start:
+   after you change it, run `sudo systemctl restart sw-blockmaster`.
+
+3. **Start blockvolume with the identity of one slot.** `--volume-id`,
+   `--replica-id` and `--server-id` (`SWB_VOLUME_ID`, `SWB_REPLICA_ID`,
+   `SWB_SERVER_ID`) must equal one slot of the file: `v1`, `r1`, `s1` here.
+
+**Check before starting blockvolume.** Without a usable topology, blockmaster
+logs this line at start; if `journalctl -u sw-blockmaster` shows it, redo
+steps 1 and 2:
+
+```
+blockmaster: WARNING: --topology not supplied or empty; controller will not mint assignments until topology is provided
+```
+
+A file that cannot be read or parsed stops blockmaster with
+`blockmaster: topology: ...`.
+
+**Check after.** blockvolume logs `blockvolume: volume v1 adopted as PRIMARY
+at r1@<epoch>`, and its status shows a positive `Epoch`, `"Healthy":true` and
+`"AuthorityRole":"primary"`:
+
+```bash
+journalctl -u sw-blockvolume | grep 'adopted as PRIMARY'
+curl -s 'http://127.0.0.1:9203/status?volume=v1'; echo
+```
+
+`nvme-listening` alone does not prove this: blockvolume starts its NVMe/TCP
+listener before it has an assignment. Without one, the status shows
+`"Epoch":0`, `"Healthy":false` and `"AuthorityRole":"unknown"`.
+
+| What you see | Missing step |
+|---|---|
+| blockvolume logs `blockvolume: subscribe stream: rpc error: code = Unknown desc = subscribe: volume "v1" not in accepted topology`, again every few seconds | blockmaster has no topology, or `v1` is not in it (steps 1, 2) |
+| `walstore-chunk` only: `durable: chunk layer for volume=v1 waits for master authority (up to 30s): projection lacks healthy=false epoch=0`, and 30 s later `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable, not serving (projection lacks healthy=false epoch=0)` | The same. This wait runs once per start: after the fix, restart blockvolume too |
+| No error in either log, and `"Epoch":0` stays | `--expected-slots-per-volume` differs from the slot count (step 2), or `--server-id` or `--replica-id` differ from the slot (step 3) |
+| blockmaster logs `authority: rejected ask ...: workspace publication: no lifecycle VolumeRecord for v1; register it (CreateVolume) before publishing` | blockmaster runs with `--lifecycle-store`: a topology slot is then not enough, the volume also needs a volume record (below) |
+
+**Workspace lease volumes (`--workspace-lease`).** Besides the steps above,
+blockmaster needs `--workspace-rpc`, `--workspace-head-base-url` and
+`--lifecycle-store`, and the volume needs a single-replica volume record in
+that store. This release has no `sw-block` command that creates that record. Check with `sw-block ops workspace show --master 127.0.0.1:9180
+--volume v1`; it names the first missing piece: `workspace RPC disabled`,
+`lifecycle store unavailable`, or `workspace move requires an existing RF1
+volume`. A move target must also be a registered node, or the move is refused
+with `move target node "s2" is not registered`.
 
 ## blockmaster settings
 
@@ -78,7 +164,7 @@ the example units, which turn them into flags. blockvolume itself reads only
 |---|---|---|---|
 | `SWB_MASTER_AUTHORITY_STORE` | `--authority-store` | required | Durable authority store: assignments, epochs, leases |
 | `SWB_MASTER_LISTEN` | `--listen` | `127.0.0.1:0` | gRPC address; unauthenticated, keep it on loopback or a trusted network |
-| `SWB_MASTER_TOPOLOGY` | `--topology` | empty (no assignments minted) | Accepted-topology YAML: volumes and replica slots |
+| `SWB_MASTER_TOPOLOGY` | `--topology` | empty (no assignments minted: no volume serves) | Accepted-topology YAML: volumes and replica slots; required outside Kubernetes, read only at start |
 | `SWB_MASTER_EXPECTED_SLOTS` | `--expected-slots-per-volume` | `3` | Replica slots per volume; `1` for a single replica |
 | `SWB_MASTER_FRESHNESS_WINDOW` | `--freshness-window` | `30s` | How long a heartbeat stays fresh |
 | `SWB_MASTER_PENDING_GRACE` | `--pending-grace` | `1s` | Startup grace before a missing observation is unsupported |
@@ -154,6 +240,10 @@ group while volumes run.
     - **On an NVMe root,** and in that disk's other attaches: the fsync took 50-75 microseconds and the publish 2-3 milliseconds.
     - **Cause:** not yet established.
   - **Check the device:** `lsblk -d -o NAME,ROTA,TRAN,MODEL`, and the line blockvolume logs at start, `storage: WAL/extent sync=... file=... reason=...`, whose reason names the root's device.
+- **NVMe/TCP needs native NVMe multipath on the host (`nvme_core multipath=Y`, the Ubuntu default).**
+  The device lookup below, and the CSI node plugin's, find the namespace as an `nvmeXnY` entry under
+  `/sys/class/nvme-subsystem/nvme-subsysN/`; with multipath off that directory holds no namespace entry and
+  neither finds the device. Check: `cat /sys/module/nvme_core/parameters/multipath` must print `Y`.
 - ublk needs root. Use `sw-blockvolume-ublk.service` instead of editing the
   unprivileged unit, and load `ublk_drv` at boot
   (`echo ublk_drv | sudo tee /etc/modules-load.d/ublk.conf`).
@@ -473,3 +563,4 @@ A restore makes a new, independent volume from a snapshot. The source volume and
    - Follow it with `sw-block ops chunk restore --volume v2 --status-addr STATUS_OF_V2 --status`.
    - Until v2 is independent, a snapshot of v2 is refused (`restore_incomplete`).
    - While v2 still fetches chunks, its scheduled snapshots are skipped and counted as `restoring`. After that, until it is independent, they are refused like any snapshot and show as failed attempts with that code.
+

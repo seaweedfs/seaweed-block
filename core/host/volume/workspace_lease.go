@@ -142,7 +142,7 @@ func NewWorkspaceLeaseGuard(base frontend.ProjectionView, client WorkspaceLeaseC
 	if now == nil {
 		now = time.Now
 	}
-	return &WorkspaceLeaseGuard{base: base, client: client, id: control.WorkspaceIdentity{VolumeId: id.VolumeId, ReplicaId: id.ReplicaId, Epoch: id.Epoch}, stop: stop, now: now, kick: make(chan struct{}, 1), after: time.After}, nil
+	return &WorkspaceLeaseGuard{base: base, client: client, id: control.WorkspaceIdentity{VolumeId: id.VolumeId, ReplicaId: id.ReplicaId, ServerId: id.ServerId, Epoch: id.Epoch}, stop: stop, now: now, kick: make(chan struct{}, 1), after: time.After}, nil
 }
 
 func (g *WorkspaceLeaseGuard) Projection() frontend.Projection {
