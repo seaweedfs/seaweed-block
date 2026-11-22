@@ -415,6 +415,20 @@ snapshot lifetime; local persistence does not bypass it.
   Generic/Namespace Not Ready (SC0x82), DNR=0. Sticky faults retain their original
   non-retryable mapping. This is a local pressure outcome, not a whole-I/O
   deadline; the broader budget gap is tracked separately in issue221.
+- Every frontend I/O error completion uses one shared retry class
+  (`INV-FE-ERROR-RETRY-CLASS-001`, amended V1-SPEC r2.42): (a) a known permanent
+  cause anywhere in the wrapped/joined tree wins: EIO, ENOSPC, EROFS, counter
+  exhaustion, WAL integrity, prior fsync/append failure, invalid chunk maps, or
+  RecoveryFailure with SubstrateIO/WALIntegrity kind (any cause). Bare short-read
+  EOF is not permanent evidence; local faults carry an integrity/I/O envelope;
+  (b) otherwise a deliberate busy, not-ready, stale, closed or pure expired
+  command-deadline marker decides. Unknown causes under markers do not override
+  them; pressure/hydration/observer causes are not frontend classification atoms;
+  (c) no marker and no known permanent cause retains the permanent default,
+  logged once per unknown leaf error type. Backend owners must classify any
+  unclassified type seen in a gate before GO. Both frontend mappers consume
+  ClassifyBackendError; no storage/authority state changes on completion.
+
 - A flusher cycle sorts native snapshot entries by record offset and reuses at
   most one fully validated record (bounded by WALSize). Every block still checks
   its LBA/data offset/LSN/nonce; the cache is local to the snapshot recovery
@@ -449,7 +463,7 @@ Tests: `TestSnapshotSchedule_SlotsAreOffsetPerVolume`, `_FailureIsTypedAndBacksO
 
 ## Part B. Invariant ledger
 
-312 rows: 241 ACTIVE, 68 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 297 new.
+313 rows: 242 ACTIVE, 68 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 298 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -497,6 +511,7 @@ The "Machine / transition" column refers to Part A. Notes under a table record w
 | `INV-WAL-V3-ADMISSION-EXPIRY-STATE-001` | A v3 write refused for an expired deadline before its append leaves the WAL bytes, nextLSN and the dirty map unchanged. | M1 Serving (write admission) | `core/storage/walstore.go` `WALStore.WriteContext`, `WALStore.WriteBatchContext` | `TestStorageBackendExpiredWriteDoesNotAppend` | — | ACTIVE |
 | `INV-WAL-V3-ADMISSION-PREFIX-ERR-001` | A write batch that returns a committed prefix with a storage error keeps that error in the error set the frontend classifies. | M1 Serving (write admission) | `core/frontend/durable/storage_adapter.go` `writeFullBlockBatch`, `withStorageCause`, `observeWriteCause` | `TestStorageBackendPartialBatchPhysicalFaultSurvivesObserverDeadline` | — | ACTIVE |
 | `INV-WAL-V3-ADMISSION-RETRYABLE-001` | A write that fails only because the caller's deadline expired is reported retryable, also through a required write observer and on NVMe; a write whose error carries a physical cause is reported terminal. | M1 Serving (write admission) | `core/frontend/write_budget.go` `IsWriteDeadline`; `core/frontend/durable/storage_adapter.go` `StorageBackend.Write`, `replicationWriteError`; `core/frontend/nvme/io.go` `mapBackendError`; `core/frontend/nvme/session.go` `Session.handleWrite` | `TestStorageBackendRequiredObserverDeadlineStaysRetryable`, `TestStorageBackendPartialBatchPhysicalFaultSurvivesObserverDeadline`; `TestSessionWriteBudgetDeadlineIsRetryableIncludingFUA` (`core/frontend/nvme/write_command_budget_test.go`) | — | ACTIVE |
+| `INV-FE-ERROR-RETRY-CLASS-001` | A backend error's retry class is decided once and every frontend reports it with its protocol's retryable form; only permanent errors become medium errors. | M1 I/O error completion (shared frontend classifier) | `core/frontend/error_class.go` `ClassifyBackendError`; `core/frontend/iscsi/scsi.go`, `core/frontend/nvme/io.go` `mapBackendError` | `TestBackendErrorClassesAcrossFrontends` (`core/frontend/iscsi/backend_error_class_test.go`); `TestBackendRetryClassClearsWireDNR`, `TestSyncAndFUALatchedFaultOverridesBusy` (`core/frontend/nvme/backend_error_class_test.go`); `TestUnclassifiedBackendErrorIsPermanentAndLoggedOncePerType` (`core/frontend/iscsi/backend_error_class_test.go`); `TestSessionWriteBudgetDeadlineIsRetryableIncludingFUA` (`core/frontend/nvme/write_command_budget_test.go`) | Protocol output only; existing backend states, no new automaton state | ACTIVE |
 | `INV-WAL-V3-RECLAIM-001` | A mapped v3 checkpoint at cp moves retainedTail only to the end of a complete validated record whose last LSN is at most cp minus the retention window, and, while a BASE is installing, never past BaseCursor. | M1 checkpoint / existing two-slot retirement | `core/storage/walstore_map_checkpoint_v3.go` `WALStore.publishCheckpointV3`; `core/storage/wal_io_v3.go` `walWriterV3.reclaimThroughV3` | `TestWALStoreV3CheckpointReclaimsAcrossRingLaps`, `TestWALStoreV3ReclaimKeepsPartialBatchAndRetention`, `TestWALStoreV3ReclaimAfterInstallingPhysicalReopen` | Existing dual-slot retirement and nonce/cursor contract; concrete index/recovery/caller wiring is a code-test obligation | STUB |
 | `INV-WAL-V3-RECLAIM-INDEX-001` | A physical v3 recovery rebuilds the writer's volatile record-boundary index only from trusted write records of the kept scan; an installing reopen indexes them without moving the writer's cursor. | M1 checkpoint / existing two-slot retirement | `core/storage/wal_io_v3.go` `walWriterV3.restoreScanV3`, `walWriterV3.rememberReclaimScanV3`, `walWriterV3.indexReclaimScanLockedV3`; `core/storage/walstore_v3.go` `WALStore.recoverV3` | `TestWALStoreV3ReclaimRebuildsIndexAfterPhysicalRecovery`, `TestWALStoreV3ReclaimAfterInstallingPhysicalReopen` | — | STUB |
 | `INV-WAL-V3-RECLAIM-PUBLISH-001` | A mapped v3 checkpoint publishes retainedTail, retainedHead, the map root, CheckpointLSN and W in one slot publication, followed by a metadata-only rollover when the fallback slot still pins a lower tail. | M1 checkpoint / existing two-slot retirement | `core/storage/walstore_map_checkpoint_v3.go` `WALStore.publishCheckpointV3`; `core/storage/descriptor_v3.go` `descriptorPublisherV3.rolloverIfPinned` | `TestWALStoreV3CheckpointReclaimsAcrossRingLaps`, `TestWALStoreV3ReclaimSecondSlotFailureKeepsOldPin` | — | STUB |
