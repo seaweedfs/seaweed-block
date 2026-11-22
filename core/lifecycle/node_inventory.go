@@ -102,6 +102,14 @@ func (s *NodeInventoryStore) GetNodeSnapshot(serverID string) (NodeRegistration,
 	return copyNodeRegistration(v.(NodeRegistration)), true
 }
 
+// HoldWritesForTest takes the mutex a registration write holds across file I/O and returns its release (idempotent):
+// a held registration write, for controls that a reader (the holder host check) never waits on it. Tests only.
+func (s *NodeInventoryStore) HoldWritesForTest() (release func()) {
+	s.mu.Lock()
+	var once sync.Once
+	return func() { once.Do(s.mu.Unlock) }
+}
+
 // RegisterNode records the latest observed inventory for a server.
 // Repeating registration replaces observation fields, but still does not
 // publish authority or readiness.

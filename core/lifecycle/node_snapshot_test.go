@@ -41,13 +41,25 @@ func TestNodeSnapshotDoesNotWaitForARegistrationWrite(t *testing.T) {
 	// control: the mutex-taking read does wait while the write is held
 	blocked := make(chan struct{})
 	go func() { _, _ = s.GetNode("node-a"); close(blocked) }()
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-blocked:
+		case <-time.After(5 * time.Second):
+			t.Error("control reader did not join")
+		}
+	})
 	select {
 	case <-blocked:
 		t.Fatal("control: GetNode did not wait for the held registration write")
 	case <-time.After(200 * time.Millisecond):
 	}
 	release()
-	<-blocked
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("control reader did not finish after the release")
+	}
 	if got.DataAddr != "127.0.0.1:19101" {
 		t.Fatalf("wrong committed registration: %+v", got)
 	}

@@ -397,3 +397,57 @@ func TestDeletionReservedWorkspaceVolumeKeepsTheStreamHostCheck(t *testing.T) {
 		t.Fatalf("deletion-reserved workspace volume, stream from another host: %v, want the host refusal", err)
 	}
 }
+
+// codex01 #416 P2 (INV-WS-RENEW-NONBLOCKING-001): a LIVE lease renewal through holderMatches, whose host check reads the
+// node registry, completes while a registration write is held (the store mutex RegisterNode keeps across file I/O). The
+// hold is proven real: a concurrent RegisterNode does not finish until it is released.
+func TestLiveRenewalDoesNotWaitForAHeldRegistrationWrite(t *testing.T) {
+	r := newIsolationRig(t, false, t.TempDir(), t.TempDir()) // node-a registered on 127.0.0.1
+	r.createVolume(t, "w3")
+	if _, err := r.m.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "w3", DesiredRF: 1,
+		Candidates: []lifecycle.PlacementCandidate{{VolumeID: "w3", ServerID: "node-a", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.obs.ReportHeartbeat(r.ctx, &control.HeartbeatReport{ServerId: "node-a", SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
+		Slots: []*control.HeartbeatSlot{{VolumeId: "w3", ReplicaId: "r1", DataAddr: "127.0.0.1:19131", CtrlAddr: "127.0.0.1:19132"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	line := waitAuthorityLine(t, r.m.Publisher(), "w3")
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "w3", ReplicaId: "r1", Epoch: line.Epoch}
+	if _, err := r.ws.RenewWorkspaceLease(r.ctx, id); err != nil {
+		t.Fatalf("first grant: %v", err)
+	}
+	release := r.m.Lifecycle().Nodes.HoldWritesForTest()
+	writer := make(chan struct{})
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-writer:
+		case <-time.After(5 * time.Second):
+			t.Error("held registration writer did not join")
+		}
+	})
+	go func() {
+		defer close(writer)
+		_, _ = r.m.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-c", DataAddr: "127.0.0.1:19501", CtrlAddr: "127.0.0.1:19502"})
+	}()
+	ctx, cancel := context.WithTimeout(r.ctx, time.Second)
+	defer cancel()
+	if _, err := r.ws.RenewWorkspaceLease(ctx, id); err != nil {
+		t.Fatalf("live renewal during a held registration write: %v (it must not wait on the registry store)", err)
+	}
+	select {
+	case <-writer:
+		t.Fatal("control: the registration write was not actually held")
+	default:
+	}
+	release()
+	select {
+	case <-writer:
+	case <-time.After(5 * time.Second):
+		t.Fatal("registration write did not finish after the release")
+	}
+}

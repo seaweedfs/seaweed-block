@@ -33,6 +33,18 @@ func TestPublishTargetIsPrimaryOwned(t *testing.T) {
 	if !ok || got.ISCSIAddr != "192.0.2.1:3260" || got.Multipath || got.IQN != "iqn.v1" {
 		t.Fatalf("foreign target: %+v ok=%v, want only the primary's", got, ok)
 	}
+	// iSCSI paths match on IQN AND LUN (codex01): a supporting q/LUN2 is another target, never a path to the primary's q/LUN1
+	lun := func(replica, addr string, n uint32) *control.FrontendTarget {
+		return &control.FrontendTarget{Protocol: string(ProtocolISCSI), Addr: addr, Iqn: "iqn.q", Lun: n, ReplicaId: replica}
+	}
+	got, ok = publishTargetFromStatus(status(lun("r1", "192.0.2.1:3260", 1), lun("r2", "192.0.2.2:3260", 2)), true, false)
+	if !ok || got.ISCSIAddr != "192.0.2.1:3260" || got.LUN != 1 || got.Multipath || len(got.ISCSIAddrs) != 0 {
+		t.Fatalf("LUN mismatch: %+v ok=%v, want only the primary's q/LUN1 (no multipath)", got, ok)
+	}
+	got, ok = publishTargetFromStatus(status(lun("r1", "192.0.2.1:3260", 1), lun("r2", "192.0.2.2:3260", 1)), true, false)
+	if !ok || got.LUN != 1 || !got.Multipath || len(got.ISCSIAddrs) != 2 || got.ISCSIAddrs[0] != "192.0.2.1:3260" {
+		t.Fatalf("nonzero LUN match: %+v ok=%v, want multipath primary-first at LUN 1", got, ok)
+	}
 	// no primary frontend at all, supporting present: no target
 	if got, ok := publishTargetFromStatus(status(ft("r2", "192.0.2.2:3260", "iqn.v1")), false, false); ok {
 		t.Fatalf("no primary frontend: published %+v, want no target", got)

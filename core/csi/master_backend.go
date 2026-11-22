@@ -256,7 +256,7 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 
 // primaryOwnedFrontends applies INV-AUTH-HOLDER-IDENTITY-001 when the master tags each frontend with its replica: the
 // usable frontends of the primary replica come first, and another replica's frontend is kept only as an extra path to a
-// target the primary itself serves (same IQN, or same NQN/NSID/transport). No usable primary frontend: none at all, so
+// target the primary itself serves (same IQN and LUN, or same NQN/NSID/transport). No usable primary frontend: none at all, so
 // a supporting replica is never published under the primary identity. An untagged (older) response is returned as is.
 func primaryOwnedFrontends(resp *control.StatusResponse, rejectLoopback bool) ([]*control.FrontendTarget, bool) {
 	tagged := false
@@ -273,7 +273,7 @@ func primaryOwnedFrontends(resp *control.StatusResponse, rejectLoopback bool) ([
 		case ft.GetAddr() == "" || rejectFrontendAddr(ft.GetAddr(), rejectLoopback):
 			return "", false
 		case ft.GetProtocol() == string(ProtocolISCSI) && ft.GetIqn() != "":
-			return "iscsi\x00" + ft.GetIqn(), true
+			return "iscsi\x00" + ft.GetIqn() + "\x00" + strconv.FormatUint(uint64(ft.GetLun()), 10), true // IQN AND LUN
 		case ft.GetProtocol() == string(ProtocolNVMe) && ft.GetNqn() != "":
 			return "nvme\x00" + ft.GetNqn() + "\x00" + strconv.FormatUint(uint64(ft.GetNsid()), 10) + "\x00" +
 				string(normalizeFrontendTransport(ProtocolNVMe, FrontendTransport(ft.GetTransport()))), true
