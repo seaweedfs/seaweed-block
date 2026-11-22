@@ -128,3 +128,33 @@ func TestAssignmentHolderIdentityRefusesCarriedEndpointMismatch(t *testing.T) {
 		})
 	}
 }
+
+// INV-AUTH-HOLDER-IDENTITY-001 / M3 Unassigned -> Primary: recovery replay
+// of a valid new holder must not inherit a foreign-holder fence from an
+// endpoint-mismatched delivery naming that same server and replica.
+func TestAssignmentHolderIdentityPlannedHandoffBeforeReadiness(t *testing.T) {
+	h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "new-host", VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", EnableT1Readiness: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	h.BlockLocalReadiness("awaiting durable recovery")
+	own := holderAssignment(t, "new-host")
+	h.applyFact(own)
+	mismatch := holderAssignment(t, "new-host")
+	mismatch.DataAddr = "127.0.0.1:9991"
+	h.applyFact(mismatch)
+	if h.realAdpt.Projection().Epoch != 0 {
+		t.Fatal("assignment entered adapter before readiness")
+	}
+	h.ClearLocalReadinessBlock()
+	h.SetReplicationVolume(nil)
+	h.replayLocalReadinessFactIfReady()
+	deadline := time.Now().Add(time.Second)
+	for !h.view.Projection().Healthy && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if p := h.view.Projection(); !p.Healthy || p.Epoch != 2 {
+		t.Fatalf("own clean-move assignment stayed fenced after readiness replay: %+v; other=%+v", p, h.LastOtherLine())
+	}
+}
