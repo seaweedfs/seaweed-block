@@ -250,7 +250,7 @@ func TestHeadBeltRetryOfUnconfirmedClaimStillCools(t *testing.T) {
 	if _, err := ClaimChunkHead(retryCtx, f, ChunkLayerConfig{Epoch: 2, Holder: "new", HeadCoolingWindow: chunkHeadOperationTimeout + chunkHeadSettleTime}); err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) < chunkHeadOperationTimeout+chunkHeadSettleTime || f.stats().cas != 1 {
-		t.Fatal("retry bypassed cooling or replayed a settled claim")
+	if time.Since(start) < chunkHeadOperationTimeout+chunkHeadSettleTime || f.stats().cas != 2 {
+		t.Fatal("retry bypassed cooling or failed to fence the previous incarnation")
 	}
 }

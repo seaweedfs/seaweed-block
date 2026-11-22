@@ -54,6 +54,20 @@ func openRecovered(t *testing.T, p *durable.DurableProvider) storage.LogicalStor
 	return s
 }
 
+// freshV1Claim is only for fresh v1View fixtures, never reopened/local roots.
+// INV-WS-CLAIM-BEFORE-SERVE-001: validate the open before using its baseline.
+func freshV1Claim(t *testing.T, remote *storage.MemChunkRemote) storage.ChunkHead {
+	t.Helper()
+	head := headHolder(t, remote)
+	assigned := v1View().Projection()
+	if head.Gen != 1 || head.Epoch != assigned.Epoch || head.Holder != assigned.ReplicaID ||
+		head.State != storage.ChunkHeadActive || head.RemoteLSN != 0 || head.DetachedBy != nil ||
+		len(head.Chunks) != 0 || len(head.Segments) != 0 || head.ManifestChunkCount != 0 || head.ChunkBytes != 0 || remote.Puts() != 0 {
+		t.Fatalf("fresh open did not establish exactly one empty assigned active claim: HEAD=%+v PUTs=%d", head, remote.Puts())
+	}
+	return head
+}
+
 func block(fill byte) []byte { return bytes.Repeat([]byte{fill}, 4096) }
 
 func headBlock(t *testing.T, remote *storage.MemChunkRemote, lba uint32) []byte {

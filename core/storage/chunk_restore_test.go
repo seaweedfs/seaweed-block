@@ -75,13 +75,13 @@ func TestClaimChunkHeadRefusesStaleAuthorityAndAdmissionDrift(t *testing.T) {
 	if err == nil || after.Gen != before.Gen || after.Epoch != 3 {
 		t.Fatalf("drift published: head=%+v err=%v", after, err)
 	}
-	// An identical already-settled claim is idempotent and creates no new gen.
+	// Reopening the same owner preserves the image but fences its old generation.
 	if _, err := ClaimChunkHead(context.Background(), remote, ChunkLayerConfig{Epoch: 3, Holder: "current"}); err != nil {
 		t.Fatal(err)
 	}
 	final, _ := remote.GetHead(context.Background())
-	if final.Gen != before.Gen {
-		t.Fatal("idempotent claim advanced HEAD")
+	if final.Gen != before.Gen+1 || final.RemoteLSN != before.RemoteLSN {
+		t.Fatal("same-owner reopen did not replace only the generation")
 	}
 }
 

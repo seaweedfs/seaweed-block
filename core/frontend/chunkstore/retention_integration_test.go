@@ -50,11 +50,7 @@ func TestIntegration_RetainAndUsage(t *testing.T) {
 			t.Fatal(err)
 		}
 		next := storage.ChunkHead{Epoch: 1, Holder: "h1", RemoteLSN: uint64(step), Chunks: map[uint64]storage.ChunkRef{0: ref(key, data)}}
-		gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, next)
-		if err != nil {
-			t.Fatal(err)
-		}
-		next.Gen = gen
+		next = publishIntegrationHead(t, r, cur, next, full)
 		cur = next
 		clock = clock.Add(time.Minute)
 		if _, err := cat.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: name, RequestID: "r-" + name, Class: class}, next); err != nil {
@@ -73,7 +69,7 @@ func TestIntegration_RetainAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(before.Snapshots) != n+7 || before.StoredBindings != n+7 || before.StoredUpperBound || before.LiveBytes != full {
+	if len(before.Snapshots) != n+7 || before.StoredBindings != 2*(n+7) || before.ManifestBindings != n+7 || before.StoredUpperBound || before.LiveBytes != full {
 		t.Fatalf("before: %d snapshots, %d bindings, upper=%t, live=%d", len(before.Snapshots), before.StoredBindings, before.StoredUpperBound, before.LiveBytes)
 	}
 	exclusive := func(u VolumeUsage) uint64 {
@@ -131,7 +127,7 @@ func TestIntegration_RetainAndUsage(t *testing.T) {
 	if got := exclusive(after); got != uint64(n+1)*full {
 		t.Fatalf("after: exclusive %d, want %d", got, uint64(n+1)*full)
 	}
-	if after.StoredBindings != n+7 || !after.StoredUpperBound {
+	if after.StoredBindings != 2*(n+7) || after.ManifestBindings != n+7 || !after.StoredUpperBound {
 		t.Fatalf("after: %d bindings, upper=%t; want all still stored (no GC yet), flagged as an upper bound", after.StoredBindings, after.StoredUpperBound)
 	}
 }
@@ -166,9 +162,7 @@ func TestIntegration_RetainIgnoresIncompleteForks(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := storage.ChunkHead{Epoch: 1, Holder: "h1", RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{0: ref("chunks/e1/c0/k", data)}}
-	if head.Gen, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, head); err != nil {
-		t.Fatal(err)
-	}
+	head = publishIntegrationHead(t, r, cur, head, uint64(full))
 	clock := time.Now().Add(-72 * time.Hour)
 	cat.SetClock(func() time.Time { clock = clock.Add(time.Second); return clock }) // every read advances
 	for i := 0; i < 3; i++ {

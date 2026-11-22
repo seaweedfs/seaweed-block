@@ -99,7 +99,7 @@ func TestOwnBatch_CarriesGuestWrites(t *testing.T) {
 
 // A chunk whose every block the guest overwrote and flushed before the walker
 // reached it stays absent but is fully local: a batch owns it with no fetch
-// (codex01 #340 S1: otherwise nothing ever cuts it and the driver stalls).
+// (otherwise nothing ever cuts it and the driver stalls).
 func TestOwnBatch_OwnsAFullyOverwrittenAbsentChunkWithoutAFetch(t *testing.T) {
 	fastWalker(t)
 	s, layer, remote, _ := hydrationFixture(t, 2, 64)
@@ -145,7 +145,7 @@ func TestOwnBatch_OwnsAFullyOverwrittenAbsentChunkWithoutAFetch(t *testing.T) {
 }
 
 // A failed ordinary cut remembers an equal-to-HEAD chunk without a key; the
-// next batch must still upload it under an own key (codex01 #340 S2).
+// next batch must still upload it under an own key.
 func TestOwnBatch_UploadsAChunkRememberedEqualByAFailedCut(t *testing.T) {
 	fastWalker(t)
 	s, layer, remote, _ := hydrationFixture(t, 2, 64)

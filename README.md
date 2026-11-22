@@ -137,6 +137,10 @@ sw-block ops chunk verify    --volume v1 --chunk-filer <filer>   # read-only che
 ```
 
 `volume-delete` is refused while the volume is attached or has snapshots.
+Frozen detach and the pre-copy detach are not supported in this release: a
+detach with `--frozen` (`frozen:true` on `POST /chunk/detach`) is refused with
+409 `frozen_detach_unsupported`, and `blockvolume` refuses to start with
+`--chunk-detach-precopy`.
 `restore` creates the target from the snapshot and, with `--status-addr` naming
 the blockvolume that serves the target, starts the background restore there:
 the target serves at once, copies every chunk under its own keys and becomes
@@ -216,7 +220,11 @@ a launcher of your own that binds blockmaster to a node address must add it.
 ## Correctness and verification
 
 - **CI** runs `go build`, `go vet` and `go test -short` on every pull request
-  and push to `main` ([workflow](.github/workflows/test.yml)). Crash,
+  and push to `main` ([workflow](.github/workflows/test.yml)); that set leaves out the four
+  long, disk-heavy packages (a pull request runs those of them it changes);
+  they run in full, together with the legacy-fixture configuration, on a
+  separate test VM for every merge train (commit status `full-suite (pool VM)`
+  on the train head). Crash,
   mutation, real-SeaweedFS and binary tests are described in the
   [core design, Part 2](docs/design/block-design.md#part-2-verification-lessons-known-issues),
   with the known issues.
