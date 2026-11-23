@@ -56,7 +56,7 @@ func TestMarkVolumeDeleting_RefusedWhileAssigned(t *testing.T) {
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("mark of an assigned volume: %v; want FailedPrecondition", err)
 	}
-	want := "revoke the line with its sealed generation (sw-block ops workspace revoke --epoch E --sealed-gen G) and wait for the recorded ACK, then delete; if the process was stopped by a signal, start it again first"
+	want := "revoke the line with its sealed generation (sw-block ops workspace revoke --epoch E --sealed-gen G) and wait for the recorded ACK, then delete"
 	if !strings.Contains(status.Convert(err).Message(), want) {
 		t.Fatalf("delete refusal lacks the clean-revocation cure: %v", err)
 	}

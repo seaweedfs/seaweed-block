@@ -144,7 +144,7 @@ func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, 
 	}
 	if _, line, ok := p.workspaceLineLocked(volume); ok {
 		if s == nil || s.Ack == nil || s.Ack.Epoch != line.info.Epoch || s.Ack.ReplicaID != line.info.ReplicaID {
-			return fmt.Errorf("workspace delete: live authority requires clean revocation ACK: revoke the line with its sealed generation (sw-block ops workspace revoke --epoch E --sealed-gen G) and wait for the recorded ACK, then delete; if the process was stopped by a signal, start it again first")
+			return fmt.Errorf("workspace delete: live authority requires clean revocation ACK: revoke the line with its sealed generation (sw-block ops workspace revoke --epoch E --sealed-gen G) and wait for the recorded ACK, then delete")
 		}
 	} else if pendingPlacement {
 		return fmt.Errorf("workspace delete: placement may have queued authority")
