@@ -160,7 +160,9 @@ func TestSnapshotLadderC3KilledMidHydrateAndMidBatch(t *testing.T) {
 	drive()
 
 	// Written while owning, then killed in the middle of the batch.
-	inBatch := func(s restoreProgress) bool { return s.Filled == len(chunks) && s.Batches == 0 && s.Phase != "independent" }
+	inBatch := func(s restoreProgress) bool {
+		return s.Filled == len(chunks) && s.Batches == 0 && s.Phase != "independent"
+	}
 	env.awaitRestorePhase(t, "v2", "the first batch cut running", 180*time.Second, func(s restoreProgress) bool { return s.Running && inBatch(s) })
 	w1 := ladderImage("c3kw1", []uint64{3, 17, 50}, 3)
 	env.writeImage(t, "n-v2", w1)
