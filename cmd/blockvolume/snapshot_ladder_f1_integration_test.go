@@ -110,6 +110,7 @@ type f1Round struct {
 	UploadedChunks  int     `json:"uploaded_chunks"`
 	UploadedBytes   int64   `json:"uploaded_bytes"`
 	HostSlotWaits   uint64  `json:"host_slot_waits"`
+	SlotRetries     int     `json:"snapshot_slot_refusals_retried"`
 	RestoreMs       float64 `json:"restore_ms"`
 	RestoreExact    bool    `json:"restore_exact"`
 	LoadPrefix      int     `json:"load_prefix_blocks"`
@@ -268,6 +269,28 @@ func f1Restore(t *testing.T, env *handoffEnv, src, snap, target string) *daemon 
 // longer than this by a cut fails the rung.
 const f1CommandDeadline = 30 * time.Second
 
+// A snapshot refused because every host slot is held is resent with its
+// request id every f1SlotRetryPause, for at most f1SlotRetryBound from its
+// first request; its request-to-commit time includes the waits.
+const (
+	f1SlotRetryPause = 250 * time.Millisecond
+	f1SlotRetryBound = 120 * time.Second
+)
+
+// f1SlotRefusal reports whether a failed snapshot's error body is a
+// retryable refusal for a busy host slot.
+func f1SlotRefusal(stdout string) bool {
+	var body struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		Retryable bool   `json:"retryable"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &body) != nil || !body.Retryable {
+		return false
+	}
+	return body.Code == "host_slot_busy" || body.Code == "capture_refused" && strings.Contains(body.Message, "hostlimit: no background slot")
+}
+
 // f1Block is one deterministic 4096-byte block (pattern needs a length that
 // divides 4096; these labels do not, so the block is filled explicitly).
 func f1Block(vol string, round int, kind string, lba uint64) []byte {
@@ -359,6 +382,7 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 		start, end time.Time
 		out, err   string
 		code       int
+		retries    int
 	}
 	res := make([]snapRes, len(vols))
 	var sg sync.WaitGroup
@@ -369,7 +393,18 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 			defer sg.Done()
 			<-gate
 			res[i].start = time.Now()
-			res[i].out, res[i].err, res[i].code = env.h.run(t, "ops", "chunk", "snapshot", "--volume", v.id, "--status-addr", env.hosts[v.node].status, "--name", fmt.Sprintf("f1-r%d", round))
+			// A refusal for a busy host slot is retryable by contract: resend
+			// it with the same request id, as an operator would, within a bound.
+			request := fmt.Sprintf("f1-r%d-%s", round, v.id)
+			for {
+				res[i].out, res[i].err, res[i].code = env.h.run(t, "ops", "chunk", "snapshot", "--volume", v.id, "--status-addr", env.hosts[v.node].status,
+					"--name", fmt.Sprintf("f1-r%d", round), "--request-id", request)
+				if res[i].code == 0 || !f1SlotRefusal(res[i].out) || time.Since(res[i].start) > f1SlotRetryBound {
+					break
+				}
+				res[i].retries++
+				time.Sleep(f1SlotRetryPause)
+			}
 			res[i].end = time.Now()
 		}(i, v)
 	}
@@ -393,6 +428,7 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 			continue
 		}
 		r.SnapshotMs = ms(res[i].end.Sub(res[i].start))
+		r.SlotRetries = res[i].retries
 		f1Latencies(&r, w.samples, res[i].start, res[i].end)
 		if r.WritesIn == 0 {
 			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: no load write was issued inside the snapshot window", v.id, round))
