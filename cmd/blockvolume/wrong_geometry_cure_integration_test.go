@@ -12,16 +12,16 @@ import (
 )
 
 // The operations-guide cure for a blockvolume started with the wrong
-// --durable-blocks, run as written. The guard comes first: `sw-block ops chunk
-// show` must print the HEAD with epoch 0, no holder and state active (the
-// volume never served, so its local files hold no acknowledged write). Then
-// the process is stopped, the four named files are removed from
-// --durable-root, and a start with the right flags serves. Afterwards the same
-// command shows a claimed HEAD (epoch >= 1, a holder): the guard now forbids
-// removing those files.
+// --durable-blocks, run as written, in one sitting: the process is stopped
+// first; then the guard: `sw-block ops chunk show` must print the HEAD with
+// epoch 0, no holder and state active (the volume never served, so its local
+// files hold no acknowledged write); then the four named files are removed
+// from --durable-root and a start with the right flags serves. Afterwards the
+// same command shows a claimed HEAD (epoch >= 1, a holder): the guard now
+// forbids removing those files.
 func TestWrongGeometryCureAsWritten(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.strandTarget(t, "v2") // exits 75 with geometry_mismatch; under systemd: systemctl stop
+	env.strandTarget(t, "v2") // stopped: it exited 75 (under systemd: systemctl stop)
 	b := env.hosts["n-v2"]
 	guard := env.headOf(t, "v2")
 	t.Logf("guard: sw-block ops chunk show --volume v2: %s", guard)
