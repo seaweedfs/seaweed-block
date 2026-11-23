@@ -16,7 +16,7 @@ block volumes (alpha).
 | Consumer | an agent sandbox or microVM, as a plain virtio block device | an app pod, through a PVC and the CSI driver |
 | Frontend | NVMe/TCP loopback or ublk | iSCSI, or NVMe/TCP (source-gated) |
 | Durability | one local replica, with cuts to SeaweedFS | RF=1 with best-effort ack by default; synchronous RF=2 or RF=3 (`sync-quorum`, `sync-all`) when configured, in a supported lab |
-| Maturity | proof of concept | alpha |
+| Maturity | 1.0 (standalone deployment) | alpha |
 
 Both uses share one core. `blockvolume` serves one volume replica; its
 frontends turn block requests into a single Read / Write / Sync contract, and
@@ -149,8 +149,8 @@ the target serves at once, copies every chunk under its own keys and becomes
 independent of the source (snapshots of it are refused until then). Without
 `--status-addr` it only creates the target and prints the command that starts
 the restore once the target is attached.
-The chunk path (`walstore-chunk`) is a proof of concept. It is not yet a
-default, a release claim or a production path.
+`walstore-chunk` (local WAL, SeaweedFS chunk store) is the 1.0 standalone
+deployment; Kubernetes is alpha.
 
 ## Quick start: Kubernetes (alpha)
 
