@@ -17,11 +17,22 @@ for c in losetup mkfs.ext4 mount umount mountpoint truncate; do command -v "$c" 
 mkdir "$work/root" "$work/limit" "$work/logs"
 loops=()
 cleanup() {
+  local rc=$? failed=0
   set +e
-  for m in "$work/root" "$work/limit"; do mountpoint -q "$m" && umount "$m"; done
-  for l in "${loops[@]}"; do losetup -d "$l"; done
+  for m in "$work/root" "$work/limit"; do
+    mountpoint -q "$m" || continue
+    # A blockvolume that outlived a killed test would hold the mount busy.
+    command -v fuser >/dev/null && fuser -km "$m" >/dev/null 2>&1
+    umount "$m" 2>/dev/null || { sleep 1; umount "$m"; } || { umount -l "$m"; failed=1; }
+  done
+  for l in "${loops[@]}"; do losetup -d "$l" || failed=1; done
   # Only the sparse images this script created under WORKDIR.
   rm -f -- "$work/root.img" "$work/limit.img"
+  if [ "$failed" = 1 ] || losetup -a | grep -qF "$work/"; then
+    echo "diskfull.sh: teardown incomplete (busy mount or loop device left)" >&2
+    exit 3
+  fi
+  exit $rc
 }
 trap cleanup EXIT
 for fs in root:512M limit:8M; do

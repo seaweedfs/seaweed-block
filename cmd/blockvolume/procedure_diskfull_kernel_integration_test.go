@@ -73,6 +73,16 @@ func TestProcedureLocalDiskFullKernelInitiator(t *testing.T) {
 	if out := sh("echo " + connect + " > /dev/nvme-fabrics && echo connected"); !strings.Contains(out, "connected") {
 		t.Fatalf("kernel connect: %s", out)
 	}
+	// Registered at once, by NQN: a later failure must not leave the
+	// controller connected.
+	t.Cleanup(func() {
+		ctrls, _ := filepath.Glob("/sys/class/nvme/nvme*")
+		for _, c := range ctrls {
+			if b, _ := os.ReadFile(filepath.Join(c, "subsysnqn")); strings.TrimSpace(string(b)) == plannedHandoffNQN {
+				_ = os.WriteFile(filepath.Join(c, "delete_controller"), []byte("1"), 0o200)
+			}
+		}
+	})
 	var ctrl, dev string
 	for end := time.Now().Add(30 * time.Second); dev == "" || ctrl == ""; time.Sleep(500 * time.Millisecond) {
 		ctrls, _ := filepath.Glob("/sys/class/nvme/nvme*")
@@ -90,7 +100,6 @@ func TestProcedureLocalDiskFullKernelInitiator(t *testing.T) {
 			t.Fatalf("no namespace device for %s (controller %q, device %q)", plannedHandoffNQN, ctrl, dev)
 		}
 	}
-	t.Cleanup(func() { _ = os.WriteFile(filepath.Join(ctrl, "delete_controller"), []byte("1"), 0o200) })
 	t.Logf("KERNEL: %s connected as %s (%s); multipath=%s io_timeout=%ss max_retries=%s", plannedHandoffNQN, dev, ctrl,
 		sh("cat /sys/module/nvme_core/parameters/multipath"), sh("cat /sys/module/nvme_core/parameters/io_timeout"),
 		sh("cat /sys/module/nvme_core/parameters/max_retries"))

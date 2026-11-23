@@ -4,6 +4,7 @@ package main_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -57,6 +58,9 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	}
 	if root == "" || limit == "" {
 		t.Fatalf("SWBLOCK_DISKFULL_ROOT=%q and SWBLOCK_DISKFULL_LIMIT=%q must be set together", root, limit)
+	}
+	for _, m := range []string{root, limit} {
+		requireSmallDedicatedMount(t, m)
 	}
 	env := startHandoffEnvWith(t, 1, []string{"v2"})
 	if d := os.Getenv("SWBLOCK_REPLAY_LOGS"); d != "" {
@@ -134,7 +138,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	// behind it a guest would retry for ever: a wrong class, reported.
 	switch {
 	case firstErr == nil:
-		t.Logf("case 1: no error in %d writes with 2 MiB free", next)
+		t.Fatalf("case 1: no write failed in %d writes with 2 MiB free: the disk never filled, so this case tested nothing", next)
 	case strings.Contains(firstErr.Error(), "status 0x800c"):
 		diskFullFinding(t, 484, false, "case 1: the guest saw the permanent 0x800c for ENOSPC")
 	case strings.Contains(firstErr.Error(), "status 0x0104"):
@@ -175,6 +179,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	// within the bound naming the full disk; never damage acknowledged data.
 	fill = fillDisk(t, root, 0)
 	holder.kill(t)
+	requireDiskFull(t, root, "case 1b, at the restart")
 	holder = env.start(t, "blockvolume-v1-restart-full", "s1")
 	served := false
 	for end := time.Now().Add(60 * time.Second); ; time.Sleep(500 * time.Millisecond) {
@@ -219,6 +224,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 		for ch := 0; ch < cutCrashChunks; ch++ {
 			for i := 0; i < cutCrashPer; i++ {
 				lba := uint64(ch*ladderChunkBlocks + i)
+				_ = c.io.SetDeadline(time.Now().Add(diskFullBound))
 				got := c.read(t, lba, 4096)
 				if w, ok := want[lba]; ok {
 					if !bytes.Equal(got, w) {
@@ -230,6 +236,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 			}
 		}
 		for lba, w := range want {
+			_ = c.io.SetDeadline(time.Now().Add(diskFullBound))
 			if !bytes.Equal(c.read(t, lba, 4096), w) {
 				t.Fatalf("case 1: flush-acknowledged LBA %d lost after the disk filled", lba)
 			}
@@ -292,8 +299,13 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	}
 	done := make(chan cutResult, 1)
 	g0 := headGen()
-	go func() {
-		out, errOut, rc := env.h.run(t, cut...)
+	go func() { // off the test goroutine: no t.Fatal here
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+		defer cancel()
+		out, errOut, rc, err := runCLI(ctx, env.h, cut...)
+		if err != nil {
+			rc, errOut = -1, errOut+err.Error()
+		}
 		done <- cutResult{out + errOut, rc}
 	}()
 	func() {
@@ -321,7 +333,15 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	t.Logf("case 3: cut with the host-limit dir full exited %d; guest write+flush succeeded meanwhile", r.rc)
 	// The seal of a planned hand-over must not depend on the limit directory.
 	out, errOut, rc := env.h.run(t, "ops", "chunk", "detach", "--plain", "--volume", "v1", "--status-addr", env.hosts["s1"].status, "--timeout", "120s")
-	diskFullFinding(t, 486, rc != 0, "case 3: detach --plain with the host-limit dir full exited %d:\n%s\n%s", rc, out, errOut)
+	sealed, sealErr := sealedGen(out, errOut, e)
+	diskFullFinding(t, 486, rc != 0 || sealErr != nil || sealed <= g0,
+		"case 3: detach --plain with the host-limit dir full exited %d, sealed gen %d (HEAD was %d, %v):\n%s\n%s", rc, sealed, g0, sealErr, out, errOut)
+	if g := headGen(); rc == 0 && g != sealed {
+		t.Fatalf("case 3: detach --plain reported gen %d but HEAD is at gen %d", sealed, g)
+	}
+	if o, eo, vrc := env.h.run(t, verify...); rc == 0 && vrc != 0 {
+		t.Fatalf("case 3: the sealed HEAD does not verify (exit %d):\n%s\n%s", vrc, o, eo)
+	}
 	fill.free(t)
 	t.Logf("slowest guest command answer: %s (bound %s)", diskFullSlowest, diskFullBound)
 	if !t.Failed() {
@@ -342,41 +362,6 @@ func diskFullFinding(t *testing.T, issue int, bad bool, format string, args ...a
 		t.Error(line)
 	case line != "":
 		t.Log(line)
-	}
-}
-
-// diskFullVerdict decides a defect row. A known defect that still reproduces
-// passes; an unknown one fails; a known one that no longer reproduces fails
-// too, so the list cannot go stale and hide a later regression.
-func diskFullVerdict(known map[int]bool, issue int, bad bool, msg string) (fail bool, line string) {
-	switch {
-	case bad && known[issue]:
-		return false, fmt.Sprintf("KNOWN FINDING #%d: %s", issue, msg)
-	case bad:
-		return true, fmt.Sprintf("FINDING #%d: %s", issue, msg)
-	case known[issue]:
-		return true, fmt.Sprintf("FIXED #%d: no longer reproduces; remove it from knownDiskFullFindings so this row is strict", issue)
-	}
-	return false, ""
-}
-
-func TestDiskFullVerdict(t *testing.T) {
-	known := map[int]bool{1: true}
-	for _, c := range []struct {
-		issue int
-		bad   bool
-		fail  bool
-		line  string
-	}{
-		{1, true, false, "KNOWN FINDING #1"},
-		{1, false, true, "FIXED #1"},
-		{2, true, true, "FINDING #2"},
-		{2, false, false, ""},
-	} {
-		fail, line := diskFullVerdict(known, c.issue, c.bad, "m")
-		if fail != c.fail || !strings.HasPrefix(line, c.line) || (c.line == "" && line != "") {
-			t.Errorf("issue %d bad %v: fail=%v line=%q", c.issue, c.bad, fail, line)
-		}
 	}
 }
 
@@ -440,6 +425,9 @@ func fillDisk(t *testing.T, dir string, keep int64) diskFiller {
 	var st syscall.Statfs_t
 	_ = syscall.Statfs(dir, &st)
 	t.Logf("filled %s: filler %d MiB, %d KiB free", dir, n>>20, int64(st.Bavail)*int64(st.Bsize)>>10)
+	if free := int64(st.Bavail) * int64(st.Bsize); free > keep+(1<<20) {
+		t.Fatalf("filled %s but %d bytes are still free (want about %d)", dir, free, keep)
+	}
 	return diskFiller{path: path}
 }
 
@@ -447,5 +435,37 @@ func (d diskFiller) free(t *testing.T) {
 	t.Helper()
 	if err := os.Remove(d.path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// requireDiskFull fails unless dir's file system has (almost) no free space.
+func requireDiskFull(t *testing.T, dir, what string) {
+	t.Helper()
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		t.Fatal(err)
+	}
+	if free := int64(st.Bavail) * int64(st.Bsize); free > 64<<10 {
+		t.Fatalf("%s: the disk is not full (%d bytes free)", what, free)
+	}
+}
+
+// requireSmallDedicatedMount guards the fill: dir must be the root of its own
+// small file system, so the filler can only fill the harness's mount.
+func requireSmallDedicatedMount(t *testing.T, dir string) {
+	t.Helper()
+	var fs syscall.Statfs_t
+	var self, parent syscall.Stat_t
+	if err := syscall.Statfs(dir, &fs); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Stat(dir, &self); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Stat(filepath.Dir(dir), &parent); err != nil {
+		t.Fatal(err)
+	}
+	if size := int64(fs.Blocks) * int64(fs.Bsize); self.Dev == parent.Dev || size > 2<<30 {
+		t.Fatalf("%s must be a dedicated mount of at most 2 GiB (own device %v, size %d)", dir, self.Dev != parent.Dev, size)
 	}
 }
