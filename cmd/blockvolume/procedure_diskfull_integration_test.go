@@ -37,9 +37,9 @@ import (
 //     --plain, the urgent seal, still seals (#486); guest I/O works meanwhile.
 //
 // Each filed defect is a known-finding row (diskFullFinding): while it
-// reproduces the row logs KNOWN FINDING #n and passes; once fixed it logs
-// FIXED #n; removing the issue from knownDiskFullFindings makes the row a
-// strict assertion. A defect not in the list fails the test.
+// reproduces the row logs KNOWN FINDING #n and passes; once fixed the row
+// fails with FIXED #n until the issue is removed from knownDiskFullFindings,
+// which makes it a strict assertion. A defect not in the list fails the test.
 //
 // Environment: SWBLOCK_DISKFULL_ROOT and SWBLOCK_DISKFULL_LIMIT (two mounted
 // filesystems, nothing else on them); CHUNKSTORE_WEED; optional
@@ -336,14 +336,47 @@ var knownDiskFullFindings = map[int]bool{484: true} // 486 fixed by #487
 // reproduced in this run.
 func diskFullFinding(t *testing.T, issue int, bad bool, format string, args ...any) {
 	t.Helper()
-	msg := fmt.Sprintf(format, args...)
+	fail, line := diskFullVerdict(knownDiskFullFindings, issue, bad, fmt.Sprintf(format, args...))
 	switch {
-	case bad && knownDiskFullFindings[issue]:
-		t.Logf("KNOWN FINDING #%d: %s", issue, msg)
+	case fail:
+		t.Error(line)
+	case line != "":
+		t.Log(line)
+	}
+}
+
+// diskFullVerdict decides a defect row. A known defect that still reproduces
+// passes; an unknown one fails; a known one that no longer reproduces fails
+// too, so the list cannot go stale and hide a later regression.
+func diskFullVerdict(known map[int]bool, issue int, bad bool, msg string) (fail bool, line string) {
+	switch {
+	case bad && known[issue]:
+		return false, fmt.Sprintf("KNOWN FINDING #%d: %s", issue, msg)
 	case bad:
-		t.Errorf("FINDING #%d: %s", issue, msg)
-	case knownDiskFullFindings[issue]:
-		t.Logf("FIXED #%d: no longer reproduces; remove it from knownDiskFullFindings so this row is strict", issue)
+		return true, fmt.Sprintf("FINDING #%d: %s", issue, msg)
+	case known[issue]:
+		return true, fmt.Sprintf("FIXED #%d: no longer reproduces; remove it from knownDiskFullFindings so this row is strict", issue)
+	}
+	return false, ""
+}
+
+func TestDiskFullVerdict(t *testing.T) {
+	known := map[int]bool{1: true}
+	for _, c := range []struct {
+		issue int
+		bad   bool
+		fail  bool
+		line  string
+	}{
+		{1, true, false, "KNOWN FINDING #1"},
+		{1, false, true, "FIXED #1"},
+		{2, true, true, "FINDING #2"},
+		{2, false, false, ""},
+	} {
+		fail, line := diskFullVerdict(known, c.issue, c.bad, "m")
+		if fail != c.fail || !strings.HasPrefix(line, c.line) || (c.line == "" && line != "") {
+			t.Errorf("issue %d bad %v: fail=%v line=%q", c.issue, c.bad, fail, line)
+		}
 	}
 }
 
