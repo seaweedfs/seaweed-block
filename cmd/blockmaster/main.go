@@ -136,9 +136,9 @@ func parseFlags(args []string) (flags, error) {
 	if f.workspaceMaxClockSkew <= 0 || f.workspaceMaxClockSkew >= 60*time.Second {
 		return flags{}, fmt.Errorf("--workspace-max-clock-skew must be positive and less than 60s")
 	}
-	fenceExitBound := durable.ChunkFenceWatchInterval + volume.WorkspaceDrainTimeout
-	if f.workspaceMaxClockSkew/2 <= fenceExitBound {
-		return flags{}, fmt.Errorf("--workspace-max-clock-skew=%s gives half-skew=%s, which must exceed fence-exit=%s (detection=%s + cleanup=%s); increase --workspace-max-clock-skew above %s", f.workspaceMaxClockSkew, f.workspaceMaxClockSkew/2, fenceExitBound, durable.ChunkFenceWatchInterval, volume.WorkspaceDrainTimeout, 2*fenceExitBound)
+	fenceExitBudget := durable.ChunkFenceWatchInterval + volume.WorkspaceDrainTimeout
+	if f.workspaceMaxClockSkew/2 <= fenceExitBudget {
+		return flags{}, fmt.Errorf("--workspace-max-clock-skew=%s gives half-skew=%s, which must exceed configured fence-exit budget=%s (watch cadence=%s + drain timeout=%s), assuming normal scheduling; increase --workspace-max-clock-skew above %s", f.workspaceMaxClockSkew, f.workspaceMaxClockSkew/2, fenceExitBudget, durable.ChunkFenceWatchInterval, volume.WorkspaceDrainTimeout, 2*fenceExitBudget)
 	}
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")

@@ -188,7 +188,7 @@ with `move target node "s2" is not registered`.
 | `SWB_MASTER_PENDING_GRACE` | `--pending-grace` | `1s` | Startup grace before a missing observation is unsupported |
 | `SWB_MASTER_WORKSPACE_RPC` | `--workspace-rpc` | `false` | Workspace lease, revocation and move RPCs |
 | `SWB_MASTER_WORKSPACE_HEAD_BASE_URL` | `--workspace-head-base-url` | empty | Filer HTTP directory of HEAD files; required with `--workspace-rpc` |
-| `SWB_MASTER_WORKSPACE_MAX_CLOCK_SKEW` | `--workspace-max-clock-skew` | `20s` | Clock-skew bound for workspace leases and forced moves; must be >10.1s and <60s so half-skew exceeds the fence-exit bound |
+| `SWB_MASTER_WORKSPACE_MAX_CLOCK_SKEW` | `--workspace-max-clock-skew` | `20s` | Clock-skew bound for workspace leases and forced moves; must be >10.1s and <60s so half-skew exceeds the configured fence-exit budget, assuming normal scheduling |
 | `SWB_MASTER_EXTRA_ARGS` | any | empty | Other flags; the Kubernetes `--launcher-*` and `--lifecycle-*` flags are set by the Helm chart |
 
 ## blockvolume settings

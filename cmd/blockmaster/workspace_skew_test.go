@@ -12,7 +12,7 @@ func TestWorkspaceClockSkewFlag(t *testing.T) {
 			t.Errorf("accepted %s", v)
 		}
 	}
-	for _, v := range []string{"11s", "20s", "59s"} {
+	for _, v := range []string{"10.2s", "11s", "20s", "59s"} {
 		f, err := parseFlags([]string{"--authority-store", "unused", "--workspace-max-clock-skew", v})
 		want, _ := time.ParseDuration(v)
 		if err != nil || f.workspaceMaxClockSkew != want {
@@ -32,7 +32,7 @@ func TestWorkspaceSkewMustExceedFenceExitBound(t *testing.T) {
 			if err == nil {
 				t.Fatalf("accepted skew %s whose half does not exceed fence exit", tc.skew)
 			}
-			for _, want := range []string{"--workspace-max-clock-skew=" + tc.skew, "half-skew=" + tc.half, "fence-exit=5.05s", "increase", "10.1s"} {
+			for _, want := range []string{"--workspace-max-clock-skew=" + tc.skew, "half-skew=" + tc.half, "configured fence-exit budget=5.05s", "watch cadence=50ms", "drain timeout=5s", "assuming normal scheduling", "increase", "10.1s"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("refusal %q lacks %q", err, want)
 				}
