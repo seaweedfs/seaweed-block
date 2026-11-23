@@ -84,7 +84,7 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 			defer conn.Close()
 			client := control.NewWorkspaceServiceClient(conn)
 			id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
-			lease, err := client.RenewWorkspaceLease(ctx, id)
+			_, err = client.RenewWorkspaceLease(ctx, id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -171,13 +171,23 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				// Actual master lease expiry, no test clock and no revocation ACK.
-				timer := time.NewTimer(time.Until(time.Unix(0, lease.ExpiresAtNs)) + 100*time.Millisecond + 20*time.Millisecond)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
+				// The master owns the full horizon/deadline/skew barrier. Wait
+				// for its affirmative preview, not a locally copied expiry formula.
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					preview, err := client.PreviewWorkspaceMove(ctx, q)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if preview.Admitted {
+						break
+					}
+					select {
+					case <-ticker.C:
+					case <-ctx.Done():
+						t.Fatalf("forced preview never admitted: %v (last reason %q)", ctx.Err(), preview.Reason)
+					}
 				}
 				q.Force = false
 				if _, err = client.MoveWorkspace(ctx, q); err == nil {
