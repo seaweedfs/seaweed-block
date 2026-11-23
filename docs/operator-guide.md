@@ -133,6 +133,9 @@ default) can expire the host's slots; keep host clocks synchronized.
 - `ops chunk verify`;
 - restoring a snapshot into a new, independent volume.
 
+A snapshot can be refused with `host_slot_busy` / `no background slot` (retryable) while every host slot is held by
+other volumes' cuts; retry with the same request id.
+
 ## Moving a volume, and returning it
 
 [Volume lifecycle](volume-lifecycle.md):
@@ -196,6 +199,7 @@ Every command on the pages above, and the test that runs it.
 | The shipped units' start limits (`StartLimitIntervalSec=600`, `StartLimitBurst=10`, `RestartPreventExitStatus=78`) | `TestBlockvolumeUnitsBoundStartupRetries` (`internal/testops`, reads the unit files) | unit files |
 | `systemctl enable`, `stop`, `disable`, `reset-failed`, `systemd-tmpfiles --create` as written on these pages | not run: the tests above start transient units, not the installed ones | not run |
 | Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesARestoreAndAForkTargetThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
+| A snapshot refused with `host_slot_busy` / `no background slot` while every host slot is held, retried with the same request id | `TestSnapshotLadderF1VolumesOneHost` (`cmd/blockvolume`, `F1_RUN=1`, `F1_HOST_LIMIT_DIR` set, 3 slots; `F1_SLOT_RETRY_SECONDS=0` is its negative control) | binary |
 | Full local disk; full `--host-limit-dir` | `TestProcedureLocalDiskFull` (`cmd/blockvolume`, root, `testdata/diskfull.sh`); what a Linux guest sees: `TestProcedureLocalDiskFullKernelInitiator` (kernel NVMe/TCP host) | binary |
 | A start with the wrong `--durable-blocks` (`geometry_mismatch`): the guard (`sw-block ops chunk show`), removing the local files, a start with the right flags | `TestWrongGeometryCureAsWritten` (`cmd/blockvolume`) | binary |
 | SeaweedFS (filer or volume server) down during a cut | `TestProcedureStoreDownDuringACut` (`cmd/blockvolume`) | binary |
