@@ -32,14 +32,21 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 	keys := plainDetachStoredKeys(t, env)
 	cli := env.h.start(t, "plain-detach-interrupted", env.h.cli, "ops", "chunk", "detach", "--plain",
 		"--volume", "v1", "--status-addr", env.hosts["s1"].status, "--timeout", "120s")
-	poll(t, 60*time.Second, "plain detach stored no new immutable chunk", func() bool {
+	uploadDeadline := time.Now().Add(60 * time.Second)
+	for {
 		select {
 		case <-cli.done:
 			t.Fatal("detach finished before the mid-upload kill witness")
 		default:
 		}
-		return plainDetachStoredKeys(t, env) > keys
-	})
+		if plainDetachStoredKeys(t, env) > keys {
+			break
+		}
+		if time.Now().After(uploadDeadline) {
+			t.Fatal("plain detach stored no new immutable chunk")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	// Stop only this child before reading the remote proof, so the uploader
 	// cannot cross its CAS while the test verifies where the kill will land.
 	if err := holder.proc.Signal(syscall.SIGSTOP); err != nil {
@@ -50,6 +57,7 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 	if err != nil || atKill.Gen != before.Gen || atKill.State != "active" || atKill.RemoteLSN != before.RemoteLSN {
 		t.Fatalf("missed mid-upload window: before=%+v stopped=%+v: %v", before, atKill, err)
 	}
+	t.Logf("kill witness: immutable keys %d -> %d, HEAD gen=%d LSN=%d remains active", keys, plainDetachStoredKeys(t, env), atKill.Gen, atKill.RemoteLSN)
 	select {
 	case <-cli.done:
 		t.Fatal("detach completed or aborted before the verified kill window")
