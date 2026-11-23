@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -14,11 +15,11 @@ import (
 // This kills the master after the move answer, before the target starts.
 // It tests an issued move's recovery, not a kill inside a persistence syscall.
 func TestProcedureMasterKilledAfterMoveBeforeTargetStarts(t *testing.T) {
-	env := startHandoffEnv(t, 2)
+	env := startHandoffEnv(t, 3)
 	must, mustU := fatalOn(t)
 	old := env.start(t, "blockvolume-s1", "s1")
 	e := env.adopt(t, old, "s1")
-	block := pattern("master-crash-move")
+	block := pattern("master-move-test")
 	env.writeBlock(t, "s1", 0, block)
 	g := env.seal(t, "s1", e)
 	l := env.sealedLSN(t, e, g)
@@ -34,6 +35,14 @@ func TestProcedureMasterKilledAfterMoveBeforeTargetStarts(t *testing.T) {
 	out, _ = env.h.command(t, args...)
 	if replay := mustU(movedEpochTo(out, e, g, l, "s2")); replay != e2 {
 		t.Fatalf("replayed move issued epoch %d; original was %d", replay, e2)
+	}
+	for _, conflict := range []struct{ target, request string }{
+		{"s2", "different-request"}, {"s3", "different-target"},
+	} {
+		out, stderr, code := env.h.run(t, env.moveClean(e, conflict.target, conflict.request)...)
+		if code == 0 || !strings.Contains(stderr, "code = FailedPrecondition") {
+			t.Fatalf("competing move to %s: exit=%d stdout=%q stderr=%q; want affirmative FailedPrecondition", conflict.target, code, out, stderr)
+		}
 	}
 	out, _ = env.h.command(t, env.chunkShow()...)
 	if got := mustU(sealedHeadLSN(out, e, g)); got != l {
@@ -51,6 +60,24 @@ func TestProcedureMasterKilledAfterMoveBeforeTargetStarts(t *testing.T) {
 	if !bytes.Equal(env.readBlock(t, "s2", 8), make([]byte, 4096)) {
 		t.Fatal("unwritten target block is not zero")
 	}
+	// A returning source must not adopt or serve the issued target's line.
+	returning := env.start(t, "blockvolume-s1-returning", "s1")
+	poll(t, 45*time.Second, "returning old holder did not exit", func() bool {
+		if returning.has("adopted as PRIMARY") || env.servingNow("s1") {
+			t.Fatal("returning old holder adopted or served after the issued move")
+		}
+		select {
+		case <-returning.done:
+			return true
+		default:
+			return false
+		}
+	})
+	code := exitCode(returning.err)
+	if (code != 75 && code != 78) || !returning.has("blockvolume: exiting status=") {
+		t.Fatalf("returning old holder exit=%v without the documented retry/no-retry exit line", returning.err)
+	}
+
 }
 
 func restartKilledMaster(t *testing.T, env *handoffEnv) {
