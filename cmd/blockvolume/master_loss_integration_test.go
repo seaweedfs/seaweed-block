@@ -7,16 +7,28 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// Coverage cells A2.24, A2.27 and A2.35: real master dial failure while
-// the holder is alive. Administrative calls still reach the real master.
+// Coverage cells A2.24, A2.27 and A2.35: the holder loses its master while it
+// is alive, two ways: its connections are closed (renewals fail at once), or
+// they stay open and every byte is dropped (each renewal hangs until its own
+// 2 s timeout: the guard's stalled-renewal path). Either way the holder exits
+// 75 for lease_expired before a forced move is admitted, and the target then
+// serves the cut block. Administrative calls still reach the real master.
 func TestProcedureMasterUnreachableFencesBeforeForcedMove(t *testing.T) {
+	t.Run("connections closed", func(t *testing.T) { masterLoss(t, false) })
+	t.Run("silent drop", func(t *testing.T) { masterLoss(t, true) })
+}
+
+func masterLoss(t *testing.T, silent bool) {
 	env := startHandoffEnv(t, 2)
-	proxy, disconnect := holderMasterProxy(t, env.h.masterAddr)
+	proxy, disconnect, drop := holderMasterProxy(t, env.h.masterAddr)
 	args := env.volArgs("s1")
 	for i := range args {
 		if args[i] == "--master" {
@@ -31,7 +43,11 @@ func TestProcedureMasterUnreachableFencesBeforeForcedMove(t *testing.T) {
 	// read proves data preservation without promising unpublished WAL data.
 	env.h.command(t, "ops", "chunk", "cut", "--volume", "v1", "--status-addr", env.hosts["s1"].status, "--timeout", "120s")
 	env.requireHeadHolder(t, e, "s1")
-	disconnect()
+	if silent {
+		drop()
+	} else {
+		disconnect()
+	}
 	b := env.hosts["s2"]
 	move := []string{"ops", "workspace", "force-move", "--master", env.h.masterAddr, "--volume", "v1",
 		"--target-host", b.id, "--target-data", b.data, "--target-ctrl", b.ctrl, "--request-id", "master-loss-move",
@@ -65,6 +81,11 @@ func TestProcedureMasterUnreachableFencesBeforeForcedMove(t *testing.T) {
 	if !old.has("reason=lease_expired") {
 		t.Fatal("holder exit lacks affirmative lease_expired reason")
 	}
+	if silent {
+		// The stalled-renewal path: a renewal ran to its own timeout, then the
+		// guard fenced, then the process exited for the expired lease.
+		requireLogOrder(t, old, "the call reached the 2s renewal timeout", "workspace lease: fenced", "reason=lease_expired")
+	}
 	if listening(env.hosts["s1"].nvme) {
 		t.Fatal("exited holder still has a frontend listener")
 	}
@@ -80,10 +101,29 @@ func TestProcedureMasterUnreachableFencesBeforeForcedMove(t *testing.T) {
 	}
 }
 
+// requireLogOrder requires each of lines to appear in d's log, each after the
+// one before it.
+func requireLogOrder(t *testing.T, d *daemon, lines ...string) {
+	t.Helper()
+	data, _ := os.ReadFile(d.log)
+	at := 0
+	for _, l := range lines {
+		i := strings.Index(string(data)[at:], l)
+		if i < 0 {
+			t.Fatalf("%s: %q missing, or not after the lines before it (%q)", d.name, l, lines)
+		}
+		at += i + len(l)
+	}
+}
+
 // holderMasterProxy forwards real TCP bytes until disconnect closes every
-// accepted connection and the listener. Closing a port is the injected
-// failure, never the evidence used to pass the lease/exit assertion.
-func holderMasterProxy(t *testing.T, target string) (string, func()) {
+// accepted connection and the listener, or until drop makes it a silent
+// black hole: every connection, open or new, stays open and its bytes are
+// read and discarded in both directions, so a call sent through it gets no
+// answer until its own timeout. Closing a port or dropping bytes is the
+// injected failure, never the evidence used to pass the lease/exit
+// assertion.
+func holderMasterProxy(t *testing.T, target string) (string, func(), func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -93,7 +133,24 @@ func holderMasterProxy(t *testing.T, target string) (string, func()) {
 	var wg sync.WaitGroup
 	var once sync.Once
 	closed := false
+	var dropping atomic.Bool
 	conns := map[net.Conn]bool{}
+	// forward copies src to dst until src ends, discarding the bytes while
+	// dropping.
+	forward := func(dst, src net.Conn) {
+		buf := make([]byte, 32<<10)
+		for {
+			n, err := src.Read(buf)
+			if n > 0 && !dropping.Load() {
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
 	acceptDone := make(chan struct{})
 	stop := func() {
 		once.Do(func() {
@@ -140,6 +197,10 @@ func holderMasterProxy(t *testing.T, target string) (string, func()) {
 			go func() {
 				defer wg.Done()
 				defer func() { mu.Lock(); delete(conns, client); mu.Unlock(); _ = client.Close() }()
+				if dropping.Load() { // a new connection into the black hole: held open, never answered
+					_, _ = io.Copy(io.Discard, client)
+					return
+				}
 				server, err := net.DialTimeout("tcp", target, 2*time.Second)
 				if err != nil {
 					return
@@ -154,13 +215,13 @@ func holderMasterProxy(t *testing.T, target string) (string, func()) {
 				mu.Unlock()
 				defer func() { mu.Lock(); delete(conns, server); mu.Unlock(); _ = server.Close() }()
 				copied := make(chan struct{})
-				go func() { _, _ = io.Copy(server, client); _ = server.Close(); close(copied) }()
-				_, _ = io.Copy(client, server)
+				go func() { forward(server, client); _ = server.Close(); close(copied) }()
+				forward(client, server)
 				_ = client.Close()
 				_ = server.Close()
 				<-copied
 			}()
 		}
 	}()
-	return ln.Addr().String(), stop
+	return ln.Addr().String(), stop, func() { dropping.Store(true) }
 }
