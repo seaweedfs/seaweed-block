@@ -74,7 +74,10 @@ type checkpointLogLimiter struct {
 }
 
 func (l *checkpointLogLimiter) report(err error, now time.Time) {
-	if errors.Is(err, syscall.ENOSPC) {
+	// A latched store fault is terminal even when ENOSPC is its cause: it is
+	// logged every time. Only a retried ENOSPC (no RecoveryFailure) is limited.
+	var terminal *RecoveryFailure
+	if errors.Is(err, syscall.ENOSPC) && !errors.As(err, &terminal) {
 		if !l.noSpaceLast.IsZero() && now.Sub(l.noSpaceLast) < 30*time.Second {
 			l.noSpaceSuppressed++
 			return
