@@ -75,3 +75,69 @@ func TestCatalog_PublishIsBoundedByTheDeadline(t *testing.T) {
 		f.stallCreate = nil
 	}
 }
+
+// A delayed source read must not create a target, and an expired attempt
+// after VOLUME must not create a copy intent, even one it later deletes.
+func TestFork_ExpiredAttemptWritesNoNewMetadata(t *testing.T) {
+	for _, origin := range []string{OriginFork, OriginRestore} {
+		for _, stage := range []string{"source_read", "volume_written", "live"} {
+			t.Run(origin+"/"+stage, func(t *testing.T) {
+				f, _, c, h := catalogFixture(t)
+				ctx := context.Background()
+				now := time.Unix(1800000000, 0)
+				c.SetClock(func() time.Time { return now })
+				if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "s"}, h); err != nil {
+					t.Fatal(err)
+				}
+				start := now
+				volumeWrites, intentWrites := 0, 0
+				f.afterLookup = func(p string) {
+					if stage == "source_read" && isSnapPath(p, "v1", "s1") {
+						now = start.Add(DefaultOpDeadline)
+					}
+				}
+				f.beforeCreate = func(p string) {
+					if p == catBase+"/v2/VOLUME" {
+						volumeWrites++
+						if stage == "volume_written" {
+							now = start.Add(DefaultOpDeadline)
+						}
+					}
+					if strings.HasPrefix(p, catBase+"/v2/intents/") {
+						intentWrites++
+					}
+				}
+				req := ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"}
+				var err error
+				if origin == OriginFork {
+					_, err = c.Fork(ctx, req)
+				} else {
+					_, err = c.Restore(ctx, req)
+				}
+				f.afterLookup, f.beforeCreate = nil, nil
+				if stage == "live" {
+					if err != nil || volumeWrites != 1 || intentWrites != 1 {
+						t.Fatalf("live attempt: err=%v VOLUME=%d intents=%d", err, volumeWrites, intentWrites)
+					}
+					return
+				}
+				if CodeOf(err) != CodeDeadlineExceeded {
+					t.Fatalf("expired attempt: %v", err)
+				}
+				wantVolume := 0
+				if stage == "volume_written" {
+					wantVolume = 1
+				}
+				if volumeWrites != wantVolume || intentWrites != 0 {
+					t.Fatalf("expired attempt wrote VOLUME=%d intents=%d; want %d and 0", volumeWrites, intentWrites, wantVolume)
+				}
+				if _, err := f.LookupEntry(ctx, catBase+"/v2", headName); err == nil {
+					t.Fatal("expired attempt published HEAD")
+				}
+				if intents := intentsOf(t, f, "v2"); len(intents) != 0 {
+					t.Fatalf("expired attempt left intents: %+v", intents)
+				}
+			})
+		}
+	}
+}
