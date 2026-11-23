@@ -70,6 +70,10 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
   - plus room for a cut's copy-on-write side files. A cut writes them next to the store while guest writes overwrite
     blocks it has not uploaded yet.
 
+  blockvolume refuses to create a volume when the durable root has less free space than its size plus the WAL (the
+  refusal names both numbers), and warns at start when the free space is below its remaining growth plus the WAL;
+  there is no override.
+
   Alert on local free space. On a full local disk, a Linux guest's writes fail after about 75 s with an I/O error
   (EREMOTEIO), and the guest file system may then go read-only. Once space is freed, new writes succeed without a
   restart. Data the guest had already flushed is kept.
