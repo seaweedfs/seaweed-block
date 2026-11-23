@@ -234,18 +234,36 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	// would take any space freed on the shared disk.
 	holder.term(t, 30*time.Second)
 	fill = fillDisk(t, root, 0)
+	// Either answer names the full disk within the bound: an exit, or the
+	// process stays up with its durable recovery faulted (status stays
+	// available, readiness blocked) and never serves.
 	v2 := env.start(t, "blockvolume-v2-full", "n-v2")
-	err := v2.wait(60 * time.Second)
-	if err == nil || strings.Contains(err.Error(), "still running") {
-		t.Fatalf("case 2: blockvolume on a full durable root: %v (want an exit with a reason within 60s)", err)
+	outcome := ""
+	for end := time.Now().Add(60 * time.Second); outcome == ""; time.Sleep(500 * time.Millisecond) {
+		select {
+		case <-v2.done:
+			outcome = fmt.Sprintf("exited (%v)", v2.err)
+		default:
+		}
+		switch {
+		case outcome != "":
+		case v2.has("durable recovery faulted"):
+			outcome = "stayed up with durable recovery faulted"
+		case v2.has("adopted as PRIMARY"):
+			t.Fatalf("case 2: v2 adopted as primary on a full durable root")
+		case time.Now().After(end):
+			t.Fatalf("case 2: blockvolume on a full durable root neither exited nor faulted within 60s; log %s", v2.log)
+		}
 	}
 	if !v2.has("no space left on device") {
-		t.Fatalf("case 2: blockvolume exited (%v) without naming the full disk; log %s", err, v2.log)
+		t.Fatalf("case 2: blockvolume %s without naming the full disk; log %s", outcome, v2.log)
 	}
+	v2.kill(t)
 	fill.free(t)
+	// What the failed create left behind must not stop the next start.
 	v2 = env.start(t, "blockvolume-v2", "n-v2")
 	v2.waitLog(t, 60*time.Second, "blockvolume: volume v2 adopted as PRIMARY at r1@")
-	t.Logf("case 2: exited on the full root (%v), then started and adopted v2", err)
+	t.Logf("case 2: on the full root blockvolume %s naming ENOSPC; after freeing, it started over the partial create and adopted v2", outcome)
 
 	// 3. The --host-limit-dir disk is full.
 	slots := filepath.Join(limit, "slots")
