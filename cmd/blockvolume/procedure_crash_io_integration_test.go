@@ -323,3 +323,94 @@ func (c *nvmeInitiator) tryRead(lba uint64, n int) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// Gap 2, procedure part (cells P8.7, P9.4, P11.3): kill -9 of the holder
+// during a cut's upload, with real binaries. Image A is cut; every block is
+// rewritten (image B, flushed); a second cut starts and the holder is
+// SIGKILLed at half the first cut's duration. After the restart: HEAD
+// verifies whole at depth data (old or new image, nothing missing), every
+// block reads B locally, and the next cut, read back through a snapshot
+// restored into a new volume, is B.
+const (
+	cutCrashChunks = 48
+	cutCrashPer    = 64 // blocks written per chunk
+)
+
+func cutCrashBlock(img byte, lba uint64) []byte {
+	s := fmt.Sprintf("cut-crash %c lba %08d|", img, lba)
+	b := make([]byte, 4096)
+	for i := range b {
+		b[i] = s[i%len(s)]
+	}
+	return b
+}
+
+func (env *handoffEnv) writeCutCrashImage(t *testing.T, img byte) {
+	t.Helper()
+	c := dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
+	defer c.close()
+	for ch := 0; ch < cutCrashChunks; ch++ {
+		for i := 0; i < cutCrashPer; i++ {
+			lba := uint64(ch*ladderChunkBlocks + i)
+			c.write(t, lba, cutCrashBlock(img, lba))
+		}
+	}
+	c.flush(t)
+}
+
+func (env *handoffEnv) requireCutCrashImage(t *testing.T, hostID string, img byte) {
+	t.Helper()
+	c := dialNVMe(t, env.hosts[hostID].nvme, plannedHandoffNQN)
+	defer c.close()
+	for ch := 0; ch < cutCrashChunks; ch++ {
+		for i := 0; i < cutCrashPer; i++ {
+			lba := uint64(ch*ladderChunkBlocks + i)
+			if got := c.read(t, lba, 4096); !bytes.Equal(got, cutCrashBlock(img, lba)) {
+				t.Fatalf("%s: LBA %d is not image %c", hostID, lba, img)
+			}
+		}
+	}
+}
+
+func TestProcedureCrashDuringACut(t *testing.T) {
+	env := startHandoffEnvWith(t, 1, []string{"v2"})
+	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
+	first := env.start(t, "blockvolume-v1", "s1")
+	e := env.adopt(t, first, "s1")
+	cut := []string{"ops", "chunk", "cut", "--volume", "v1", "--status-addr", env.hosts["s1"].status}
+	verify := []string{"ops", "chunk", "verify", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--depth", "data"}
+
+	env.writeCutCrashImage(t, 'A')
+	cutStart := time.Now()
+	env.h.command(t, cut...)
+	full := time.Since(cutStart)
+	env.writeCutCrashImage(t, 'B')
+
+	done := make(chan int, 1)
+	go func() {
+		_, _, code := env.h.run(t, cut...)
+		done <- code
+	}()
+	time.Sleep(full / 2)
+	select {
+	case code := <-done:
+		t.Fatalf("the second cut finished (exit %d) before the kill at %s: no upload was in flight", code, full/2)
+	default:
+	}
+	first.kill(t)
+	code := <-done
+	t.Logf("the first cut took %s; the holder was killed at %s into the second (its CLI exit %d)", full, full/2, code)
+
+	if out, errOut, rc := env.h.run(t, verify...); rc != 0 {
+		t.Fatalf("HEAD is not whole after the kill (verify exit %d):\n%s\n%s", rc, out, errOut)
+	}
+	again := env.start(t, "blockvolume-v1-again", "s1")
+	if got := env.adopt(t, again, "s1"); got != e {
+		t.Fatalf("the restarted holder adopted epoch %d; want %d", got, e)
+	}
+	env.requireCutCrashImage(t, "s1", 'B')
+	env.h.command(t, cut...)
+	env.snapshot(t, "s1", "v1", "after-crash")
+	env.restoreInto(t, "v1", "after-crash", "v2")
+	env.requireCutCrashImage(t, "n-v2", 'B')
+}
