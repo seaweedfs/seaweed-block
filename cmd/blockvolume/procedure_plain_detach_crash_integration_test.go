@@ -19,7 +19,7 @@ import (
 // must not strand the hand-over. The kill is witnessed by a new immutable
 // key and an unchanged active HEAD, not by a delay or a successful CLI exit.
 func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
-	env := startHandoffEnv(t, 1)
+	env := startHandoffEnv(t, 2)
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off", "--chunk-upload-concurrency", "1"}
 	holder := env.start(t, "holder-before-detach-kill", "s1")
 	e := env.adopt(t, holder, "s1")
@@ -91,6 +91,9 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 	env.requireCutCrashImage(t, "s1", 'B')
 	g := env.seal(t, "s1", e)
 	l := env.sealedLSN(t, e, g)
+	if l <= before.RemoteLSN {
+		t.Fatalf("retry did not publish the acknowledged image: remote LSN %d <= baseline %d", l, before.RemoteLSN)
+	}
 	if again := env.seal(t, "s1", e); again != g {
 		t.Fatalf("plain seal replay changed generation %d -> %d", g, again)
 	}
@@ -99,14 +102,15 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 		t.Fatalf("revoked restarted holder did not exit cleanly: %v", err)
 	}
 	env.waitAck(t, e, g)
-	out, _ = env.h.command(t, env.moveClean(e, "s1", "move-v1-1")...)
+	out, _ = env.h.command(t, env.moveClean(e, "s2", "move-v1-1")...)
 	_, mustU := fatalOn(t)
-	e2 := mustU(movedEpoch(out, e, g, l))
-	next := env.start(t, "holder-after-clean-move", "s1")
-	if got := env.adopt(t, next, "s1"); got != e2 {
+	e2 := mustU(movedEpochTo(out, e, g, l, "s2"))
+	next := env.start(t, "holder-after-clean-move", "s2")
+	if got := env.adopt(t, next, "s2"); got != e2 {
 		t.Fatalf("clean move adopted epoch %d; want %d", got, e2)
 	}
-	env.requireCutCrashImage(t, "s1", 'B')
+	// A fresh root on another host cannot satisfy this from the source WAL.
+	env.requireCutCrashImage(t, "s2", 'B')
 	verified, _ := env.h.command(t, "ops", "chunk", "verify", "--volume", "v1",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath,
 		"--depth", "data", "--timeout", "60s", "--bytes-per-sec", "0")
