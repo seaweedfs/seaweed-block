@@ -158,7 +158,7 @@ func TestSnapshotLadderF1VolumesOneHost(t *testing.T) {
 func f1RestoreTarget(vol, round int) string { return fmt.Sprintf("v%dr%d", vol, round) }
 
 // f1StartEnv is the procedure harness laid out as one host (V1-SPEC r2.52,
-// claude05 00:56Z): ONE server id, s1, and one blockvolume process per
+// the layout ruling): ONE server id, s1, and one blockvolume process per
 // volume, each with its own replica id and its own data/ctrl/status/NVMe
 // ports. Source v<i> is replica r<i>; the restore target of v<i> in round k
 // is replica r<i+N*k> on the same server. The node record carries the first
