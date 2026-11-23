@@ -656,3 +656,33 @@ func TestUrgentFallbackUploadIsNotPaced(t *testing.T) {
 		}
 	}
 }
+
+// While an urgent cut is on the fallback, a healthy cut admitted after the
+// pool came back is still paced: only fallback leases alone go unpaced.
+func TestFallbackDoesNotUnpaceAHealthyLease(t *testing.T) {
+	c := testConfig(t)
+	c.BytesPerSecond = 16 << 20
+	c.Directory += "-missing"
+	l := newTest(t, c)
+	urgent, err := l.Acquire(context.Background(), Urgent, nil)
+	if err != nil || !l.Snapshot().(Stats).FallbackActive {
+		t.Fatalf("urgent fallback: id=%d err=%v", urgent, err)
+	}
+	defer l.Release(urgent)
+	if err := os.Mkdir(c.Directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	normal, err := l.Admit(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatalf("healthy normal admission after the pool came back: %v", err)
+	}
+	defer l.Release(normal)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := l.WaitUpload(ctx, 16<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.WaitUpload(ctx, 16<<20); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a healthy lease's second 16 MiB upload was not paced beside a fallback lease: %v", err)
+	}
+}

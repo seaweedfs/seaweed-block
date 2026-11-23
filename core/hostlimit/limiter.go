@@ -469,9 +469,15 @@ func (l *Limiter) WaitUpload(ctx context.Context, n int) error {
 			l.mu.Unlock()
 			return ErrRevoked
 		}
-		if l.fallback {
-			// Only an urgent cut runs on the fallback, and with the shared
-			// pool unusable there is no host cap to protect: not paced.
+		// Only urgent cuts run on the fallback, and with the shared pool
+		// unusable there is no host cap to protect: while every live lease
+		// is a fallback lease, uploads are not paced. A healthy lease beside
+		// one keeps its pacing.
+		onlyFallback := l.fallback && len(l.live) > 0
+		for _, held := range l.live {
+			onlyFallback = onlyFallback && held.fallback
+		}
+		if onlyFallback {
 			l.mu.Unlock()
 			return nil
 		}
