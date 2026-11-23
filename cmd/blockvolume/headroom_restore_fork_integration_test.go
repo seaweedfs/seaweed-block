@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -60,8 +62,8 @@ func requireOnlyReplicaFloor(t *testing.T, dir, vol string) {
 // root holds no store (only its replica floor). Status 1 is not
 // RestartPreventExitStatus=78 in the shipped unit, so systemd starts it
 // again every 5 s, refusing each time, until space is freed or its start
-// limit stops it. It returns the refusal line.
-func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) string {
+// limit stops it. It returns the refused process.
+func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) *daemon {
 	t.Helper()
 	b := env.hosts["n-"+target]
 	d := env.h.start(t, name, env.h.volume, env.volArgsFor(b)...)
@@ -84,7 +86,48 @@ func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) str
 	}
 	t.Logf("%s refused (exit status 1): %s", name, strings.TrimSpace(line))
 	requireOnlyReplicaFloor(t, b.root, target)
-	return strings.TrimSpace(line)
+	return d
+}
+
+// logUint reads the number re captures from the first line of d's log that
+// it matches.
+func logUint(t *testing.T, d *daemon, re *regexp.Regexp) uint64 {
+	t.Helper()
+	data, _ := os.ReadFile(d.log)
+	m := re.FindSubmatch(data)
+	if m == nil {
+		t.Fatalf("%s: no line matching %s", d.name, re)
+	}
+	n, err := strconv.ParseUint(string(m[1]), 10, 64)
+	if err != nil || n == 0 {
+		t.Fatalf("%s: %q: %v", d.name, m[0], err)
+	}
+	return n
+}
+
+// deleteServingTarget runs the volume-lifecycle page's delete for a target
+// that serves (d on host b at epoch e): seal, revoke and wait for its ACK
+// and clean exit, then volume-delete, which must complete.
+func (env *handoffEnv) deleteServingTarget(t *testing.T, vol string, b bvHost, d *daemon, e uint64) {
+	t.Helper()
+	_, mustU := fatalOn(t)
+	out, errOut := env.h.command(t, "ops", "chunk", "detach", "--plain", "--volume", vol, "--status-addr", b.status, "--timeout", "120s")
+	g := mustU(sealedGen(out, errOut, e))
+	env.h.command(t, "ops", "workspace", "revoke", "--master", env.h.masterAddr, "--volume", vol, "--replica", "r1",
+		"--epoch", fmt.Sprint(e), "--sealed-gen", fmt.Sprint(g))
+	if err := d.wait(30 * time.Second); err != nil {
+		t.Fatalf("%s after the revocation: %v; want a clean exit by itself", vol, err)
+	}
+	poll(t, 30*time.Second, fmt.Sprintf("workspace show never reported %s's ACK", vol), func() bool {
+		out, _ := env.h.command(t, "ops", "workspace", "show", "--master", env.h.masterAddr, "--volume", vol)
+		return showsAck(out, e, g)
+	})
+	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", vol, "--chunk-filer", env.cluster.filerGRPC,
+		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-"+vol)
+	var del struct{ Completed bool }
+	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
+		t.Fatalf("volume-delete of %s after the way out: exit %d %s %s; want completed", vol, code, out, errOut)
+	}
 }
 
 // TestHeadroomRefusesARestoreAndAForkTargetThenServesThem: a snapshot of v1
@@ -97,10 +140,12 @@ func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) str
 //
 // A refused target exists in the catalog and holds the master's line, but
 // cannot start: today it cannot be volume-deleted either (the delete wants a
-// clean revocation ACK its holder cannot send), a known limit of 1.0. The
-// documented way out is tested: once space is freed, v2 and v3 start and
-// serve the snapshot, and v4 starts, is sealed, revoked and acknowledged, and
-// then deleted.
+// clean revocation ACK its holder cannot send), a known limit of 1.0. Both
+// documented ways out are run: once space is freed, v2 and v3 start and serve
+// the snapshot, and v4 starts, is sealed, revoked and acknowledged, and then
+// deleted; and the refused restore target v6 is force-moved to another host
+// with room (n-v7), where it starts, serves the snapshot and is deleted the
+// same way.
 func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	small, filler := os.Getenv("CHUNKSTORE_SMALL_ROOT"), os.Getenv("CHUNKSTORE_SMALL_FILLER")
 	if small == "" || filler == "" {
@@ -111,8 +156,8 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		t.Fatalf("the small file system has %d bytes free, not less than the %d a volume needs: fix the runner", free, need)
 	}
 
-	env := startLadderEnv(t, "v2", "v3", "v4", "v5")
-	for _, v := range []string{"v2", "v3", "v4"} {
+	env := startLadderEnv(t, "v2", "v3", "v4", "v5", "v6", "v7")
+	for _, v := range []string{"v2", "v3", "v4", "v6"} {
 		b := env.hosts["n-"+v]
 		b.root = filepath.Join(small, t.Name(), "vol-n-"+v)
 		env.hosts["n-"+v] = b
@@ -128,10 +173,13 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	env.h.command(t, "ops", "chunk", "fork", "--source", "v1", "--snapshot", "base", "--target", "v3",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", "v4",
-		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	for _, v := range []string{"v2", "v3", "v4"} {
-		env.refusedForHeadroom(t, v, "blockvolume-"+v+"-no-room")
+	for _, v := range []string{"v4", "v6"} {
+		env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", v,
+			"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	}
+	refused := map[string]*daemon{}
+	for _, v := range []string{"v2", "v3", "v4", "v6"} {
+		refused[v] = env.refusedForHeadroom(t, v, "blockvolume-"+v+"-no-room")
 	}
 
 	// The stranded target: not deletable while its holder cannot start.
@@ -163,26 +211,48 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		env.requireImage(t, "n-"+v, img)
 	}
 
-	// The documented way out for the stranded target: with room it starts,
-	// and the usual delete steps (seal, revoke, ACK, delete) complete.
-	_, mustU := fatalOn(t)
+	// Way out 1 for a stranded target: with room it starts, and the usual
+	// delete steps (seal, revoke, ACK, delete) complete.
+	adopted := func(vol string) *regexp.Regexp {
+		return regexp.MustCompile(`blockvolume: volume ` + vol + ` adopted as PRIMARY at r1@(\d+) `)
+	}
 	d4 := env.startTarget(t, "v4", "blockvolume-v4-with-room")
-	e4 := mustU(adoptedEpoch(d4.line("blockvolume: volume v4 adopted as PRIMARY at r1@")))
-	b4 := env.hosts["n-v4"]
-	out, errOut = env.h.command(t, "ops", "chunk", "detach", "--plain", "--volume", "v4", "--status-addr", b4.status, "--timeout", "120s")
-	g4 := mustU(sealedGen(out, errOut, e4))
-	env.h.command(t, "ops", "workspace", "revoke", "--master", env.h.masterAddr, "--volume", "v4", "--replica", "r1",
-		"--epoch", fmt.Sprint(e4), "--sealed-gen", fmt.Sprint(g4))
-	if err := d4.wait(30 * time.Second); err != nil {
-		t.Fatalf("v4 after the revocation: %v; want a clean exit by itself", err)
-	}
-	poll(t, 30*time.Second, "workspace show never reported v4's ACK", func() bool {
-		out, _ := env.h.command(t, "ops", "workspace", "show", "--master", env.h.masterAddr, "--volume", "v4")
-		return showsAck(out, e4, g4)
+	env.deleteServingTarget(t, "v4", env.hosts["n-v4"], d4, logUint(t, d4, adopted("v4")))
+
+	// Way out 2: the refused target's line is force-moved to a host with room
+	// (n-v7, whose own volume is never created), where it starts, serves the
+	// snapshot, and is deleted the same way.
+	e6 := logUint(t, refused["v6"], regexp.MustCompile(`assignment stream delivery .*volume="v6" .*epoch=(\d+)`))
+	b7 := env.hosts["n-v7"]
+	move := []string{"ops", "workspace", "force-move", "--master", env.h.masterAddr, "--volume", "v6",
+		"--target-host", b7.id, "--target-data", b7.data, "--target-ctrl", b7.ctrl, "--request-id", "force-v6",
+		"--confirm-forced", fmt.Sprintf("v6@%d", e6)}
+	var preview string
+	poll(t, 150*time.Second, "the forced move of the refused, never-started target v6 was never admitted", func() bool {
+		out, errOut, _ := env.h.run(t, append(append([]string{}, move...), "--dry-run")...)
+		preview = out + errOut
+		return previewAdmitted(out)
 	})
-	out, errOut, code = deleteV4()
-	var del struct{ Completed bool }
-	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
-		t.Fatalf("volume-delete of v4 after the way out: exit %d %s %s; want completed", code, out, errOut)
+	t.Logf("forced move of v6 admitted: %s", strings.TrimSpace(preview))
+	out, _ = env.h.command(t, move...)
+	issued := regexp.MustCompile(fmt.Sprintf(`(?m)^forced move issued: volume v6 request \S+: r1@%d on n-v6 -> r1@(\d+) on %s `, e6, regexp.QuoteMeta(b7.id)))
+	m := issued.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("forced move of v6: %q; want issued to %s", out, b7.id)
 	}
+	b6 := b7
+	b6.volume = "v6"
+	b6.root = filepath.Join(filepath.Dir(b7.root), "vol-n-v7-v6")
+	env.hosts["n-v7"] = b6
+	d6 := env.h.start(t, "blockvolume-v6-on-n-v7", env.h.volume, env.volArgsFor(b6)...)
+	d6.waitLog(t, 60*time.Second, "blockvolume: volume v6 adopted as PRIMARY at r1@")
+	e62 := logUint(t, d6, adopted("v6"))
+	if fmt.Sprint(e62) != m[1] {
+		t.Fatalf("v6 adopted at epoch %d on n-v7; the forced move issued %s", e62, m[1])
+	}
+	poll(t, 60*time.Second, "v6 never reported its frontend ready on n-v7", func() bool {
+		return volumeFrontendReady(b6.status, "v6")
+	})
+	env.requireImage(t, "n-v7", img)
+	env.deleteServingTarget(t, "v6", b6, d6, e62)
 }
