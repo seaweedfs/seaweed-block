@@ -51,6 +51,8 @@ func masterKilledWhileRevoking(t *testing.T, freeze bool) {
 	ws := control.NewWorkspaceServiceClient(conn)
 	identity := &control.WorkspaceIdentity{VolumeId: "v1", ReplicaId: "r1", ServerId: "s1", Epoch: e}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// This probe updates the master's lease view, not the holder's monotonic
+	// deadline. The holder still has to finish using its own renewal history.
 	lease, err := ws.RenewWorkspaceLease(ctx, identity)
 	cancel()
 	if err != nil || lease.GetValidForNs() <= 0 {
@@ -122,6 +124,9 @@ func masterKilledWhileRevoking(t *testing.T, freeze bool) {
 		}
 	}
 	if err := holder.wait(30 * time.Second); err != nil {
+		// Diagnostic output on failure, not a successful exit-75 classification:
+		// the public journal view and both logs distinguish the barrier from a
+		// test-induced delay. Every nonzero holder exit still fails this test.
 		out, _, code := env.h.run(t, env.show...)
 		masterLog, _ := os.ReadFile(restarted.log)
 		holderLog, _ := os.ReadFile(holder.log)
