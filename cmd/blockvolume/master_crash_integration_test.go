@@ -26,7 +26,7 @@ func TestProcedureMasterKilledAfterMoveBeforeTargetStarts(t *testing.T) {
 	must(old.wait(30 * time.Second))
 	env.waitAck(t, e, g)
 
-	args := env.moveClean(e, "s2", "crash-after-move")
+	args := env.moveClean(e, "s2", "move-v1-1")
 	out, _ := env.h.command(t, args...)
 	e2 := mustU(movedEpochTo(out, e, g, l, "s2"))
 	restartKilledMaster(t, env)
