@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"log"
+	"syscall"
 	"time"
 )
 
@@ -63,13 +64,25 @@ func (r mapCoverageRefusal) Error() string { return ErrMapCoverageStale.Error() 
 func (r mapCoverageRefusal) Unwrap() error { return ErrMapCoverageStale }
 
 // Owned exclusively by the flusher run loop; no storage lock or I/O ordering
-// changes. Terminal errors are never rate limited.
+// changes. Terminal errors are never rate limited; a retried ENOSPC is.
 type checkpointLogLimiter struct {
 	last       time.Time
 	suppressed uint64
+	// A full local disk fails every retry with ENOSPC; one line per 30 s.
+	noSpaceLast       time.Time
+	noSpaceSuppressed uint64
 }
 
 func (l *checkpointLogLimiter) report(err error, now time.Time) {
+	if errors.Is(err, syscall.ENOSPC) {
+		if !l.noSpaceLast.IsZero() && now.Sub(l.noSpaceLast) < 30*time.Second {
+			l.noSpaceSuppressed++
+			return
+		}
+		log.Printf("storage: flusher: local disk full, retrying suppressed=%d: %v", l.noSpaceSuppressed, err)
+		l.noSpaceLast, l.noSpaceSuppressed = now, 0
+		return
+	}
 	if !errors.Is(err, ErrMapCoverageStale) {
 		log.Printf("storage: flusher: %v", err)
 		return
