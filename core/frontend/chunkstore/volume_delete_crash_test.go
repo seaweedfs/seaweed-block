@@ -22,13 +22,17 @@ func nthUpdate(p string, n int) func(op, q string) bool {
 }
 
 // requireVolumeDeleted checks the end state of a completed volume delete:
-// HEAD deleted, the volume refused for ever, the reservation committed.
+// HEAD deleted, the VOLUME entry marked deleted, the volume refused for
+// ever, the reservation committed.
 func requireVolumeDeleted(t *testing.T, c *Catalog, rsv *fakeReservation, vol string) {
 	t.Helper()
 	ctx := context.Background()
 	h, ok, err := c.ReadHead(ctx, vol)
 	if err != nil || !ok || h.State != storage.ChunkHeadDeleted {
 		t.Fatalf("HEAD after the delete: %+v ok %v %v; want deleted", h, ok, err)
+	}
+	if v, ok, err := c.ReadVolume(ctx, vol); err != nil || !ok || v.State != VolumeDeleted {
+		t.Fatalf("VOLUME after the delete: %+v ok %v %v; want deleted", v, ok, err)
 	}
 	if _, err := c.EnsureVolume(ctx, vol, catGeo); CodeOf(err) != CodeVolumeDeleted {
 		t.Fatalf("attach after the delete: %v; want volume_deleted", err)
@@ -97,13 +101,16 @@ func TestCatalogVolumeDeleteCrashAtEachStepThenRerunCompletes(t *testing.T) {
 				if got := headState(t, c, "v1"); got.State != left {
 					t.Fatalf("after the crash HEAD is %q; want %q", got.State, left)
 				}
+				if v, _, err := c.ReadVolume(ctx, "v1"); err != nil || (v.State == VolumeDeleted) != (step.p == volumePath && after) {
+					t.Fatalf("after the crash VOLUME is %q (%v); want deleted only after its own write applied", v.State, err)
+				}
 				res, err := c.DeleteVolume(ctx, "v1", rsv.admission("d1"))
 				if err != nil || !res.Completed {
 					t.Fatalf("the rerun after a crash at %s: %+v %v; want completed", name, res, err)
 				}
 				requireVolumeDeleted(t, c, rsv, "v1")
-				if res, err := c.DeleteVolume(ctx, "v1", rsv.admission("d1")); err != nil || !res.Completed {
-					t.Fatalf("a further rerun: %+v %v; want completed (replayed)", res, err)
+				if res, err := c.DeleteVolume(ctx, "v1", rsv.admission("d1")); err != nil || !res.Completed || !res.Replayed {
+					t.Fatalf("a further rerun: %+v %v; want completed and replayed", res, err)
 				}
 			})
 		}
