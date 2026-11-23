@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"testing"
 	"time"
 )
@@ -47,6 +48,26 @@ func (env *handoffEnv) awaitRestorePhase(t *testing.T, target, what string, boun
 	return restoreProgress{}
 }
 
+// denseImage fills every block of the given chunks with incompressible
+// bytes (seeded by tag and LBA), so that their chunks are full size in the
+// store and a restore of them takes measurable time at the driver's rate.
+func denseImage(tag string, chunks []uint64) map[uint64][]byte {
+	img := map[uint64][]byte{}
+	var seed int64
+	for _, c := range tag {
+		seed = seed*31 + int64(c)
+	}
+	for _, c := range chunks {
+		for i := uint64(0); i < ladderChunkBlocks; i++ {
+			lba := c*ladderChunkBlocks + i
+			b := make([]byte, 4096)
+			rand.New(rand.NewSource(seed ^ int64(lba))).Read(b)
+			img[lba] = b
+		}
+	}
+	return img
+}
+
 // startTarget starts target's blockvolume and waits until it serves.
 func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 	t.Helper()
@@ -60,7 +81,8 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 }
 
 // TestSnapshotLadderC3KilledMidHydrateAndMidBatch: a restore of a snapshot
-// of 48 written chunks into v2 (about 192 MiB to make local and re-upload).
+// of 32 full chunks of incompressible data into v2 (128 MiB to make local
+// and re-upload at the driver's 64 MiB/s).
 // Its blockvolume is killed (SIGKILL) while the driver is hydrating, started
 // again and the driver started again. While the driver then owns chunks, the
 // guest writes to v2 (acknowledged), and the blockvolume is killed again in
@@ -72,10 +94,10 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 func TestSnapshotLadderC3KilledMidHydrateAndMidBatch(t *testing.T) {
 	env := startLadderEnv(t, "v2", "v3")
 	var chunks []uint64
-	for c := uint64(0); c < 48; c++ {
+	for c := uint64(0); c < 32; c++ {
 		chunks = append(chunks, c)
 	}
-	src := ladderImage("c3ksrc", chunks, 2)
+	src := denseImage("c3ksrc", chunks)
 	env.writeImage(t, "s1", src)
 	env.snapshot(t, "s1", "v1", "base")
 
