@@ -54,6 +54,7 @@ type f1Config struct {
 	Volumes, Rounds    int
 	WriteSeconds       int
 	HostLimitDir       string
+	SlotRetryBound     time.Duration
 	Slots              int
 	Report             string
 	LedgerBlocksPerRnd int
@@ -78,7 +79,7 @@ func f1ConfigFromEnv(t *testing.T) f1Config {
 	}
 	c := f1Config{Volumes: num("F1_VOLUMES", 10), Rounds: num("F1_ROUNDS", 3), WriteSeconds: num("F1_WRITE_SECONDS", 120),
 		HostLimitDir: os.Getenv("F1_HOST_LIMIT_DIR"), Slots: num("F1_HOST_LIMIT_SLOTS", hostlimit.DefaultConfig("").NormalSlots),
-		Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: num("F1_LOAD_SPAN", 8192)}
+		SlotRetryBound: time.Duration(num("F1_SLOT_RETRY_SECONDS", 60)) * time.Second, Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: num("F1_LOAD_SPAN", 8192)}
 	if v := os.Getenv("F1_CONTROL_PAUSE_SECONDS"); v != "" {
 		c.ControlPauseSecs = num("F1_CONTROL_PAUSE_SECONDS", 0)
 	}
@@ -111,8 +112,11 @@ type f1Round struct {
 	UploadedBytes   int64   `json:"uploaded_bytes"`
 	HostSlotWaits   uint64  `json:"host_slot_waits"`
 	SlotRetries     int     `json:"snapshot_slot_refusals_retried"`
+	SlotWaitMs      float64 `json:"snapshot_slot_wait_ms"`
 	RestoreMs       float64 `json:"restore_ms"`
-	RestoreExact    bool    `json:"restore_exact"`
+	// RestoreExact is true or false for a snapshot that ran, "not_run" for
+	// one that was never admitted.
+	RestoreExact any `json:"restore_exact"`
 	LoadPrefix      int     `json:"load_prefix_blocks"`
 	WritesIn        int     `json:"writes_in_window"`
 	WritesOut       int     `json:"writes_outside_window"`
@@ -270,12 +274,12 @@ func f1Restore(t *testing.T, env *handoffEnv, src, snap, target string) *daemon 
 const f1CommandDeadline = 30 * time.Second
 
 // A snapshot refused because every host slot is held is resent with its
-// request id every f1SlotRetryPause, for at most f1SlotRetryBound from its
-// first request; its request-to-commit time includes the waits.
-const (
-	f1SlotRetryPause = 250 * time.Millisecond
-	f1SlotRetryBound = 120 * time.Second
-)
+// request id every f1SlotRetryPause, for at most cfg.SlotRetryBound from its
+// first request (the snapshot command's operation bound, its default
+// --timeout of 60 s; F1_SLOT_RETRY_SECONDS=0 turns the retry off, the
+// negative control). Its request-to-commit time includes the waits; the
+// write window starts at the admitted attempt.
+const f1SlotRetryPause = 250 * time.Millisecond
 
 // f1SlotRefusal reports whether a failed snapshot's error body is a
 // retryable refusal for a busy host slot.
@@ -380,6 +384,7 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 
 	type snapRes struct {
 		start, end time.Time
+		admitted   time.Time // the start of the attempt that was not refused
 		out, err   string
 		code       int
 		retries    int
@@ -397,9 +402,10 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 			// it with the same request id, as an operator would, within a bound.
 			request := fmt.Sprintf("f1-r%d-%s", round, v.id)
 			for {
+				res[i].admitted = time.Now()
 				res[i].out, res[i].err, res[i].code = env.h.run(t, "ops", "chunk", "snapshot", "--volume", v.id, "--status-addr", env.hosts[v.node].status,
 					"--name", fmt.Sprintf("f1-r%d", round), "--request-id", request)
-				if res[i].code == 0 || !f1SlotRefusal(res[i].out) || time.Since(res[i].start) > f1SlotRetryBound {
+				if res[i].code == 0 || !f1SlotRefusal(res[i].out) || time.Since(res[i].start) > cfg.SlotRetryBound {
 					break
 				}
 				res[i].retries++
@@ -416,11 +422,16 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 
 	out := make([]f1Round, len(vols))
 	for i, v := range vols {
-		r := f1Round{Volume: v.id, Round: round}
+		r := f1Round{Volume: v.id, Round: round, RestoreExact: "not_run", SlotRetries: res[i].retries}
 		w := ws[i]
 		if w.err != nil {
 			rep.WriteErrors++
 			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: write error: %v", v.id, round, w.err))
+		}
+		if res[i].code != 0 && f1SlotRefusal(res[i].out) {
+			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: snapshot not admitted within %v (%d slot refusals retried): %s", v.id, round, cfg.SlotRetryBound, res[i].retries, firstLine(res[i].out)))
+			out[i] = r
+			continue
 		}
 		if res[i].code != 0 {
 			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: snapshot exit %d: %s %s", v.id, round, res[i].code, res[i].out, res[i].err))
@@ -428,8 +439,8 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 			continue
 		}
 		r.SnapshotMs = ms(res[i].end.Sub(res[i].start))
-		r.SlotRetries = res[i].retries
-		f1Latencies(&r, w.samples, res[i].start, res[i].end)
+		r.SlotWaitMs = ms(res[i].admitted.Sub(res[i].start))
+		f1Latencies(&r, w.samples, res[i].admitted, res[i].end)
 		if r.WritesIn == 0 {
 			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: no load write was issued inside the snapshot window", v.id, round))
 		}
@@ -439,9 +450,10 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 		rs := time.Now()
 		rd := f1Restore(t, env, v.id, fmt.Sprintf("f1-r%d", round), target)
 		r.RestoreMs = ms(time.Since(rs))
-		r.RestoreExact, r.LoadPrefix = f1Verify(t, env, cfg, v.id, target, round, w.written)
+		exact, prefix := f1Verify(t, env, cfg, v.id, target, round, w.written)
+		r.RestoreExact, r.LoadPrefix = exact, prefix
 		rd.term(t, 60*time.Second)
-		if !r.RestoreExact {
+		if !exact {
 			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: the restored snapshot is not the volume at its point", v.id, round))
 		}
 		out[i] = r
