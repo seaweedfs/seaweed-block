@@ -189,6 +189,17 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	// The last partial batch is flushed too, so every write is acknowledged
+	// and the read-back can name each block's bytes.
+	if len(pending) > 0 {
+		if err := op(c.tryFlush); err != nil {
+			errs++
+		} else {
+			for _, l := range pending {
+				want[l] = pendingBytes[l]
+			}
+		}
+	}
 	c.close()
 	t.Logf("%s down 60s (COW reserve %d): guest writes %d, errors %d, slowest answer %s, frontend ready %v, peak COW side bytes %d",
 		down, cowBytes, written, errs, slowest.Round(time.Millisecond), env.frontendReadyAt("s1"), peakSide)
