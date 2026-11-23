@@ -130,7 +130,12 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		if got := env.adopt(t, holder, "s1"); got != e {
 			t.Fatalf("round %d: the restarted holder adopted epoch %d; want %d (restarted %v after the kill: within the lease?)", k, got, e, time.Since(killed).Round(time.Millisecond))
 		}
-		t.Logf("round %d (kill after %v): %s (exit %d err %v); serving again %v after the kill", k, delay, class, r.code, r.err, time.Since(killed).Round(time.Millisecond))
+		adopted := time.Since(killed)
+		poll(t, 60*time.Second, fmt.Sprintf("round %d: the restarted holder never reported its frontend ready", k), func() bool {
+			return env.frontendReadyAt("s1")
+		})
+		t.Logf("round %d (kill after %v): %s (exit %d err %v); adopted %v and frontend ready %v after the kill", k, delay, class, r.code, r.err,
+			adopted.Round(time.Millisecond), time.Since(killed).Round(time.Millisecond))
 		env.requireImage(t, "s1", cum)
 
 		pre := env.snapshots(t, "v1", name)
