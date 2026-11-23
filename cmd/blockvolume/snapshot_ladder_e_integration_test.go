@@ -90,12 +90,22 @@ func (env *handoffEnv) filerNames(t *testing.T, dir string) map[string]bool {
 // blocks in twelve chunks are written and acknowledged (so the snapshot's cut
 // has twelve chunks to upload), a snapshot with a fixed request id is
 // started, and the holder is killed after a different delay (from at once to
-// well after the answer), then restarted within its lease. Each round is
-// classified from what the kill left in the filer: ANSWERED (the command
-// answered success first), MID (no answer, but the snapshot's name record or
-// an intent that was not there before the request: the kill landed inside
-// the snapshot, in its cut or its catalog steps), or BEFORE (neither). The test fails as inconclusive unless at
-// least one round is MID. After each restart, before the retry:
+// well after the answer), then restarted within its lease. Each kill's step
+// is recorded from what it left, read from the filer and the list (not
+// through the snapshot's own answer):
+//   - ANSWERED: the command answered success before the kill;
+//   - PUBLISHED: no answer, but the snapshot is listed after the restart
+//     (the attempt entry was written; the answer was lost);
+//   - CATALOG: no answer, not listed, but the name record exists (the kill
+//     landed in the catalog steps, before the attempt entry);
+//   - CUT: no answer, no name record, but an intent that was not there
+//     before the request (the kill landed in the snapshot's cut, which
+//     writes its intent first);
+//   - BEFORE: none of these.
+//
+// The test fails as inconclusive unless at least one kill is PUBLISHED,
+// CATALOG or CUT (inside the snapshot). After each restart, before the
+// retry:
 //   - the snapshot is listed at most once and only active; an ANSWERED one
 //     is listed, at the cut its answer gave;
 //   - one more block is written (acknowledged).
@@ -128,7 +138,7 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 	}
 	var images []map[uint64][]byte // what each round's snapshot must hold
 	cum := map[uint64][]byte{0: marker}
-	classes := map[string]int{}
+	steps := map[string]int{}
 	for k, delay := range delays {
 		img := ladderImage(fmt.Sprintf("e1r%d", k), []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, 3)
 		env.writeImage(t, "s1", img)
@@ -165,14 +175,7 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		for n := range env.filerNames(t, intents) {
 			newIntent = newIntent || !before[n]
 		}
-		class := "BEFORE"
-		switch {
-		case answered:
-			class = "ANSWERED"
-		case env.nameRecorded(t, "v1", name) || newIntent:
-			class = "MID"
-		}
-		classes[class]++
+		named := env.nameRecorded(t, "v1", name)
 
 		// Restarted within the lease, as the unit's RestartSec does: the same
 		// epoch, serving the blocks written before the kill.
@@ -184,11 +187,23 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		poll(t, 60*time.Second, fmt.Sprintf("round %d: the restarted holder never reported its frontend ready", k), func() bool {
 			return env.frontendReadyAt("s1")
 		})
-		t.Logf("round %d (kill after %v): %s (exit %d err %v; new intent %v); adopted %v and frontend ready %v after the kill", k, delay, class, r.code, r.err,
-			newIntent, adopted.Round(time.Millisecond), time.Since(killed).Round(time.Millisecond))
 		env.requireImage(t, "s1", cum)
 
 		pre := env.snapshots(t, "v1", name)
+		step := "BEFORE"
+		switch {
+		case answered:
+			step = "ANSWERED"
+		case len(pre) == 1:
+			step = "PUBLISHED"
+		case named:
+			step = "CATALOG"
+		case newIntent:
+			step = "CUT"
+		}
+		steps[step]++
+		t.Logf("round %d (kill after %v): step %s (exit %d err %v; name record %v, new intent %v, listed %v); adopted %v and frontend ready %v after the kill",
+			k, delay, step, r.code, r.err, named, newIntent, len(pre) == 1, adopted.Round(time.Millisecond), time.Since(killed).Round(time.Millisecond))
 		switch {
 		case len(pre) > 1:
 			t.Fatalf("round %d: %s listed %d times: %+v", k, name, len(pre), pre)
@@ -226,9 +241,9 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		}
 		cum = mergeImages(cum, post)
 	}
-	t.Logf("rounds: %v", classes)
-	if classes["MID"] == 0 {
-		t.Fatalf("inconclusive: no kill landed inside a snapshot (rounds %v)", classes)
+	t.Logf("kill steps: %v", steps)
+	if steps["PUBLISHED"]+steps["CATALOG"]+steps["CUT"] == 0 {
+		t.Fatalf("inconclusive: no kill landed inside a snapshot (steps %v)", steps)
 	}
 
 	next := ladderImage("e1next", []uint64{30, 31}, 3)
