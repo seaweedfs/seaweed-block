@@ -537,6 +537,7 @@ func runCLI(ctx context.Context, h *plannedHandoffHarness, args ...string) (stri
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
+	h.logCommand(args, stdout.String(), stderr.String(), err)
 	var exit *exec.ExitError
 	switch {
 	case err == nil:
