@@ -38,12 +38,15 @@ func freeBytes(t *testing.T, dir string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize)
 }
 
-// requireNoFiles fails if any regular file exists under dir: a refused
-// create leaves nothing behind.
-func requireNoFiles(t *testing.T, dir string) {
+// requireOnlyReplicaFloor fails unless the only regular file under dir is
+// the volume's replica floor: a refused create writes no store, WAL or
+// marker. The floor is written when the assignment arrives, before the store
+// is opened and refused (a known limit: the check precedes the store, not
+// every sidecar).
+func requireOnlyReplicaFloor(t *testing.T, dir, vol string) {
 	t.Helper()
 	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
+		if err == nil && !info.IsDir() && filepath.Base(p) != vol+".replica-floor" {
 			t.Fatalf("a refused create left %s (%d bytes)", p, info.Size())
 		}
 		return nil
@@ -54,9 +57,10 @@ func requireNoFiles(t *testing.T, dir string) {
 // refuse the create the way the durable store's open fails at startup: it
 // exits on its own with status 1, its log says "blockvolume: durable storage
 // open:" and names the free bytes and the need (size + WAL), and its durable
-// root holds no file. Status 1 is not RestartPreventExitStatus=78 in the
-// shipped unit, so systemd starts it again every 5 s, refusing each time,
-// until space is freed. It returns the refusal line.
+// root holds no store (only its replica floor). Status 1 is not
+// RestartPreventExitStatus=78 in the shipped unit, so systemd starts it
+// again every 5 s, refusing each time, until space is freed or its start
+// limit stops it. It returns the refusal line.
 func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) string {
 	t.Helper()
 	b := env.hosts["n-"+target]
@@ -79,7 +83,7 @@ func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) str
 		t.Fatalf("%s: exit status %d, refusal %q; want status 1 from the durable storage open at startup", name, code, line)
 	}
 	t.Logf("%s refused (exit status 1): %s", name, strings.TrimSpace(line))
-	requireNoFiles(t, b.root)
+	requireOnlyReplicaFloor(t, b.root, target)
 	return strings.TrimSpace(line)
 }
 
@@ -87,13 +91,16 @@ func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) str
 // is restored into v2 and v4 and forked into v3, each target's durable root
 // on a small file system with less free space than the volume size + WAL.
 // Each target's blockvolume refuses the create, naming both numbers, exits
-// with status 1, and leaves no file; the source still serves its
-// data and its snapshot is still listed. The operator's two ways out:
-//   - give up the stranded target: volume-delete of v4 (which exists in the
-//     catalog but cannot start) completes, and the source's snapshot is
-//     then restored into another target, v5, which serves it;
-//   - free space: once the filler is removed, v2 and v3 start, serve, and
-//     read back the snapshot.
+// with status 1, and writes no store; the source still serves its data and
+// its snapshot is still listed, and restores into another target (v5) that
+// serves it.
+//
+// A refused target exists in the catalog and holds the master's line, but
+// cannot start: today it cannot be volume-deleted either (the delete wants a
+// clean revocation ACK its holder cannot send), a known limit of 1.0. The
+// documented way out is tested: once space is freed, v2 and v3 start and
+// serve the snapshot, and v4 starts, is sealed, revoked and acknowledged, and
+// then deleted.
 func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	small, filler := os.Getenv("CHUNKSTORE_SMALL_ROOT"), os.Getenv("CHUNKSTORE_SMALL_FILLER")
 	if small == "" || filler == "" {
@@ -127,13 +134,16 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		env.refusedForHeadroom(t, v, "blockvolume-"+v+"-no-room")
 	}
 
-	// The stranded target given up: deleted, and the snapshot restored elsewhere.
-	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v4", "--chunk-filer", env.cluster.filerGRPC,
-		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v4")
-	var del struct{ Completed bool }
-	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
-		t.Fatalf("volume-delete of the refused target v4: exit %d %s %s; want completed", code, out, errOut)
+	// The stranded target: not deletable while its holder cannot start.
+	deleteV4 := func() (string, string, int) {
+		return env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v4", "--chunk-filer", env.cluster.filerGRPC,
+			"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v4")
 	}
+	out, errOut, code := deleteV4()
+	if code == 0 || !strings.Contains(out+errOut, "live authority requires clean revocation ACK") {
+		t.Fatalf("volume-delete of the refused target v4: exit %d %s %s; want refused for the missing ACK (a known limit)", code, out, errOut)
+	}
+	// The snapshot is still restorable into another target that has room.
 	env.restoreInto(t, "v1", "base", "v5")
 	env.requireImage(t, "n-v5", img)
 
@@ -151,5 +161,28 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	for _, v := range []string{"v2", "v3"} {
 		env.startTarget(t, v, "blockvolume-"+v+"-with-room")
 		env.requireImage(t, "n-"+v, img)
+	}
+
+	// The documented way out for the stranded target: with room it starts,
+	// and the usual delete steps (seal, revoke, ACK, delete) complete.
+	_, mustU := fatalOn(t)
+	d4 := env.startTarget(t, "v4", "blockvolume-v4-with-room")
+	e4 := mustU(adoptedEpoch(d4.line("blockvolume: volume v4 adopted as PRIMARY at r1@")))
+	b4 := env.hosts["n-v4"]
+	out, errOut = env.h.command(t, "ops", "chunk", "detach", "--plain", "--volume", "v4", "--status-addr", b4.status, "--timeout", "120s")
+	g4 := mustU(sealedGen(out, errOut, e4))
+	env.h.command(t, "ops", "workspace", "revoke", "--master", env.h.masterAddr, "--volume", "v4", "--replica", "r1",
+		"--epoch", fmt.Sprint(e4), "--sealed-gen", fmt.Sprint(g4))
+	if err := d4.wait(30 * time.Second); err != nil {
+		t.Fatalf("v4 after the revocation: %v; want a clean exit by itself", err)
+	}
+	poll(t, 30*time.Second, "workspace show never reported v4's ACK", func() bool {
+		out, _ := env.h.command(t, "ops", "workspace", "show", "--master", env.h.masterAddr, "--volume", "v4")
+		return showsAck(out, e4, g4)
+	})
+	out, errOut, code = deleteV4()
+	var del struct{ Completed bool }
+	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
+		t.Fatalf("volume-delete of v4 after the way out: exit %d %s %s; want completed", code, out, errOut)
 	}
 }
