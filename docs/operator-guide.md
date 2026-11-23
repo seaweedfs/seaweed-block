@@ -72,7 +72,11 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
   blockvolume refuses to create a volume when the durable root has less free space than its size plus the WAL (the
   refusal names both numbers), and warns at start when the free space is below its remaining growth plus the WAL;
-  there is no override.
+  there is no override. The refusal ends the process with status 1 (`blockvolume: durable storage open: ... needs
+  N (size S + WAL W)`), so the shipped unit starts it again every 5 s, refusing each time, until its start limit stops
+  it; free space on that file system, then start the unit again. A restore or fork target refused this way exists in
+  the catalog but cannot start, and it cannot be deleted until it has started once and been sealed, revoked and
+  acknowledged: free space and start it, or move it with a forced move to a host with room.
 
   Alert on local free space. On a full local disk, a Linux guest's writes fail after about 75 s with an I/O error
   (EREMOTEIO), and the guest file system may then go read-only. Once space is freed, new writes succeed without a
