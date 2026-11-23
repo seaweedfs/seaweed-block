@@ -230,6 +230,7 @@ stateDiagram-v2
   NameHeld --> Published: exclusive create snaps/name/attempt
   NameHeld --> Aborted: DeleteSnapshot or GC tombstones the attempt path
   Published --> Deleting: DeleteSnapshot or retention (forks do not hold it)
+  Deleting --> Deleting: a retry of the same request is refused (snapshot_deleting), never answered as success
   Published --> ForkTarget: deadline live before VOLUME, legacy preparation, copy intent and HEAD
   ForkTarget --> ActiveTarget: exclusive HEAD create before deadline (fork or restore)
   Deleting --> NameFreed: name record removed
