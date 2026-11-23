@@ -153,7 +153,8 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 				t.Fatalf("round %d: %s answered %s before the kill but is listed as %+v", k, name, r.out, pre[0])
 			}
 		}
-		post := map[uint64][]byte{uint64(50+k) * ladderChunkBlocks: pattern(fmt.Sprintf("e1-post-%02d-blk!", k))}
+		// 16 bytes: pattern repeats it to exactly one block.
+		post := map[uint64][]byte{uint64(50+k) * ladderChunkBlocks: pattern(fmt.Sprintf("e1-post-%02d-blk!!", k))}
 		env.writeImage(t, "s1", post)
 
 		out, _ := env.h.command(t, "ops", "chunk", "snapshot", "--volume", "v1", "--status-addr", env.hosts["s1"].status,
