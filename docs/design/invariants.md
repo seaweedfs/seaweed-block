@@ -81,6 +81,32 @@ Recovery warnings such as `wal_hole_suspected` are recorded in Serving without c
 
 blockmaster's publisher is the only component that mints epochs. Diagrams: the assignment lifecycle in [core §1.5](block-design.md#15-authority-blockmaster-assignments-epochs-leases), and the workspace lease and move in [agent workspace §7](agent-workspace-design.md#7-lease-takeover-and-host-moves).
 
+**Heartbeat observations, per server/volume/replica slot.**
+
+`ObservationStore.ingest` compares each reported slot only with that slot's
+stored timestamp (`slotObservedAt`). An older slot is dropped and counted;
+an equal or newer slot is accepted. A mixed report merges accepted slots and
+retains every other stored slot. An all-superseded nonempty report changes no
+observation or health transition. Accepted slots keep their own freshness;
+server metadata keeps its newest timestamp without lending it to another slot.
+
+```mermaid
+flowchart LR
+  Report[Receive heartbeat report] --> Compare{Each slot: stored timestamp newer?}
+  Compare -->|yes| Drop[Drop and count only that slot]
+  Compare -->|no| Accept[Accept that slot and its health transition]
+  Drop --> Mixed{Any accepted slots or an empty report?}
+  Accept --> Mixed
+  Mixed -->|yes| Merge[Merge accepted slots; retain other slots and newest server metadata]
+  Mixed -->|no| Keep[Keep stored observations unchanged]
+```
+
+| From | To | Event and guard | Enforced in | Protects |
+|---|---|---|---|---|
+| Stored observations | Stored observations (slot refused) | stored timestamp for this server/volume/replica is strictly newer than the report; drop and count only this slot | `core/authority/observation_store.go` `ingest`, `slotObservedAt` | `INV-OBS-SLOT-ORDER-001` |
+| Stored observations | Stored observations (mixed report merged) | accept equal/newer slots against their own stored timestamp; merge only accepted slots, preserving other slots and independent freshness | `core/authority/observation_store.go` `ingest`, `mergeServerSlots` | `INV-OBS-SLOT-ORDER-001` |
+| Stored observations | Stored observations (no mutation) | a nonempty report has no accepted slot; publish no observation mutation or health transition | `core/authority/observation_store.go` `ingest` | `INV-OBS-SLOT-ORDER-001` |
+
 **Assignment line, per volume.**
 
 | From | To | Event and guard | Enforced in | Protects |
@@ -467,7 +493,7 @@ Tests: `TestSnapshotSchedule_SlotsAreOffsetPerVolume`, `_FailureIsTypedAndBacksO
 
 ## Part B. Invariant ledger
 
-315 rows: 244 ACTIVE, 68 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 300 new.
+316 rows: 245 ACTIVE, 68 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 301 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -930,6 +956,7 @@ Notes:
 | `INV-CSI-CONSUMES-AUTHORITY-001` | CSI never imports authority code or builds assignment facts; it takes the publish target from blockmaster and refreshes it before a stage, and blockmaster mints the IDs of the events CSI reports. | M2 (read side) | `core/csi/master_backend.go` `LookupPublishTarget`; `core/csi/node.go` `refreshPublishContext`; `core/host/master/observation_service.go` `ReportClusterEvent` | `TestG15a_CSI_DoesNotImportAuthorityOrConstructAssignmentFacts` (`core/csi/boundary_guard_test.go`); `TestG15e_CSIReattachUsesFreshPublishTargetAfterUnstage` (`core/csi/node_test.go`); `TestObservationService_ReportClusterEventAppearsInVolumeTimeline` (`core/host/master/observation_service_test.go`) | — | ACTIVE |
 | `INV-K8S-NONLOOPBACK-001` | Generated multi-node Helm values enable external iSCSI, external status and loopback rejection; with rejection enabled CSI never publishes a loopback target and fails closed when only loopback targets exist. | M2 (read side) | `cmd/sw-block/main.go` `runOpsGenerateHelmValues`; `core/csi/master_backend.go` `rejectFrontendAddr` | `TestOpsGenerateHelmValuesMultiNodeExternalISCSI` (`cmd/sw-block/main_test.go`); `TestNodeLoss_ControlStatusLookup_RejectsLoopbackPublishTargetsWhenEnabled`, `TestNodeLoss_ControlStatusLookup_FailClosedWhenOnlyLoopbackTargets` (`core/csi/master_backend_test.go`) | — | ACTIVE |
 | `INV-OBS-PRODUCT-EVENTS-001` | blockmaster records placement-verified, promotion-candidate-evaluation and authority-published events, and the CSI node reports `csi_reattach_observed` after a successful stage. | M3 promotion decision (observation) | `core/host/master/product_loop.go` `recordPlacementVerifiedEvents`, `recordPromotionEvaluationEvents`, `recordAuthorityPublishedEvent` | `TestMasterTimeline_RecordsPlacementVerified`, `TestMasterTimeline_RecordsPromotionCandidateEvaluation`, `TestMasterTimeline_RecordsAuthorityPublishedAfterMint` (`core/host/master/event_ring_test.go`); `TestNodeStage_ReportsCSIReattachObservedAfterSuccessfulStage` (`core/csi/node_test.go`) | — | ACTIVE |
+| `INV-OBS-SLOT-ORDER-001` | A heartbeat slot (server, volume, replica) is ordered only against that slot's own previous heartbeat: a later-stamped heartbeat of another slot of the same server never supersedes it. | M2 heartbeat observations: per-slot refusal / mixed merge / all-superseded no mutation (V1-SPEC r2.53) | `core/authority/observation_store.go` `ingest` (per-slot comparison), `slotObservedAt`; `SupersededSlotCount` (diagnostic only) | `TestObservationStore_InterleavedSendersOrderPerSlot`, `TestObservationStore_MixedSlotReportKeepsOnlyNewerFacts`, `TestObservationStore_SupersededSlotLogsAfterUnlock` (`core/authority/observation_store_slot_order_test.go`) | 1.0 limit: a backward wall-clock step longer than the freshness window expires that host's slots; 1.0.1: per-process sequence. | ACTIVE |
 | `INV-OBS-SLOT-FROM-EXPECTED-SERVER-001` | A replica's slot in the assembled topology takes addresses and health only from a fresh fact reported by the server its expected slot names; another server's fact for the same replica is never used, so with none from that server the slot is a placeholder. | AUTHORITY/ORDER: observation to assignment line | `core/authority/snapshot_builder.go` `assembleVolumeTopology` | `TestAssembleVolumeTopology_SlotFactOnlyFromTheExpectedServer` (`core/authority/snapshot_slot_server_test.go`) | — (pure assembly; the unit test is the proof form) | ACTIVE |
 | `INV-HELM-RF-NODECOUNT-001` | Generated Helm values fail closed when the requested replication factor exceeds the selected Ready schedulable node count. | M3 (configuration) | `cmd/sw-block/main.go` `runOpsGenerateHelmValues`, `selectHelmValuesNodes` | `TestOpsGenerateHelmValuesRejectsRFAboveSelectedNodes` (`cmd/sw-block/main_test.go`) | — | ACTIVE |
 | `INV-HOSTPATH-TRANSPARENT-001` | The read model reports transparent host-path recovery only with a multipathed, Active/Optimized, stale-fenced path, writer and reader checks, and the same pod UID. | K8s readiness model | `core/ops/managed_volume_model.go` `classifyManagedVolume`, `deriveManagedVolumeStates` | `TestManagedVolumeProjection_TransparentISCSIALUARecovered`, `TestManagedVolumeProjection_MissingMultipathBlocksTransparentClaim` (`core/ops/managed_volume_model_test.go`) | — | ACTIVE |

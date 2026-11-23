@@ -2,6 +2,7 @@ package authority
 
 import (
 	"errors"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -10,7 +11,7 @@ import (
 // ============================================================
 // P14 S4 — Observation Store
 //
-// Push-ingested latest-wins observation store per ServerID. The
+// Push-ingested latest-wins observation store per replica slot. The
 // store computes derived freshness on read, based on wall-clock
 // time vs ObservedAt + FreshnessWindow. Expired observations stay
 // visible; they are just semantically ineligible for supported
@@ -35,23 +36,32 @@ type ObservationStore struct {
 	revision     uint64
 	onMutation   func()
 
-	// supersededCount counts heartbeat ingests that were dropped
-	// because a newer ObservedAt was already stored for the same
-	// ServerID. Diagnostic only — PCDD-DELAYED-HB-001 evidence
+	// supersededCount counts slot reports that were dropped because a
+	// newer ObservedAt was stored for that server/volume/replica slot.
+	// Diagnostic only — PCDD-DELAYED-HB-001 evidence
 	// surface. Not an authority input; publisher / controller /
 	// evidence minting paths MUST NOT read it. Exposed via
 	// SupersededCount().
 	supersededCount uint64
+	supersededSlots map[[3]string]uint64
 }
 
-// SupersededCount returns the total number of ingests that were
-// dropped because a newer observation from the same server was
-// already stored. Diagnostic surface for PCDD-DELAYED-HB-001.
+// SupersededCount returns the total number of slot reports dropped
+// because a newer report of that same server/volume/replica was stored.
+// Diagnostic surface for PCDD-DELAYED-HB-001.
 // NOT authority input. Monotonic across the lifetime of the store.
 func (s *ObservationStore) SupersededCount() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.supersededCount
+}
+
+// SupersededSlotCount is the diagnostic count for one reporting slot.
+// Like SupersededCount, it is not an authority input.
+func (s *ObservationStore) SupersededSlotCount(serverID, volumeID, replicaID string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.supersededSlots[[3]string{serverID, volumeID, replicaID}]
 }
 
 // SlotFact returns the most-recently-observed SlotFact for a
@@ -201,10 +211,11 @@ func NewObservationStore(config FreshnessConfig, now func() time.Time) *Observat
 	}
 	cfg := config.withDefaults()
 	return &ObservationStore{
-		config:       cfg,
-		now:          now,
-		startedAt:    now(),
-		observations: map[string]Observation{},
+		config:          cfg,
+		now:             now,
+		startedAt:       now(),
+		observations:    map[string]Observation{},
+		supersededSlots: make(map[[3]string]uint64),
 	}
 }
 
@@ -231,11 +242,10 @@ var ErrInvalidObservation = errors.New("observation_store: invalid observation")
 // ExpiresAt, and fires the registered mutation callback if
 // anything changed.
 //
-// Latest-wins per ServerID. If an incoming observation has an
-// ObservedAt strictly older than the currently-stored one from
-// the same server, the store keeps the newer one (ignores the
-// stale ingest). No error is returned for that case; it's a
-// routine ordering event, not a bug.
+// Latest-wins per (ServerID, volume, replica). A slot report strictly
+// older than that slot's stored fact is ignored; other slots in the
+// observation are accepted independently. No error is returned for
+// superseded reports.
 func (s *ObservationStore) Ingest(obs Observation) error {
 	_, err := s.ingest(obs)
 	return err
@@ -290,44 +300,65 @@ func (s *ObservationStore) ingest(obs Observation) ([]SlotHealthTransition, erro
 
 	var fn func()
 	var transitions []SlotHealthTransition
+	type supersededReport struct {
+		volume, replica string
+		sentAt, newest  time.Time
+		total           uint64
+	}
+	var dropped []supersededReport
+	// Both the all-superseded and mixed-report paths release mu before
+	// returning. Logging never runs under the store lock.
+	defer func() {
+		for _, d := range dropped {
+			log.Printf("heartbeat superseded server=%s volume=%s replica=%s sent_at=%s newest=%s total=%d",
+				obs.ServerID, d.volume, d.replica, d.sentAt.UTC().Format(time.RFC3339Nano), d.newest.UTC().Format(time.RFC3339Nano), d.total)
+		}
+	}()
 	s.mu.Lock()
 	prev, hadPrev := s.observations[obs.ServerID]
-	if hadPrev {
-		if prev.ObservedAt.After(obs.ObservedAt) {
-			// Out-of-order ingest: keep the newer one already
-			// stored. No mutation fired.
-			//
-			// Diagnostic counter for PCDD-DELAYED-HB-001. Not an
-			// authority input. Must never be read by publisher /
-			// controller / evidence minting path — it exists so
-			// tests and operators can see that a superseded
-			// heartbeat was observed and recorded-as-superseded,
-			// distinct from "silently dropped".
-			s.supersededCount++
-			s.mu.Unlock()
-			return nil, nil
-		}
-	}
 	// Health transitions, from this accepted report against the same
-	// server's previously stored fact for each slot it carries.
+	// slot's stored fact. INV-OBS-SLOT-ORDER-001 / V1-SPEC r2.53:
+	// timestamps order one sender's
+	// slot only; a later report from another slot cannot supersede it.
+	accepted := make([]SlotFact, 0, len(obs.Slots))
 	for _, slot := range obs.Slots {
 		old := ""
+		var newest time.Time
 		if hadPrev {
 			for _, p := range prev.Slots {
 				if slotKey(p) == slotKey(slot) {
 					old = p.UnhealthyReason
+					newest = slotObservedAt(p, prev)
 					break
 				}
 			}
 		}
+		if newest.After(slot.ObservedAt) {
+			s.supersededCount++
+			key := [3]string{obs.ServerID, slot.VolumeID, slot.ReplicaID}
+			s.supersededSlots[key]++
+			dropped = append(dropped, supersededReport{slot.VolumeID, slot.ReplicaID, slot.ObservedAt, newest, s.supersededSlots[key]})
+			continue
+		}
+		accepted = append(accepted, slot)
 		if old != slot.UnhealthyReason {
 			transitions = append(transitions, SlotHealthTransition{
 				VolumeID: slot.VolumeID, ReplicaID: slot.ReplicaID, Old: old, New: slot.UnhealthyReason,
 			})
 		}
 	}
+	if len(obs.Slots) > 0 && len(accepted) == 0 {
+		s.mu.Unlock()
+		return nil, nil
+	}
+	obs.Slots = accepted
 	if hadPrev {
 		obs.Slots = mergeServerSlots(prev.Slots, obs.Slots)
+		if prev.ObservedAt.After(obs.ObservedAt) {
+			// Preserve the newest server metadata without lending its
+			// timestamp or freshness to another process's slot.
+			obs.ObservedAt, obs.ExpiresAt, obs.Server = prev.ObservedAt, prev.ExpiresAt, prev.Server
+		}
 	}
 	s.observations[obs.ServerID] = obs
 	s.revision++
