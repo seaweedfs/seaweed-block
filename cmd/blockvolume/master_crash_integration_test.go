@@ -40,8 +40,8 @@ func TestProcedureMasterKilledAfterMoveBeforeTargetStarts(t *testing.T) {
 		{"s2", "different-request"}, {"s3", "different-target"},
 	} {
 		out, stderr, code := env.h.run(t, env.moveClean(e, conflict.target, conflict.request)...)
-		if code == 0 || !strings.Contains(stderr, "code = FailedPrecondition") {
-			t.Fatalf("competing move to %s: exit=%d stdout=%q stderr=%q; want affirmative FailedPrecondition", conflict.target, code, out, stderr)
+		if code != 1 || out != "" || strings.TrimSpace(stderr) != "workspace move: clean move: workspace move: missing or changed authority/lease" {
+			t.Fatalf("competing move to %s: exit=%d stdout=%q stderr=%q; want the definite-refusal exit and changed-authority answer", conflict.target, code, out, stderr)
 		}
 	}
 	out, _ = env.h.command(t, env.chunkShow()...)
