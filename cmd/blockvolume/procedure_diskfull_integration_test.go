@@ -21,18 +21,29 @@ import (
 // space; deleting it frees it.
 //
 //  1. The WAL's disk fills under guest I/O: every guest command answers within
-//     a bound (an error is allowed, a hang is not); after the space is freed
-//     and the holder restarts, every flush-acknowledged block reads back and
-//     the next cut moves HEAD and verifies.
-//  2. A new volume's durable root is full: blockvolume exits within a bound and
-//     says why; after the space is freed it starts and serves.
-//  3. The --host-limit-dir disk is full: a cut answers within a bound and guest
-//     I/O keeps working meanwhile; after the space is freed a cut commits.
+//     the bound; the first error is the documented permanent one (0x800c), or
+//     0x0104 only without ENOSPC behind it; image A stays readable; the test
+//     logs whether writes resume once the space is freed without a restart.
+//     1b. The holder restarts with the disk still full: it serves reads or
+//     exits naming the full disk. After the space is freed and a restart,
+//     every flush-acknowledged block reads back and the next cut moves HEAD
+//     and verifies.
+//  2. A new volume's durable root is full: blockvolume exits and says why;
+//     after the space is freed it starts and serves.
+//  3. The --host-limit-dir disk is full: the limiter fails open (the cut
+//     commits) and detach --plain still seals; guest I/O works meanwhile.
+//
+// A FINDING (a wrong error class, a limiter that does not fail open) fails
+// the test with t.Errorf and the run continues to the end.
 //
 // Environment: SWBLOCK_DISKFULL_ROOT and SWBLOCK_DISKFULL_LIMIT (two mounted
 // filesystems, nothing else on them); CHUNKSTORE_WEED; optional
 // SWBLOCK_TEST_BINS and SWBLOCK_REPLAY_LOGS (logs are copied there).
-const diskFullBound = 30 * time.Second
+//
+// diskFullBound stays below the Linux NVMe host default I/O timeout (30 s)
+// with margin: an answer at 29 s would still make a real guest reset the
+// controller.
+const diskFullBound = 20 * time.Second
 
 func TestProcedureLocalDiskFull(t *testing.T) {
 	root, limit := os.Getenv("SWBLOCK_DISKFULL_ROOT"), os.Getenv("SWBLOCK_DISKFULL_LIMIT")
@@ -79,45 +90,114 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	env.writeCutCrashImage(t, 'A')
 	cutAdvances("before the disk fills")
 
-	// 1. The WAL's disk fills under guest I/O.
+	// 1. The WAL's disk fills under guest I/O. LBAs 0.. are written in order
+	// (chunks 0-7 at most); image A in chunks 40-47 is never overwritten here.
 	fill := fillDisk(t, root, 2<<20)
 	c := dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
 	want := map[uint64][]byte{}
 	var pending []uint64
-	var firstErr error
-	const maxWrites = 8192 // 32 MiB, far more than the 2 MiB left
-	for i := 0; i < maxWrites && firstErr == nil; i++ {
-		lba := uint64(i)
-		b := cutCrashBlock('W', lba)
-		if err := diskFullOp(c, func() error { return c.tryWrite(lba, b) }); err != nil {
-			firstErr = fmt.Errorf("write %d: %w", i, err)
-			break
-		}
-		pending = append(pending, lba)
-		if (i+1)%8 == 0 {
-			if err := diskFullOp(c, c.tryFlush); err != nil {
-				firstErr = fmt.Errorf("flush after write %d: %w", i, err)
-				break
+	next := 0
+	writeUntilError := func(n int) error {
+		for end := next + n; next < end; next++ {
+			lba := uint64(next)
+			b := cutCrashBlock('W', lba)
+			if err := diskFullOp(c, func() error { return c.tryWrite(lba, b) }); err != nil {
+				return fmt.Errorf("write %d: %w", next, err)
 			}
-			for _, l := range pending {
-				want[l] = cutCrashBlock('W', l)
+			pending = append(pending, lba)
+			if (next+1)%8 == 0 {
+				if err := diskFullOp(c, c.tryFlush); err != nil {
+					return fmt.Errorf("flush after write %d: %w", next, err)
+				}
+				for _, l := range pending {
+					want[l] = cutCrashBlock('W', l)
+				}
+				pending = pending[:0]
 			}
-			pending = pending[:0]
 		}
+		return nil
 	}
+	firstErr := writeUntilError(8192) // 32 MiB, far more than the 2 MiB left
 	if errors.Is(firstErr, errDiskFullHang) {
 		t.Fatalf("case 1: a guest command did not answer within %s on a full disk: %v", diskFullBound, firstErr)
 	}
 	// INV-FE-ERROR-RETRY-CLASS-001: ENOSPC is a permanent cause, so NVMe
-	// Generic/Internal Error with DNR (0x800c); a WAL pressure timeout is the
-	// documented retryable Namespace Not Ready, DNR=0 (0x0104). Anything else
-	// (a generic transport error, another code) is not the documented answer.
-	if firstErr != nil && !strings.Contains(firstErr.Error(), "status 0x800c") && !strings.Contains(firstErr.Error(), "status 0x0104") {
+	// Generic/Internal Error with DNR (0x800c). Namespace Not Ready, DNR=0
+	// (0x0104) is right only for WAL pressure a cut relieves; with ENOSPC
+	// behind it a guest would retry for ever: a wrong class, reported.
+	switch {
+	case firstErr == nil:
+		t.Logf("case 1: no error in %d writes with 2 MiB free", next)
+	case strings.Contains(firstErr.Error(), "status 0x800c"):
+	case strings.Contains(firstErr.Error(), "status 0x0104"):
+		if holder.has("no space left on device") {
+			t.Errorf("FINDING case 1: the guest saw retryable 0x0104 (%v) while the holder logs ENOSPC: a permanent cause surfaced as retryable", firstErr)
+		}
+	default:
 		t.Fatalf("case 1: the guest saw %v, not a documented completion for a full disk", firstErr)
 	}
 	t.Logf("case 1: %d flush-acknowledged writes, %d unflushed; first error: %v; frontend ready: %v",
 		len(want), len(pending), firstErr, env.frontendReadyAt("s1"))
+	// A full disk never makes existing data unreadable.
+	readImageA := func(what string, c *nvmeInitiator) {
+		t.Helper()
+		for ch := 40; ch < cutCrashChunks; ch++ {
+			for i := 0; i < cutCrashPer; i += 16 {
+				lba := uint64(ch*ladderChunkBlocks + i)
+				var got []byte
+				err := diskFullOp(c, func() (err error) { got, err = c.tryRead(lba, 4096); return err })
+				if err != nil || !bytes.Equal(got, cutCrashBlock('A', lba)) {
+					t.Fatalf("%s: image A at LBA %d is not readable on a full disk: %v", what, lba, err)
+				}
+			}
+		}
+	}
+	readImageA("case 1, after the first write error", c)
+	// Without a restart: do writes resume once the space is freed?
+	fill.free(t)
+	if err := writeUntilError(16); err != nil {
+		t.Logf("case 1: after freeing the space, without a restart, writes still fail (latched until restart): %v", err)
+	} else {
+		t.Logf("case 1: after freeing the space, without a restart, writes and flushes resume")
+	}
 	c.close()
+
+	// 1b. Restart while the disk is still full: serve (reads at least) or exit
+	// within the bound naming the full disk; never damage acknowledged data.
+	fill = fillDisk(t, root, 0)
+	holder.kill(t)
+	holder = env.start(t, "blockvolume-v1-restart-full", "s1")
+	served := false
+	for end := time.Now().Add(60 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+		if holder.has("blockvolume: volume v1 adopted as PRIMARY at r1@") {
+			served = true
+			break
+		}
+		exited := false
+		select {
+		case <-holder.done:
+			exited = true
+		default:
+		}
+		if exited {
+			if !holder.has("no space left on device") {
+				t.Fatalf("case 1b: the holder exited on a full disk without naming it (%v); log %s", holder.err, holder.log)
+			}
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("case 1b: the holder neither served nor exited within 60s on a full disk")
+		}
+	}
+	if served {
+		env.h.waitPrimaryAt(t, env.hosts["s1"].status, e)
+		c := dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
+		readImageA("case 1b, restarted on a full disk", c)
+		c.close()
+		t.Logf("case 1b: restarted on a full disk and serves reads")
+	} else {
+		t.Logf("case 1b: restart on a full disk exited naming the full disk")
+	}
 	fill.free(t)
 	holder.kill(t)
 	holder = env.start(t, "blockvolume-v1-after-full-wal", "s1")
@@ -140,15 +220,20 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 				}
 			}
 		}
+		for lba, w := range want {
+			if !bytes.Equal(c.read(t, lba, 4096), w) {
+				t.Fatalf("case 1: flush-acknowledged LBA %d lost after the disk filled", lba)
+			}
+		}
 	}()
 	cutAdvances("case 1, after the space is freed")
 
 	// 2. A new volume's durable root is full.
 	fill = fillDisk(t, root, 0)
 	v2 := env.start(t, "blockvolume-v2-full", "n-v2")
-	err := v2.wait(diskFullBound)
+	err := v2.wait(60 * time.Second)
 	if err == nil || strings.Contains(err.Error(), "still running") {
-		t.Fatalf("case 2: blockvolume on a full durable root: %v (want an exit with a reason within %s)", err, diskFullBound)
+		t.Fatalf("case 2: blockvolume on a full durable root: %v (want an exit with a reason within 60s)", err)
 	}
 	if !v2.has("no space left on device") {
 		t.Fatalf("case 2: blockvolume exited (%v) without naming the full disk; log %s", err, v2.log)
@@ -199,27 +284,40 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 		t.Fatalf("case 3: a cut with the host-limit dir full did not answer within 2m")
 	}
 	// The docs name no outcome for a full --host-limit-dir (the launch check,
-	// INV-HOST-LAUNCH-CHECK-001, only reads it). A definite answer either way
-	// is accepted: a refusal naming the full disk, or a commit that moved HEAD.
-	switch g := headGen(); {
-	case r.rc != 0 && !strings.Contains(r.out, "no space left on device"):
-		t.Fatalf("case 3: the cut failed (exit %d) without naming the full disk:\n%s", r.rc, r.out)
-	case r.rc == 0 && g <= g0:
-		t.Fatalf("case 3: the cut exited 0 but HEAD stayed at gen %d", g)
+	// INV-HOST-LAUNCH-CHECK-001, only reads it). The position for the ruling:
+	// the limiter paces background cuts and must fail open, so the cut
+	// commits; a refusal is reported for a ruling, not accepted.
+	if g := headGen(); r.rc != 0 || g <= g0 {
+		t.Errorf("FINDING case 3: with the host-limit dir full the cut exited %d and HEAD is at gen %d (was %d); the limiter did not fail open:\n%s", r.rc, g, g0, r.out)
 	}
 	t.Logf("case 3: cut with the host-limit dir full exited %d; guest write+flush succeeded meanwhile", r.rc)
+	// The seal of a planned hand-over must not depend on the limit directory.
+	out, errOut, rc := env.h.run(t, "ops", "chunk", "detach", "--plain", "--volume", "v1", "--status-addr", env.hosts["s1"].status, "--timeout", "120s")
+	if rc != 0 {
+		t.Errorf("FINDING case 3: detach --plain with the host-limit dir full exited %d:\n%s\n%s", rc, out, errOut)
+	} else {
+		t.Logf("case 3: detach --plain with the host-limit dir full sealed the volume")
+	}
 	fill.free(t)
-	cutAdvances("case 3, after the space is freed")
-	env.requireCutCrashImage(t, "s1", 'B')
-	fmt.Println("DISKFULL_OK")
+	t.Logf("slowest guest command answer: %s (bound %s)", diskFullSlowest, diskFullBound)
+	if !t.Failed() {
+		fmt.Println("DISKFULL_OK")
+	}
 }
 
-var errDiskFullHang = errors.New("no answer within the bound")
+var (
+	errDiskFullHang = errors.New("no answer within the bound")
+	diskFullSlowest time.Duration
+)
 
 // diskFullOp runs op with a deadline on the I/O queue; a timeout is a hang.
 func diskFullOp(c *nvmeInitiator, op func() error) error {
-	_ = c.io.SetDeadline(time.Now().Add(diskFullBound))
+	start := time.Now()
+	_ = c.io.SetDeadline(start.Add(diskFullBound))
 	err := op()
+	if d := time.Since(start); d > diskFullSlowest {
+		diskFullSlowest = d
+	}
 	var ne interface{ Timeout() bool }
 	if errors.As(err, &ne) && ne.Timeout() {
 		return fmt.Errorf("%w: %v", errDiskFullHang, err)
