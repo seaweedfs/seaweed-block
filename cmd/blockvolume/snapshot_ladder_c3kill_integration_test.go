@@ -120,20 +120,22 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 // local at the driver's 64 MiB/s: about 2 s of hydrating). Its blockvolume
 // is killed (SIGKILL) one second into hydrating, started again, and read
 // back in full (a partly filled chunk must never be served), and the driver
-// is started again. When the status then shows every chunk filled and no
-// batch done, still running and not independent (after hydration completed,
-// before independence), the guest writes to v2 (acknowledged) and the
-// blockvolume is killed again, restarted (every acknowledged write reads
+// is started again: the read-back has made every chunk local, so the
+// resumed run has nothing left to fill (its status then reports filled 0)
+// and spends its time re-uploading the chunks under v2's own keys. 150 ms
+// into that run, still running and not independent, the guest writes to v2
+// (acknowledged) and, the run checked still running and not independent,
+// the blockvolume is killed again, restarted (every acknowledged write reads
 // back), and the driver started again; the guest writes once more. The
 // driver resumes from the target's remote facts to independence (per its
 // status). Then v2 holds the snapshot with every acknowledged write over it,
 // and the source's snapshot, restored again into v3, is unchanged (none of
 // v2's writes in it).
 //
-// Not covered: guest writes while the driver reports Owning. With one batch
-// (32 chunks, under the 64-chunk batch) the status goes from hydrating to
-// independent without ever showing owning, so the second kill is only known
-// to land after hydration completed and before independence.
+// Not covered: guest writes while the driver reports Owning. The status
+// shows owning only once the single batch (32 chunks, under the 64-chunk
+// batch) has ended, a few ms before independent, so the second kill is only
+// known to land in the resumed run, every chunk local, before independence.
 func TestSnapshotLadderC3KilledHydratingAndBeforeIndependence(t *testing.T) {
 	env := startLadderEnv(t, "v2", "v3")
 	var chunks []uint64
@@ -163,16 +165,18 @@ func TestSnapshotLadderC3KilledHydratingAndBeforeIndependence(t *testing.T) {
 	env.requireImage(t, "n-v2", src) // serves the snapshot, no partly filled chunk
 	drive()
 
-	// Written after hydration completed and before independence, then killed.
-	afterFill := func(s restoreProgress) bool {
-		return s.Filled == len(chunks) && s.Batches == 0 && s.Phase != "independent"
-	}
-	env.awaitRestorePhase(t, "v2", "hydration completed, not independent", 180*time.Second, func(s restoreProgress) bool { return s.Running && afterFill(s) })
+	// In the resumed run, every chunk local, before independence: written,
+	// then killed.
+	notDone := func(s restoreProgress) bool { return s.Phase != "independent" }
+	resumed := time.Now()
+	env.awaitRestorePhase(t, "v2", "the resumed run", 30*time.Second, func(s restoreProgress) bool { return s.Running && notDone(s) })
+	time.Sleep(time.Until(resumed.Add(150 * time.Millisecond)))
+	env.requireRestoreState(t, "v2", "running and not independent", notDone)
 	w1 := ladderImage("c3kw1", []uint64{3, 17, 50}, 3)
 	env.writeImage(t, "n-v2", w1)
-	st = env.requireRestoreState(t, "v2", "after hydration and before independence", afterFill)
+	st = env.requireRestoreState(t, "v2", "running and not independent", notDone)
 	target.kill(t)
-	t.Logf("killed after hydration completed and before independence, after the write: %+v", st)
+	t.Logf("killed %v into the resumed run, after the write: %+v", time.Since(resumed).Round(time.Millisecond), st)
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-batch-kill")
 	env.requireImage(t, "n-v2", mergeImages(src, w1)) // every acknowledged write survived the kill
 	drive()
