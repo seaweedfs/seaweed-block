@@ -205,6 +205,26 @@ func (env *handoffEnv) snapshot(t *testing.T, hostID, vol, name string) snapshot
 	return info
 }
 
+// listSnapshots lists vol's snapshots (with a name prefix when given) under
+// ctx, without failing the test.
+func (env *handoffEnv) listSnapshots(ctx context.Context, vol, prefix string) ([]snapshotInfo, error) {
+	args := []string{"ops", "chunk", "snapshots", "--volume", vol, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
+	if prefix != "" {
+		args = append(args, "--prefix", prefix)
+	}
+	out, errOut, code, err := runCLI(ctx, env.h, args...)
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		Snapshots []snapshotInfo `json:"snapshots"`
+	}
+	if code != 0 || json.Unmarshal([]byte(out), &body) != nil {
+		return nil, fmt.Errorf("snapshots of %s: exit %d: %s %s", vol, code, out, errOut)
+	}
+	return body.Snapshots, nil
+}
+
 // snapshots lists vol's snapshots (with a name prefix when given).
 func (env *handoffEnv) snapshots(t *testing.T, vol, prefix string) []snapshotInfo {
 	t.Helper()
@@ -292,7 +312,8 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 		if !joined {
 			select {
 			case <-done:
-			case <-time.After(10 * time.Second):
+			case <-time.After(10 * time.Second): // runCLI's 5 s WaitDelay, with a margin
+				t.Error("snapshot s4 worker did not finish within 10 s of its cancellation: its completion is unresolved")
 			}
 		}
 	})
@@ -303,7 +324,11 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	env.writeBlock(t, "s1", 4, pattern("ladder-b1-blk-E!"))
 	var observed []snapshotInfo
 	var r result
+	// The observation bound: every list probe runs within what is left of it,
+	// and a probe that returns after it fails the test.
 	deadline := time.Now().Add(160 * time.Second)
+	obs, obsCancel := context.WithDeadline(context.Background(), deadline)
+	defer obsCancel()
 	for running := true; running; {
 		select {
 		case r = <-done:
@@ -313,8 +338,12 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 		if running && time.Now().After(deadline) {
 			t.Fatal("snapshot s4 did not return within its bound")
 		}
+		list, err := env.listSnapshots(obs, "v1", "s4")
+		if err != nil || time.Now().After(deadline) {
+			t.Fatalf("listing s4 within the observation bound: %v", err)
+		}
 		var s4 *snapshotInfo
-		for _, e := range env.snapshots(t, "v1", "s4") {
+		for _, e := range list {
 			e := e
 			s4 = &e
 		}
@@ -458,9 +487,10 @@ func volumeFrontendReady(statusAddr, vol string) bool {
 
 // waitIndependent polls the restore status of target until the restore
 // driver reports its phase independent (what the status says; it is not a
-// separate measurement of which keys hold the chunks). The bound is end to
-// end: every query runs within what is left of it, and a success seen after
-// it does not count.
+// separate measurement of which keys hold the chunks). 120 s bounds the
+// observation: every query runs within what is left of it, and a success
+// seen after it does not count. A query cancelled at the bound may take up
+// to runCLI's 5 s WaitDelay more to clean up.
 func (env *handoffEnv) waitIndependent(t *testing.T, target string) {
 	t.Helper()
 	const bound = 120 * time.Second
