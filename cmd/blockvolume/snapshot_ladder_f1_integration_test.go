@@ -124,6 +124,7 @@ type f1Report struct {
 	Limiter     string    `json:"limiter"`
 	StartedAt   time.Time `json:"started_at"`
 	Rounds      []f1Round `json:"rounds"`
+	Health      []f1Health `json:"heartbeat_health"`
 	CommitBound float64   `json:"commit_bound_ms"`
 	WriteErrors int       `json:"write_errors"`
 	Verdict     string    `json:"verdict"`
@@ -133,7 +134,7 @@ type f1Report struct {
 func TestSnapshotLadderF1VolumesOneHost(t *testing.T) {
 	cfg := f1ConfigFromEnv(t)
 	rep := &f1Report{Config: cfg, StartedAt: time.Now().UTC(), Limiter: "off"}
-	env := f1StartEnv(t, cfg)
+	env, master := f1StartEnv(t, cfg)
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	if cfg.HostLimitDir != "" {
 		env.volExtra = append(env.volExtra, "--host-limit-dir", cfg.HostLimitDir, "--host-limit-normal-slots", strconv.Itoa(cfg.Slots))
@@ -141,6 +142,7 @@ func TestSnapshotLadderF1VolumesOneHost(t *testing.T) {
 	}
 	vols := f1StartSources(t, env, cfg.Volumes)
 	defer f1WriteReport(t, cfg, rep)
+	watch := f1StartWatch(env, vols)
 
 	for round := 1; round <= cfg.Rounds; round++ {
 		before := f1FilerEntries(t, env)
@@ -152,6 +154,7 @@ func TestSnapshotLadderF1VolumesOneHost(t *testing.T) {
 		}
 		rep.Rounds = append(rep.Rounds, rounds...)
 	}
+	rep.Health = watch.finish(master.log)
 	f1Judge(t, cfg, rep)
 }
 
@@ -163,7 +166,7 @@ func f1RestoreTarget(vol, round int) string { return fmt.Sprintf("v%dr%d", vol, 
 // ports. Source v<i> is replica r<i>; the restore target of v<i> in round k
 // is replica r<i+N*k> on the same server. The node record carries the first
 // source's pair, as the deployment page writes one node.
-func f1StartEnv(t *testing.T, cfg f1Config) *handoffEnv {
+func f1StartEnv(t *testing.T, cfg f1Config) (*handoffEnv, *daemon) {
 	t.Helper()
 	h := newPlannedHandoffHarness(t)
 	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/f1-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
@@ -202,7 +205,7 @@ func f1StartEnv(t *testing.T, cfg f1Config) *handoffEnv {
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
 		"--workspace-rpc", "--workspace-head-base-url", "http://"+env.cluster.filerHTTP+env.chunkPath)
 	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
-	return env
+	return env, master
 }
 
 // f1Up starts the blockvolume of key and waits for its volume to be primary
@@ -567,6 +570,11 @@ func f1Judge(t *testing.T, cfg f1Config, rep *f1Report) {
 		waves = math.Ceil(float64(cfg.Volumes)/float64(cfg.Slots)) + 1
 	}
 	rep.CommitBound = waves * worst
+	for _, h := range rep.Health {
+		if h.SlotExpiries > 0 {
+			rep.Failures = append(rep.Failures, fmt.Sprintf("%s: the master lost its slot %d time(s) for %.0f ms in total (during: %v)", h.Volume, h.SlotExpiries, h.SlotUnobservedMs, h.DuringExpiry))
+		}
+	}
 	if longest > rep.CommitBound {
 		rep.Failures = append(rep.Failures, fmt.Sprintf("a snapshot took %.0f ms, above the bound %.0f ms (%.0f waves x the slowest cut %.0f ms): a volume starved", longest, rep.CommitBound, waves, worst))
 	}
