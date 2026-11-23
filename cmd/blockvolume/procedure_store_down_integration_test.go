@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,15 +31,19 @@ const storeDownBound = 20 * time.Second
 
 func TestProcedureStoreDownDuringACut(t *testing.T) {
 	for _, down := range []string{"filer", "volume"} {
-		t.Run(down, func(t *testing.T) { storeDownDuringACut(t, down, 0) })
+		t.Run(down, func(t *testing.T) { storeDownDuringACut(t, down, 0, false) })
 	}
 	// The limit (claude06's variant): the stalled cut's copy-on-write reserve
 	// (--host-limit-cow-bytes) is 4 MiB, less than the 12 MiB of its capture
 	// that the guest overwrites during the outage. The outcome is recorded.
-	t.Run("volume-cow-reserve-exceeded", func(t *testing.T) { storeDownDuringACut(t, "volume", 4<<20) })
+	t.Run("volume-cow-reserve-exceeded", func(t *testing.T) { storeDownDuringACut(t, "volume", 4<<20, false) })
+	// 400 MiB: the 48 captured 4 MiB chunks fit in half of it, so the cut
+	// opens its copy-on-write window; asserted to stay within reserve/2 and
+	// to close when the cut fails.
+	t.Run("volume-cow-window-400MiB", func(t *testing.T) { storeDownDuringACut(t, "volume", 400<<20, true) })
 }
 
-func storeDownDuringACut(t *testing.T, down string, cowBytes int64) {
+func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bool) {
 	env := startHandoffEnvWith(t, 1, []string{"v2"})
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	if cowBytes > 0 {
@@ -173,6 +178,21 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64) {
 		t.Logf("%s down: the cut answered while it was down, after %s, exit %d: %s", down, cutWhileDown.at.Round(time.Millisecond), cutWhileDown.rc, firstLine(cutWhileDown.out))
 	} else {
 		t.Logf("%s down: the cut had not answered after %s", down, time.Since(cutStart).Round(time.Second))
+	}
+	if cowWindow {
+		// The reserve bounds the copy-on-write window: stage() opens it only
+		// when the captured chunks fit in half the reserve.
+		switch {
+		case cutWhileDown == nil || !strings.Contains(cutWhileDown.out, "capture copy"):
+			t.Fatalf("%s down: the cut did not fail inside a copy-on-write window (no 'capture copy'): %+v", down, cutWhileDown)
+		case peakSide == 0 || peakSide > cowBytes/2:
+			t.Fatalf("%s down: peak COW side bytes %d, want > 0 and <= half the %d reserve", down, peakSide, cowBytes)
+		case sideBytes() != 0:
+			t.Fatalf("%s down: %d COW side bytes left after the cut failed: the window did not close", down, sideBytes())
+		case written == 0:
+			t.Fatalf("%s down: the guest wrote nothing while the window was open", down)
+		}
+		t.Logf("%s down: COW window measured: peak %d <= reserve/2 %d, closed on the failure", down, peakSide, cowBytes/2)
 	}
 
 	// The store comes back.
