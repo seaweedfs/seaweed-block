@@ -4,8 +4,10 @@ package main_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"syscall"
 	"testing"
 	"time"
@@ -48,7 +50,20 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 	if err != nil || atKill.Gen != before.Gen || atKill.State != "active" || atKill.RemoteLSN != before.RemoteLSN {
 		t.Fatalf("missed mid-upload window: before=%+v stopped=%+v: %v", before, atKill, err)
 	}
+	select {
+	case <-cli.done:
+		t.Fatal("detach completed or aborted before the verified kill window")
+	default:
+	}
 	holder.kill(t)
+	var exited *exec.ExitError
+	if !errors.As(holder.err, &exited) {
+		t.Fatalf("holder did not have a signal exit: %v", holder.err)
+	}
+	status, ok := exited.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("holder exit %v; want SIGKILL", exited)
+	}
 	if err := cli.wait(15 * time.Second); err == nil {
 		t.Fatal("interrupted detach unexpectedly returned success")
 	}
