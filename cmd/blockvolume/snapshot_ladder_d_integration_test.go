@@ -14,10 +14,12 @@ import (
 	"time"
 )
 
-// Rung D of the snapshot ladder: deletes. A deleted snapshot leaves every
-// other snapshot restorable, whichever one is deleted (the newest, a middle
-// one, one whose content recurs later), and the collector then reclaims the
-// chunk data only the deleted snapshots referenced.
+// Rung D of the snapshot ladder: deletes. D1-D3 are the logical delete: a
+// deleted snapshot leaves every other snapshot restorable, whichever one is
+// deleted (the newest, a middle one, one whose content recurs later). No
+// collector runs in them (a delete only marks the snapshot and frees its
+// name), so they prove nothing about reclamation. D4 runs the collector and
+// measures what it reclaims.
 //
 // The collector's grace may not be shorter than the operation deadline plus
 // the clock skew plus the CAS apply bound (11 minutes with the defaults), and
@@ -88,8 +90,9 @@ func TestSnapshotLadderD1DeleteTheNewest(t *testing.T) {
 
 // TestSnapshotLadderD2DeleteAMiddleOne: four snapshots, each sharing chunks
 // with its neighbours; the second is deleted; the first, the third and the
-// fourth restore as they were (the deleted one's chunks that a neighbour or a
-// later snapshot still uses are kept).
+// fourth restore as they were. No collector runs: whether the deleted one's
+// chunks that a neighbour still uses would survive collection is not tested
+// here.
 func TestSnapshotLadderD2DeleteAMiddleOne(t *testing.T) {
 	env := startLadderEnv(t, "v2", "v3", "v4")
 	img1 := ladderImage("d2one", []uint64{0, 2}, 4)
