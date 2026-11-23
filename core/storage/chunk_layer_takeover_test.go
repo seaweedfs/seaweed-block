@@ -1,12 +1,6 @@
-//go:build chunk_takeover_red
-
-// RED tests for the takeover CAS at attach (W2 spec §6.3, P5). They are
-// written by W2 and implemented by W4; the build tag keeps them out of the
-// default suite until then. Run them with:
-//
-//	go test -tags chunk_takeover_red -run TestChunkAttach_TakeOver ./core/storage/
-//
-// The implementation should remove the build tag.
+// V1-SPEC r2.55 side (a), coverage cell P10.6;
+// INV-WS-CLAIM-BEFORE-SERVE-001. The production attach path first claims
+// HEAD, then attaches the chunk layer against that exact claim.
 
 package storage
 
@@ -36,6 +30,11 @@ func TestChunkAttach_TakeOverRaisesEpoch(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
+	claimed, err := ClaimChunkHead(ctTimeout(t), f, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RestoreGuard = &ChunkHeadVersion{Gen: claimed.Gen, Epoch: claimed.Epoch}
 	mustAttach(t, s, f, cfg)
 
 	head := f.stats().head
@@ -48,6 +47,12 @@ func TestChunkAttach_TakeOverRaisesEpoch(t *testing.T) {
 	for k, v := range seeded.Chunks {
 		if head.Chunks[k] != v {
 			t.Fatalf("takeover changed chunk %d: %+v, want %+v", k, head.Chunks[k], v)
+		}
+	}
+	for lba := uint32(0); lba < ctNumBlocks; lba++ {
+		got, err := s.Read(lba)
+		if err != nil || !bytes.Equal(got, blockOf(takeoverImage(), lba)) {
+			t.Fatalf("takeover read LBA %d: bytes differ from seeded image, err=%v", lba, err)
 		}
 	}
 	// The old holder (epoch 1) can no longer commit.
@@ -86,7 +91,7 @@ func TestChunkAttach_TakeOverRacesOldHolder(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
-	layer, err := attachChunkLayer(s, f, cfg)
+	claimed, err := ClaimChunkHead(ctTimeout(t), f, cfg)
 	f.mu.Lock()
 	ran := injected
 	f.mu.Unlock()
@@ -101,15 +106,24 @@ func TestChunkAttach_TakeOverRacesOldHolder(t *testing.T) {
 		if h := f.stats().head; h.Holder == cfg.Holder {
 			t.Fatalf("attach failed (%v) but HEAD names the new holder: %+v", err, h)
 		}
-		return
+		if !errors.Is(err, ErrChunkHeadPrecondition) {
+			t.Fatalf("competing publication was not a definite claim refusal: %v", err)
+		}
+		// Retry the definite refusal through the same claim seam; the
+		// successful retry must serve every byte of the competing image.
+		claimed, err = ClaimChunkHead(ctTimeout(t), f, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	t.Cleanup(func() { _ = layer.Close() })
+	cfg.RestoreGuard = &ChunkHeadVersion{Gen: claimed.Gen, Epoch: claimed.Epoch}
+	mustAttach(t, s, f, cfg)
 
 	head := f.stats().head
-	if head.Epoch != 2 || head.Holder != cfg.Holder {
+	if head.Epoch != 2 || head.Holder != cfg.Holder || head.RemoteLSN != 101 {
 		t.Fatalf("attach returned without taking over: HEAD epoch %d holder %q", head.Epoch, head.Holder)
 	}
-	want := f.imageOf(t, head)
+	want := newer
 	for lba := uint32(0); lba < ctNumBlocks; lba++ {
 		got, err := s.Read(lba)
 		if err != nil {
