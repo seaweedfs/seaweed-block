@@ -293,9 +293,12 @@ func TestSyncControlsIgnoreAmbientAllocation(t *testing.T) {
 			// The crash-matrix child is fdatasync-bound and takes 1-35 s on a
 			// slow disk, so it runs until the parent test's deadline rather
 			// than a fixed budget.
-			ctx, cancel := context.WithCancel(context.Background())
+			var ctx context.Context
+			var cancel context.CancelFunc
 			if d, ok := t.Deadline(); ok {
 				ctx, cancel = context.WithDeadline(context.Background(), d.Add(-10*time.Second))
+			} else {
+				ctx, cancel = context.WithCancel(context.Background())
 			}
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+tc.test+"$")
