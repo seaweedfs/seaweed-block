@@ -371,7 +371,7 @@ HEAD states, snapshots, forks, intents, key bindings, GC and volume delete in th
 
 | From | To | Guard | Enforced in | Protects |
 |---|---|---|---|---|
-| — | name held | exclusive name record `{request, attempt}`; a retry with the same request id gets its own attempt back | `core/frontend/chunkstore/catalog.go` `CreateSnapshot`, `claimName` | `INV-SNAP-EXPLICIT-DELETE-001` |
+| — | name held | exclusive name record `{request, attempt}`; a retry with the same request id gets its own attempt back, unless that attempt is being deleted: then the retry is refused (`snapshot_deleting`), never answered as success, by the replay check and by the create | `core/frontend/chunkstore/catalog.go` `CreateSnapshot`, `claimName`, `SnapshotReplay` | `INV-SNAP-EXPLICIT-DELETE-001` |
 | name held | published | the volume is not being deleted; an intent with a deadline is written and the deadline is re-checked; exclusive create of the attempt path | `core/frontend/chunkstore/catalog.go` `CreateSnapshot` | `INV-SNAP-EXPLICIT-DELETE-001` |
 | published | deleting | `DeleteSnapshot` or retention for this attempt, whatever forks or restores read it (no claim is read); the mark records its delete time and GC keeps the attempt rooted for its grace | `core/frontend/chunkstore/catalog.go` `DeleteSnapshot`; `core/frontend/chunkstore/retention.go` `markDeleting` | `INV-SNAP-EXPLICIT-DELETE-001`, `INV-SNAP-DELETE-ANY-ORDER-001` |
 | published | deleting (retention, class `scheduled`) | the snapshot is not among the newest K of class `scheduled` (K from the newest one's `swb.schedule.keep`, default 7); other classes are planned without it | `core/frontend/chunkstore/retention.go` `planRetention` | `INV-SNAP-SCHEDULED-KEEP-001` |

@@ -982,6 +982,9 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		if info.State == SnapAborted {
 			return SnapshotInfo{}, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s: this request's attempt was aborted; delete the name to reuse it", vol, req.Name)
 		}
+		if info.State == SnapDeleting {
+			return SnapshotInfo{}, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s is being deleted; wait for the delete to finish, then reuse the name", req.Name)
+		}
 		return info, nil
 	case got != nil:
 		// The attempt path holds a sweep's tombstone, which is permanent:
@@ -1059,6 +1062,8 @@ func (c *Catalog) SnapshotReplay(ctx context.Context, vol string, req SnapshotRe
 		return SnapshotInfo{}, false, nil // this request's attempt has not published: publish it
 	case ref.info.State == SnapAborted:
 		return SnapshotInfo{}, false, catErr(CodeSnapshotExists, false, nil, "snapshot %s/%s: this request's attempt was aborted; delete the name to reuse it", vol, req.Name)
+	case ref.info.State == SnapDeleting:
+		return SnapshotInfo{}, false, catErr(CodeSnapshotDeleting, false, nil, "snapshot %s is being deleted; wait for the delete to finish, then reuse the name", req.Name)
 	}
 	ref.info.Replayed = true
 	return ref.info, true, nil
