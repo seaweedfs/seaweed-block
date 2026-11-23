@@ -450,7 +450,6 @@ func (env *handoffEnv) requireHeadHolder(t *testing.T, e uint64, host string) {
 	}
 }
 
-
 func (env *handoffEnv) start(t *testing.T, name, id string) *daemon {
 	t.Helper()
 	return env.h.start(t, name, env.h.volume, env.volArgs(id)...)

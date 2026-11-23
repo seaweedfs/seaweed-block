@@ -40,7 +40,9 @@ func adoptedEpochOf(vol, line string) (uint64, error) {
 
 // sealedGen reads G from a plain detach: one JSON object on stdout and
 // exactly the sealed-generation line on stderr.
-func sealedGen(stdout, stderr string, e uint64) (uint64, error) { return sealedGenOf(stdout, stderr, "v1", e) }
+func sealedGen(stdout, stderr string, e uint64) (uint64, error) {
+	return sealedGenOf(stdout, stderr, "v1", e)
+}
 
 // sealedGenOf reads G from a plain detach of volume vol at epoch e.
 func sealedGenOf(stdout, stderr, vol string, e uint64) (uint64, error) {
