@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 )
 
 // Single-volume coverage, gap 1 (cell A2.4, V1-SPEC r2.55): kill -9 of the
@@ -141,4 +143,183 @@ func TestProcedureCrashWithIOInFlight(t *testing.T) {
 		}
 	}
 	t.Logf("after the restart: all %d flush-acknowledged writes read back; %d of the %d unflushed completed writes survived as a prefix", flushed, kept-flushed, written-flushed)
+}
+
+// Gap 1, cell A3.5: kill -9 of a holder serving on a FRESH root (after a
+// clean move) while chunk fills from HEAD are in flight. s1 writes one block
+// in each of the first fillChunks chunks; after the hand-over, s2 starts
+// with no local copy. A reader walks those chunks (each read misses and
+// fills) while a writer streams Flush-acknowledged writes into chunks s1
+// never wrote; s2 is SIGKILLed mid-walk and restarted. Every s1 block must
+// read back (the fills are redone from HEAD) and every acknowledged s2 write
+// must survive.
+const (
+	fillChunks     = 60
+	fillWriterBase = 60 * ladderChunkBlocks
+	fillWriterSpan = 4 * ladderChunkBlocks
+	fillFlushEvery = 8
+)
+
+func fillSourceBlock(c int) []byte {
+	s := fmt.Sprintf("fill-src chunk %03d|", c)
+	b := make([]byte, 4096)
+	for i := range b {
+		b[i] = s[i%len(s)]
+	}
+	return b
+}
+
+func TestProcedureCrashOnAFreshRootWithFillsInFlight(t *testing.T) {
+	env := startHandoffEnv(t, 2)
+	must, mustU := fatalOn(t)
+	h := env.h
+
+	old := env.start(t, "blockvolume-s1", "s1")
+	e := env.adopt(t, old, "s1")
+	for c := 0; c < fillChunks; c++ {
+		env.writeBlock(t, "s1", uint64(c*ladderChunkBlocks), fillSourceBlock(c))
+	}
+	g := env.seal(t, "s1", e)
+	l := env.sealedLSN(t, e, g)
+	env.revoke(t, e, g)
+	if err := old.wait(30 * time.Second); err != nil {
+		t.Fatalf("s1 after the revocation: %v", err)
+	}
+	env.waitAck(t, e, g)
+	moved, _ := h.command(t, env.moveClean(e, "s2", "move-fill-1")...)
+	e2 := mustU(movedEpochTo(moved, e, g, l, "s2"))
+	nw := env.start(t, "blockvolume-s2", "s2")
+	must(checkClaimDoneBy(nw.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in"), e2, "s2"))
+	if got := env.adopt(t, nw, "s2"); got != e2 {
+		t.Fatalf("s2 adopted at epoch %d; want %d", got, e2)
+	}
+
+	// The reader: read misses fill each source chunk from HEAD.
+	var rmu sync.Mutex
+	reads, readErr := 0, error(nil)
+	readerDone := make(chan struct{})
+	rc := dialNVMe(t, env.hosts["s2"].nvme, plannedHandoffNQN)
+	go func() {
+		defer close(readerDone)
+		defer rc.close()
+		for c := 0; c < fillChunks; c++ {
+			_, err := rc.tryRead(uint64(c*ladderChunkBlocks), 4096)
+			rmu.Lock()
+			if err != nil {
+				readErr = err
+				rmu.Unlock()
+				return
+			}
+			reads = c + 1
+			rmu.Unlock()
+		}
+	}()
+	// The writer: acknowledged local writes into chunks s1 never wrote.
+	var wmu sync.Mutex
+	written, flushed := 0, 0
+	writerDone := make(chan struct{})
+	wc := dialNVMe(t, env.hosts["s2"].nvme, plannedHandoffNQN)
+	go func() {
+		defer close(writerDone)
+		defer wc.close()
+		for n := 0; n < fillWriterSpan; n++ {
+			lba := uint64(fillWriterBase + n)
+			err := wc.tryWrite(lba, crashIOBlock(lba))
+			if err == nil && n%fillFlushEvery == fillFlushEvery-1 {
+				if err = wc.tryFlush(); err == nil {
+					wmu.Lock()
+					flushed = n + 1
+					wmu.Unlock()
+				}
+			}
+			if err != nil {
+				return
+			}
+			wmu.Lock()
+			written = n + 1
+			wmu.Unlock()
+		}
+	}()
+	poll(t, 60*time.Second, "s2 never got its first fills and acknowledged writes", func() bool {
+		rmu.Lock()
+		r := reads
+		rmu.Unlock()
+		wmu.Lock()
+		f := flushed
+		wmu.Unlock()
+		return r >= 3 && f >= 64
+	})
+	nw.kill(t) // SIGKILL with fills and writes in flight
+	<-readerDone
+	<-writerDone
+	rmu.Lock()
+	readsAtKill, rerr := reads, readErr
+	rmu.Unlock()
+	wmu.Lock()
+	writtenAtKill, flushedAtKill := written, flushed
+	wmu.Unlock()
+	if readsAtKill >= fillChunks {
+		t.Fatalf("the reader finished all %d fills before the kill: no fill was in flight", fillChunks)
+	}
+	t.Logf("at the kill: %d of %d source chunks read (filled), reader error %v; %d writes completed, %d covered by a Flush", readsAtKill, fillChunks, rerr, writtenAtKill, flushedAtKill)
+
+	again := env.start(t, "blockvolume-s2-again", "s2")
+	if got := env.adopt(t, again, "s2"); got != e2 {
+		t.Fatalf("the restarted s2 adopted epoch %d; want %d", got, e2)
+	}
+	c := dialNVMe(t, env.hosts["s2"].nvme, plannedHandoffNQN)
+	defer c.close()
+	for k := 0; k < fillChunks; k++ {
+		if got := c.read(t, uint64(k*ladderChunkBlocks), 4096); !bytes.Equal(got, fillSourceBlock(k)) {
+			t.Fatalf("source chunk %d (filled before the kill: %t) does not read back after the restart", k, k < readsAtKill)
+		}
+	}
+	for n := 0; n < flushedAtKill; n++ {
+		lba := uint64(fillWriterBase + n)
+		if got := c.read(t, lba, 4096); !bytes.Equal(got, crashIOBlock(lba)) {
+			t.Fatalf("flush-acknowledged write %d (LBA %d) on the fresh root is lost after kill -9 and restart", n, lba)
+		}
+	}
+	t.Logf("after the restart: all %d source chunks and all %d flush-acknowledged writes read back", fillChunks, flushedAtKill)
+}
+
+// tryRead is read returning the error (for readers off the test goroutine).
+func (c *nvmeInitiator) tryRead(lba uint64, n int) ([]byte, error) {
+	cmd := c.ioCmd(0x02, lba, n/4096)
+	if err := c.w.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		return nil, fmt.Errorf("nvme Read: %w", err)
+	}
+	var data []byte
+	for {
+		ch, err := c.r.Dequeue()
+		if err != nil {
+			return nil, fmt.Errorf("nvme Read: %w", err)
+		}
+		if ch.Type == 0x5 {
+			var resp nvme.CapsuleResponse
+			if err := c.r.Receive(&resp); err != nil {
+				return nil, fmt.Errorf("nvme Read response: %w", err)
+			}
+			if resp.Status != 0 {
+				return nil, fmt.Errorf("nvme Read status 0x%04x", resp.Status)
+			}
+			break
+		}
+		if ch.Type != 0x7 {
+			return nil, fmt.Errorf("nvme Read: unexpected PDU type 0x%x", ch.Type)
+		}
+		var dh nvme.C2HDataHeader
+		if err := c.r.Receive(&dh); err != nil {
+			return nil, fmt.Errorf("nvme C2HData: %w", err)
+		}
+		part := make([]byte, c.r.Length())
+		if err := c.r.ReceiveData(part); err != nil {
+			return nil, fmt.Errorf("nvme C2HData payload: %w", err)
+		}
+		data = append(data, part...)
+	}
+	if len(data) != n {
+		return nil, fmt.Errorf("nvme Read returned %d bytes; want %d", len(data), n)
+	}
+	return data, nil
 }
