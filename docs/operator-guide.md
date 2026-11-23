@@ -56,7 +56,7 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
 Each volume process reports its own heartbeat slot (server, volume and replica).
 The master orders each slot against that slot's previous report. In version 1.0,
-a backward host-clock step longer than the freshness window (10 seconds by
+a backward host-clock step longer than the freshness window (30 seconds by
 default) can expire the host's slots; keep host clocks synchronized.
 
 ## Recovery point and sync policy
