@@ -18,13 +18,15 @@ import (
 // Local headroom for a restore and a fork target. The durable root of each
 // target is on a small file system (CHUNKSTORE_SMALL_ROOT, a directory on it)
 // that a filler file (CHUNKSTORE_SMALL_FILLER, on the same file system) keeps
-// below the volume size + WAL. The runner prepares both (a loop-mounted ext4
-// needs root); without them the test is skipped.
+// below the volume size + WAL. testdata/headroom-small-fs.sh prepares both on
+// a fresh loop-mounted ext4 for each run and removes it afterwards (root
+// only); without them the test is skipped, as in CI.
 //
 // The check's limit: it compares one volume's size + WAL with the free space
-// at that moment, not the sum over every volume on the file system. Two
-// 256 MiB + 64 MiB targets both pass on the 512 MiB file system once the
-// filler is gone, though together they could outgrow it.
+// at that moment, not the sum over every volume on the file system. Once the
+// filler is gone, four 256 MiB + 64 MiB targets (1280 MiB together) all start
+// on the 768 MiB file system; the test asserts that sum exceeds the file
+// system's size.
 
 const (
 	headroomVolumeBytes = 65536 * 4096 // the harness's volume size
@@ -40,19 +42,37 @@ func freeBytes(t *testing.T, dir string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize)
 }
 
-// requireOnlyReplicaFloor fails unless the only regular file under dir is
+func fsBytes(t *testing.T, dir string) int64 {
+	t.Helper()
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		t.Fatal(err)
+	}
+	return int64(st.Blocks) * int64(st.Bsize)
+}
+
+// requireOnlyReplicaFloor requires the regular files under dir to be exactly
 // the volume's replica floor: a refused create writes no store, WAL or
 // marker. The floor is written when the assignment arrives, before the store
 // is opened and refused (a known limit: the check precedes the store, not
 // every sidecar).
 func requireOnlyReplicaFloor(t *testing.T, dir, vol string) {
 	t.Helper()
-	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && filepath.Base(p) != vol+".replica-floor" {
-			t.Fatalf("a refused create left %s (%d bytes)", p, info.Size())
+	var files []string
+	if err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			files = append(files, filepath.Base(p))
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatalf("listing %s: %v", dir, err)
+	}
+	if len(files) != 1 || files[0] != vol+".replica-floor" {
+		t.Fatalf("a refused create left %v under %s; want exactly %s.replica-floor", files, dir, vol)
+	}
 }
 
 // refusedForHeadroom starts the target's blockvolume and requires it to
@@ -139,8 +159,9 @@ func (env *handoffEnv) deleteServingTarget(t *testing.T, vol string, b bvHost, d
 }
 
 // TestHeadroomRefusesARestoreAndAForkTargetThenServesThem: a snapshot of v1
-// is restored into v2 and v4 and forked into v3, each target's durable root
-// on a small file system with less free space than the volume size + WAL.
+// is restored into v2, v4 and v6 and forked into v3, each target's durable
+// root on a small file system with less free space than the volume size +
+// WAL.
 // Each target's blockvolume refuses the create, naming both numbers, exits
 // with status 1, and writes no store; the source still serves its data and
 // its snapshot is still listed, and restores into another target (v5) that
@@ -163,6 +184,7 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		t.Fatalf("the small file system has %d bytes free, not less than the %d a volume needs: fix the runner", free, need)
 	}
 
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(small, t.Name())) })
 	env := startLadderEnv(t, "v2", "v3", "v4", "v5", "v6", "v7")
 	for _, v := range []string{"v2", "v3", "v4", "v6"} {
 		b := env.hosts["n-"+v]
@@ -192,10 +214,10 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	// The stranded target: not deletable while its holder cannot start.
 	deleteV4 := func() (string, string, int) {
 		return env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v4", "--chunk-filer", env.cluster.filerGRPC,
-			"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v4")
+			"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v4-while-refused")
 	}
 	out, errOut, code := deleteV4()
-	if code == 0 || !strings.Contains(out+errOut, "live authority requires clean revocation ACK") {
+	if code != 1 || !strings.Contains(out+errOut, "live authority requires clean revocation ACK") {
 		t.Fatalf("volume-delete of the refused target v4: exit %d %s %s; want refused for the missing ACK (a known limit)", code, out, errOut)
 	}
 	// The snapshot is still restorable into another target that has room.
@@ -244,4 +266,12 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	d6 := env.startTarget(t, "v6", "blockvolume-v6-with-room")
 	env.requireImage(t, "n-v6", img)
 	env.deleteServingTarget(t, "v6", env.hosts["n-v6"], d6, logUint(t, d6, adopted("v6")))
+
+	// The check is per volume, not a sum: all four targets started on this
+	// file system, though together they need more than its whole size.
+	if total, size := 4*need, fsBytes(t, small); total <= size {
+		t.Fatalf("four targets need %d bytes, not more than the %d-byte file system: the run does not show the per-volume limit", total, size)
+	} else {
+		t.Logf("four targets needing %d bytes together all started on a %d-byte file system (the check is per volume)", total, size)
+	}
 }
