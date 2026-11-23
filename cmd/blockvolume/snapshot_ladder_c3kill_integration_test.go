@@ -3,10 +3,11 @@
 package main_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -21,31 +22,65 @@ type restoreProgress struct {
 	Batches int    `json:"batches"`
 }
 
-// awaitRestorePhase polls target's restore status every 50 ms until ok
-// holds and returns that status; it fails the test if the restore failed,
-// became independent first (the moment was missed), or bound passed.
+// restoreStatus reads target's restore status straight from its status
+// server (a GET answers the status without starting a run).
+func (env *handoffEnv) restoreStatus(c *http.Client, target string) (restoreProgress, string, bool) {
+	resp, err := c.Get("http://" + env.hosts["n-"+target].status + "/chunk/restore?volume=" + target)
+	if err != nil {
+		return restoreProgress{}, "", false
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	var st restoreProgress
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(b, &st) != nil {
+		return restoreProgress{}, string(b), false
+	}
+	return st, string(b), true
+}
+
+// awaitRestorePhase polls target's restore status every 10 ms until ok
+// holds and returns that status, logging each change with when it was seen
+// (the record of where a kill landed). It fails the test if the restore
+// failed, became independent first (the moment was missed), or bound passed.
+// The driver's counters (filled, owned, foreign) are written when a step
+// ends, not while it runs: a moment inside a step is chosen by the phase and
+// the time spent in it, not by a counter.
 func (env *handoffEnv) awaitRestorePhase(t *testing.T, target, what string, bound time.Duration, ok func(restoreProgress) bool) restoreProgress {
 	t.Helper()
-	end := time.Now().Add(bound)
-	ctx, cancel := context.WithDeadline(context.Background(), end)
-	defer cancel()
-	for time.Now().Before(end) {
-		out, _, code, err := runCLI(ctx, env.h, "ops", "chunk", "restore", "--volume", target, "--status-addr", env.hosts["n-"+target].status, "--status")
-		var st restoreProgress
-		if err == nil && code == 0 && json.Unmarshal([]byte(out), &st) == nil {
+	c := &http.Client{Timeout: 2 * time.Second}
+	began := time.Now()
+	last := restoreProgress{Phase: "-"}
+	for time.Since(began) < bound {
+		if st, raw, good := env.restoreStatus(c, target); good {
+			if st != last {
+				t.Logf("restore of %s at +%v (waiting for %s): %+v", target, time.Since(began).Round(time.Millisecond), what, st)
+				last = st
+			}
 			switch {
 			case ok(st):
 				return st
 			case st.Phase == "failed":
-				t.Fatalf("restore of %s failed waiting for %s: %s", target, what, out)
+				t.Fatalf("restore of %s failed waiting for %s: %s", target, what, raw)
 			case st.Phase == "independent":
-				t.Fatalf("restore of %s became independent before %s was seen (the restore is too small to catch it): %s", target, what, out)
+				t.Fatalf("restore of %s became independent before %s was seen (the restore is too small to catch it): %s", target, what, raw)
 			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("restore of %s: %s not seen within %v", target, what, bound)
 	return restoreProgress{}
+}
+
+// requireRestoreState reads target's restore status once and fails the test
+// unless the run is still going and ok holds: the check, right before a
+// kill, that the kill lands where the test says.
+func (env *handoffEnv) requireRestoreState(t *testing.T, target, what string, ok func(restoreProgress) bool) restoreProgress {
+	t.Helper()
+	st, raw, good := env.restoreStatus(&http.Client{Timeout: 2 * time.Second}, target)
+	if !good || !st.Running || !ok(st) {
+		t.Fatalf("restore of %s is no longer %s before the kill: %s", target, what, raw)
+	}
+	return st
 }
 
 // denseImage fills every block of the given chunks with incompressible
@@ -81,13 +116,17 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 }
 
 // TestSnapshotLadderC3KilledMidHydrateAndMidBatch: a restore of a snapshot
-// of 32 full chunks of incompressible data into v2 (128 MiB to make local
-// and re-upload at the driver's 64 MiB/s).
-// Its blockvolume is killed (SIGKILL) while the driver is hydrating, started
-// again and the driver started again. While the driver then owns chunks, the
-// guest writes to v2 (acknowledged), and the blockvolume is killed again in
-// the middle of the batch, restarted, and the driver started again; the
-// guest writes once more. The driver resumes from the target's remote facts
+// of 32 full chunks of incompressible data into v2 (128 MiB to make local at
+// the driver's 64 MiB/s: about 2 s of hydrating). Its blockvolume is killed
+// (SIGKILL) one second into hydrating (about half the chunks local, by the
+// pace), started again and the driver started again; nothing is read in
+// between, so the restart finds the chunks the walker had not reached still
+// remote. When the walker has made every chunk local and the first batch cut
+// (Hydrating>Owning, one batch for 32 chunks) is running, which the status
+// shows as running with every chunk filled and no batch done, the guest
+// writes to v2 (acknowledged) and, the batch still running, the blockvolume
+// is killed again, restarted, and the driver started again; the guest writes
+// once more. The driver resumes from the target's remote facts
 // to independence (per its status). Then v2 holds the snapshot with every
 // acknowledged write over it, and the source's snapshot, restored again
 // into v3, is unchanged (none of v2's writes in it).
@@ -110,29 +149,28 @@ func TestSnapshotLadderC3KilledMidHydrateAndMidBatch(t *testing.T) {
 	}
 	drive()
 
-	// Killed while hydrating: some chunks local, not all.
-	st := env.awaitRestorePhase(t, "v2", "hydrating with part of the chunks local", 120*time.Second, func(s restoreProgress) bool {
-		return s.Phase == "hydrating" && s.Filled > 0 && s.Filled < len(chunks)
-	})
+	// Killed one second into hydrating: by the pace, about half the chunks
+	// are local.
+	env.awaitRestorePhase(t, "v2", "hydrating", 120*time.Second, func(s restoreProgress) bool { return s.Phase == "hydrating" })
+	time.Sleep(time.Second)
+	st := env.requireRestoreState(t, "v2", "hydrating", func(s restoreProgress) bool { return s.Phase == "hydrating" })
 	target.kill(t)
-	t.Logf("killed while hydrating: %+v", st)
+	t.Logf("killed 1 s into hydrating: %+v", st)
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-hydrate-kill")
-	env.requireImage(t, "n-v2", src) // serves the snapshot at once after the restart
 	drive()
 
 	// Written while owning, then killed in the middle of the batch.
-	env.awaitRestorePhase(t, "v2", "owning", 180*time.Second, func(s restoreProgress) bool { return s.Phase == "owning" })
+	inBatch := func(s restoreProgress) bool { return s.Filled == len(chunks) && s.Batches == 0 && s.Phase != "independent" }
+	env.awaitRestorePhase(t, "v2", "the first batch cut running", 180*time.Second, func(s restoreProgress) bool { return s.Running && inBatch(s) })
 	w1 := ladderImage("c3kw1", []uint64{3, 17, 50}, 3)
 	env.writeImage(t, "n-v2", w1)
-	st = env.awaitRestorePhase(t, "v2", "owning with chunks still foreign", 180*time.Second, func(s restoreProgress) bool {
-		return s.Phase == "owning" && s.Foreign > 0
-	})
+	st = env.requireRestoreState(t, "v2", "in its first batch cut", inBatch)
 	target.kill(t)
-	t.Logf("killed while owning: %+v", st)
+	t.Logf("killed in the first batch cut, after the write: %+v", st)
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-batch-kill")
 	env.requireImage(t, "n-v2", mergeImages(src, w1)) // every acknowledged write survived the kill
 	drive()
-	w2 := ladderImage("c3kw2", []uint64{17, 40, 60}, 2)
+	w2 := ladderImage("c3kw2", []uint64{17, 44, 60}, 2) // not chunk 40: requireEdges keeps it untouched
 	env.writeImage(t, "n-v2", w2)
 
 	env.waitIndependent(t, "v2")
