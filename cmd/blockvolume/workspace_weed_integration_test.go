@@ -21,6 +21,7 @@ type w4WeedCluster struct {
 	master, filerHTTP, filerGRPC string
 	dir                          string
 	weed                         string
+	procs                        map[string]*w4WeedProc
 }
 
 func w4FreePortPair(t *testing.T, used map[int]bool) int {
@@ -86,29 +87,17 @@ func startWorkspaceWeedAt(t *testing.T, dir string) *w4WeedCluster {
 		dir:       dir,
 		weed:      weed,
 	}
+	c.procs = map[string]*w4WeedProc{}
 	run := func(name string, args ...string) {
-		logf, err := os.Create(filepath.Join(dir, name+".log"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command(weed, args...)
-		cmd.Stdout, cmd.Stderr = logf, logf
-		cmd.Dir = dir
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start %s: %v", name, err)
-		}
+		c.startProc(t, name, args...)
 		t.Cleanup(func() {
-			_ = cmd.Process.Kill()
-			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
+			p := c.procs[name]
+			if !c.stopProcWithin(name, 5*time.Second) {
 				t.Errorf("weed %s did not exit after kill", name)
 			}
-			logf.Close()
+			p.log.Close()
 			if t.Failed() {
-				b, _ := os.ReadFile(logf.Name())
+				b, _ := os.ReadFile(p.log.Name())
 				if len(b) > 4000 {
 					b = b[len(b)-4000:]
 				}
@@ -143,6 +132,65 @@ func startWorkspaceWeedAt(t *testing.T, dir string) *w4WeedCluster {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return c
+}
+
+// w4WeedProc is one weed process; a restart replaces it under the same name,
+// arguments and log, so the cluster's cleanup always ends the current one.
+type w4WeedProc struct {
+	args []string
+	log  *os.File
+	cmd  *exec.Cmd
+	done chan struct{}
+}
+
+func (c *w4WeedCluster) startProc(t *testing.T, name string, args ...string) {
+	t.Helper()
+	p := c.procs[name]
+	if p == nil {
+		logf, err := os.Create(filepath.Join(c.dir, name+".log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p = &w4WeedProc{args: args, log: logf}
+		c.procs[name] = p
+	}
+	cmd := exec.Command(c.weed, p.args...)
+	cmd.Stdout, cmd.Stderr = p.log, p.log
+	cmd.Dir = c.dir
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s: %v", name, err)
+	}
+	p.cmd, p.done = cmd, make(chan struct{})
+	go func(done chan struct{}) { _ = cmd.Wait(); close(done) }(p.done)
+}
+
+// stopProcWithin kills name's current process and reports whether it exited.
+func (c *w4WeedCluster) stopProcWithin(name string, d time.Duration) bool {
+	p := c.procs[name]
+	if p == nil || p.cmd == nil {
+		return true
+	}
+	_ = p.cmd.Process.Kill()
+	select {
+	case <-p.done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// stopProc and restartProc take one weed process (master, volume, filer) down
+// and bring it back with the same ports and data directory.
+func (c *w4WeedCluster) stopProc(t *testing.T, name string) {
+	t.Helper()
+	if !c.stopProcWithin(name, 10*time.Second) {
+		t.Fatalf("weed %s did not exit after kill", name)
+	}
+}
+
+func (c *w4WeedCluster) restartProc(t *testing.T, name string) {
+	t.Helper()
+	c.startProc(t, name)
 }
 
 func (c *w4WeedCluster) client(t *testing.T, assignPath string) *chunkstore.SWFS {
