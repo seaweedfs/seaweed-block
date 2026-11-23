@@ -182,6 +182,9 @@ type handoffEnv struct {
 	// volExtra is appended to every blockvolume command (a test that pins
 	// a default the page leaves alone, for example).
 	volExtra []string
+	// A crash test restarts exactly this owned master with the same stores.
+	masterProcess *daemon
+	masterArgs    []string
 }
 
 // bvHost is one host's blockvolume: its server id, endpoints, local root
@@ -243,10 +246,12 @@ func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...st
 
 	// 2. blockmaster with the lifecycle store and the cluster spec.
 	mstate := filepath.Join(h.dir, "master")
-	master := h.start(t, "blockmaster", h.master, append([]string{
+	env.masterArgs = append([]string{
 		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)...)
+		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)
+	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
+	env.masterProcess = master
 	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
 		t.Fatalf("blockmaster start line %q does not name listen=%s", l, h.masterAddr)
 	}
