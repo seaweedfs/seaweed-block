@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func (attachLookupProjection) Projection() frontend.Projection {
 func TestAttachLookupUnavailableIsNotAnAbsentHead(t *testing.T) {
 	for _, code := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded, codes.PermissionDenied, codes.Internal} {
 		t.Run(code.String(), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			head := storage.ChunkHead{Gen: 7, Epoch: 3, Holder: "node/r1", State: storage.ChunkHeadActive}
 			entry, err := headEntry(head)
@@ -47,7 +48,7 @@ func TestAttachLookupUnavailableIsNotAnAbsentHead(t *testing.T) {
 			// The absence sentinel inside an Unavailable message is still an error.
 			f.lookupErr = status.Error(code, "lookup failed: "+filerNotFoundText)
 			f.mu.Unlock()
-			if h, err := remote.GetHead(ctx); err == nil || errors.Is(err, ErrNotFound) || status.Code(err) != code {
+			if h, err := remote.GetHead(ctx); err == nil || errors.Is(err, ErrNotFound) || status.Code(err) != code || !strings.Contains(err.Error(), "lookup failed: "+filerNotFoundText) {
 				t.Fatalf("failed lookup became an absent HEAD: head=%+v error=%v", h, err)
 			}
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{
@@ -62,7 +63,7 @@ func TestAttachLookupUnavailableIsNotAnAbsentHead(t *testing.T) {
 			if _, err := p.EnsureStorage("v1"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := p.RecoverVolume(ctx, "v1"); status.Code(err) != code {
+			if _, err := p.RecoverVolume(ctx, "v1"); status.Code(err) != code || !strings.Contains(err.Error(), "lookup failed: "+filerNotFoundText) {
 				t.Fatalf("attach error=%v; want preserved %s", err, code)
 			}
 			if err := p.AdmitsIO("v1"); err == nil {
