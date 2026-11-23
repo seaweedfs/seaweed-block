@@ -63,6 +63,22 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
   - Above about 100 volumes the drive's flush rate, not the software, sets the limit.
   - Treat these numbers as one host class, not a guarantee.
+- **Local disk:** a volume's store grows sparsely up to its full size. Size each durable root's file system for
+  every volume on it:
+  - the volume size;
+  - plus its WAL, 64 MiB;
+  - plus room for a cut's copy-on-write side files. A cut writes them next to the store while guest writes overwrite
+    blocks it has not uploaded yet.
+
+  blockvolume refuses to create a volume when the durable root has less free space than its size plus the WAL (the
+  refusal names both numbers), and warns at start when the free space is below its remaining growth plus the WAL;
+  there is no override.
+
+  Alert on local free space. On a full local disk, a Linux guest's writes fail after about 75 s with an I/O error
+  (EREMOTEIO), and the guest file system may then go read-only. Once space is freed, new writes succeed without a
+  restart. Data the guest had already flushed is kept.
+- **`--host-limit-dir`:** keep it on a local file system with free space. When it cannot be written, background cuts
+  are refused (they fail closed); the seal at stop still runs.
 - **SeaweedFS space:** every cut and snapshot stores the chunks that changed since the previous one. Space comes
   back only by GC and then a SeaweedFS vacuum (below).
 
