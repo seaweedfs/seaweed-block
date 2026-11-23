@@ -357,17 +357,23 @@ func fillDisk(t *testing.T, dir string, keep int64) diskFiller {
 	if err != nil {
 		t.Fatal(err)
 	}
-	buf := make([]byte, 1<<20)
 	var n int64
-	for {
-		w, err := f.Write(buf)
-		n += int64(w)
-		if err != nil {
-			if !errors.Is(err, syscall.ENOSPC) {
-				t.Fatalf("filler: %v", err)
+	// 1 MiB writes, then 4 KiB ones, so not even a small file still fits.
+	for _, size := range []int{1 << 20, 4096} {
+		buf := make([]byte, size)
+		for {
+			w, err := f.Write(buf)
+			n += int64(w)
+			if err != nil {
+				if !errors.Is(err, syscall.ENOSPC) {
+					t.Fatalf("filler: %v", err)
+				}
+				break
 			}
-			break
 		}
+	}
+	if err := f.Sync(); err != nil && !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("filler sync: %v", err)
 	}
 	if keep > 0 {
 		if err := f.Truncate(max(n-keep, 0)); err != nil {
