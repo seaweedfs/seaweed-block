@@ -67,7 +67,9 @@ func TestProcedureLocalDiskFullKernelInitiator(t *testing.T) {
 	}
 	before := blocks()
 	host, port, _ := strings.Cut(env.hosts["s1"].nvme, ":")
-	connect := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s,hostnqn=nqn.2026-11.io.seaweedfs:diskfull-kernel", host, port, plannedHandoffNQN)
+	// Its own host NQN needs its own host ID: the kernel refuses a known host
+	// ID with a different host NQN.
+	connect := fmt.Sprintf("transport=tcp,traddr=%s,trsvcid=%s,nqn=%s,hostnqn=nqn.2026-11.io.seaweedfs:diskfull-kernel,hostid=5eb10cc0-d15c-4f00-8000-000000000484", host, port, plannedHandoffNQN)
 	if out := sh("echo " + connect + " > /dev/nvme-fabrics && echo connected"); !strings.Contains(out, "connected") {
 		t.Fatalf("kernel connect: %s", out)
 	}
