@@ -469,10 +469,19 @@ func (l *Limiter) WaitUpload(ctx context.Context, n int) error {
 			l.mu.Unlock()
 			return ErrRevoked
 		}
-		div := l.cfg.NormalSlots + l.cfg.UrgentSlots
-		if l.fallback {
-			div = l.cfg.FallbackVolumes
+		// Only urgent cuts run on the fallback, and with the shared pool
+		// unusable there is no host cap to protect: while every live lease
+		// is a fallback lease, uploads are not paced. A healthy lease beside
+		// one keeps its pacing.
+		onlyFallback := l.fallback && len(l.live) > 0
+		for _, held := range l.live {
+			onlyFallback = onlyFallback && held.fallback
 		}
+		if onlyFallback {
+			l.mu.Unlock()
+			return nil
+		}
+		div := l.cfg.NormalSlots + l.cfg.UrgentSlots
 		rate := l.cfg.BytesPerSecond / int64(div)
 		if rate < 1 {
 			rate = 1
