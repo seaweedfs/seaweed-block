@@ -25,7 +25,7 @@ func TestProcedureMasterUnreachableFencesBeforeForcedMove(t *testing.T) {
 	}
 	old := env.h.start(t, "blockvolume-s1-partition", env.h.volume, args...)
 	e := env.adopt(t, old, "s1")
-	block := pattern("master-loss-kept!")
+	block := pattern("master-loss-kept")
 	env.writeBlock(t, "s1", 0, block)
 	// Install a known remote point before losing the master, so the target's
 	// read proves data preservation without promising unpublished WAL data.
