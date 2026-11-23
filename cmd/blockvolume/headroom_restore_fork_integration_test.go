@@ -51,9 +51,12 @@ func requireNoFiles(t *testing.T, dir string) {
 }
 
 // refusedForHeadroom starts the target's blockvolume and requires it to
-// refuse the create: it exits on its own with its exit line (status and
-// reason), its log names the free bytes and the need (size + WAL), and its
-// durable root holds no file. It returns the exit line.
+// refuse the create the way the durable store's open fails at startup: it
+// exits on its own with status 1, its log says "blockvolume: durable storage
+// open:" and names the free bytes and the need (size + WAL), and its durable
+// root holds no file. Status 1 is not RestartPreventExitStatus=78 in the
+// shipped unit, so systemd starts it again every 5 s, refusing each time,
+// until space is freed. It returns the refusal line.
 func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) string {
 	t.Helper()
 	b := env.hosts["n-"+target]
@@ -72,20 +75,19 @@ func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) str
 	if line == "" || !strings.Contains(line, "bytes free") {
 		t.Fatalf("%s: no refusal naming the free bytes and %q", name, want)
 	}
-	exit := d.line("blockvolume: exiting status=")
-	if exit == "" {
-		t.Fatalf("%s: no 'blockvolume: exiting status=N reason=...' line", name)
+	if code := exitCode(err); code != 1 || !strings.Contains(line, "blockvolume: durable storage open:") {
+		t.Fatalf("%s: exit status %d, refusal %q; want status 1 from the durable storage open at startup", name, code, line)
 	}
-	t.Logf("%s refused: %s; %s", name, strings.TrimSpace(line), strings.TrimSpace(exit))
+	t.Logf("%s refused (exit status 1): %s", name, strings.TrimSpace(line))
 	requireNoFiles(t, b.root)
-	return strings.TrimSpace(exit)
+	return strings.TrimSpace(line)
 }
 
 // TestHeadroomRefusesARestoreAndAForkTargetThenServesThem: a snapshot of v1
 // is restored into v2 and v4 and forked into v3, each target's durable root
 // on a small file system with less free space than the volume size + WAL.
 // Each target's blockvolume refuses the create, naming both numbers, exits
-// with the same exit line, and leaves no file; the source still serves its
+// with status 1, and leaves no file; the source still serves its
 // data and its snapshot is still listed. The operator's two ways out:
 //   - give up the stranded target: volume-delete of v4 (which exists in the
 //     catalog but cannot start) completes, and the source's snapshot is
@@ -121,13 +123,8 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", "v4",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	exits := map[string]string{}
 	for _, v := range []string{"v2", "v3", "v4"} {
-		line := env.refusedForHeadroom(t, v, "blockvolume-"+v+"-no-room")
-		exits[line[strings.Index(line, "status="):]] = v
-	}
-	if len(exits) != 1 {
-		t.Fatalf("the refusals exited differently: %v", exits)
+		env.refusedForHeadroom(t, v, "blockvolume-"+v+"-no-room")
 	}
 
 	// The stranded target given up: deleted, and the snapshot restored elsewhere.
