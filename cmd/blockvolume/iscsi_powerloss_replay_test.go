@@ -4,6 +4,7 @@ package main_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,7 +16,8 @@ import (
 // Power loss with real binaries (V1-SPEC r2.55 gap 3, INV-FE-FLUSH-SYNC-001):
 // blockvolume keeps its durable root on a dm-log-writes device. The guest
 // writes over iSCSI and issues SYNCHRONIZE CACHE; once the last sync returns,
-// the harness marks the log "acknowledged". Later writes are not synced. The
+// the harness marks the log "acknowledged". Later writes and their sync must
+// not survive the replay. The
 // volume is killed, and the harness replays the log only up to that mark onto
 // a fresh device mounted at the same path: the disk as a power cut at the
 // mark would have left it, with no page cache. A restarted blockvolume must
@@ -26,14 +28,21 @@ import (
 //	SWBLOCK_REPLAY_ROOT       mount point of the dm-log-writes filesystem
 //	SWBLOCK_REPLAY_CUT        executable: "mark" marks the log, "replay"
 //	                          unmounts, replays to the mark and remounts
-//	SWBLOCK_REPLAY_BINS       optional dir with prebuilt blockmaster/blockvolume
+//	SWBLOCK_TEST_BINS       optional dir with prebuilt blockmaster/blockvolume
 //	SWBLOCK_REPLAY_LOGS       optional existing dir for master state and logs
-//	SWBLOCK_REPLAY_DROP_SYNC  "1" = negative control: no SYNCHRONIZE CACHE, so
-//	                          the acknowledged writes must be lost
+//	SWBLOCK_REPLAY_DROP_SYNC  "1" = negative control: after one SYNCHRONIZE
+//	                          CACHE makes the store durable, the measured
+//	                          writes get none, so blocks must be lost (the test
+//	                          passes and prints REPLAY_control_RED)
+//
+// The harness is cmd/blockvolume/testdata/powerloss-replay.sh.
 func TestPowerLossReplayAckedWritesSurvive(t *testing.T) {
 	root, cut := os.Getenv("SWBLOCK_REPLAY_ROOT"), os.Getenv("SWBLOCK_REPLAY_CUT")
-	if root == "" || cut == "" {
+	if root == "" && cut == "" {
 		t.Skip("requires the isolated dm-log-writes replay harness")
+	}
+	if root == "" || cut == "" {
+		t.Fatalf("SWBLOCK_REPLAY_ROOT=%q and SWBLOCK_REPLAY_CUT=%q must be set together", root, cut)
 	}
 	dropSync := os.Getenv("SWBLOCK_REPLAY_DROP_SYNC") == "1"
 	bins := powerLossBins(t)
@@ -74,6 +83,11 @@ func TestPowerLossReplayAckedWritesSurvive(t *testing.T) {
 		return b
 	}
 	cli := dialG8Iscsi(t, iscsiAddr, iqn)
+	// The store and one block are durable before the measured writes, so a
+	// red control shows block loss in an existing store, not a lost store.
+	base := block(acked+afterBy, 9)
+	cli.write10(t, acked+afterBy, base)
+	cli.syncCache10(t)
 	want := map[uint32][]byte{}
 	for lba := uint32(0); lba < acked; lba++ {
 		b := block(lba, 1)
@@ -109,6 +123,9 @@ func TestPowerLossReplayAckedWritesSurvive(t *testing.T) {
 
 	cli2 := dialG8Iscsi(t, iscsiAddr, iqn)
 	defer cli2.close(t)
+	if got := cli2.read10(t, acked+afterBy, 1, bs); !bytes.Equal(got, base) {
+		t.Fatalf("the block synced before the measured writes is gone: the store did not survive the replay")
+	}
 	lost := 0
 	first := -1
 	for lba := uint32(0); lba < acked; lba++ {
@@ -127,16 +144,26 @@ func TestPowerLossReplayAckedWritesSurvive(t *testing.T) {
 	}
 	t.Logf("drop_sync=%v: acked blocks lost %d of %d (first %d); post-mark blocks present %d of %d",
 		dropSync, lost, acked, first, after, afterBy)
-	if lost > 0 {
-		t.Fatalf("REPLAY_BYTES_MISMATCH volume: %d of %d acknowledged blocks lost after power-loss replay (first LBA %d, drop_sync=%v)",
-			lost, acked, first, dropSync)
+	if after != 0 {
+		t.Fatalf("%d of %d post-mark blocks survived: the replay did not stop at the mark", after, afterBy)
 	}
-	fmt.Printf("REPLAY_volume_OK drop_sync=%v acked=%d post_mark_present=%d\n", dropSync, acked, after)
+	if dropSync {
+		if lost == 0 {
+			t.Fatalf("CONTROL_NOT_RED: no block lost without SYNCHRONIZE CACHE; the replay cannot show a missing sync")
+		}
+		fmt.Printf("REPLAY_control_RED lost=%d of %d first=%d\n", lost, acked, first)
+		return
+	}
+	if lost > 0 {
+		t.Fatalf("REPLAY_BYTES_MISMATCH volume: %d of %d acknowledged blocks lost after power-loss replay (first LBA %d)",
+			lost, acked, first)
+	}
+	fmt.Printf("REPLAY_volume_OK acked=%d post_mark_present=%d\n", acked, after)
 }
 
 func powerLossBins(t *testing.T) l2bins {
 	t.Helper()
-	if d := os.Getenv("SWBLOCK_REPLAY_BINS"); d != "" {
+	if d := os.Getenv("SWBLOCK_TEST_BINS"); d != "" {
 		b := l2bins{master: filepath.Join(d, "blockmaster"), volume: filepath.Join(d, "blockvolume")}
 		for _, p := range []string{b.master, b.volume} {
 			if _, err := os.Stat(p); err != nil {
@@ -148,9 +175,11 @@ func powerLossBins(t *testing.T) l2bins {
 	return buildG54Binaries(t)
 }
 
-func runReplayCut(t *testing.T, cut, step string) {
+func runReplayCut(t *testing.T, cut string, step ...string) {
 	t.Helper()
-	out, err := exec.Command(cut, step).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, cut, step...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("replay harness %s: %v\n%s", step, err, out)
 	}
