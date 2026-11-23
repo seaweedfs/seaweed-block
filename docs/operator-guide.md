@@ -187,3 +187,13 @@ Every command on the pages above, and the test that runs it.
 | `blockvolume` under systemd: exit 75 after an expired start, restart, re-grant | `TestSystemdExpiredStartupExits75ThenRegrantServes` (`cmd/blockvolume`, a real systemd manager, tag `systemd_integration`) | binary |
 | The shipped units' start limits (`StartLimitIntervalSec=600`, `StartLimitBurst=10`, `RestartPreventExitStatus=78`) | `TestBlockvolumeUnitsBoundStartupRetries` (`internal/testops`, reads the unit files) | unit files |
 | `systemctl enable`, `stop`, `disable`, `reset-failed`, `systemd-tmpfiles --create` as written on these pages | not run: the tests above start transient units, not the installed ones | not run |
+| Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesARestoreAndAForkTargetThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
+| Full local disk; full `--host-limit-dir` | `TestProcedureLocalDiskFull` (`cmd/blockvolume`, root, `testdata/diskfull.sh`); what a Linux guest sees: `TestProcedureLocalDiskFullKernelInitiator` (kernel NVMe/TCP host) | binary |
+| SeaweedFS (filer or volume server) down during a cut | `TestProcedureStoreDownDuringACut` (`cmd/blockvolume`) | binary |
+| `blockmaster` refuses a `--workspace-max-clock-skew` whose half does not exceed its fence-exit budget (at or below 10.1 s) | `TestBlockmasterRefusesASkewBoundAtOrBelowTheFenceExit` (`cmd/blockvolume`, tag `subprocess`) | binary |
+| The missing lock directory (`host volume lock directory unavailable`) and its cure (tmpfiles entry or chown) | not run in 1.0 | not run |
+| [First volume (read-only check)](standalone-deployment.md#first-volume-read-only-check): `swb_start`, `swb_show`, `swb_stop` | not run in 1.0 (needs `sudo` and the kernel NVMe/TCP host) | not run |
+| [Write test](standalone-deployment.md#write-test-scratch-host-only): `scripts/run-nvme-os-smoke.sh` | not run in 1.0 | not run |
+| [Upgrade order](standalone-deployment.md#upgrade-order): `blockmaster` first, then `blockvolume` | not run in 1.0 (no mixed-version run) | not run |
+| Scheduled snapshots (`--chunk-snapshot-schedule`) and periodic capture (`--chunk-capture-interval`) on a running volume | not run in 1.0 as written: the schedule is tested with a fake clock in `core/host/volume`, the interval only as a flag; the binary tests cut and snapshot on demand | not run |
+| SeaweedFS vacuum (`/vol/vacuum`, `volume.vacuum`) | not run in 1.0: a SeaweedFS command; the tests check that GC deletes the chunks, not that SeaweedFS compacts its files | not run |
