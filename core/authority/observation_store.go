@@ -10,7 +10,7 @@ import (
 // ============================================================
 // P14 S4 — Observation Store
 //
-// Push-ingested latest-wins observation store per ServerID. The
+// Push-ingested latest-wins observation store per replica slot. The
 // store computes derived freshness on read, based on wall-clock
 // time vs ObservedAt + FreshnessWindow. Expired observations stay
 // visible; they are just semantically ineligible for supported
@@ -231,11 +231,10 @@ var ErrInvalidObservation = errors.New("observation_store: invalid observation")
 // ExpiresAt, and fires the registered mutation callback if
 // anything changed.
 //
-// Latest-wins per ServerID. If an incoming observation has an
-// ObservedAt strictly older than the currently-stored one from
-// the same server, the store keeps the newer one (ignores the
-// stale ingest). No error is returned for that case; it's a
-// routine ordering event, not a bug.
+// Latest-wins per (ServerID, volume, replica). A slot report strictly
+// older than that slot's stored fact is ignored; other slots in the
+// observation are accepted independently. No error is returned for
+// superseded reports.
 func (s *ObservationStore) Ingest(obs Observation) error {
 	_, err := s.ingest(obs)
 	return err
