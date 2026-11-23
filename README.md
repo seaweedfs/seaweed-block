@@ -136,7 +136,9 @@ sw-block ops chunk gc        --chunk-filer <filer> --master <blockmaster>  # pre
 sw-block ops chunk verify    --volume v1 --chunk-filer <filer>   # read-only check of the remote image
 ```
 
-`volume-delete` is refused while the volume is attached or has snapshots.
+`volume-delete` is refused until the volume's holder has been revoked and its ACK
+is recorded, and while the volume has snapshots: see
+[Delete a volume](docs/volume-lifecycle.md#delete-a-volume).
 Frozen detach and the pre-copy detach are not supported in this release: a
 detach with `--frozen` (`frozen:true` on `POST /chunk/detach`) is refused with
 409 `frozen_detach_unsupported`, and `blockvolume` refuses to start with

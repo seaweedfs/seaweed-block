@@ -185,6 +185,8 @@ Each procedure below runs as written on this page, with the real binaries, two
 | Same host: restart after a crash inside the lease | `TestProcedureSameHostCrashRestartInsideTheLease` | runs |
 | After a crash: started 40 s after the stop, the barrier passes inside the start wait | `TestProcedureStartInsideTheBarrierWaitIsReGranted` | runs: does not serve while renewals are refused, serves once re-granted |
 | After a crash: started too early (the start wait ends before the barrier) | `TestProcedureStartTooEarlyExitsAndARestartServes` | runs: exits 75 with `reason=assignment_timeout`; a later start serves |
+| Delete a volume: seal, revoke, ACK, delete the snapshots, volume-delete | none (run by hand with the real binaries for this page) | runs |
+| Delete after the process was stopped by a signal (start again, revoke, ACK, delete) | none | not run |
 | Hand-over between two machines | none | not run (the tests use one machine's loopback) |
 
 ## Planned hand-over
@@ -350,6 +352,57 @@ refused (nothing moved), 2 refused locally, 3 unknown (rerun with the same
 The product does not power off an old holder that is still alive: it stops
 serving when its lease ends. Make sure it stays down.
 
+## Delete a volume
+
+A volume is deleted only after its holder has given it up: sealed, revoked and
+acknowledged, exactly as in steps 2 to 5 of the planned hand-over, and after its
+snapshots are deleted. Sealing and stopping the process is not enough: until the
+ACK is recorded, blockmaster still counts the volume as in use.
+
+**1. Stop the writer and seal** (hand-over steps 2 and 3):
+
+```bash
+sw-block ops chunk detach --plain --volume v1 --status-addr STATUS --timeout 120s
+```
+
+It answers `{"volumeID":"v1","cutLSN":...,"headGen":G,"headEpoch":E,...}` and prints
+`sealed HEAD generation: G`.
+
+**2. Revoke and wait for the ACK** (hand-over steps 4 and 5). Do not stop
+`blockvolume` yourself: it sends the ACK and exits with status 0 on its own.
+
+```bash
+sw-block ops workspace revoke --master MASTER --volume v1 --replica R --epoch E --sealed-gen G
+sw-block ops workspace show   --master MASTER --volume v1
+```
+
+`show` must print `lease state: revoking` and `recorded ACK: R@E HEAD generation G`.
+
+**3. Delete every snapshot of the volume:**
+
+```bash
+sw-block ops chunk snapshots       --volume v1 --chunk-filer FILER
+sw-block ops chunk snapshot-delete --volume v1 --chunk-filer FILER --name s1
+```
+
+Each delete answers `{"volumeID":"v1","name":"s1","state":"deleting"}`.
+
+**4. Delete the volume:**
+
+```bash
+sw-block ops chunk volume-delete --volume v1 --chunk-filer FILER --master MASTER --request-id del-v1
+```
+
+It answers with `"admitted":true,"committed":true,"headMarked":true,"completed":true`.
+Keep the `--request-id` and use the same one if you have to run the command again.
+Afterwards `sw-block ops chunk show --volume v1 --chunk-filer FILER` shows
+`"state": "deleted"` and `"chunkCount": 0`.
+
+**If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
+and step 4 is refused with `live authority requires clean revocation ACK`. Nothing
+was deleted. Start `blockvolume` again with the same flags and local root, then do
+step 2 and continue. This recovery is not run by a test in this release.
+
 ## Symptoms
 
 | You see | It means | Do |
@@ -357,6 +410,8 @@ serving when its lease ends. Make sure it stays down.
 | `sw-block ops chunk detach: plain_detach_busy: durable: plain detach requires idle frontend I/O` | I/O was in flight; nothing changed | Stop the writer, retry step 3 |
 | detach answers `detach_aborted` | Nothing was published; the volume serves here again | Retry step 3 |
 | detach answers `outcome_unknown` | The seal may have landed; I/O stays stopped | Retry step 3: it settles the outcome |
+| volume-delete: `volume_in_use: ... live authority requires clean revocation ACK` | The volume was sealed (or only stopped) but never revoked and acknowledged; nothing was deleted | "Delete a volume", step 2 |
+| volume-delete: `volume v1 has snapshots (s1); delete them first` | Snapshots still exist; nothing was deleted | "Delete a volume", step 3 |
 | revoke: `workspace revoke: no matching lease` | `--replica`/`--epoch` are not the current holder | Read them again with `show` |
 | move: `workspace clean move needs detached HEAD and matching revocation ACK` | No ACK yet, or its generation differs from HEAD | Wait for the ACK line (step 5); compare `G` with `ops chunk show` |
 | move: `move target node "S2" is not registered` | `S2` is not under `nodes` | Add it to the cluster spec, restart blockmaster |
