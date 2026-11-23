@@ -4,7 +4,9 @@ package main_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"os/exec"
 	"syscall"
 	"testing"
 	"time"
@@ -37,8 +39,13 @@ func TestProcedureMasterKilledWhileRevoking(t *testing.T) {
 	}
 	requireRevoking()
 	env.masterProcess.kill(t)
-	if env.masterProcess.err == nil {
-		t.Fatal("master exited successfully instead of being killed")
+	var exited *exec.ExitError
+	if !errors.As(env.masterProcess.err, &exited) {
+		t.Fatalf("master did not have a signal exit: %v", env.masterProcess.err)
+	}
+	status, ok := exited.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("master exit %v; want SIGKILL", exited)
 	}
 	restarted := env.h.start(t, "blockmaster-after-revoke-kill", env.h.master, env.masterArgs...)
 	restarted.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
