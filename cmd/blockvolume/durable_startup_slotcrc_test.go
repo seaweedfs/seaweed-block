@@ -152,7 +152,6 @@ func TestDurableStartup_Issue51_SmartWALTornTailRecovers(t *testing.T) {
 
 // V3 replaces the legacy warning-only recovery policy with nonce-bound,
 // contiguous WAL recovery. Corruption below strict W must block readiness.
-// The old v2 warning control is retained in walstore_midhistory_hole_test.go.
 func TestDurableStartup_Issue51_WALStoreV3CommittedHoleBlocksReadiness(t *testing.T) {
 	const childEnv = "SWBLOCK_V3_STARTUP_CRASH_PATH"
 	if path := os.Getenv(childEnv); path != "" {
