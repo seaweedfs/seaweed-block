@@ -2,6 +2,7 @@ package authority
 
 import (
 	"errors"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ type ObservationStore struct {
 	// evidence minting paths MUST NOT read it. Exposed via
 	// SupersededCount().
 	supersededCount uint64
+	supersededSlots map[[3]string]uint64
 }
 
 // SupersededCount returns the total number of slot reports dropped
@@ -52,6 +54,14 @@ func (s *ObservationStore) SupersededCount() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.supersededCount
+}
+
+// SupersededSlotCount is the diagnostic count for one reporting slot.
+// Like SupersededCount, it is not an authority input.
+func (s *ObservationStore) SupersededSlotCount(serverID, volumeID, replicaID string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.supersededSlots[[3]string{serverID, volumeID, replicaID}]
 }
 
 // SlotFact returns the most-recently-observed SlotFact for a
@@ -201,10 +211,11 @@ func NewObservationStore(config FreshnessConfig, now func() time.Time) *Observat
 	}
 	cfg := config.withDefaults()
 	return &ObservationStore{
-		config:       cfg,
-		now:          now,
-		startedAt:    now(),
-		observations: map[string]Observation{},
+		config:          cfg,
+		now:             now,
+		startedAt:       now(),
+		observations:    map[string]Observation{},
+		supersededSlots: make(map[[3]string]uint64),
 	}
 }
 
@@ -289,6 +300,19 @@ func (s *ObservationStore) ingest(obs Observation) ([]SlotHealthTransition, erro
 
 	var fn func()
 	var transitions []SlotHealthTransition
+	var dropped []struct {
+		volume, replica string
+		sentAt, newest  time.Time
+		total           uint64
+	}
+	// Both the all-superseded and mixed-report paths release mu before
+	// returning. Logging never runs under the store lock.
+	defer func() {
+		for _, d := range dropped {
+			log.Printf("heartbeat superseded server=%s volume=%s replica=%s sent_at=%s newest=%s total=%d",
+				obs.ServerID, d.volume, d.replica, d.sentAt.UTC().Format(time.RFC3339Nano), d.newest.UTC().Format(time.RFC3339Nano), d.total)
+		}
+	}()
 	s.mu.Lock()
 	prev, hadPrev := s.observations[obs.ServerID]
 	// Health transitions, from this accepted report against the same
@@ -297,18 +321,25 @@ func (s *ObservationStore) ingest(obs Observation) ([]SlotHealthTransition, erro
 	accepted := make([]SlotFact, 0, len(obs.Slots))
 	for _, slot := range obs.Slots {
 		old := ""
-		superseded := false
+		var newest time.Time
 		if hadPrev {
 			for _, p := range prev.Slots {
 				if slotKey(p) == slotKey(slot) {
 					old = p.UnhealthyReason
-					superseded = slotObservedAt(p, prev).After(slot.ObservedAt)
+					newest = slotObservedAt(p, prev)
 					break
 				}
 			}
 		}
-		if superseded {
+		if newest.After(slot.ObservedAt) {
 			s.supersededCount++
+			key := [3]string{obs.ServerID, slot.VolumeID, slot.ReplicaID}
+			s.supersededSlots[key]++
+			dropped = append(dropped, struct {
+				volume, replica string
+				sentAt, newest  time.Time
+				total           uint64
+			}{slot.VolumeID, slot.ReplicaID, slot.ObservedAt, newest, s.supersededSlots[key]})
 			continue
 		}
 		accepted = append(accepted, slot)
