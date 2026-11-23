@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -178,9 +179,13 @@ func TestIntegration_RetainIgnoresIncompleteForks(t *testing.T) {
 	var pinnedAttempt string
 	stoppedFork := func(snap, target string) {
 		t.Helper()
-		cat.OpDeadline = time.Nanosecond
+		start := clock
+		cat.SetClock(func() time.Time { return clock })
+		original := cat.f
+		cat.f = expireForkVolumeFiler{Filer: original, target: path.Join(base, target, volumeName), expire: func() { clock = start.Add(DefaultOpDeadline) }}
 		_, err := cat.Fork(ctx, ForkRequest{Source: "v1", Snapshot: snap, Target: target, RequestID: "f"})
-		cat.OpDeadline = 0
+		cat.f = original
+		cat.SetClock(func() time.Time { clock = clock.Add(time.Second); return clock })
 		if CodeOf(err) != CodeDeadlineExceeded {
 			t.Fatalf("fork %s past its deadline: %v; want deadline_exceeded", target, err)
 		}
@@ -230,4 +235,20 @@ func TestIntegration_RetainIgnoresIncompleteForks(t *testing.T) {
 			t.Fatalf("fork %s retry after its parent was deleted: %v; want snapshot_not_found or snapshot_deleting", fk.target, err)
 		}
 	}
+}
+
+// expireForkVolumeFiler advances only after the target identity was stored;
+// the retention test therefore exercises an incomplete fork, not an absent one.
+type expireForkVolumeFiler struct {
+	Filer
+	target string
+	expire func()
+}
+
+func (f expireForkVolumeFiler) CreateEntry(ctx context.Context, dir string, e *filerpb.Entry, exclusive bool) error {
+	err := f.Filer.CreateEntry(ctx, dir, e, exclusive)
+	if err == nil && path.Join(dir, e.Name) == f.target {
+		f.expire()
+	}
+	return err
 }

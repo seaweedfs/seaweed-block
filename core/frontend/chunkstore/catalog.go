@@ -1285,6 +1285,7 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 	// readAt + deadline, the last moment this fork can publish
 	// (INV-SNAP-DELETE-ANY-ORDER-001). The parent is not claimed.
 	readAt := c.now()
+	deadline := readAt.Add(c.deadline())
 	var shareToken string
 	if c.guard != nil { // the shared HEAD is the snapshot's, read below
 		if shareToken, err = c.guard.Begin(ctx, req.Source); err != nil {
@@ -1334,6 +1335,9 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 				req.Target, req.Source, req.Snapshot, existing.Fork.SourceGen, snap.HeadGen)
 		}
 	} else {
+		if !c.now().Before(deadline) {
+			return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: deadline passed; VOLUME not written", req.Target)
+		}
 		vol := VolumeInfo{Format: volumeFormat, VolumeID: req.Target, Geometry: snap.geo, Origin: origin, CreatedNs: c.now().UnixNano(),
 			Parent: &Parent{VolumeID: req.Source, Snapshot: req.Snapshot, Gen: snap.HeadGen}, Fork: record}
 		ve, err := volumeEntry(vol, req.RequestID)
@@ -1355,6 +1359,9 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		existing = vol
 	}
 
+	if !c.now().Before(deadline) {
+		return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: deadline passed; manifest preparation not started", req.Target)
+	}
 	head, upgradeIDs, err := c.prepareLegacyHead(ctx, dstRoot, storage.ChunkHead{}, head, snap.geo)
 	defer c.dropManifestIntents(ctx, dstRoot, upgradeIDs)
 	if err != nil {
@@ -1365,7 +1372,9 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		return ForkResult{}, err
 	}
 	he.Extended[extReq] = []byte(req.RequestID)
-	deadline := readAt.Add(c.deadline())
+	if !c.now().Before(deadline) {
+		return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: deadline passed; copy intent not written", req.Target)
+	}
 	id, err := putIntent(ctx, c.f, dstRoot, storage.ChunkIntent{Gen: 0, Epoch: 0, Holder: tag, Keys: headKeys(head), Segments: head.Segments, ChunkBytes: head.ChunkBytes,
 		DeadlineNs: deadline.UnixNano()})
 	if err != nil {
