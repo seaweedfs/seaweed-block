@@ -1359,6 +1359,9 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		existing = vol
 	}
 
+	if !c.now().Before(deadline) {
+		return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: deadline passed; manifest preparation not started", req.Target)
+	}
 	head, upgradeIDs, err := c.prepareLegacyHead(ctx, dstRoot, storage.ChunkHead{}, head, snap.geo)
 	defer c.dropManifestIntents(ctx, dstRoot, upgradeIDs)
 	if err != nil {
