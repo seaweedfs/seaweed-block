@@ -236,11 +236,16 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		"--target-host", b7.id, "--target-data", b7.data, "--target-ctrl", b7.ctrl, "--request-id", "force-v6",
 		"--confirm-forced", fmt.Sprintf("v6@%d", e6)}
 	var preview string
-	poll(t, 150*time.Second, "the forced move of the refused, never-started target v6 was never admitted", func() bool {
+	for end := time.Now().Add(150 * time.Second); ; time.Sleep(2 * time.Second) {
 		out, errOut, _ := env.h.run(t, append(append([]string{}, move...), "--dry-run")...)
-		preview = out + errOut
-		return previewAdmitted(out)
-	})
+		preview = strings.TrimSpace(out + errOut)
+		if previewAdmitted(out) {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("the forced move of the refused, never-started target v6 was never admitted in 150 s; the last dry run answered: %s", preview)
+		}
+	}
 	t.Logf("forced move of v6 admitted: %s", strings.TrimSpace(preview))
 	out, _ = env.h.command(t, move...)
 	issued := regexp.MustCompile(fmt.Sprintf(`(?m)^forced move issued: volume v6 request \S+: r1@%d on n-v6 -> r1@(\d+) on %s `, e6, regexp.QuoteMeta(b7.id)))
