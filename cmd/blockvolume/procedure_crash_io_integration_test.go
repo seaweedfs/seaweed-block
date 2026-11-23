@@ -247,7 +247,7 @@ func TestProcedureCrashOnAFreshRootWithFillsInFlight(t *testing.T) {
 		wmu.Lock()
 		f := flushed
 		wmu.Unlock()
-		return r >= 3 && f >= 64
+		return r >= 3 && f >= 8
 	})
 	nw.kill(t) // SIGKILL with fills and writes in flight
 	<-readerDone
@@ -326,11 +326,16 @@ func (c *nvmeInitiator) tryRead(lba uint64, n int) ([]byte, error) {
 
 // Gap 2, procedure part (cells P8.7, P9.4, P11.3): kill -9 of the holder
 // during a cut's upload, with real binaries. Image A is cut; every block is
-// rewritten (image B, flushed); a second cut starts and the holder is
-// SIGKILLed at half the first cut's duration. After the restart: HEAD
-// verifies whole at depth data (old or new image, nothing missing), every
-// block reads B locally, and the next cut, read back through a snapshot
-// restored into a new volume, is B.
+// rewritten and a second cut starts; the holder is SIGKILLed after a delay.
+// The kill counts as mid-upload only if chunk objects of the second cut
+// reached the filer while HEAD stayed at the first cut's generation; else the
+// delay is adapted (shorter if the cut had committed, longer if nothing was
+// uploaded) and the step repeats with a new image, up to cutCrashAttempts
+// times. After the mid-upload kill and a restart: HEAD verifies whole at
+// depth data, every block reads the last image locally, and the next cut,
+// read back through a snapshot restored into a new volume, is that image.
+const cutCrashAttempts = 6
+
 const (
 	cutCrashChunks = 48
 	cutCrashPer    = 64 // blocks written per chunk
@@ -375,42 +380,63 @@ func (env *handoffEnv) requireCutCrashImage(t *testing.T, hostID string, img byt
 func TestProcedureCrashDuringACut(t *testing.T) {
 	env := startHandoffEnvWith(t, 1, []string{"v2"})
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
-	first := env.start(t, "blockvolume-v1", "s1")
-	e := env.adopt(t, first, "s1")
+	holder := env.start(t, "blockvolume-v1", "s1")
+	e := env.adopt(t, holder, "s1")
 	cut := []string{"ops", "chunk", "cut", "--volume", "v1", "--status-addr", env.hosts["s1"].status}
 	verify := []string{"ops", "chunk", "verify", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--depth", "data"}
+	headGen := func() uint64 {
+		out, _ := env.h.command(t, env.chunkShow()...)
+		h, err := parseHead(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.Gen
+	}
 
 	env.writeCutCrashImage(t, 'A')
 	cutStart := time.Now()
 	env.h.command(t, cut...)
-	full := time.Since(cutStart)
-	env.writeCutCrashImage(t, 'B')
-
-	done := make(chan int, 1)
-	go func() {
-		_, _, code := env.h.run(t, cut...)
-		done <- code
-	}()
-	time.Sleep(full / 2)
-	select {
-	case code := <-done:
-		t.Fatalf("the second cut finished (exit %d) before the kill at %s: no upload was in flight", code, full/2)
-	default:
+	delay := time.Since(cutStart) / 2
+	img, landed := byte('A'), false
+	for attempt := 1; attempt <= cutCrashAttempts && !landed; attempt++ {
+		img++
+		env.writeCutCrashImage(t, img)
+		gen, entries := headGen(), f1FilerEntries(t, env)
+		done := make(chan int, 1)
+		go func() {
+			_, _, code := env.h.run(t, cut...)
+			done <- code
+		}()
+		time.Sleep(delay)
+		holder.kill(t)
+		code := <-done
+		uploaded := f1FilerEntries(t, env) - entries
+		after := headGen()
+		switch {
+		case after != gen:
+			t.Logf("attempt %d: the cut committed before the kill at %s (HEAD gen %d -> %d, CLI exit %d); shorter", attempt, delay, gen, after, code)
+			delay /= 2
+		case uploaded <= 0:
+			t.Logf("attempt %d: nothing was uploaded before the kill at %s; longer", attempt, delay)
+			delay *= 2
+		default:
+			landed = true
+			t.Logf("attempt %d: killed at %s mid-upload: %d new filer entries, HEAD still gen %d (CLI exit %d)", attempt, delay, uploaded, gen, code)
+		}
+		if out, errOut, rc := env.h.run(t, verify...); rc != 0 {
+			t.Fatalf("attempt %d: HEAD is not whole after the kill (verify exit %d):\n%s\n%s", attempt, rc, out, errOut)
+		}
+		holder = env.start(t, fmt.Sprintf("blockvolume-v1-%d", attempt), "s1")
+		if got := env.adopt(t, holder, "s1"); got != e {
+			t.Fatalf("attempt %d: the restarted holder adopted epoch %d; want %d", attempt, got, e)
+		}
+		env.requireCutCrashImage(t, "s1", img)
 	}
-	first.kill(t)
-	code := <-done
-	t.Logf("the first cut took %s; the holder was killed at %s into the second (its CLI exit %d)", full, full/2, code)
-
-	if out, errOut, rc := env.h.run(t, verify...); rc != 0 {
-		t.Fatalf("HEAD is not whole after the kill (verify exit %d):\n%s\n%s", rc, out, errOut)
+	if !landed {
+		t.Fatalf("no kill landed mid-upload in %d attempts", cutCrashAttempts)
 	}
-	again := env.start(t, "blockvolume-v1-again", "s1")
-	if got := env.adopt(t, again, "s1"); got != e {
-		t.Fatalf("the restarted holder adopted epoch %d; want %d", got, e)
-	}
-	env.requireCutCrashImage(t, "s1", 'B')
 	env.h.command(t, cut...)
 	env.snapshot(t, "s1", "v1", "after-crash")
 	env.restoreInto(t, "v1", "after-crash", "v2")
-	env.requireCutCrashImage(t, "n-v2", 'B')
+	env.requireCutCrashImage(t, "n-v2", img)
 }

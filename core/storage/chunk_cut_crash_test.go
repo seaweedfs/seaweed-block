@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Single-volume coverage gap 2 (cells P5.4, P6.4, P8.7, P9.4, P10.4, P11.3;
@@ -199,7 +200,13 @@ func TestChunkCutCrashAtEachStage(t *testing.T) {
 			r.puts = 0 // count this cut's uploads only
 			r.mu.Unlock()
 			st.arm(l, r, die)
-			_, cutErr := l.Capture(ctx)
+			// The dying cut gets its own short context: after the death its
+			// remote calls fail and it may retry them until its deadline (a
+			// real dead process does not); the restarted process below runs
+			// on fresh contexts.
+			dyingCtx, cancelDying := context.WithTimeout(context.Background(), 5*time.Second)
+			_, cutErr := l.Capture(dyingCtx)
+			cancelDying()
 			if !r.isDead() {
 				t.Fatalf("the stage %q was never reached (puts %d, cut error %v)", st.name, r.puts, cutErr)
 			}
@@ -212,6 +219,7 @@ func TestChunkCutCrashAtEachStage(t *testing.T) {
 			}
 
 			// Restart: the store recovers its WAL; HEAD is old or new, whole.
+			ctx = ctTimeout(t)
 			s2, _ := reopen(t, path)
 			head, _ := f.GetHead(ctx)
 			got := f.imageOf(t, head)
