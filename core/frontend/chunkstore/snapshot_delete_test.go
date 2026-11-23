@@ -25,12 +25,16 @@ func TestSnapshotDelete_ForkRetryAfterDeleteRereadsTheParent(t *testing.T) {
 	}
 	req := ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"}
 	clock := time.Now()
-	c.SetClock(func() time.Time { clock = clock.Add(time.Second); return clock }) // every read advances
-	c.OpDeadline = time.Nanosecond
+	c.SetClock(func() time.Time { return clock })
+	f.beforeCreate = func(p string) {
+		if p == catBase+"/v2/VOLUME" {
+			clock = clock.Add(DefaultOpDeadline)
+		}
+	}
 	if _, err := c.Fork(ctx, req); CodeOf(err) != CodeDeadlineExceeded {
 		t.Fatalf("fork past its deadline: %v, want deadline_exceeded", err)
 	}
-	c.OpDeadline = 0
+	f.beforeCreate = nil
 	if _, ok, err := c.ReadVolume(ctx, "v2"); !ok || err != nil {
 		t.Fatalf("the stopped fork's VOLUME: ok=%v %v", ok, err)
 	}
