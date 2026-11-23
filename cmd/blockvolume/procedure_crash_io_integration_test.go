@@ -383,7 +383,7 @@ func TestProcedureCrashDuringACut(t *testing.T) {
 	holder := env.start(t, "blockvolume-v1", "s1")
 	e := env.adopt(t, holder, "s1")
 	cut := []string{"ops", "chunk", "cut", "--volume", "v1", "--status-addr", env.hosts["s1"].status}
-	verify := []string{"ops", "chunk", "verify", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--depth", "data"}
+	verify := []string{"ops", "chunk", "verify", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--depth", "data", "--timeout", "5m"}
 	headGen := func() uint64 {
 		out, _ := env.h.command(t, env.chunkShow()...)
 		h, err := parseHead(out)
