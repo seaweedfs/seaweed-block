@@ -30,13 +30,30 @@ const storeDownBound = 20 * time.Second
 
 func TestProcedureStoreDownDuringACut(t *testing.T) {
 	for _, down := range []string{"filer", "volume"} {
-		t.Run(down, func(t *testing.T) { storeDownDuringACut(t, down) })
+		t.Run(down, func(t *testing.T) { storeDownDuringACut(t, down, 0) })
 	}
+	// The limit (claude06's variant): the stalled cut's copy-on-write reserve
+	// (--host-limit-cow-bytes) is 4 MiB, less than the 12 MiB of its capture
+	// that the guest overwrites during the outage. The outcome is recorded.
+	t.Run("volume-cow-reserve-exceeded", func(t *testing.T) { storeDownDuringACut(t, "volume", 4<<20) })
 }
 
-func storeDownDuringACut(t *testing.T, down string) {
+func storeDownDuringACut(t *testing.T, down string, cowBytes int64) {
 	env := startHandoffEnvWith(t, 1, []string{"v2"})
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
+	if cowBytes > 0 {
+		// Not under a temporary directory: the host-limit launch check refuses one.
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir, err := os.MkdirTemp(home, ".swblock-test-host-limit-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		env.volExtra = append(env.volExtra, "--host-limit-dir", dir, "--host-limit-cow-bytes", fmt.Sprint(cowBytes))
+	}
 	holder := env.start(t, "blockvolume-v1", "s1")
 	env.adopt(t, holder, "s1")
 	cut := []string{"ops", "chunk", "cut", "--volume", "v1", "--status-addr", env.hosts["s1"].status}
@@ -93,7 +110,7 @@ func storeDownDuringACut(t *testing.T, down string) {
 	// A minute of guest writes and flushes while the store is down.
 	c := dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
 	var pending []uint64
-	var errs int
+	var errs, timeouts int
 	var slowest time.Duration
 	var cutWhileDown *cutAnswer
 	peakSide := sideBytes()
@@ -106,7 +123,13 @@ func storeDownDuringACut(t *testing.T, down string) {
 		}
 		var ne interface{ Timeout() bool }
 		if errors.As(err, &ne) && ne.Timeout() {
-			t.Fatalf("%s down: a guest command did not answer within %s: %v", down, storeDownBound, err)
+			if cowBytes == 0 {
+				t.Fatalf("%s down: a guest command did not answer within %s: %v", down, storeDownBound, err)
+			}
+			timeouts++
+			// The queue is mid-command after a timeout: a new connection.
+			c.close()
+			c = dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
 		}
 		return err
 	}
@@ -144,8 +167,8 @@ func storeDownDuringACut(t *testing.T, down string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	c.close()
-	t.Logf("%s down 60s: guest writes %d, errors %d, slowest answer %s, frontend ready %v, peak COW side bytes %d",
-		down, written, errs, slowest.Round(time.Millisecond), env.frontendReadyAt("s1"), peakSide)
+	t.Logf("%s down 60s (COW reserve %d): guest writes %d, errors %d (of them over %s: %d), slowest answer %s, frontend ready %v, peak COW side bytes %d",
+		down, cowBytes, written, errs, storeDownBound, timeouts, slowest.Round(time.Millisecond), env.frontendReadyAt("s1"), peakSide)
 	if cutWhileDown != nil {
 		t.Logf("%s down: the cut answered while it was down, after %s, exit %d: %s", down, cutWhileDown.at.Round(time.Millisecond), cutWhileDown.rc, firstLine(cutWhileDown.out))
 	} else {
