@@ -43,14 +43,58 @@ func (env *handoffEnv) nameRecorded(t *testing.T, vol, name string) bool {
 	return false
 }
 
+// filerNames lists the entry names (unescaped) of a filer directory, read
+// straight from the filer (not through the product); a missing directory
+// lists as empty.
+func (env *handoffEnv) filerNames(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	c := &http.Client{Timeout: 10 * time.Second}
+	names := map[string]bool{}
+	for last := ""; ; {
+		req, _ := http.NewRequest("GET", "http://"+env.cluster.filerHTTP+dir+"/?limit=1000&lastFileName="+url.QueryEscape(last), nil)
+		req.Header.Set("Accept", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var page struct {
+			Entries []struct {
+				FullPath string `json:"FullPath"`
+			} `json:"Entries"`
+			LastFileName          string `json:"LastFileName"`
+			ShouldDisplayLoadMore bool   `json:"ShouldDisplayLoadMore"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return names
+		}
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("filer listing of %s: status %d %v", dir, resp.StatusCode, err)
+		}
+		for _, e := range page.Entries {
+			name, err := url.PathUnescape(path.Base(e.FullPath))
+			if err != nil {
+				t.Fatalf("filer entry %q: %v", e.FullPath, err)
+			}
+			names[name] = true
+		}
+		if !page.ShouldDisplayLoadMore || page.LastFileName == "" || page.LastFileName == last {
+			return names
+		}
+		last = page.LastFileName
+	}
+}
+
 // TestSnapshotLadderE1CrashDuringASnapshot: rounds on one volume. In each,
-// blocks in two new chunks are written and acknowledged, a snapshot with a
-// fixed request id is started, and the holder is killed after a different
-// delay (from at once to well after the answer), then restarted within its
-// lease. Each round is classified from what the kill left: ANSWERED (the
-// command answered success first), MID (no answer, but the catalog holds the
-// snapshot's name record: the kill landed inside the snapshot), or BEFORE
-// (no answer and no name record). The test fails as inconclusive unless at
+// blocks in twelve chunks are written and acknowledged (so the snapshot's cut
+// has twelve chunks to upload), a snapshot with a fixed request id is
+// started, and the holder is killed after a different delay (from at once to
+// well after the answer), then restarted within its lease. Each round is
+// classified from what the kill left in the filer: ANSWERED (the command
+// answered success first), MID (no answer, but the snapshot's name record or
+// an intent that was not there before the request: the kill landed inside
+// the snapshot, in its cut or its catalog steps), or BEFORE (neither). The test fails as inconclusive unless at
 // least one round is MID. After each restart, before the retry:
 //   - the snapshot is listed at most once and only active; an ANSWERED one
 //     is listed, at the cut its answer gave;
@@ -86,11 +130,13 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 	cum := map[uint64][]byte{0: marker}
 	classes := map[string]int{}
 	for k, delay := range delays {
-		img := ladderImage(fmt.Sprintf("e1r%d", k), []uint64{uint64(k + 1), uint64(20 + k)}, 3)
+		img := ladderImage(fmt.Sprintf("e1r%d", k), []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, 3)
 		env.writeImage(t, "s1", img)
 		cum = mergeImages(cum, img)
 		name, req := fmt.Sprintf("e1-%d", k), fmt.Sprintf("r-e1-%d", k)
 
+		intents := path.Join(env.chunkPath, "v1", "intents")
+		before := env.filerNames(t, intents)
 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 		done := make(chan result, 1)
 		go func() {
@@ -115,11 +161,15 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		}
 		cancel()
 		answered := r.err == nil && r.code == 0
+		newIntent := false
+		for n := range env.filerNames(t, intents) {
+			newIntent = newIntent || !before[n]
+		}
 		class := "BEFORE"
 		switch {
 		case answered:
 			class = "ANSWERED"
-		case env.nameRecorded(t, "v1", name):
+		case env.nameRecorded(t, "v1", name) || newIntent:
 			class = "MID"
 		}
 		classes[class]++
@@ -134,8 +184,8 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		poll(t, 60*time.Second, fmt.Sprintf("round %d: the restarted holder never reported its frontend ready", k), func() bool {
 			return env.frontendReadyAt("s1")
 		})
-		t.Logf("round %d (kill after %v): %s (exit %d err %v); adopted %v and frontend ready %v after the kill", k, delay, class, r.code, r.err,
-			adopted.Round(time.Millisecond), time.Since(killed).Round(time.Millisecond))
+		t.Logf("round %d (kill after %v): %s (exit %d err %v; new intent %v); adopted %v and frontend ready %v after the kill", k, delay, class, r.code, r.err,
+			newIntent, adopted.Round(time.Millisecond), time.Since(killed).Round(time.Millisecond))
 		env.requireImage(t, "s1", cum)
 
 		pre := env.snapshots(t, "v1", name)
