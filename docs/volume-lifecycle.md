@@ -422,6 +422,10 @@ follow from that order:
   it`: delete the name and take the snapshot again.
 - **A `--request-id` protects against a duplicate only while its snapshot name
   exists.** After `snapshot-delete`, repeating the same request takes a new snapshot.
+- **A repeated request never reports success for a snapshot that is being deleted.**
+  If the snapshot of a `--request-id` is being deleted when the request is repeated, the
+  answer is `snapshot_deleting ... is being deleted; wait for the delete to finish, then
+  reuse the name`, not the earlier success.
 
 ## Symptoms
 
@@ -433,6 +437,7 @@ follow from that order:
 | volume-delete: `volume_in_use: ... live authority requires clean revocation ACK` | The volume was sealed (or only stopped) but never revoked and acknowledged; nothing was deleted | "Delete a volume", step 2 |
 | volume-delete: `volume v1 has snapshots (s1); delete them first` | Snapshots still exist, or a name is held by an unfinished request (such a name is not in the list); nothing was deleted | "Delete a volume", step 3; for a name that is not listed, "Snapshot names and retries" |
 | snapshot: `snapshot_exists ... this request's attempt was aborted; delete the name to reuse it` | An earlier attempt of this request did not finish and was swept | `snapshot-delete` the name, then take the snapshot again |
+| snapshot: `snapshot_deleting ... is being deleted; wait for the delete to finish, then reuse the name` | The request was repeated while its snapshot is being deleted | Wait for the delete to finish; take the snapshot again if it is still wanted |
 | revoke: `workspace revoke: no matching lease` | `--replica`/`--epoch` are not the current holder | Read them again with `show` |
 | move: `workspace clean move needs detached HEAD and matching revocation ACK` | No ACK yet, or its generation differs from HEAD | Wait for the ACK line (step 5); compare `G` with `ops chunk show` |
 | move: `move target node "S2" is not registered` | `S2` is not under `nodes` | Add it to the cluster spec, restart blockmaster |
