@@ -147,13 +147,12 @@ func (env *handoffEnv) deleteServingTarget(t *testing.T, vol string, b bvHost, d
 // serves it.
 //
 // A refused target exists in the catalog and holds the master's line, but
-// cannot start: today it cannot be volume-deleted either (the delete wants a
-// clean revocation ACK its holder cannot send), a known limit of 1.0. Both
-// documented ways out are run: once space is freed, v2 and v3 start and serve
-// the snapshot, and v4 starts, is sealed, revoked and acknowledged, and then
-// deleted; and the refused restore target v6 is force-moved to another host
-// with room (n-v7), where it starts, serves the snapshot and is deleted the
-// same way.
+// cannot start, and until it has started once it is stranded (a known limit
+// of 1.0): a volume-delete wants a clean revocation ACK its holder cannot
+// send, and a forced move to a host with room (n-v7) is refused because the
+// master knows no holder of it. The one way out is run: once space is freed,
+// v2 and v3 start and serve the snapshot, and v4 and v6 start, serve, and are
+// sealed, revoked, acknowledged and deleted.
 func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	small, filler := os.Getenv("CHUNKSTORE_SMALL_ROOT"), os.Getenv("CHUNKSTORE_SMALL_FILLER")
 	if small == "" || filler == "" {
@@ -227,45 +226,22 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	d4 := env.startTarget(t, "v4", "blockvolume-v4-with-room")
 	env.deleteServingTarget(t, "v4", env.hosts["n-v4"], d4, logUint(t, d4, adopted("v4")))
 
-	// Way out 2: the refused target's line is force-moved to a host with room
-	// (n-v7, whose own volume is never created), where it starts, serves the
-	// snapshot, and is deleted the same way.
+	// A forced move is no way out for a refused target: the master knows no
+	// holder of it (it never held a lease), so every dry run is refused and
+	// nothing is sent. Its one way out is the first: with room, it starts on
+	// its own host and is deleted the usual way.
 	e6 := logUint(t, refused["v6"], regexp.MustCompile(`assignment stream delivery .*volume="v6" .*epoch=(\d+)`))
 	b7 := env.hosts["n-v7"]
 	move := []string{"ops", "workspace", "force-move", "--master", env.h.masterAddr, "--volume", "v6",
 		"--target-host", b7.id, "--target-data", b7.data, "--target-ctrl", b7.ctrl, "--request-id", "force-v6",
-		"--confirm-forced", fmt.Sprintf("v6@%d", e6)}
-	var preview string
-	for end := time.Now().Add(150 * time.Second); ; time.Sleep(2 * time.Second) {
-		out, errOut, _ := env.h.run(t, append(append([]string{}, move...), "--dry-run")...)
-		preview = strings.TrimSpace(out + errOut)
-		if previewAdmitted(out) {
-			break
-		}
-		if time.Now().After(end) {
-			t.Fatalf("the forced move of the refused, never-started target v6 was never admitted in 150 s; the last dry run answered: %s", preview)
+		"--confirm-forced", fmt.Sprintf("v6@%d", e6), "--dry-run"}
+	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(3 * time.Second) {
+		out, errOut, code := env.h.run(t, move...)
+		if code == 0 || previewAdmitted(out) || !strings.Contains(out+errOut, `the master knows no holder of volume "v6"`) || !strings.Contains(out+errOut, "nothing was sent") {
+			t.Fatalf("forced move of the refused, never-started v6: exit %d %s %s; want refused, the master knowing no holder, nothing sent", code, out, errOut)
 		}
 	}
-	t.Logf("forced move of v6 admitted: %s", strings.TrimSpace(preview))
-	out, _ = env.h.command(t, move...)
-	issued := regexp.MustCompile(fmt.Sprintf(`(?m)^forced move issued: volume v6 request \S+: r1@%d on n-v6 -> r1@(\d+) on %s `, e6, regexp.QuoteMeta(b7.id)))
-	m := issued.FindStringSubmatch(out)
-	if m == nil {
-		t.Fatalf("forced move of v6: %q; want issued to %s", out, b7.id)
-	}
-	b6 := b7
-	b6.volume = "v6"
-	b6.root = filepath.Join(filepath.Dir(b7.root), "vol-n-v7-v6")
-	env.hosts["n-v7"] = b6
-	d6 := env.h.start(t, "blockvolume-v6-on-n-v7", env.h.volume, env.volArgsFor(b6)...)
-	d6.waitLog(t, 60*time.Second, "blockvolume: volume v6 adopted as PRIMARY at r1@")
-	e62 := logUint(t, d6, adopted("v6"))
-	if fmt.Sprint(e62) != m[1] {
-		t.Fatalf("v6 adopted at epoch %d on n-v7; the forced move issued %s", e62, m[1])
-	}
-	poll(t, 60*time.Second, "v6 never reported its frontend ready on n-v7", func() bool {
-		return volumeFrontendReady(b6.status, "v6")
-	})
-	env.requireImage(t, "n-v7", img)
-	env.deleteServingTarget(t, "v6", b6, d6, e62)
+	d6 := env.startTarget(t, "v6", "blockvolume-v6-with-room")
+	env.requireImage(t, "n-v6", img)
+	env.deleteServingTarget(t, "v6", env.hosts["n-v6"], d6, logUint(t, d6, adopted("v6")))
 }
