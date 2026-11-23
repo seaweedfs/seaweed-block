@@ -69,6 +69,9 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 			if _, err = h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-b", DataAddr: "127.0.0.1:9201", CtrlAddr: "127.0.0.1:9101"}); err != nil {
 				t.Fatal(err)
 			}
+			if _, err = h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-a", DataAddr: "127.0.0.1:9202", CtrlAddr: "127.0.0.1:9102"}); err != nil {
+				t.Fatal(err)
+			}
 			seedVerifiedExistingReplicaPlacement(t, h)
 			if _, err = h.RunLifecycleProductTick(); err != nil {
 				t.Fatal(err)
