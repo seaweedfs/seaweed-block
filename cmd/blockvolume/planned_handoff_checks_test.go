@@ -27,8 +27,11 @@ func checkShowGranted(out string, e uint64) error {
 }
 
 // adoptedEpoch reads E from blockvolume's adoption line.
-func adoptedEpoch(line string) (uint64, error) {
-	e, err := matchUint(regexp.MustCompile(`blockvolume: volume v1 adopted as PRIMARY at r1@(\d+) `), line)
+func adoptedEpoch(line string) (uint64, error) { return adoptedEpochOf("v1", line) }
+
+// adoptedEpochOf reads E from blockvolume's adoption line for volume vol.
+func adoptedEpochOf(vol, line string) (uint64, error) {
+	e, err := matchUint(regexp.MustCompile(`blockvolume: volume `+regexp.QuoteMeta(vol)+` adopted as PRIMARY at r1@(\d+) `), line)
 	if err == nil && e == 0 {
 		err = fmt.Errorf("adopted at epoch 0: %q", line)
 	}
@@ -38,6 +41,11 @@ func adoptedEpoch(line string) (uint64, error) {
 // sealedGen reads G from a plain detach: one JSON object on stdout and
 // exactly the sealed-generation line on stderr.
 func sealedGen(stdout, stderr string, e uint64) (uint64, error) {
+	return sealedGenOf(stdout, stderr, "v1", e)
+}
+
+// sealedGenOf reads G from a plain detach of volume vol at epoch e.
+func sealedGenOf(stdout, stderr, vol string, e uint64) (uint64, error) {
 	var a struct {
 		VolumeID       string `json:"volumeID"`
 		HeadGen        uint64 `json:"headGen"`
@@ -48,8 +56,8 @@ func sealedGen(stdout, stderr string, e uint64) (uint64, error) {
 	if err := json.Unmarshal([]byte(stdout), &a); err != nil {
 		return 0, fmt.Errorf("plain detach stdout is not the JSON answer: %v: %q", err, stdout)
 	}
-	if a.VolumeID != "v1" || a.HeadGen == 0 || a.HeadEpoch != e || a.CutLSN == 0 || a.LastWrittenLSN == 0 {
-		return 0, fmt.Errorf("plain detach answer %+v; want v1, a generation, epoch %d and both LSNs after a write", a, e)
+	if a.VolumeID != vol || a.HeadGen == 0 || a.HeadEpoch != e || a.CutLSN == 0 || a.LastWrittenLSN == 0 {
+		return 0, fmt.Errorf("plain detach answer %+v; want %s, a generation, epoch %d and both LSNs after a write", a, vol, e)
 	}
 	if strings.TrimSpace(stderr) != fmt.Sprintf("sealed HEAD generation: %d", a.HeadGen) {
 		return 0, fmt.Errorf("plain detach stderr %q; want exactly the sealed generation line", stderr)
@@ -156,7 +164,13 @@ func checkHeadReopenedBy(out string, e2, g, l uint64, host string) error {
 // forcedEpoch reads E2 from a forced move's answer (`forced move issued:
 // ... r1@E on FROM -> r1@E2 on TO (kept HEAD gen N, remote LSN L)`).
 func forcedEpoch(out string, e uint64, from, to string) (uint64, error) {
-	re := regexp.MustCompile(fmt.Sprintf(`(?m)^forced move issued: volume v1 request \S+: r1@%d on %s -> r1@(\d+) on %s \(kept HEAD gen \d+, remote LSN \d+\)$`, e, regexp.QuoteMeta(from), regexp.QuoteMeta(to)))
+	return forcedEpochOf(out, "v1", e, from, to)
+}
+
+// forcedEpochOf reads E2 from a forced move of volume vol from host from to
+// host to.
+func forcedEpochOf(out, vol string, e uint64, from, to string) (uint64, error) {
+	re := regexp.MustCompile(fmt.Sprintf(`(?m)^forced move issued: volume %s request \S+: r1@%d on %s -> r1@(\d+) on %s \(kept HEAD gen \d+, remote LSN \d+\)$`, regexp.QuoteMeta(vol), e, regexp.QuoteMeta(from), regexp.QuoteMeta(to)))
 	e2, err := matchUint(re, out)
 	if err == nil && e2 <= e {
 		err = fmt.Errorf("forced move issued epoch %d; want above %d", e2, e)
