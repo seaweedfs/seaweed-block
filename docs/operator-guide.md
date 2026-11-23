@@ -134,7 +134,8 @@ default) can expire the host's slots; keep host clocks synchronized.
 - restoring a snapshot into a new, independent volume.
 
 A snapshot can be refused with `host_slot_busy` / `no background slot` (retryable) while every host slot is held by
-other volumes' cuts; retry with the same request id.
+other volumes' cuts; retry with the same request id. With many volumes on a host, a snapshot may wait for a slot:
+measured up to 15 s at 32 volumes with the default 3 slots.
 
 ## Moving a volume, and returning it
 
