@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io/fs"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,12 +35,17 @@ func TestCreateRefusesWithoutLocalHeadroom(t *testing.T) {
 				t.Fatalf("create on a root with 8 MiB free: %v", err)
 			}
 			var left []string
-			_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-				if err == nil && !d.IsDir() {
+			if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if !d.IsDir() {
 					left = append(left, path)
 				}
 				return nil
-			})
+			}); err != nil {
+				t.Fatalf("walk %s: %v", root, err)
+			}
 			if len(left) != 0 {
 				t.Fatalf("a refused create left %v", left)
 			}
@@ -65,24 +69,27 @@ func TestOpenWarnsWithoutLocalHeadroom(t *testing.T) {
 	}
 	p.Close()
 	for _, c := range []struct {
+		name string
 		free int64
 		warn bool
-	}{{256 << 20, true}, {330 << 20, false}} {
-		var out bytes.Buffer
-		log.SetOutput(&out)
-		restore := durable.SetRootFreeForTest(c.free)
-		p, err := durable.NewDurableProvider(cfg, v1View())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := p.EnsureStorage("v1"); err != nil {
-			t.Fatalf("an existing volume did not open with %d bytes free: %v", c.free, err)
-		}
-		p.Close()
-		restore()
-		log.SetOutput(os.Stderr)
-		if got := strings.Contains(out.String(), "WARNING volume v1"); got != c.warn {
-			t.Fatalf("free %d: warning=%v, want %v:\n%s", c.free, got, c.warn, out.String())
-		}
+	}{{"256MiB-free-warns", 256 << 20, true}, {"330MiB-free-quiet", 330 << 20, false}} {
+		t.Run(c.name, func(t *testing.T) {
+			var out bytes.Buffer
+			prior := log.Writer()
+			log.SetOutput(&out)
+			t.Cleanup(func() { log.SetOutput(prior) })
+			t.Cleanup(durable.SetRootFreeForTest(c.free))
+			p, err := durable.NewDurableProvider(cfg, v1View())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { p.Close() })
+			if _, err := p.EnsureStorage("v1"); err != nil {
+				t.Fatalf("an existing volume did not open with %d bytes free: %v", c.free, err)
+			}
+			if got := strings.Contains(out.String(), "WARNING volume v1"); got != c.warn {
+				t.Fatalf("free %d: warning=%v, want %v:\n%s", c.free, got, c.warn, out.String())
+			}
+		})
 	}
 }
