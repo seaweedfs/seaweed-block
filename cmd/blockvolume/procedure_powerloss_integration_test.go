@@ -20,7 +20,8 @@ import (
 // the holder, replays the log only up to the mark onto a fresh device (the
 // harness puts a new log-writes layer on it and remounts it at the same
 // path), restarts the holder and requires every flush-acknowledged block,
-// then a cut that commits and verifies at depth data. The phases:
+// then a cut that moves HEAD to a new generation and verifies at depth data;
+// at the end a snapshot restored into a new volume is the last image. The phases:
 //
 //  1. image A flushed and cut (committed, WAL trimmed), then a power cut;
 //  2. image B over the same LBAs, flushed, one more write without a flush,
@@ -39,7 +40,7 @@ func TestPowerLossReplayChunkVolume(t *testing.T) {
 	if root == "" || cutTool == "" {
 		t.Fatalf("SWBLOCK_REPLAY_ROOT=%q and SWBLOCK_REPLAY_CUT=%q must be set together", root, cutTool)
 	}
-	env := startHandoffEnvWith(t, 1, nil)
+	env := startHandoffEnvWith(t, 1, []string{"v2"})
 	if d := os.Getenv("SWBLOCK_REPLAY_LOGS"); d != "" {
 		t.Cleanup(func() { copyLogs(t, env.h.dir, d) })
 	}
@@ -62,14 +63,22 @@ func TestPowerLossReplayChunkVolume(t *testing.T) {
 	e := env.adopt(t, holder, "s1")
 	cuts := 0
 	// powerCut ends at a restarted holder that serves every acknowledged block
-	// of img, and a cut that commits and verifies.
-	powerCut := func(phase string, img byte) {
+	// of img, and a cut that verifies; with advance, that cut must move HEAD to
+	// a new generation (a cut that uploads nothing would leave it). frozenGen,
+	// when not 0, is the HEAD generation seen while frozen: it must still hold
+	// after the kill, so no HEAD write from before the freeze landed later.
+	powerCut := func(phase string, img byte, frozenGen uint64, advance bool) {
 		t.Helper()
 		if err := holder.proc.Signal(syscall.SIGSTOP); err != nil {
 			t.Fatalf("%s: freeze the holder: %v", phase, err)
 		}
 		runReplayCut(t, cutTool, "mark")
 		holder.kill(t)
+		if frozenGen != 0 {
+			if g := headGen(); g != frozenGen {
+				t.Fatalf("%s: HEAD moved from gen %d to %d after the freeze: the cut was not in progress at the mark", phase, frozenGen, g)
+			}
+		}
 		runReplayCut(t, cutTool, "replay")
 		cuts++
 		holder = env.start(t, fmt.Sprintf("blockvolume-v1-after-cut-%d", cuts), "s1")
@@ -77,7 +86,11 @@ func TestPowerLossReplayChunkVolume(t *testing.T) {
 			t.Fatalf("%s: the restarted holder adopted epoch %d; want %d", phase, got, e)
 		}
 		env.requireCutCrashImage(t, "s1", img)
+		g0 := headGen()
 		env.h.command(t, cut...)
+		if g := headGen(); advance && g <= g0 {
+			t.Fatalf("%s: the cut after the replay left HEAD at gen %d (was %d): the replayed writes were not published", phase, g, g0)
+		}
 		if out, errOut, rc := env.h.run(t, verify...); rc != 0 {
 			t.Fatalf("%s: HEAD does not verify after the replay (exit %d):\n%s\n%s", phase, rc, out, errOut)
 		}
@@ -89,7 +102,7 @@ func TestPowerLossReplayChunkVolume(t *testing.T) {
 	cutStart := time.Now()
 	env.h.command(t, cut...)
 	cutTook := time.Since(cutStart)
-	powerCut("phase 1 (after a committed cut)", 'A')
+	powerCut("phase 1 (after a committed cut)", 'A', 0, false)
 
 	// Phase 2: overwrite with B; then a write the guest never flushed.
 	env.writeCutCrashImage(t, 'B')
@@ -104,7 +117,7 @@ func TestPowerLossReplayChunkVolume(t *testing.T) {
 		defer c.close()
 		c.write(t, extra, cutCrashBlock('x', extra))
 	}()
-	powerCut("phase 2 (between a write and its flush)", 'B')
+	powerCut("phase 2 (between a write and its flush)", 'B', 0, true)
 	func() {
 		c := dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
 		defer c.close()
@@ -130,6 +143,7 @@ func TestPowerLossReplayChunkVolume(t *testing.T) {
 		if err := holder.proc.Signal(syscall.SIGSTOP); err != nil {
 			t.Fatalf("phase 3: freeze the holder: %v", err)
 		}
+		time.Sleep(time.Second) // a HEAD write already on the wire lands before the reading
 		uploaded, after := f1FilerEntries(t, env)-entries, headGen()
 		switch {
 		case after != gen:
@@ -145,7 +159,7 @@ func TestPowerLossReplayChunkVolume(t *testing.T) {
 		if landed {
 			// Still frozen mid-upload: the power cut starts from here (its
 			// SIGSTOP is a no-op on a stopped process).
-			powerCut(fmt.Sprintf("phase 3 attempt %d (cut in progress)", attempt), img)
+			powerCut(fmt.Sprintf("phase 3 attempt %d (cut in progress)", attempt), img, gen, true)
 			<-done
 			break
 		}
@@ -157,6 +171,10 @@ func TestPowerLossReplayChunkVolume(t *testing.T) {
 	if !landed {
 		t.Fatalf("no power cut landed while a cut uploaded, in %d attempts", cutCrashAttempts)
 	}
+	// What the filer holds is the image: a snapshot restored into a new volume.
+	env.snapshot(t, "s1", "v1", "after-power-cuts")
+	env.restoreInto(t, "v1", "after-power-cuts", "v2")
+	env.requireCutCrashImage(t, "n-v2", img)
 	fmt.Printf("REPLAY_chunk_OK power_cuts=%d last_image=%c\n", cuts, img)
 }
 

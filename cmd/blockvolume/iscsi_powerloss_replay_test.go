@@ -179,7 +179,9 @@ func runReplayCut(t *testing.T, cut string, step ...string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, cut, step...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, cut, step...)
+	cmd.WaitDelay = 5 * time.Second // a hung child keeping the pipe open does not outlive the kill
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("replay harness %s: %v\n%s", step, err, out)
 	}
