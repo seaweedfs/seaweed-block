@@ -106,6 +106,9 @@ func TestWorkspaceRevocationAckOnlyAfterFrontendAndCutsStop(t *testing.T) {
 		if g.Projection().Healthy {
 			t.Fatal("drain began before admission closed")
 		}
+		if cause := g.FenceCause(); cause != "revoked by the master" {
+			t.Fatalf("drain cause %q; want revocation, not an expired RPC deadline", cause)
+		}
 		attempts++
 		if attempts == 1 {
 			return 0, errors.New("drain still failed")
@@ -117,6 +120,9 @@ func TestWorkspaceRevocationAckOnlyAfterFrontendAndCutsStop(t *testing.T) {
 	}
 	if err := g.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if !g.Held() || !g.Projection().Healthy || attempts != 0 || acks != 0 {
+		t.Fatal("valid first grant must serve without a drain or ACK")
 	}
 	revoking = true
 	if err := g.Refresh(context.Background()); err == nil {
