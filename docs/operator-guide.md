@@ -52,9 +52,11 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal
   `size_bytes` in the cluster spec (for example 65536 x 4096 = 268435456).
-  If a blockvolume's first start for a volume used the wrong `--durable-blocks`, its log repeats `chunk attach check: chunkstore:
-  geometry_mismatch` and it exits; waiting or restarting with the right flags does not help, because its local store
-  was created at the wrong size. In one sitting: stop the unit first; then check that the volume never served:
+  A first start whose `--durable-blocks` or `--durable-blocksize` disagrees with the volume record is refused before
+  any local store is created: it exits 78 (the unit does not restart it) with a line `geometry_mismatch: --durable-blocks
+  ... disagree with the volume record`; correct the flag and start it again.
+  A wrong-size local store left by an earlier release's first start is different: its log repeats `chunk attach check:
+  chunkstore: geometry_mismatch` and it exits; waiting or restarting with the right flags does not help. In one sitting: stop the unit first; then check that the volume never served:
   `sw-block ops chunk show --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
   `"holder":""` in its head; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
   `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. If the head shows an epoch above 0 or
@@ -202,7 +204,8 @@ Every command on the pages above, and the test that runs it.
 | Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesARestoreAndAForkTargetThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
 | A snapshot refused with `host_slot_busy` / `no background slot` while every host slot is held, retried with the same request id | `TestSnapshotLadderF1VolumesOneHost` (`cmd/blockvolume`, `F1_RUN=1`, `F1_HOST_LIMIT_DIR` set, 3 slots; `F1_SLOT_RETRY_SECONDS=0` is its negative control) | binary |
 | Full local disk; full `--host-limit-dir` | `TestProcedureLocalDiskFull` (`cmd/blockvolume`, root, `testdata/diskfull.sh`); what a Linux guest sees: `TestProcedureLocalDiskFullKernelInitiator` (kernel NVMe/TCP host) | binary |
-| A start with the wrong `--durable-blocks` (`geometry_mismatch`): the guard (`sw-block ops chunk show`), removing the local files, a start with the right flags | `TestWrongGeometryCureAsWritten` (`cmd/blockvolume`) | binary |
+| A first start with the wrong `--durable-blocks`: refused before any local store is created (exit 78) | `TestWrongGeometryFlagIsRefusedBeforeTheStoreIsCreated` (`cmd/blockvolume`) | binary |
+| A wrong-size local store left by an earlier release (`geometry_mismatch` at attach): the guard (`sw-block ops chunk show`), removing the local files, a start with the right flags | `TestWrongGeometryCureAsWritten` (`cmd/blockvolume`; the store is planted from a capture of such a run) | binary |
 | SeaweedFS (filer or volume server) down during a cut | `TestProcedureStoreDownDuringACut` (`cmd/blockvolume`) | binary |
 | `blockmaster` refuses a `--workspace-max-clock-skew` whose half does not exceed its fence-exit budget (at or below 10.1 s) | `TestBlockmasterRefusesASkewBoundAtOrBelowTheFenceExit` (`cmd/blockvolume`, tag `subprocess`) | binary |
 | The missing lock directory (`host volume lock directory unavailable`) and its cure (tmpfiles entry or chown) | not run in 1.0 | not run |

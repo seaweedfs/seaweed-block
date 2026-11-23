@@ -732,6 +732,24 @@ func runVolume(f flags, exits *processExit) int {
 				defer chunk.close()
 			}
 		}
+		// Only a store about to be created takes its geometry from the flags;
+		// an existing store opens with its own (blocks == 0), and a mismatch
+		// between it and the record is the attach check's.
+		if chunkErr == nil && geometryErr == nil && blocks != 0 && chunk.catalog != nil {
+			readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			refusal := geometryFlagsRefusal(readCtx, chunk.catalog, f.volumeID, uint64(blocks), uint32(blockSize))
+			readCancel()
+			if refusal != "" {
+				fmt.Fprintln(os.Stderr, refusal)
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return exitGeometryRefused
+			}
+		}
 		var dp *durable.DurableProvider
 		err := geometryErr
 		if err == nil {

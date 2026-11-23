@@ -114,6 +114,46 @@ func TestChunkVolumeRootStaysInsideBase(t *testing.T) {
 	}
 }
 
+// Before any local store is created, a geometry flag that disagrees with the
+// volume record is refused with a line naming both; a matching record, a
+// missing record (the attach check creates it) and an unreadable one (the
+// attach check still applies) do not refuse.
+func TestGeometryFlagsRefusalComparesTheRecord(t *testing.T) {
+	ctx := context.Background()
+	cat, err := chunkstore.NewCatalog(chunkstore.NewMemFiler(), defaultChunkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := geometryFlagsRefusal(ctx, cat, "v1", 32768, 4096); got != "" {
+		t.Fatalf("no record yet: %q", got)
+	}
+	if _, err := cat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
+		t.Fatal(err)
+	}
+	if got := geometryFlagsRefusal(ctx, cat, "v1", 65536, 4096); got != "" {
+		t.Fatalf("matching flags refused: %q", got)
+	}
+	for _, c := range []struct {
+		blocks uint64
+		size   uint32
+	}{{32768, 4096}, {65536, 512}} {
+		got := geometryFlagsRefusal(ctx, cat, "v1", c.blocks, c.size)
+		for _, want := range []string{"geometry_mismatch", "--durable-blocks", "65536 blocks of 4096 bytes"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("flags %d x %d: refusal %q lacks %q", c.blocks, c.size, got, want)
+			}
+		}
+	}
+	if got := geometryFlagsRefusal(ctx, cat, "v1", 0, 0); got != "" {
+		t.Fatalf("an existing store (no create geometry) must not be refused: %q", got)
+	}
+	gone, cancel := context.WithCancel(ctx)
+	cancel()
+	if got := geometryFlagsRefusal(gone, cat, "bad/id", 32768, 4096); got != "" {
+		t.Fatalf("an unreadable record must not refuse: %q", got)
+	}
+}
+
 // The attach check is the VOLUME entry's attach rules (B9 W2 §4.2): the first
 // attach creates VOLUME from the local geometry, a later attach with the same
 // geometry passes, and another geometry is refused.
