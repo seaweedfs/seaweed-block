@@ -635,3 +635,24 @@ func TestAdmitClosedDuringPoolAcquisitionIsRevoked(t *testing.T) {
 		t.Fatalf("admission racing Close: id=%d err=%v; want ErrRevoked", id, err)
 	}
 }
+
+// An urgent cut on the static fallback (the shared pool is unusable) is not
+// rate-paced: there is no shared cap to protect, and pacing it at
+// BytesPerSecond/FallbackVolumes made a seal time out (issue 486).
+func TestUrgentFallbackUploadIsNotPaced(t *testing.T) {
+	c := testConfig(t)
+	c.Directory += "-missing"
+	l := newTest(t, c)
+	id, err := l.Acquire(context.Background(), Urgent, nil)
+	if err != nil || !l.Snapshot().(Stats).FallbackActive {
+		t.Fatalf("urgent fallback: id=%d err=%v", id, err)
+	}
+	defer l.Release(id)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for i := 0; i < 4; i++ {
+		if err := l.WaitUpload(ctx, 16<<20); err != nil {
+			t.Fatalf("upload %d on the fallback was paced: %v", i, err)
+		}
+	}
+}

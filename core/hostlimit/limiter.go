@@ -469,10 +469,13 @@ func (l *Limiter) WaitUpload(ctx context.Context, n int) error {
 			l.mu.Unlock()
 			return ErrRevoked
 		}
-		div := l.cfg.NormalSlots + l.cfg.UrgentSlots
 		if l.fallback {
-			div = l.cfg.FallbackVolumes
+			// Only an urgent cut runs on the fallback, and with the shared
+			// pool unusable there is no host cap to protect: not paced.
+			l.mu.Unlock()
+			return nil
 		}
+		div := l.cfg.NormalSlots + l.cfg.UrgentSlots
 		rate := l.cfg.BytesPerSecond / int64(div)
 		if rate < 1 {
 			rate = 1
