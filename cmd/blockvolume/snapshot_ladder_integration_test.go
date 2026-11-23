@@ -260,9 +260,10 @@ func (env *handoffEnv) restoreAttached(t *testing.T, src, snap, target string) {
 // TestSnapshotLadderB1SnapshotQuery: three snapshots with writes between
 // them. The list is exactly the committed snapshots, in order, each active,
 // with the point (cut LSN), HEAD generation and size (chunk count) its
-// creation answered; a prefix shows one. A snapshot being taken while a
-// write runs appears in the list only committed, with the fields its
-// creation answers, and stays. A snapshot request that is refused
+// creation answered; a prefix shows one. A snapshot being taken appears in
+// the list only committed, with the fields its creation answers, and stays;
+// the test fails as inconclusive unless at least one listing ran while the
+// snapshot was in flight and did not show it. A snapshot request that is refused
 // (a restore volume not yet independent) leaves no name in the list.
 func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	env := startLadderEnv(t, "v2")
@@ -296,8 +297,9 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	}
 
 	// A snapshot being taken: listed only committed, and then it stays. The
-	// write before it is acknowledged first, so its cut is past s3's; the
-	// write during it may land before or after its cut.
+	// write before it is acknowledged first, so its cut is past s3's; a
+	// second write follows its start, and may land before or after its cut
+	// (the test claims nothing about it).
 	env.writeBlock(t, "s1", 3, pattern("ladder-b1-blk-D!"))
 	type result struct {
 		out, errOut string
@@ -324,6 +326,7 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	env.writeBlock(t, "s1", 4, pattern("ladder-b1-blk-E!"))
 	var observed []snapshotInfo
 	var r result
+	inFlightUnlisted := 0 // listings begun before s4 answered that did not show it
 	// The observation bound: every list probe runs within what is left of it,
 	// and a probe that returns after it fails the test.
 	deadline := time.Now().Add(160 * time.Second)
@@ -347,6 +350,9 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 			e := e
 			s4 = &e
 		}
+		if running && s4 == nil {
+			inFlightUnlisted++
+		}
 		switch {
 		case s4 == nil && len(observed) > 0:
 			t.Fatal("s4 was listed, then disappeared")
@@ -359,6 +365,10 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	if r.err != nil || r.code != 0 {
 		t.Fatalf("snapshot s4: exit %d %v\n%s\n%s", r.code, r.err, r.out, r.errOut)
 	}
+	if inFlightUnlisted == 0 {
+		t.Fatalf("inconclusive: no listing ran while s4 was in flight and unlisted (%d listings saw it committed)", len(observed))
+	}
+	t.Logf("s4: %d listings while in flight did not show it; %d showed it committed", inFlightUnlisted, len(observed))
 	var created snapshotInfo
 	if err := json.Unmarshal([]byte(r.out), &created); err != nil || created.Name != "s4" {
 		t.Fatalf("snapshot s4 answer: %v\n%s", err, r.out)
