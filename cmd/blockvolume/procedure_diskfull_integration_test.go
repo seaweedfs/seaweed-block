@@ -91,7 +91,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	cutAdvances("before the disk fills")
 
 	// 1. The WAL's disk fills under guest I/O. LBAs 0.. are written in order
-	// (chunks 0-7 at most); image A in chunks 40-47 is never overwritten here.
+	// (chunks 0-31 at most); image A in chunks 40-47 is never overwritten here.
 	fill := fillDisk(t, root, 2<<20)
 	c := dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
 	want := map[uint64][]byte{}
@@ -117,7 +117,9 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 		}
 		return nil
 	}
-	firstErr := writeUntilError(8192) // 32 MiB, far more than the 2 MiB left
+	// 128 MiB: more than the 2 MiB left and more than the preallocated WAL, so
+	// the WAL fills too when the flusher cannot write extents.
+	firstErr := writeUntilError(32768)
 	if errors.Is(firstErr, errDiskFullHang) {
 		t.Fatalf("case 1: a guest command did not answer within %s on a full disk: %v", diskFullBound, firstErr)
 	}
@@ -228,7 +230,9 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	}()
 	cutAdvances("case 1, after the space is freed")
 
-	// 2. A new volume's durable root is full.
+	// 2. A new volume's durable root is full. v1 stops first: its flusher
+	// would take any space freed on the shared disk.
+	holder.term(t, 30*time.Second)
 	fill = fillDisk(t, root, 0)
 	v2 := env.start(t, "blockvolume-v2-full", "n-v2")
 	err := v2.wait(60 * time.Second)
@@ -244,7 +248,6 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	t.Logf("case 2: exited on the full root (%v), then started and adopted v2", err)
 
 	// 3. The --host-limit-dir disk is full.
-	holder.term(t, 30*time.Second)
 	slots := filepath.Join(limit, "slots")
 	if err := os.Mkdir(slots, 0o700); err != nil {
 		t.Fatal(err)
