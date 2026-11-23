@@ -132,6 +132,19 @@ func TestNeverStartedDeleteRacesAStart(t *testing.T) {
 // the process exits 75; its HEAD was never claimed (epoch 0, no holder).
 func (env *handoffEnv) strandTarget(t *testing.T, v string) {
 	t.Helper()
+	d := env.startWrongGeometry(t, v)
+	err := d.wait(90 * time.Second)
+	head := env.headOf(t, v)
+	if exitCode(err) != 75 || !d.has("adopted as PRIMARY") || !strings.Contains(head, `"epoch":0`) || !strings.Contains(head, `"holder":""`) {
+		t.Fatalf("setup: %s is not assigned-never-claimed: exit %v, adopted %v, HEAD %s", v, err, d.has("adopted as PRIMARY"), head)
+	}
+}
+
+// startWrongGeometry restores v from v1's snapshot s1 and starts its
+// blockvolume with the wrong --durable-blocks; it returns once the process
+// logged its adoption (the master assigned it), still alive.
+func (env *handoffEnv) startWrongGeometry(t *testing.T, v string) *daemon {
+	t.Helper()
 	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", v,
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	args := append([]string{}, env.volArgsFor(env.hosts["n-"+v])...)
@@ -141,11 +154,13 @@ func (env *handoffEnv) strandTarget(t *testing.T, v string) {
 		}
 	}
 	d := env.h.start(t, "blockvolume-"+v+"-wrong-geometry", env.h.volume, args...)
-	err := d.wait(90 * time.Second)
-	head := env.headOf(t, v)
-	if exitCode(err) != 75 || !d.has("adopted as PRIMARY") || !strings.Contains(head, `"epoch":0`) || !strings.Contains(head, `"holder":""`) {
-		t.Fatalf("setup: %s is not assigned-never-claimed: exit %v, adopted %v, HEAD %s", v, err, d.has("adopted as PRIMARY"), head)
-	}
+	d.waitLog(t, 60*time.Second, "blockvolume: volume "+v+" adopted as PRIMARY at r1@")
+	return d
+}
+
+func (env *handoffEnv) workspaceShow(t *testing.T, v string) string {
+	out, errOut, _ := env.h.run(t, "ops", "workspace", "show", "--master", env.h.masterAddr, "--volume", v)
+	return out + errOut
 }
 
 func (env *handoffEnv) headOf(t *testing.T, v string) string {
@@ -172,27 +187,58 @@ func startSourceWithSnapshot(t *testing.T, targets ...string) *handoffEnv {
 	return env
 }
 
-// 1.0.1 red (r2.65 item 4): a target that was assigned and never claimed
-// holds nothing to seal or ACK, so volume-delete completes WITHOUT a revoke;
-// its HEAD becomes a deleted tombstone and the source is untouched. On 1.0
-// the delete is refused as volume_in_use (live authority needs a revocation
-// ACK that no process can give).
+// 1.0.1 red (r2.65 item 4): a target that was assigned (its lease granted)
+// and never claimed its HEAD has acknowledged nothing, so volume-delete
+// completes WITHOUT a revoke; its HEAD becomes a deleted tombstone, the
+// source is untouched, and the master's line for the lease ends: no granted
+// lease stays on a deleted volume. Three moments to delete at:
+//   - alive: the process still runs with its granted lease, before the
+//     recovery watchdog's 30 s exit; recorded only (the answer is not fixed);
+//   - exited: the process exited 75, the lease not yet lapsed;
+//   - lapsed: the lease lapsed too (65 s after the exit).
+//
+// On 1.0 the delete is refused as volume_in_use (live authority needs a
+// revocation ACK that no process can give).
 func TestAssignedNeverClaimedTargetIsDeletableWithoutARevoke(t *testing.T) {
-	env := startSourceWithSnapshot(t, "v2")
-	env.strandTarget(t, "v2")
-	out, code := env.deleteNoRevoke(context.Background(), "v2", "del-v2-assigned")
-	var del struct{ Completed bool }
-	if code != 0 || json.Unmarshal([]byte(firstLine(out)), &del) != nil || !del.Completed {
-		t.Fatalf("1.0.1: volume-delete of an assigned-never-claimed target must complete without a revoke; exit %d:\n%s", code, out)
-	}
-	if head := env.headOf(t, "v2"); !strings.Contains(head, `"state":"deleted"`) {
-		t.Fatalf("the deleted target's HEAD is not a deleted tombstone: %s", head)
+	env := startSourceWithSnapshot(t, "v2", "v3", "v4")
+	for _, c := range []struct{ moment, v string }{{"alive", "v2"}, {"exited", "v3"}, {"lapsed", "v4"}} {
+		t.Run(c.moment, func(t *testing.T) {
+			var d *daemon
+			switch c.moment {
+			case "alive":
+				d = env.startWrongGeometry(t, c.v)
+			case "exited":
+				env.strandTarget(t, c.v)
+			case "lapsed":
+				env.strandTarget(t, c.v)
+				time.Sleep(65 * time.Second)
+			}
+			before := env.workspaceShow(t, c.v)
+			out, code := env.deleteNoRevoke(context.Background(), c.v, "del-"+c.v+"-"+c.moment)
+			var del struct{ Completed bool }
+			completed := code == 0 && json.Unmarshal([]byte(firstLine(out)), &del) == nil && del.Completed
+			head := env.headOf(t, c.v)
+			after := env.workspaceShow(t, c.v)
+			served := false
+			if d != nil {
+				served = d.wait(60*time.Second) == nil || volumeFrontendReady(env.hosts["n-"+c.v].status, c.v)
+				d.kill(t)
+			}
+			t.Logf("%s: delete exit %d, completed %v, HEAD %s, process served %v\nworkspace show before:\n%s\nafter:\n%s\ndelete output:\n%s",
+				c.moment, code, completed, head, served, before, after, out)
+			if completed && (!strings.Contains(head, `"state":"deleted"`) || strings.Contains(after, "lease state: granted") || served) {
+				t.Errorf("%s: a completed delete must leave a deleted HEAD, no granted lease and no serving process", c.moment)
+			}
+			if c.moment != "alive" && !completed {
+				t.Errorf("1.0.1: %s: volume-delete of an assigned-never-claimed target must complete without a revoke; exit %d", c.moment, code)
+			}
+		})
 	}
 	if got := env.readBlock(t, "s1", 0); string(got) != string(cutCrashBlock('A', 0)) {
 		t.Fatalf("the source's block changed")
 	}
 	if snaps := env.snapshots(t, "v1", ""); len(snaps) != 1 {
-		t.Fatalf("the source has %d snapshots after the target's delete; want 1", len(snaps))
+		t.Fatalf("the source has %d snapshots after the targets' deletes; want 1", len(snaps))
 	}
 }
 
