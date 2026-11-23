@@ -450,7 +450,6 @@ func (env *handoffEnv) requireHeadHolder(t *testing.T, e uint64, host string) {
 	}
 }
 
-func pattern(s string) []byte { return bytes.Repeat([]byte(s), 4096/len(s)) }
 
 func (env *handoffEnv) start(t *testing.T, name, id string) *daemon {
 	t.Helper()
