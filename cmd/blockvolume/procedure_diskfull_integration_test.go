@@ -330,7 +330,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 }
 
 // knownDiskFullFindings are the filed defects this test still expects.
-var knownDiskFullFindings = map[int]bool{484: true, 486: true}
+var knownDiskFullFindings = map[int]bool{484: true} // 486 fixed by #487
 
 // diskFullFinding is one defect row: bad reports whether issue's defect
 // reproduced in this run.
