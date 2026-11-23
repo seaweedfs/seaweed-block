@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,6 +37,8 @@ import (
 //
 // A large test: it runs only with F1_RUN=1, on a host booked for it, never in
 // CI. Knobs: F1_VOLUMES (10), F1_ROUNDS (3), F1_WRITE_SECONDS (120),
+// F1_CONTROL_PAUSE_SECONDS (a negative control: stop the last volume's
+// process that long after the rounds; the rung must then fail),
 // F1_LOAD_SPAN (8192 blocks per volume per round, written evenly across the
 // write period, so writes run before, during and after the snapshots),
 // F1_HOST_LIMIT_DIR (a local, non-temporary directory; required for the
@@ -55,6 +58,7 @@ type f1Config struct {
 	Report             string
 	LedgerBlocksPerRnd int
 	LoadSpan           int
+	ControlPauseSecs   int
 }
 
 func f1ConfigFromEnv(t *testing.T) f1Config {
@@ -75,6 +79,9 @@ func f1ConfigFromEnv(t *testing.T) f1Config {
 	c := f1Config{Volumes: num("F1_VOLUMES", 10), Rounds: num("F1_ROUNDS", 3), WriteSeconds: num("F1_WRITE_SECONDS", 120),
 		HostLimitDir: os.Getenv("F1_HOST_LIMIT_DIR"), Slots: num("F1_HOST_LIMIT_SLOTS", hostlimit.DefaultConfig("").NormalSlots),
 		Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: num("F1_LOAD_SPAN", 8192)}
+	if v := os.Getenv("F1_CONTROL_PAUSE_SECONDS"); v != "" {
+		c.ControlPauseSecs = num("F1_CONTROL_PAUSE_SECONDS", 0)
+	}
 	if c.Rounds*(c.LedgerBlocksPerRnd+c.LoadSpan) > ladderUntouched {
 		t.Fatalf("F1_ROUNDS=%d does not fit below the untouched chunk", c.Rounds)
 	}
@@ -153,6 +160,20 @@ func TestSnapshotLadderF1VolumesOneHost(t *testing.T) {
 			rounds[i].FilerPerSnap = float64(added) / float64(len(rounds))
 		}
 		rep.Rounds = append(rep.Rounds, rounds...)
+	}
+	if cfg.ControlPauseSecs > 0 {
+		// Negative control: the last volume's blockvolume is stopped
+		// (SIGSTOP) past the master's freshness window, so its heartbeats
+		// stop; the watch must record a slot expiry and the rung must fail.
+		last := vols[len(vols)-1]
+		if err := last.d.proc.Signal(syscall.SIGSTOP); err != nil {
+			t.Fatalf("control: SIGSTOP %s: %v", last.id, err)
+		}
+		time.Sleep(time.Duration(cfg.ControlPauseSecs) * time.Second)
+		if err := last.d.proc.Signal(syscall.SIGCONT); err != nil {
+			t.Fatalf("control: SIGCONT %s: %v", last.id, err)
+		}
+		time.Sleep(3 * time.Second)
 	}
 	rep.Health = watch.finish(master.log)
 	f1Judge(t, cfg, rep)
