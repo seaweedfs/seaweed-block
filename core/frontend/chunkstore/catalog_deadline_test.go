@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,55 @@ func TestFork_ExpiredAttemptWritesNoNewMetadata(t *testing.T) {
 				}
 				if intents := intentsOf(t, f, "v2"); len(intents) != 0 {
 					t.Fatalf("expired attempt left intents: %+v", intents)
+				}
+			})
+		}
+	}
+}
+
+// The frozen flat snapshot forces the manifest-upgrade path to create an
+// intent before uploading its segment; count creates, even if later removed.
+func TestFork_ExpiredLegacyPreparationWritesNoIntent(t *testing.T) {
+	for _, origin := range []string{OriginFork, OriginRestore} {
+		for _, expired := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/expired=%t", origin, expired), func(t *testing.T) {
+				f, c, r := preF4ForkFixture(t, false)
+				now := time.Unix(1800000000, 0)
+				start := now
+				c.SetClock(func() time.Time { return now })
+				intents := 0
+				f.beforeCreate = func(p string) {
+					if p == catBase+"/v3/VOLUME" && expired {
+						now = start.Add(DefaultOpDeadline)
+					}
+					if strings.HasPrefix(p, catBase+"/v3/intents/") {
+						intents++
+					}
+				}
+				req := ForkRequest{Source: "v1", Snapshot: "s1", Target: "v3", RequestID: "legacy-deadline"}
+				var err error
+				if origin == OriginFork {
+					_, err = c.Fork(context.Background(), req)
+				} else {
+					_, err = c.Restore(context.Background(), req)
+				}
+				f.beforeCreate = nil
+				if expired {
+					if CodeOf(err) != CodeDeadlineExceeded || intents != 0 {
+						t.Fatalf("expired legacy attempt: err=%v intent creates=%d; want deadline and zero", err, intents)
+					}
+					if _, err := f.LookupEntry(context.Background(), catBase+"/v3", headName); err == nil {
+						t.Fatal("expired legacy attempt published HEAD")
+					}
+				} else {
+					if err != nil || intents != 2 {
+						t.Fatalf("live legacy attempt: err=%v intent creates=%d; want success and upgrade+copy intents", err, intents)
+					}
+					dst, err := NewChunkRemote(f, r.b, catBase+"/v3")
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertLegacyImage(t, dst)
 				}
 			})
 		}
