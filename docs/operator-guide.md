@@ -190,6 +190,7 @@ Every command on the pages above, and the test that runs it.
 | Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesARestoreAndAForkTargetThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
 | Full local disk; full `--host-limit-dir` | `TestProcedureLocalDiskFull` (`cmd/blockvolume`, root, `testdata/diskfull.sh`); what a Linux guest sees: `TestProcedureLocalDiskFullKernelInitiator` (kernel NVMe/TCP host) | binary |
 | SeaweedFS (filer or volume server) down during a cut | `TestProcedureStoreDownDuringACut` (`cmd/blockvolume`) | binary |
+| `blockmaster` refuses a `--workspace-max-clock-skew` whose half does not exceed its fence-exit budget (at or below 10.1 s) | `TestBlockmasterRefusesASkewBoundAtOrBelowTheFenceExit` (`cmd/blockvolume`, tag `subprocess`) | binary |
 | The missing lock directory (`host volume lock directory unavailable`) and its cure (tmpfiles entry or chown) | not run in 1.0 | not run |
 | [First volume (read-only check)](standalone-deployment.md#first-volume-read-only-check): `swb_start`, `swb_show`, `swb_stop` | not run in 1.0 (needs `sudo` and the kernel NVMe/TCP host) | not run |
 | [Write test](standalone-deployment.md#write-test-scratch-host-only): `scripts/run-nvme-os-smoke.sh` | not run in 1.0 | not run |
