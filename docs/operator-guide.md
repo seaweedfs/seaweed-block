@@ -52,11 +52,14 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal
   `size_bytes` in the cluster spec (for example 65536 x 4096 = 268435456).
-  If a blockvolume was started with the wrong `--durable-blocks` and its log repeats `geometry_mismatch`, first
-  confirm the volume never served: `sw-block ops chunk show --volume <vol> --chunk-filer <filer> --chunk-path <path>`
-  prints `"epoch":0` and `"holder":""` in its head. Only then stop the unit, remove `<vol>.bin`, `<vol>.bin.chunkfresh`,
-  `<vol>.bin.chunkmap` and `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. Never remove
-  these files for a volume whose head shows an epoch above 0 or a holder: they hold its acknowledged writes.
+  If a blockvolume was started with the wrong `--durable-blocks`, its log repeats `chunk attach check: chunkstore:
+  geometry_mismatch` and it exits; waiting or restarting with the right flags does not help, because its local store
+  was created at the wrong size. In one sitting: stop the unit first; then check that the volume never served:
+  `sw-block ops chunk show --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
+  `"holder":""` in its head; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
+  `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. If the head shows an epoch above 0 or
+  a holder, do not remove these files, even if this host never served the volume (for example after a forced move):
+  they may hold acknowledged writes; use the normal move or delete procedure instead.
 - **Memory:** plan for about 32-36 MiB per running volume. That was measured with 150-200 volumes on one host.
 - **Measured throughput on one host** (16 cores, 23.7 GB RAM, one consumer NVMe drive, fsync on every volume):
 
