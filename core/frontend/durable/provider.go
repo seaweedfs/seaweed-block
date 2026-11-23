@@ -938,6 +938,7 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 		if err != nil {
 			return nil, fmt.Errorf("durable: OpenWALStore %s: %w", path, err)
 		}
+		p.warnLowHeadroom(volumeID, path, int64(ws.NumBlocks())*int64(ws.BlockSize()))
 		// G6 §1.A α: plumb operator-tunable retention into walstore.
 		// Zero (pre-G6 default) preserves strict checkpoint-driven
 		// recycle.
@@ -988,7 +989,7 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 		var err error
 		if p.testWALStoreFactory != nil {
 			ws, err = p.testWALStoreFactory(path, true)
-		} else {
+		} else if err = p.refuseCreateWithoutHeadroom(volumeID); err == nil {
 			ws, err = storage.CreateWALStoreWithOptions(path, p.cfg.NumBlocks, p.cfg.BlockSize, storage.WALStoreOptions{ChunkBlocks: p.cfg.ChunkBlocks})
 		}
 		if err != nil {
