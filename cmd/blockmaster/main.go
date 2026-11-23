@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/host/master"
+	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/launcher"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
@@ -133,6 +135,10 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.workspaceMaxClockSkew <= 0 || f.workspaceMaxClockSkew >= 60*time.Second {
 		return flags{}, fmt.Errorf("--workspace-max-clock-skew must be positive and less than 60s")
+	}
+	fenceExitBudget := durable.ChunkFenceWatchInterval + volume.WorkspaceDrainTimeout
+	if f.workspaceMaxClockSkew/2 <= fenceExitBudget {
+		return flags{}, fmt.Errorf("--workspace-max-clock-skew=%s gives half-skew=%s, which must exceed configured fence-exit budget=%s (watch cadence=%s + drain timeout=%s), assuming normal scheduling; increase --workspace-max-clock-skew above %s", f.workspaceMaxClockSkew, f.workspaceMaxClockSkew/2, fenceExitBudget, durable.ChunkFenceWatchInterval, volume.WorkspaceDrainTimeout, 2*fenceExitBudget)
 	}
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")

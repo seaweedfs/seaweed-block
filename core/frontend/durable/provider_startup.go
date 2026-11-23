@@ -82,10 +82,10 @@ func (p *DurableProvider) ChooseChunkStartupExit(volumeID string, gen uint64, ch
 	return true
 }
 
-// chunkFenceWatchInterval bounds how long after a runtime fence the backend
+// ChunkFenceWatchInterval bounds how long after a runtime fence the backend
 // reports not operational and the process owner is woken. I/O is refused
 // from the fence itself (readyCheck reads the layer's latched flag).
-const chunkFenceWatchInterval = 50 * time.Millisecond
+const ChunkFenceWatchInterval = 50 * time.Millisecond
 
 // watchChunkFence waits for the attached layer to fence after startup (its
 // publication found HEAD owned by another holder or epoch: the layer latches
@@ -96,7 +96,7 @@ const chunkFenceWatchInterval = 50 * time.Millisecond
 // through p.inflight (counted when it starts) after cancelling closeCtx.
 func (p *DurableProvider) watchChunkFence(volumeID string, h *volHandle, layer storage.ChunkLayer) {
 	defer p.inflight.Done()
-	t := time.NewTicker(chunkFenceWatchInterval)
+	t := time.NewTicker(ChunkFenceWatchInterval)
 	defer t.Stop()
 	for {
 		select {
