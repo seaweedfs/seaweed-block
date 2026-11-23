@@ -87,12 +87,13 @@ func TestWorkspaceDelayedRenewalCannotUndoExpiry(t *testing.T) {
 }
 
 func TestWorkspaceRevocationAckOnlyAfterFrontendAndCutsStop(t *testing.T) {
-	now := time.Unix(1000, 0)
+	// Keep the injected clock in the live context deadline domain.
+	now := time.Now()
 	revoking := false
 	attempts, acks := 0, 0
 	var g *WorkspaceLeaseGuard
 	client := workspaceTestClient{renew: func() (*control.WorkspaceLeaseFact, error) {
-		return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(time.Second), Revoking: revoking}, nil
+		return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(30 * time.Second), Revoking: revoking}, nil
 	},
 		ack: func() error {
 			if attempts != 2 || g.Projection().Healthy {
