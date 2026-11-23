@@ -185,8 +185,10 @@ Each procedure below runs as written on this page, with the real binaries, two
 | Same host: restart after a crash inside the lease | `TestProcedureSameHostCrashRestartInsideTheLease` | runs |
 | After a crash: started 40 s after the stop, the barrier passes inside the start wait | `TestProcedureStartInsideTheBarrierWaitIsReGranted` | runs: does not serve while renewals are refused, serves once re-granted |
 | After a crash: started too early (the start wait ends before the barrier) | `TestProcedureStartTooEarlyExitsAndARestartServes` | runs: exits 75 with `reason=assignment_timeout`; a later start serves |
-| Delete a volume: seal, revoke, ACK, delete the snapshots, volume-delete | none (run by hand with the real binaries for this page) | runs |
-| Delete after the process was stopped by a signal (start again, revoke, ACK, delete) | none | not run |
+| Delete a volume: seal, revoke, ACK, delete the snapshots, volume-delete | `TestProcedureDeleteAVolume` | runs: refused while a snapshot exists, with nothing deleted; completes after the snapshot is deleted; a rerun with the same request id completes again |
+| Delete after the process was stopped by a signal (start again, revoke, ACK, delete) | `TestProcedureDeleteAfterASignalStop` | runs: refused for the missing ACK, with nothing deleted; completes after the restart, the revoke and the ACK |
+| After a crash: the process is killed while the guest writes, restart inside the lease | `TestProcedureCrashWithIOInFlight` | runs: every write acknowledged by a flush reads back |
+| The holder cannot reach blockmaster, then a forced move | `TestProcedureMasterUnreachableFencesBeforeForcedMove` | runs: the forced move is refused while the holder is alive and admitted only after it exited 75 (`reason=lease_expired`) |
 | Hand-over between two machines | none | not run (the tests use one machine's loopback) |
 
 ## Planned hand-over
@@ -401,7 +403,7 @@ Afterwards `sw-block ops chunk show --volume v1 --chunk-filer FILER` shows
 **If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
 and step 4 is refused with `live authority requires clean revocation ACK`. Nothing
 was deleted. Start `blockvolume` again with the same flags and local root, then do
-step 2 and continue. This recovery is not run by a test in this release.
+step 2 and continue. This recovery runs as written (`TestProcedureDeleteAfterASignalStop`).
 
 ## Snapshot names and retries
 
