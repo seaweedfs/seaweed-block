@@ -36,6 +36,8 @@ import (
 //
 // A large test: it runs only with F1_RUN=1, on a host booked for it, never in
 // CI. Knobs: F1_VOLUMES (10), F1_ROUNDS (3), F1_WRITE_SECONDS (120),
+// F1_LOAD_SPAN (8192 blocks per volume per round, written evenly across the
+// write period, so writes run before, during and after the snapshots),
 // F1_HOST_LIMIT_DIR (a local, non-temporary directory; required for the
 // limiter checks, a smoke may leave it unset), F1_HOST_LIMIT_SLOTS
 // (the limiter's normal slots; default hostlimit's), F1_REPORT.
@@ -72,7 +74,7 @@ func f1ConfigFromEnv(t *testing.T) f1Config {
 	}
 	c := f1Config{Volumes: num("F1_VOLUMES", 10), Rounds: num("F1_ROUNDS", 3), WriteSeconds: num("F1_WRITE_SECONDS", 120),
 		HostLimitDir: os.Getenv("F1_HOST_LIMIT_DIR"), Slots: num("F1_HOST_LIMIT_SLOTS", hostlimit.DefaultConfig("").NormalSlots),
-		Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: 4096}
+		Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: num("F1_LOAD_SPAN", 8192)}
 	if c.Rounds*(c.LedgerBlocksPerRnd+c.LoadSpan) > ladderUntouched {
 		t.Fatalf("F1_ROUNDS=%d does not fit below the untouched chunk", c.Rounds)
 	}
@@ -114,6 +116,7 @@ type f1Round struct {
 	WriteMaxOutMs   float64 `json:"write_max_out_ms"`
 	RSSKiB          int64   `json:"blockvolume_rss_kib"`
 	FilerEntriesNew int     `json:"filer_entries_added_by_round"`
+	FilerPerSnap    float64 `json:"filer_entries_per_snapshot"`
 }
 
 type f1Report struct {
@@ -145,6 +148,7 @@ func TestSnapshotLadderF1VolumesOneHost(t *testing.T) {
 		added := f1FilerEntries(t, env) - before
 		for i := range rounds {
 			rounds[i].FilerEntriesNew = added
+			rounds[i].FilerPerSnap = float64(added) / float64(len(rounds))
 		}
 		rep.Rounds = append(rep.Rounds, rounds...)
 	}
@@ -282,7 +286,17 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 			defer wg.Done()
 			defer c.close()
 			first := f1LedgerBase(cfg, round) + uint64(cfg.LedgerBlocksPerRnd)
+			// Paced so the span covers the whole write period.
+			every := time.Duration(cfg.WriteSeconds) * time.Second / time.Duration(cfg.LoadSpan)
+			begin := time.Now()
 			for n := 0; n < cfg.LoadSpan; n++ {
+				if wait := time.Until(begin.Add(time.Duration(n) * every)); wait > 0 {
+					select {
+					case <-stop:
+						return
+					case <-time.After(wait):
+					}
+				}
 				select {
 				case <-stop:
 					return
