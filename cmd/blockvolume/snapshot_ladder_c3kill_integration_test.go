@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"path"
 	"testing"
 	"time"
 )
@@ -83,6 +84,19 @@ func (env *handoffEnv) requireRestoreState(t *testing.T, target, what string, ok
 	return st
 }
 
+// requireBlocksOf reads every block of img on the host and requires each to
+// equal img (whole 4 KiB blocks compared byte for byte).
+func (env *handoffEnv) requireBlocksOf(t *testing.T, hostID string, img map[uint64][]byte) {
+	t.Helper()
+	c := dialNVMe(t, env.hosts[hostID].nvme, plannedHandoffNQN)
+	defer c.close()
+	for lba, want := range img {
+		if got := c.read(t, lba, 4096); string(got) != string(want) {
+			t.Fatalf("%s: block %d differs from what was written", hostID, lba)
+		}
+	}
+}
+
 // denseImage fills every block of the given chunks with incompressible
 // bytes (seeded by tag and LBA), so that their chunks are full size in the
 // store and a restore of them takes measurable time at the driver's rate.
@@ -103,6 +117,44 @@ func denseImage(tag string, chunks []uint64) map[uint64][]byte {
 	return img
 }
 
+// independent reports whether target's independence marker exists, read
+// from the filer (not through the product's status, which reports only a
+// run of this process).
+func (env *handoffEnv) independent(t *testing.T, target string) bool {
+	t.Helper()
+	c := &http.Client{Timeout: 10 * time.Second}
+	p := path.Join(env.chunkPath, target, "RESTORE-INDEPENDENT")
+	resp, err := c.Get("http://" + env.cluster.filerHTTP + p + "?metadata=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true
+	case http.StatusNotFound:
+		return false
+	}
+	t.Fatalf("filer lookup of %s: status %d", p, resp.StatusCode)
+	return false
+}
+
+// subsetOf returns the blocks of img in the given chunks.
+func subsetOf(img map[uint64][]byte, chunks []uint64) map[uint64][]byte {
+	in := map[uint64]bool{}
+	for _, c := range chunks {
+		in[c] = true
+	}
+	out := map[uint64][]byte{}
+	for lba, b := range img {
+		if in[lba/ladderChunkBlocks] {
+			out[lba] = b
+		}
+	}
+	return out
+}
+
 // startTarget starts target's blockvolume and waits until it serves.
 func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 	t.Helper()
@@ -117,25 +169,28 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 
 // TestSnapshotLadderC3KilledHydratingAndBeforeIndependence: a restore of a
 // snapshot of 32 full chunks of incompressible data into v2 (128 MiB to make
-// local at the driver's 64 MiB/s: about 2 s of hydrating). Its blockvolume
-// is killed (SIGKILL) one second into hydrating, started again, and read
-// back in full (a partly filled chunk must never be served), and the driver
-// is started again: the read-back has made every chunk local, so the
-// resumed run has nothing left to fill (its status then reports filled 0)
-// and spends its time re-uploading the chunks under v2's own keys. 150 ms
-// into that run, still running and not independent, the guest writes to v2
-// (acknowledged) and, the run checked still running and not independent,
-// the blockvolume is killed again, restarted (every acknowledged write reads
-// back), and the driver started again; the guest writes once more. The
-// driver resumes from the target's remote facts to independence (per its
-// status). Then v2 holds the snapshot with every acknowledged write over it,
-// and the source's snapshot, restored again into v3, is unchanged (none of
-// v2's writes in it).
+// local at the driver's 64 MiB/s: about 2 s of hydrating).
+//
+//  1. Its blockvolume is killed (SIGKILL) one second into hydrating and
+//     started again. Every other chunk is read back (a partly filled chunk
+//     must never be served), which makes those chunks local and leaves the
+//     rest to the driver, and the driver is started again.
+//  2. The resumed run must report, when its hydrating step ends, that it
+//     filled some chunks and not all (0 < filled < 32: it resumed from a
+//     partly local volume). Then, the run still going and not independent,
+//     the guest writes to v2 (acknowledged); checked still running and not
+//     independent, the blockvolume is killed again and restarted. Before the
+//     driver is started again the independence marker must be absent (the
+//     kill landed before independence); every acknowledged write reads back.
+//  3. The driver is started again, the guest writes once more, and the run
+//     reaches independence (per its status and the marker). Then v2 holds
+//     the snapshot with every acknowledged write over it, read back in full,
+//     and the source's snapshot, restored again into v3, is unchanged (none
+//     of v2's writes in it).
 //
 // Not covered: guest writes while the driver reports Owning. The status
 // shows owning only once the single batch (32 chunks, under the 64-chunk
-// batch) has ended, a few ms before independent, so the second kill is only
-// known to land in the resumed run, every chunk local, before independence.
+// batch) has ended, a few ms before independent.
 func TestSnapshotLadderC3KilledHydratingAndBeforeIndependence(t *testing.T) {
 	env := startLadderEnv(t, "v2", "v3")
 	var chunks []uint64
@@ -162,28 +217,40 @@ func TestSnapshotLadderC3KilledHydratingAndBeforeIndependence(t *testing.T) {
 	target.kill(t)
 	t.Logf("killed 1 s into hydrating: %+v", st)
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-hydrate-kill")
-	env.requireImage(t, "n-v2", src) // serves the snapshot, no partly filled chunk
+	var even []uint64
+	for c := uint64(0); c < 32; c += 2 {
+		even = append(even, c)
+	}
+	env.requireBlocksOf(t, "n-v2", subsetOf(src, even)) // no partly filled chunk is served
 	drive()
 
-	// In the resumed run, every chunk local, before independence: written,
-	// then killed.
+	// The resumed run: it fills what is not local yet; then, before
+	// independence, written and killed.
 	notDone := func(s restoreProgress) bool { return s.Phase != "independent" }
-	resumed := time.Now()
-	env.awaitRestorePhase(t, "v2", "the resumed run", 30*time.Second, func(s restoreProgress) bool { return s.Running && notDone(s) })
-	time.Sleep(time.Until(resumed.Add(150 * time.Millisecond)))
-	env.requireRestoreState(t, "v2", "running and not independent", notDone)
+	st = env.awaitRestorePhase(t, "v2", "the resumed run's hydrating step ended", 60*time.Second, func(s restoreProgress) bool {
+		return s.Running && s.Filled > 0 && notDone(s)
+	})
+	if st.Filled >= len(chunks) {
+		t.Fatalf("the resumed run filled %d chunks: it did not resume from a partly local volume (%d read back before it)", st.Filled, len(even))
+	}
 	w1 := ladderImage("c3kw1", []uint64{3, 17, 50}, 3)
 	env.writeImage(t, "n-v2", w1)
 	st = env.requireRestoreState(t, "v2", "running and not independent", notDone)
 	target.kill(t)
-	t.Logf("killed %v into the resumed run, after the write: %+v", time.Since(resumed).Round(time.Millisecond), st)
+	t.Logf("killed in the resumed run after it filled %d of %d chunks, after the write: %+v", st.Filled, len(chunks), st)
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-batch-kill")
-	env.requireImage(t, "n-v2", mergeImages(src, w1)) // every acknowledged write survived the kill
+	if env.independent(t, "v2") {
+		t.Fatal("the independence marker exists after the second kill: the kill did not land before independence")
+	}
+	env.requireBlocksOf(t, "n-v2", w1) // every acknowledged write survived the kill
 	drive()
 	w2 := ladderImage("c3kw2", []uint64{17, 44, 60}, 2) // not chunk 40: requireEdges keeps it untouched
 	env.writeImage(t, "n-v2", w2)
 
 	env.waitIndependent(t, "v2")
+	if !env.independent(t, "v2") {
+		t.Fatal("the restore status says independent but the marker is absent")
+	}
 	env.requireImage(t, "n-v2", mergeImages(src, w1, w2))
 	env.restoreChecked(t, "base", "v3", src, w1, w2)
 }
