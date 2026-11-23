@@ -150,7 +150,7 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 					Format   int                        `json:"format"`
 					Segments map[string]json.RawMessage `json:"segments"`
 				}
-				if err = json.Unmarshal(stored.Content, &root); err != nil || root.Format != 2 || len(root.Segments) == 0 {
+				if err = json.Unmarshal(stored.Content, &root); err != nil || root.Format != 3 || len(root.Segments) == 0 {
 					t.Fatalf("CLEAN move must exercise upgraded segmented root: %s %v", stored.Content, err)
 				}
 
