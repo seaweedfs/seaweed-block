@@ -300,11 +300,12 @@ func (s *ObservationStore) ingest(obs Observation) ([]SlotHealthTransition, erro
 
 	var fn func()
 	var transitions []SlotHealthTransition
-	var dropped []struct {
+	type supersededReport struct {
 		volume, replica string
 		sentAt, newest  time.Time
 		total           uint64
 	}
+	var dropped []supersededReport
 	// Both the all-superseded and mixed-report paths release mu before
 	// returning. Logging never runs under the store lock.
 	defer func() {
@@ -335,11 +336,7 @@ func (s *ObservationStore) ingest(obs Observation) ([]SlotHealthTransition, erro
 			s.supersededCount++
 			key := [3]string{obs.ServerID, slot.VolumeID, slot.ReplicaID}
 			s.supersededSlots[key]++
-			dropped = append(dropped, struct {
-				volume, replica string
-				sentAt, newest  time.Time
-				total           uint64
-			}{slot.VolumeID, slot.ReplicaID, slot.ObservedAt, newest, s.supersededSlots[key]})
+			dropped = append(dropped, supersededReport{slot.VolumeID, slot.ReplicaID, slot.ObservedAt, newest, s.supersededSlots[key]})
 			continue
 		}
 		accepted = append(accepted, slot)

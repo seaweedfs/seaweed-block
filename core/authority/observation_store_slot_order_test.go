@@ -61,6 +61,12 @@ func TestObservationStore_SupersededSlotLogsAfterUnlock(t *testing.T) {
 			t.Errorf("diagnostic %d=%q; want %q", i, lines[i], want)
 		}
 	}
+	if s.SupersededSlotCount("one-host", "a", "r1") != 2 ||
+		s.SupersededSlotCount("one-host", "b", "r1") != 1 ||
+		s.SupersededSlotCount("other-host", "a", "r1") != 1 ||
+		s.SupersededSlotCount("other-host", "b", "r1") != 0 || s.SupersededCount() != 4 {
+		t.Fatal("per-slot diagnostics disagree with emitted totals or aggregate count")
+	}
 }
 
 // V1-SPEC r2.53: independent processes on one server order only their
