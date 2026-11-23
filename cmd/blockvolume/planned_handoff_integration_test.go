@@ -185,10 +185,13 @@ type handoffEnv struct {
 }
 
 // bvHost is one host's blockvolume: its server id, endpoints, local root
-// and the volume it serves (v1 when empty).
+// and the volume it serves (v1 when empty). server and replica, when set,
+// replace id as the server id and r1 as the replica id (several volumes
+// under one server id).
 type bvHost struct {
 	id, data, ctrl, status, nvme, root string
 	volume                             string
+	server, replica                    string
 }
 
 // startHandoffEnv runs the chapter's steps 1-3: a weed cluster, the cluster
@@ -267,11 +270,17 @@ func (env *handoffEnv) volArgs(id string) []string { return env.volArgsFor(env.h
 func (env *handoffEnv) volArgsFor(b bvHost) []string {
 	lockDir := b.root + ".locks" // each simulated host has its own
 	_ = os.MkdirAll(lockDir, 0o700)
-	vol := b.volume
+	vol, server, replica := b.volume, b.server, b.replica
 	if vol == "" {
 		vol = "v1"
 	}
-	return append([]string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", vol, "--replica-id", "r1",
+	if server == "" {
+		server = b.id
+	}
+	if replica == "" {
+		replica = "r1"
+	}
+	return append([]string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", server, "--volume-id", vol, "--replica-id", replica,
 		"--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
 		"--durable-blocks", "65536", "--durable-blocksize", "4096",

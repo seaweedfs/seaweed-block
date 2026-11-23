@@ -290,7 +290,16 @@ func TestSyncControlsIgnoreAmbientAllocation(t *testing.T) {
 		{"crash-matrix", "TestFdatasyncAcknowledgedWritesSurviveSIGKILL", "prezero"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			// The crash-matrix child is fdatasync-bound and takes 1-35 s on a
+			// slow disk, so it runs until the parent test's deadline rather
+			// than a fixed budget.
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if d, ok := t.Deadline(); ok {
+				ctx, cancel = context.WithDeadline(context.Background(), d.Add(-10*time.Second))
+			} else {
+				ctx, cancel = context.WithCancel(context.Background())
+			}
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+tc.test+"$")
 			cmd.Env = append(os.Environ(), "SWBLOCK_TEST_SYNC_CRASH=", "SWBLOCK_TEST_SYNC_CHILD_FAILURE=", "SWBLOCK_ALLOCATION="+tc.allocation, "SWBLOCK_PREZERO=0")

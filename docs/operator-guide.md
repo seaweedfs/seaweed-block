@@ -13,6 +13,18 @@ that runs it.
   example the SeaweedFS master or filer node), with durable storage. A volume host holds no authority state.
   - Why: a forced move after a host loss needs the authority record, the lease horizon and the lost range.
   - If those lived on the lost host, the volume could not be moved anywhere.
+- **SeaweedFS durability (a premise):** sw-block assumes SeaweedFS acknowledges a write only when it is durable;
+  configuring SeaweedFS for that is the SeaweedFS deployment's responsibility.
+
+## Clock safety requirement
+
+While volumes are served, blockmaster's host must keep its wall clock **slewed, not stepped**. Configure chrony to
+allow `makestep` only at boot (for example, `makestep 1 3` for the initial updates), and do not run `ntpdate` from a
+timer. Do not restart an initial-step clock configuration while leases are live. A wall-clock step larger than the
+configured clock-skew bound while a lease is live is **outside the v1.0 supported envelope**.
+
+This is a safety premise, not a tested wall-step guarantee. The host's monotonic lease deadline does not remove this
+requirement on blockmaster's clock. See Part T `TERM-LEASE-NOW-001` in the [invariant contract](design/invariants.md).
 
 ## Install
 
@@ -53,6 +65,11 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
   - Treat these numbers as one host class, not a guarantee.
 - **SeaweedFS space:** every cut and snapshot stores the chunks that changed since the previous one. Space comes
   back only by GC and then a SeaweedFS vacuum (below).
+
+Each volume process reports its own heartbeat slot (server, volume and replica).
+The master orders each slot against that slot's previous report. In version 1.0,
+a backward host-clock step longer than the freshness window (30 seconds by
+default) can expire the host's slots; keep host clocks synchronized.
 
 ## Recovery point and sync policy
 

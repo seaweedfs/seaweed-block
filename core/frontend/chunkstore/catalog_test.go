@@ -370,7 +370,7 @@ func TestFork_RefusalsAndDeadline(t *testing.T) {
 		t.Fatal("a fork past its deadline wrote a HEAD")
 	}
 	c.SetClock(time.Now)
-	// The VOLUME from the late attempt is reused by its own retry.
+	// A retry of the expired attempt succeeds under a fresh deadline.
 	if res, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v4", RequestID: "late"}); err != nil || res.Replayed {
 		t.Fatalf("retry after the late attempt: %+v %v", res, err)
 	}

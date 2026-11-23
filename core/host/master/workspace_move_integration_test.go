@@ -69,6 +69,9 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 			if _, err = h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-b", DataAddr: "127.0.0.1:9201", CtrlAddr: "127.0.0.1:9101"}); err != nil {
 				t.Fatal(err)
 			}
+			if _, err = h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-a", DataAddr: "127.0.0.1:9202", CtrlAddr: "127.0.0.1:9102"}); err != nil {
+				t.Fatal(err)
+			}
 			seedVerifiedExistingReplicaPlacement(t, h)
 			if _, err = h.RunLifecycleProductTick(); err != nil {
 				t.Fatal(err)
@@ -81,7 +84,7 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 			defer conn.Close()
 			client := control.NewWorkspaceServiceClient(conn)
 			id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: line.ReplicaID, Epoch: line.Epoch}
-			lease, err := client.RenewWorkspaceLease(ctx, id)
+			_, err = client.RenewWorkspaceLease(ctx, id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -147,7 +150,7 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 					Format   int                        `json:"format"`
 					Segments map[string]json.RawMessage `json:"segments"`
 				}
-				if err = json.Unmarshal(stored.Content, &root); err != nil || root.Format != 2 || len(root.Segments) == 0 {
+				if err = json.Unmarshal(stored.Content, &root); err != nil || root.Format != 3 || len(root.Segments) == 0 {
 					t.Fatalf("CLEAN move must exercise upgraded segmented root: %s %v", stored.Content, err)
 				}
 
@@ -168,13 +171,23 @@ func TestIntegrationWorkspaceProductionDetachAndForcedMove(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				// Actual master lease expiry, no test clock and no revocation ACK.
-				timer := time.NewTimer(time.Until(time.Unix(0, lease.ExpiresAtNs)) + 100*time.Millisecond + 20*time.Millisecond)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
+				// The master owns the full horizon/deadline/skew barrier. Wait
+				// for its affirmative preview, not a locally copied expiry formula.
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					preview, err := client.PreviewWorkspaceMove(ctx, q)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if preview.Admitted {
+						break
+					}
+					select {
+					case <-ticker.C:
+					case <-ctx.Done():
+						t.Fatalf("forced preview never admitted: %v (last reason %q)", ctx.Err(), preview.Reason)
+					}
 				}
 				q.Force = false
 				if _, err = client.MoveWorkspace(ctx, q); err == nil {

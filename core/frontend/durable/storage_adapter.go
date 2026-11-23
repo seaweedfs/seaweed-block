@@ -206,6 +206,9 @@ type StorageBackend struct {
 	// could not follow the store's next LSN). While set, every I/O is
 	// refused, so a volume never serves without its observer. Under mu.
 	observerErr error
+	// recoveryErr retains the typed cause while the operational gate is shut.
+	// INV-FE-ERROR-RETRY-CLASS-001: permanent leaves survive readiness markers.
+	recoveryErr error // protected by mu; cleared only by successful readiness
 	// observerMu serializes moving the store's next LSN (the frontier
 	// seed) together with rebasing the observer, against installing an
 	// observer together with its rebase: whichever runs second sees the
@@ -494,6 +497,13 @@ func (b *StorageBackend) SetOperational(ok bool, evidence string) {
 	b.mu.Unlock()
 }
 
+func (b *StorageBackend) setRecoveryFailure(evidence string, cause error) {
+	b.mu.Lock()
+	b.setOperationalLocked(false, evidence)
+	b.recoveryErr = cause
+	b.mu.Unlock()
+}
+
 // FirstServing is closed the first time the backend admits I/O (for a chunk
 // volume: after its storage claim succeeded) and never reopens. A later loss
 // of readiness does not reopen it: the process exit of
@@ -503,6 +513,9 @@ func (b *StorageBackend) FirstServing() <-chan struct{} { return b.firstServing 
 // The caller owns mu; publication never calls the store or waits for I/O.
 func (b *StorageBackend) setOperationalLocked(ok bool, evidence string) {
 	flipped := !ok && b.operational.Load()
+	if ok {
+		b.recoveryErr = nil
+	}
 	b.opEvidence.Store(evidence)
 	b.operational.Store(ok)
 	if ok && !b.served {
@@ -914,6 +927,9 @@ func (b *StorageBackend) readyCheck() error {
 	closed := b.closed
 	chunkFenced := b.chunkFenced
 	observerErr := b.observerErr
+	recoveryErr := b.recoveryErr
+	operational := b.operational.Load()
+	ev, _ := b.opEvidence.Load().(string)
 	precopyPending := b.precopy != nil && b.precopy.active
 	b.mu.Unlock()
 	if closed {
@@ -928,9 +944,8 @@ func (b *StorageBackend) readyCheck() error {
 	if precopyPending {
 		return errPrecopyPaused
 	}
-	if !b.operational.Load() {
-		ev, _ := b.opEvidence.Load().(string)
-		return fmt.Errorf("%w: %s", frontend.ErrNotReady, ev)
+	if !operational {
+		return fmt.Errorf("%w: %s", errors.Join(frontend.ErrNotReady, recoveryErr), ev)
 	}
 	return nil
 }
