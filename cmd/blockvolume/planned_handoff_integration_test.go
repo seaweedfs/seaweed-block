@@ -174,16 +174,17 @@ func startPlannedHandoff(t *testing.T) (h *plannedHandoffHarness, cluster *w4Wee
 // naming every host, and the hosts' blockvolume endpoints. The volume starts
 // on s1.
 type handoffEnv struct {
-	h          *plannedHandoffHarness
-	master     *daemon
-	masterArgs []string
-	cluster    *w4WeedCluster
-	chunkPath  string
-	show       []string
-	hosts      map[string]bvHost
+	h         *plannedHandoffHarness
+	cluster   *w4WeedCluster
+	chunkPath string
+	show      []string
+	hosts     map[string]bvHost
 	// volExtra is appended to every blockvolume command (a test that pins
 	// a default the page leaves alone, for example).
 	volExtra []string
+	// A crash test restarts exactly this owned master with the same stores.
+	masterProcess *daemon
+	masterArgs    []string
 }
 
 // bvHost is one host's blockvolume: its server id, endpoints, local root
@@ -250,7 +251,7 @@ func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...st
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
 		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)
 	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
-	env.master = master
+	env.masterProcess = master
 	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
 		t.Fatalf("blockmaster start line %q does not name listen=%s", l, h.masterAddr)
 	}

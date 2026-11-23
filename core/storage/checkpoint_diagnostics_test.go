@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -189,5 +191,53 @@ func TestCheckpointDiagnostics_LastAdvanceFollowsOnlyAdvances(t *testing.T) {
 	}
 	if i.checkpointSuccesses.Load() != 3 || i.checkpointRefusals.Load() != 1 || i.checkpointFailures.Load() != 1 {
 		t.Fatalf("classification: s=%d r=%d f=%d", i.checkpointSuccesses.Load(), i.checkpointRefusals.Load(), i.checkpointFailures.Load())
+	}
+}
+
+// The flusher retries an extent write that failed with ENOSPC every cycle; on
+// a full local disk that is one log line per cycle (issue 484). It is logged
+// once per 30 s with the count of suppressed repeats.
+func TestCheckpointDiagnostics_NoSpaceRetryLogRateLimit(t *testing.T) {
+	var out bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&out)
+	t.Cleanup(func() { log.SetOutput(old) })
+	var limiter checkpointLogLimiter
+	now := time.Unix(100, 0)
+	full := fmt.Errorf("flusher: write extent LBA 653: %w", &os.PathError{Op: "write", Path: "v1.bin", Err: syscall.ENOSPC})
+	for i := 0; i < 100; i++ {
+		limiter.report(full, now.Add(time.Duration(i)*100*time.Millisecond))
+	}
+	limiter.report(full, now.Add(31*time.Second))
+	got := out.String()
+	if n := strings.Count(got, "no space left on device"); n != 2 || !strings.Contains(got, "suppressed=99") {
+		t.Fatalf("want 2 lines, the second with suppressed=99; got %d:\n%s", n, got)
+	}
+}
+
+// A terminal fault with ENOSPC as its cause (the latched append or fsync
+// failure the flusher returns each cycle) stays unlimited: only the retried
+// ENOSPC is rate-limited.
+func TestCheckpointDiagnostics_TerminalNoSpaceIsNotRateLimited(t *testing.T) {
+	var out bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&out)
+	t.Cleanup(func() { log.SetOutput(old) })
+	var limiter checkpointLogLimiter
+	now := time.Unix(100, 0)
+	terminal := NewSubstrateIOFailure(fmt.Errorf("%w: %w", ErrAppendFailed, syscall.ENOSPC), "append failed")
+	limiter.report(terminal, now)
+	limiter.report(terminal, now.Add(time.Second))
+	got := out.String()
+	if n := strings.Count(got, "no space left on device"); n != 2 || strings.Contains(got, "retrying") {
+		t.Fatalf("terminal ENOSPC faults were limited or relabelled (%d lines):\n%s", n, got)
+	}
+	// The window resets: a retried ENOSPC after 30 s is logged again with its count.
+	full := fmt.Errorf("write extent: %w", syscall.ENOSPC)
+	limiter.report(full, now)
+	limiter.report(full, now.Add(29*time.Second))
+	limiter.report(full, now.Add(30*time.Second))
+	if got := out.String(); strings.Count(got, "retrying") != 2 || !strings.Contains(got, "suppressed=1") {
+		t.Fatalf("30 s window:\n%s", got)
 	}
 }

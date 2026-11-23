@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -982,5 +983,22 @@ func TestWALStoreV3FlusherCheckpointIsClampedToTheAcknowledgedW(t *testing.T) {
 		if !bytes.Equal(readV3(t, r, lba), blk(byte(lba))) {
 			t.Fatalf("LBA %d lost after a clamped checkpoint and a crash", lba)
 		}
+	}
+}
+
+// ENOSPC on the WAL append itself (not behind it, in the flusher) is the
+// permanent, latched store fault, as the disk-full ruling scopes it (issue
+// 484): the error keeps ENOSPC and the latch is a SubstrateIO failure.
+func TestWALStoreV3AppendNoSpaceIsTheLatchedPermanentFault(t *testing.T) {
+	s, _ := newStoreV3(t, WModeLagged)
+	defer s.Close()
+	writeSynced(t, s, 1, 1)
+	s.v3.w.writeAt = func([]byte, int64) (int, error) { return 0, syscall.ENOSPC }
+	if _, err := s.Write(2, blk(2)); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("append: err = %v, want ENOSPC", err)
+	}
+	var failure *RecoveryFailure
+	if f := s.stickyIOFault(); !errors.As(f, &failure) || failure.Kind != StorageRecoveryFailureSubstrateIO {
+		t.Fatalf("ENOSPC on the append latched %v, want a SubstrateIO failure", f)
 	}
 }

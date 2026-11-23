@@ -629,7 +629,10 @@ func (c *nvmeInitiator) tryWrite(lba uint64, data []byte) error {
 	}
 	ch, err := c.r.Dequeue()
 	if err != nil || ch.Type != 0x9 {
-		return fmt.Errorf("nvme Write: want R2T, got type %v err %v", ch, err)
+		if err != nil {
+			return fmt.Errorf("nvme Write: want R2T: %w", err)
+		}
+		return fmt.Errorf("nvme Write: want R2T, got type %v", ch)
 	}
 	var r2t nvme.R2THeader
 	if err := c.r.Receive(&r2t); err != nil {
@@ -653,7 +656,11 @@ func (c *nvmeInitiator) tryFlush() error {
 func (c *nvmeInitiator) tryStatus(op string) error {
 	ch, err := c.r.Dequeue()
 	if err != nil || ch.Type != 0x5 {
-		return fmt.Errorf("nvme %s response: type %v err %v", op, ch, err)
+		if err != nil {
+			// %w: a deadline on the queue stays a net timeout for errors.As.
+			return fmt.Errorf("nvme %s response: %w", op, err)
+		}
+		return fmt.Errorf("nvme %s response: type %v", op, ch)
 	}
 	var resp nvme.CapsuleResponse
 	if err := c.r.Receive(&resp); err != nil {

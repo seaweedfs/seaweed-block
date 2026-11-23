@@ -82,15 +82,15 @@ func TestProcedureMasterKilledAfterMoveBeforeTargetStarts(t *testing.T) {
 
 func restartKilledMaster(t *testing.T, env *handoffEnv) {
 	t.Helper()
-	env.master.kill(t)
+	env.masterProcess.kill(t)
 	var exit *exec.ExitError
-	if !errors.As(env.master.err, &exit) {
-		t.Fatalf("master exit %v; want SIGKILL", env.master.err)
+	if !errors.As(env.masterProcess.err, &exit) {
+		t.Fatalf("master exit %v; want SIGKILL", env.masterProcess.err)
 	}
 	if ws, ok := exit.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
 		t.Fatalf("master status %v; want SIGKILL", exit.Sys())
 	}
 	t.Log("blockmaster confirmed dead by SIGKILL before restart")
-	env.master = env.h.start(t, "blockmaster-restarted", env.h.master, env.masterArgs...)
-	env.master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
+	env.masterProcess = env.h.start(t, "blockmaster-restarted", env.h.master, env.masterArgs...)
+	env.masterProcess.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
 }
