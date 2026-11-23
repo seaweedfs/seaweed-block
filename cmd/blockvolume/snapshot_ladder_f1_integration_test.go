@@ -394,6 +394,9 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 		}
 		r.SnapshotMs = ms(res[i].end.Sub(res[i].start))
 		f1Latencies(&r, w.samples, res[i].start, res[i].end)
+		if r.WritesIn == 0 {
+			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: no load write was issued inside the snapshot window", v.id, round))
+		}
 		f1CutStats(t, env, v, &r)
 		r.RSSKiB = f1RSS(v.d)
 		target := f1RestoreTarget(i+1, round)
