@@ -54,6 +54,11 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 - **SeaweedFS space:** every cut and snapshot stores the chunks that changed since the previous one. Space comes
   back only by GC and then a SeaweedFS vacuum (below).
 
+Each volume process reports its own heartbeat slot (server, volume and replica).
+The master orders each slot against that slot's previous report. In version 1.0,
+a backward host-clock step longer than the freshness window (10 seconds by
+default) can expire the host's slots; keep host clocks synchronized.
+
 ## Recovery point and sync policy
 
 - **A stopped volume** keeps everything it acknowledged, on its host.
