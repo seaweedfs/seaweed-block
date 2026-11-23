@@ -313,8 +313,11 @@ type plannedHandoffHarness struct {
 	dir                                                  string
 	master, volume, cli                                  string
 	masterAddr, dataAddr, ctrlAddr, statusAddr, nvmeAddr string
-	// t logs every sw-block command (logCommand).
-	t *testing.T
+	// t logs every sw-block command (logCommand) until the test ends
+	// (logDone): a runCLI goroutine that outlives it must not call t.Logf.
+	t       *testing.T
+	logMu   sync.Mutex
+	logDone bool
 }
 
 func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
@@ -323,6 +326,11 @@ func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
 		t.Fatal("CHUNKSTORE_WEED must name the pinned real SeaweedFS binary")
 	}
 	h := &plannedHandoffHarness{dir: t.TempDir(), t: t}
+	t.Cleanup(func() {
+		h.logMu.Lock()
+		h.logDone = true
+		h.logMu.Unlock()
+	})
 	suffix := ""
 	if isWindows() {
 		suffix = ".exe"
@@ -573,9 +581,11 @@ const logCommandCap = 4096
 
 // logCommand writes one sw-block command's argv, exit status and output to
 // the test log, so a refusal is visible without a rerun. It is safe from the
-// goroutines runCLI runs on while the test is running.
+// goroutines runCLI runs on; after the test ended it logs nothing.
 func (h *plannedHandoffHarness) logCommand(args []string, stdout, stderr string, err error) {
-	if h.t == nil {
+	h.logMu.Lock()
+	defer h.logMu.Unlock()
+	if h.t == nil || h.logDone {
 		return
 	}
 	status := "exit 0"
