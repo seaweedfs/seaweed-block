@@ -845,6 +845,10 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	if err := geometry.ValidateBlockGeometry(uint64(p.cfg.NumBlocks), uint64(p.cfg.BlockSize)); err != nil {
 		return nil, err
 	}
+	// Headroom before any sidecar: a refused create leaves nothing behind.
+	if err := p.refuseCreateWithoutHeadroom(volumeID); err != nil {
+		return nil, err
+	}
 	if p.cfg.Impl == ImplWALStoreChunk {
 		// Durable before the volume file exists: a crash anywhere between
 		// here and the first successful attach leaves a fresh volume.
@@ -938,6 +942,7 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 		if err != nil {
 			return nil, fmt.Errorf("durable: OpenWALStore %s: %w", path, err)
 		}
+		p.warnLowHeadroom(volumeID, path, int64(ws.NumBlocks())*int64(ws.BlockSize()))
 		// G6 §1.A α: plumb operator-tunable retention into walstore.
 		// Zero (pre-G6 default) preserves strict checkpoint-driven
 		// recycle.

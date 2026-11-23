@@ -584,7 +584,7 @@ func (r *closeBoundRemote) Put(ctx context.Context, key string, data []byte) err
 	defer end()
 	if r.waitUpload != nil {
 		if err := r.waitUpload(c, len(data)); err != nil {
-			return err
+			return fmt.Errorf("hostlimit: upload pacing before put %s: %w", key, err)
 		}
 	}
 	return r.ChunkRemote.Put(c, key, data)
