@@ -21,17 +21,20 @@ import (
 // space; deleting it frees it.
 //
 //  1. The WAL's disk fills under guest I/O: every guest command answers within
-//     the bound; the first error is the documented permanent one (0x800c), or
-//     0x0104 only without ENOSPC behind it; image A stays readable; the test
-//     logs whether writes resume once the space is freed without a restart.
+//     the bound; the first error is the retryable 0x0104 that 1.0 documents
+//     (a Linux guest then fails the write with EREMOTEIO after about 75 s;
+//     the permanent class is #484, after GO); image A stays readable; once
+//     the space is freed, writes succeed without a restart.
 //     1b. The holder restarts with the disk still full: it serves reads or
 //     exits naming the full disk. After the space is freed and a restart,
 //     every flush-acknowledged block reads back and the next cut moves HEAD
 //     and verifies.
-//  2. A new volume's durable root is full: blockvolume exits and says why;
-//     after the space is freed it starts and serves.
-//  3. The --host-limit-dir disk is full: the limiter fails open (the cut
-//     commits) and detach --plain still seals; guest I/O works meanwhile.
+//  2. A new volume's durable root is full: blockvolume refuses or exits and
+//     says why; after the space is freed it starts over what is left and
+//     serves.
+//  3. The --host-limit-dir disk is full: a cut is refused naming the full
+//     disk (background work fails closed, as ruled for #485) and detach
+//     --plain, the urgent seal, still seals (#486); guest I/O works meanwhile.
 //
 // Each filed defect is a known-finding row (diskFullFinding): while it
 // reproduces the row logs KNOWN FINDING #n and passes; once fixed it logs
@@ -160,12 +163,11 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 		}
 	}
 	readImageA("case 1, after the first write error", c)
-	// Without a restart: do writes resume once the space is freed?
+	// Operator guide: once space is freed, new writes succeed without a
+	// restart (on Linux the writes made while full failed with EREMOTEIO).
 	fill.free(t)
 	if err := writeUntilError(16); err != nil {
-		t.Logf("case 1: after freeing the space, without a restart, writes still fail (latched until restart): %v", err)
-	} else {
-		t.Logf("case 1: after freeing the space, without a restart, writes and flushes resume")
+		t.Fatalf("case 1: after freeing the space, without a restart, writes still fail: %v", err)
 	}
 	c.close()
 
@@ -260,7 +262,9 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 			t.Fatalf("case 2: blockvolume on a full durable root neither exited nor faulted within 60s; log %s", v2.log)
 		}
 	}
-	if !v2.has("no space left on device") {
+	// The headroom check refuses the create first (free space below the
+	// volume size + WAL); without it the create fails with ENOSPC.
+	if !v2.has("no space left on device") && !v2.has("bytes free; volume v2 needs") {
 		t.Fatalf("case 2: blockvolume %s without naming the full disk; log %s", outcome, v2.log)
 	}
 	v2.kill(t)
@@ -309,12 +313,11 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	case <-time.After(2 * time.Minute):
 		t.Fatalf("case 3: a cut with the host-limit dir full did not answer within 2m")
 	}
-	// The docs name no outcome for a full --host-limit-dir (the launch check,
-	// INV-HOST-LAUNCH-CHECK-001, only reads it). The position for the ruling:
-	// the limiter paces background cuts and must fail open, so the cut
-	// commits; a refusal is reported for a ruling, not accepted.
-	g := headGen()
-	diskFullFinding(t, 485, r.rc != 0 || g <= g0, "case 3: with the host-limit dir full the cut exited %d and HEAD is at gen %d (was %d); the limiter did not fail open:\n%s", r.rc, g, g0, r.out)
+	// Ruled (issue 485): background work, timer and explicit cuts, fails
+	// closed when the limiter cannot run, and says why; HEAD stays.
+	if g := headGen(); r.rc == 0 || g != g0 || !strings.Contains(r.out, "no space left on device") {
+		t.Fatalf("case 3: with the host-limit dir full a cut must be refused naming the full disk; exit %d, HEAD gen %d (was %d):\n%s", r.rc, g, g0, r.out)
+	}
 	t.Logf("case 3: cut with the host-limit dir full exited %d; guest write+flush succeeded meanwhile", r.rc)
 	// The seal of a planned hand-over must not depend on the limit directory.
 	out, errOut, rc := env.h.run(t, "ops", "chunk", "detach", "--plain", "--volume", "v1", "--status-addr", env.hosts["s1"].status, "--timeout", "120s")
@@ -327,7 +330,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 }
 
 // knownDiskFullFindings are the filed defects this test still expects.
-var knownDiskFullFindings = map[int]bool{484: true, 485: true, 486: true}
+var knownDiskFullFindings = map[int]bool{484: true, 486: true}
 
 // diskFullFinding is one defect row: bad reports whether issue's defect
 // reproduced in this run.
