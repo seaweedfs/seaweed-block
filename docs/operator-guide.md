@@ -103,6 +103,15 @@ default) can expire the host's slots; keep host clocks synchronized.
   risky work.
 - **What does not publish:** a stop, a lease revocation and a lease expiry publish nothing. Only a cut, a snapshot or
   a seal (`ops chunk detach --plain`) does.
+- **When SeaweedFS is unavailable** (the filer or a volume server is down):
+  - Guest I/O continues from the local disk; in the tests no guest command failed and the slowest answered in about 2 s.
+  - A cut in progress answers `remote_unavailable` (retryable) after about 30 s; no write the guest flushed is lost.
+  - The next cut after the store returns commits normally and publishes everything written meanwhile.
+  - A cut holds copy-on-write data on the local disk up to at most half of `--host-limit-cow-bytes` (1 GiB by
+    default). A larger dirty set is uploaded before the cut point is fixed, so during a store outage such a cut fails
+    without using local space. Guest I/O does not wait for the copy-on-write reserve.
+  - Measured for outages of about 60 s, with the filer down and with a volume server down. Longer outages are not
+    tested in 1.0.
 
 ## Snapshots, restore and space
 
