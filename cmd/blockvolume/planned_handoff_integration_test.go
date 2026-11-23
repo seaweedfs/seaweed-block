@@ -313,6 +313,8 @@ type plannedHandoffHarness struct {
 	dir                                                  string
 	master, volume, cli                                  string
 	masterAddr, dataAddr, ctrlAddr, statusAddr, nvmeAddr string
+	// t logs every sw-block command (logCommand).
+	t *testing.T
 }
 
 func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
@@ -320,7 +322,7 @@ func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
 	if os.Getenv("CHUNKSTORE_WEED") == "" {
 		t.Fatal("CHUNKSTORE_WEED must name the pinned real SeaweedFS binary")
 	}
-	h := &plannedHandoffHarness{dir: t.TempDir()}
+	h := &plannedHandoffHarness{dir: t.TempDir(), t: t}
 	suffix := ""
 	if isWindows() {
 		suffix = ".exe"
@@ -554,6 +556,7 @@ func (h *plannedHandoffHarness) run(t *testing.T, args ...string) (string, strin
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	captureOutput(t, args, stdout.String(), stderr.String())
+	h.logCommand(args, stdout.String(), stderr.String(), err)
 	var exit *exec.ExitError
 	switch {
 	case err == nil:
@@ -563,6 +566,30 @@ func (h *plannedHandoffHarness) run(t *testing.T, args ...string) (string, strin
 	}
 	t.Fatalf("sw-block %q: %v\nstdout: %s\nstderr: %s", args, err, stdout.String(), stderr.String())
 	return "", "", -1
+}
+
+// logCommandCap bounds each logged stream of one sw-block command.
+const logCommandCap = 4096
+
+// logCommand writes one sw-block command's argv, exit status and output to
+// the test log, so a refusal is visible without a rerun. It is safe from the
+// goroutines runCLI runs on while the test is running.
+func (h *plannedHandoffHarness) logCommand(args []string, stdout, stderr string, err error) {
+	if h.t == nil {
+		return
+	}
+	status := "exit 0"
+	if err != nil {
+		status = err.Error()
+	}
+	h.t.Logf("sw-block %q: %s\nstdout: %s\nstderr: %s", args, status, capLog(stdout), capLog(stderr))
+}
+
+func capLog(s string) string {
+	if len(s) <= logCommandCap {
+		return s
+	}
+	return s[:logCommandCap] + fmt.Sprintf("... (%d more bytes)", len(s)-logCommandCap)
 }
 
 // waitPrimary polls the status endpoint until the volume serves as a
