@@ -422,3 +422,35 @@ func clearDir(t *testing.T, dir string) {
 		}
 	}
 }
+
+// The operations-guide cure for a wrong --durable-blocks, run as written
+// (r2.65 procedure-before-guide). The guard comes first: `sw-block ops chunk
+// show` must print the HEAD with epoch 0, no holder and state active (the
+// volume never served, so its local files hold no acknowledged write). Then:
+// the process is stopped, the four named files are removed from
+// --durable-root, and a start with the right flags serves. Afterwards the same
+// command shows a claimed HEAD (epoch >= 1, a holder): the guard now forbids
+// removing those files.
+func TestWrongGeometryCureAsWritten(t *testing.T) {
+	env := startSourceWithSnapshot(t, "v2")
+	env.strandTarget(t, "v2") // exits 75 with geometry_mismatch; under systemd: systemctl stop
+	b := env.hosts["n-v2"]
+	guard := env.headOf(t, "v2")
+	t.Logf("guard: sw-block ops chunk show --volume v2: %s", guard)
+	if !strings.Contains(guard, `"epoch":0,"holder":""`) || !strings.Contains(guard, `"state":"active"`) {
+		t.Fatalf("the guard does not show a never-claimed HEAD: %s", guard)
+	}
+	for _, name := range []string{"v2.bin", "v2.bin.chunkfresh", "v2.bin.chunkmap", "v2.replica-floor"} {
+		if err := os.Remove(filepath.Join(b.root, name)); err != nil {
+			t.Fatalf("remove %s: %v", name, err)
+		}
+	}
+	t.Logf("left under --durable-root after the removal:\n%s", listTree(b.root))
+	d := env.startTarget(t, "v2", "blockvolume-v2-cured")
+	defer d.kill(t)
+	after := env.headOf(t, "v2")
+	t.Logf("after the cure: %s", after)
+	if strings.Contains(after, `"epoch":0`) || strings.Contains(after, `"holder":""`) {
+		t.Fatalf("a served volume's HEAD must show a claim (the guard then forbids removal): %s", after)
+	}
+}
