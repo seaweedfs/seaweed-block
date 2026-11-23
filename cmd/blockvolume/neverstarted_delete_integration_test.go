@@ -124,3 +124,39 @@ func TestNeverStartedDeleteRacesAStart(t *testing.T) {
 		d.kill(t)
 	}
 }
+
+// Exploratory (1.0.1, r2.65 item 4): the assigned-never-claimed state without
+// a small file system. The target's blockvolume starts with a geometry that
+// disagrees with the cluster spec (a wrong flag); the test records where it
+// refuses (before or after the master assigned it), what the master and
+// `workspace show` hold for it afterwards, and what volume-delete answers.
+func TestAssignedNeverClaimedTargetExplore(t *testing.T) {
+	env := startHandoffEnvWith(t, 1, []string{"v2"})
+	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
+	holder := env.start(t, "blockvolume-v1", "s1")
+	env.adopt(t, holder, "s1")
+	env.writeBlock(t, "s1", 0, cutCrashBlock('X', 0))
+	env.snapshot(t, "s1", "v1", "s1")
+	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	b := env.hosts["n-v2"]
+	args := append([]string{}, env.volArgsFor(b)...)
+	for i := range args {
+		if args[i] == "--durable-blocks" {
+			args[i+1] = "32768" // half the spec's size: a wrong flag
+		}
+	}
+	d := env.h.start(t, "blockvolume-v2-wrong-geometry", env.h.volume, args...)
+	err := d.wait(90 * time.Second)
+	t.Logf("wrong-geometry start: exit %v; adopted %v; last lines: %q", err, d.has("adopted as PRIMARY"), d.line("v2"))
+	head, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	t.Logf("v2 HEAD after the refusal (claimed if its holder/epoch are set): %s", firstLine(head))
+	t.Logf("served: frontend ready %v; HEAD claim line %q; recovery line %q", volumeFrontendReady(b.status, "v2"),
+		d.line("HEAD claim for volume=v2"), d.line("durable recovery"))
+	show, _, _ := env.h.run(t, "ops", "workspace", "show", "--master", env.h.masterAddr, "--volume", "v2")
+	t.Logf("workspace show v2 after the refusal:\n%s", show)
+	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC,
+		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v2-assigned")
+	t.Logf("volume-delete: exit %d\n%s\n%s", code, out, errOut)
+	_ = fmt.Sprint
+}
