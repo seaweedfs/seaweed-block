@@ -3,6 +3,7 @@
 package main_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,11 @@ import (
 // that a filler file (CHUNKSTORE_SMALL_FILLER, on the same file system) keeps
 // below the volume size + WAL. The runner prepares both (a loop-mounted ext4
 // needs root); without them the test is skipped.
+//
+// The check's limit: it compares one volume's size + WAL with the free space
+// at that moment, not the sum over every volume on the file system. Two
+// 256 MiB + 64 MiB targets both pass on the 512 MiB file system once the
+// filler is gone, though together they could outgrow it.
 
 const (
 	headroomVolumeBytes = 65536 * 4096 // the harness's volume size
@@ -45,9 +51,10 @@ func requireNoFiles(t *testing.T, dir string) {
 }
 
 // refusedForHeadroom starts the target's blockvolume and requires it to
-// refuse the create: it exits on its own, its log names the free bytes and
-// the need (size + WAL), and its durable root holds no file.
-func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) {
+// refuse the create: it exits on its own with its exit line (status and
+// reason), its log names the free bytes and the need (size + WAL), and its
+// durable root holds no file. It returns the exit line.
+func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) string {
 	t.Helper()
 	b := env.hosts["n-"+target]
 	d := env.h.start(t, name, env.h.volume, env.volArgsFor(b)...)
@@ -65,17 +72,26 @@ func (env *handoffEnv) refusedForHeadroom(t *testing.T, target, name string) {
 	if line == "" || !strings.Contains(line, "bytes free") {
 		t.Fatalf("%s: no refusal naming the free bytes and %q", name, want)
 	}
-	t.Logf("%s refused: %s", name, strings.TrimSpace(line))
+	exit := d.line("blockvolume: exiting status=")
+	if exit == "" {
+		t.Fatalf("%s: no 'blockvolume: exiting status=N reason=...' line", name)
+	}
+	t.Logf("%s refused: %s; %s", name, strings.TrimSpace(line), strings.TrimSpace(exit))
 	requireNoFiles(t, b.root)
+	return strings.TrimSpace(exit)
 }
 
 // TestHeadroomRefusesARestoreAndAForkTargetThenServesThem: a snapshot of v1
-// is restored into v2 and forked into v3, each target's durable root on a
-// small file system with less free space than the volume size + WAL. Each
-// target's blockvolume refuses the create, naming both numbers, and leaves no
-// file; the source still serves its data and its snapshot is still listed.
-// Once space is freed, the same targets start, serve, and read back the
-// snapshot.
+// is restored into v2 and v4 and forked into v3, each target's durable root
+// on a small file system with less free space than the volume size + WAL.
+// Each target's blockvolume refuses the create, naming both numbers, exits
+// with the same exit line, and leaves no file; the source still serves its
+// data and its snapshot is still listed. The operator's two ways out:
+//   - give up the stranded target: volume-delete of v4 (which exists in the
+//     catalog but cannot start) completes, and the source's snapshot is
+//     then restored into another target, v5, which serves it;
+//   - free space: once the filler is removed, v2 and v3 start, serve, and
+//     read back the snapshot.
 func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	small, filler := os.Getenv("CHUNKSTORE_SMALL_ROOT"), os.Getenv("CHUNKSTORE_SMALL_FILLER")
 	if small == "" || filler == "" {
@@ -86,8 +102,8 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		t.Fatalf("the small file system has %d bytes free, not less than the %d a volume needs: fix the runner", free, need)
 	}
 
-	env := startLadderEnv(t, "v2", "v3")
-	for _, v := range []string{"v2", "v3"} {
+	env := startLadderEnv(t, "v2", "v3", "v4", "v5")
+	for _, v := range []string{"v2", "v3", "v4"} {
 		b := env.hosts["n-"+v]
 		b.root = filepath.Join(small, t.Name(), "vol-n-"+v)
 		env.hosts["n-"+v] = b
@@ -103,8 +119,26 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	env.h.command(t, "ops", "chunk", "fork", "--source", "v1", "--snapshot", "base", "--target", "v3",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	env.refusedForHeadroom(t, "v2", "blockvolume-v2-no-room")
-	env.refusedForHeadroom(t, "v3", "blockvolume-v3-no-room")
+	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", "v4",
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	exits := map[string]string{}
+	for _, v := range []string{"v2", "v3", "v4"} {
+		line := env.refusedForHeadroom(t, v, "blockvolume-"+v+"-no-room")
+		exits[line[strings.Index(line, "status="):]] = v
+	}
+	if len(exits) != 1 {
+		t.Fatalf("the refusals exited differently: %v", exits)
+	}
+
+	// The stranded target given up: deleted, and the snapshot restored elsewhere.
+	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v4", "--chunk-filer", env.cluster.filerGRPC,
+		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v4")
+	var del struct{ Completed bool }
+	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
+		t.Fatalf("volume-delete of the refused target v4: exit %d %s %s; want completed", code, out, errOut)
+	}
+	env.restoreInto(t, "v1", "base", "v5")
+	env.requireImage(t, "n-v5", img)
 
 	env.requireImage(t, "s1", img) // the source is intact
 	if l := env.snapshots(t, "v1", "base"); len(l) != 1 || l[0].State != "active" {
