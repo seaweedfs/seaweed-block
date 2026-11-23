@@ -1,10 +1,67 @@
 package authority
 
 import (
+	"bytes"
 	"fmt"
+	"log"
+	"strings"
 	"testing"
 	"time"
 )
+
+type unlockedHeartbeatLog struct {
+	bytes.Buffer
+	store  *ObservationStore
+	locked bool
+}
+
+func (w *unlockedHeartbeatLog) Write(p []byte) (int, error) {
+	if w.store.mu.TryLock() {
+		w.store.mu.Unlock()
+	} else {
+		w.locked = true
+	}
+	return w.Buffer.Write(p)
+}
+
+func TestObservationStore_SupersededSlotLogsAfterUnlock(t *testing.T) {
+	base := time.Unix(1000, 0)
+	s := NewObservationStore(FreshnessConfig{}, func() time.Time { return base })
+	w := &unlockedHeartbeatLog{store: s}
+	old := log.Writer()
+	log.SetOutput(w)
+	t.Cleanup(func() { log.SetOutput(old) })
+	for _, server := range []string{"one-host", "other-host"} {
+		for _, volume := range []string{"a", "b"} {
+			slot := healthySlot(volume, "r1")
+			if err := s.Ingest(Observation{ServerID: server, ObservedAt: base, Slots: []SlotFact{slot}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, tc := range []struct{ server, volume string }{{"one-host", "a"}, {"one-host", "a"}, {"one-host", "b"}, {"other-host", "a"}} {
+		if err := s.Ingest(Observation{ServerID: tc.server, ObservedAt: base.Add(-time.Second), Slots: []SlotFact{healthySlot(tc.volume, "r1")}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w.locked {
+		t.Fatal("superseded diagnostic was emitted while the store lock was held")
+	}
+	lines := strings.Split(strings.TrimSpace(w.String()), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("diagnostics=%q; want one line per dropped slot", w.String())
+	}
+	for i, want := range []string{
+		"server=one-host volume=a replica=r1 sent_at=1970-01-01T00:16:39Z newest=1970-01-01T00:16:40Z total=1",
+		"server=one-host volume=a replica=r1 sent_at=1970-01-01T00:16:39Z newest=1970-01-01T00:16:40Z total=2",
+		"server=one-host volume=b replica=r1 sent_at=1970-01-01T00:16:39Z newest=1970-01-01T00:16:40Z total=1",
+		"server=other-host volume=a replica=r1 sent_at=1970-01-01T00:16:39Z newest=1970-01-01T00:16:40Z total=1",
+	} {
+		if !strings.Contains(lines[i], "heartbeat superseded "+want) {
+			t.Errorf("diagnostic %d=%q; want %q", i, lines[i], want)
+		}
+	}
+}
 
 // V1-SPEC r2.53: independent processes on one server order only their
 // own (volume, replica) reports; another slot's later timestamp is irrelevant.
