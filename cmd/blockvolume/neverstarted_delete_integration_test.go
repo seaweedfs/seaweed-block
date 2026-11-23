@@ -8,16 +8,13 @@ import (
 	"testing"
 )
 
-// 1.0.1 (V1-SPEC r2.65 item 4), RED on 1.0 by design: a volume whose holder
-// never started (a restore target created but never attached, as a target
-// refused for local headroom is) is deletable: NeverStarted -> Deleted is a
-// lease-automaton transition, not a flag. The operator runs volume-delete;
-// it completes, the target's catalog entry and HEAD are gone, and the source
-// volume and its snapshot are untouched.
-//
-// On 1.0 volume-delete is refused: it wants a clean revocation ACK that a
-// never-started holder cannot send (the operator guide's known limit).
-func TestNeverStartedHolderIsDeletable(t *testing.T) {
+// V1-SPEC r2.65 item 4, the guard half: a restore target created but never
+// attached (no blockvolume ever started for it) is deletable already on 1.0.
+// volume-delete completes without a revoke, its HEAD becomes a deleted
+// tombstone, and the source volume and its snapshot are untouched. The 1.0.1
+// red half is a target whose blockvolume started and was refused before it
+// served (the master assigned it); that case needs a small file system.
+func TestNeverAttachedRestoreTargetIsDeletable(t *testing.T) {
 	env := startHandoffEnvWith(t, 1, []string{"v2"})
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	holder := env.start(t, "blockvolume-v1", "s1")
@@ -33,11 +30,11 @@ func TestNeverStartedHolderIsDeletable(t *testing.T) {
 		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v2-never-started")
 	var del struct{ Completed bool }
 	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
-		t.Fatalf("1.0.1: volume-delete of a never-started target must complete; exit %d:\n%s\n%s", code, out, errOut)
+		t.Fatalf("volume-delete of a never-attached target must complete; exit %d:\n%s\n%s", code, out, errOut)
 	}
 	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	if strings.Contains(shown, `"gen"`) {
-		t.Fatalf("1.0.1: the deleted target still has a HEAD:\n%s", shown)
+	if !strings.Contains(shown, `"state":"deleted"`) {
+		t.Fatalf("the deleted target's HEAD is not a deleted tombstone:\n%s", shown)
 	}
 	// The source and its snapshot are untouched.
 	if got := env.readBlock(t, "s1", 0); string(got) != string(cutCrashBlock('N', 0)) {
