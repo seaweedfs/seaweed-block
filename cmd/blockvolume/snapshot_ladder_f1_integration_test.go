@@ -236,8 +236,15 @@ func f1Restore(t *testing.T, env *handoffEnv, src, snap, target string) *daemon 
 	return d
 }
 
+// f1Block is one deterministic 4096-byte block (pattern needs a length that
+// divides 4096; these labels do not, so the block is filled explicitly).
 func f1Block(vol string, round int, kind string, lba uint64) []byte {
-	return pattern(fmt.Sprintf("%s r%d %s %08d|", vol, round, kind, lba))
+	s := fmt.Sprintf("%s r%d %s %08d|", vol, round, kind, lba)
+	b := make([]byte, 4096)
+	for i := range b {
+		b[i] = s[i%len(s)]
+	}
+	return b
 }
 
 func f1LedgerBase(cfg f1Config, round int) uint64 {
