@@ -87,12 +87,13 @@ func TestWorkspaceDelayedRenewalCannotUndoExpiry(t *testing.T) {
 }
 
 func TestWorkspaceRevocationAckOnlyAfterFrontendAndCutsStop(t *testing.T) {
-	now := time.Unix(1000, 0)
+	// Keep the injected clock in the live context deadline domain.
+	now := time.Now()
 	revoking := false
 	attempts, acks := 0, 0
 	var g *WorkspaceLeaseGuard
 	client := workspaceTestClient{renew: func() (*control.WorkspaceLeaseFact, error) {
-		return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(time.Second), Revoking: revoking}, nil
+		return &control.WorkspaceLeaseFact{VolumeId: "v", ReplicaId: "r", Epoch: 1, ValidForNs: int64(30 * time.Second), Revoking: revoking}, nil
 	},
 		ack: func() error {
 			if attempts != 2 || g.Projection().Healthy {
@@ -106,6 +107,9 @@ func TestWorkspaceRevocationAckOnlyAfterFrontendAndCutsStop(t *testing.T) {
 		if g.Projection().Healthy {
 			t.Fatal("drain began before admission closed")
 		}
+		if cause := g.FenceCause(); cause != "revoked by the master" {
+			t.Fatalf("drain cause %q; want revocation, not an expired RPC deadline", cause)
+		}
 		attempts++
 		if attempts == 1 {
 			return 0, errors.New("drain still failed")
@@ -117,6 +121,9 @@ func TestWorkspaceRevocationAckOnlyAfterFrontendAndCutsStop(t *testing.T) {
 	}
 	if err := g.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if !g.Held() || !g.Projection().Healthy || attempts != 0 || acks != 0 {
+		t.Fatal("valid first grant must serve without a drain or ACK")
 	}
 	revoking = true
 	if err := g.Refresh(context.Background()); err == nil {
