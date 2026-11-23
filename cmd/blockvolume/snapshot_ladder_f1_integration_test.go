@@ -437,7 +437,7 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: write error: %v", v.id, round, w.err))
 		}
 		if res[i].code != 0 && f1SlotRefusal(res[i].out) {
-			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: snapshot not admitted within %v (%d slot refusals retried): %s", v.id, round, cfg.SlotRetryBound, res[i].retries, firstLine(res[i].out)))
+			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: snapshot not admitted within %v (%d slot refusals retried): %s", v.id, round, cfg.SlotRetryBound, res[i].retries, strings.Join(strings.Fields(res[i].out), " ")))
 			out[i] = r
 			continue
 		}
