@@ -212,6 +212,14 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 	} else {
 		t.Logf("%s down: the cut had not answered after %s", down, time.Since(cutStart).Round(time.Second))
 	}
+	if cowBytes > 0 && !cowWindow {
+		// A dirty set larger than half the reserve is staged before the cut
+		// point: the cut fails in its upload, with no copy-on-write window
+		// and no local space.
+		if peakSide != 0 || (cutWhileDown != nil && strings.Contains(cutWhileDown.out, "capture copy")) {
+			t.Fatalf("%s down: a staged cut used local copy-on-write space (peak %d) or opened a window: %+v", down, peakSide, cutWhileDown)
+		}
+	}
 	if cowWindow {
 		// The reserve bounds the copy-on-write window: stage() opens it only
 		// when the captured chunks fit in half the reserve.
