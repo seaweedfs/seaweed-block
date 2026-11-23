@@ -272,6 +272,9 @@ func TestAssignedNeverClaimedDeleteRacesAStart(t *testing.T) {
 	env := startSourceWithSnapshot(t, targets...)
 	for i, v := range targets {
 		env.strandTarget(t, v)
+		// The wrong-flag run left a local store of the wrong size, which alone
+		// keeps a right start from serving; clear it so a start CAN win.
+		clearDir(t, env.hosts["n-"+v].root)
 		b := env.hosts["n-"+v]
 		type delResult struct {
 			out  string
@@ -405,4 +408,17 @@ func lastLines(path string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+func clearDir(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			t.Fatalf("clear %s: %v", dir, err)
+		}
+	}
 }
