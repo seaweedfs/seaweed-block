@@ -142,7 +142,7 @@ func TestProcedureCrashWithIOInFlight(t *testing.T) {
 			t.Fatalf("LBA %d after the last acknowledged Flush holds data out of the stream's order or torn (kept %d)", lba, kept)
 		}
 	}
-	t.Logf("after the restart: all %d flush-acknowledged writes read back; %d of the %d unflushed completed writes survived as a prefix", flushed, kept-flushed, written-flushed)
+	t.Logf("after the restart: all %d flush-acknowledged writes read back; %d writes past the last acknowledged Flush survived as a prefix (%d had completed; one in flight may persist without its reply)", flushed, kept-flushed, written-flushed)
 }
 
 // Gap 1, cell A3.5: kill -9 of a holder serving on a FRESH root (after a
@@ -186,7 +186,7 @@ func TestProcedureCrashOnAFreshRootWithFillsInFlight(t *testing.T) {
 		t.Fatalf("s1 after the revocation: %v", err)
 	}
 	env.waitAck(t, e, g)
-	moved, _ := h.command(t, env.moveClean(e, "s2", "move-fill-1")...)
+	moved, _ := h.command(t, env.moveClean(e, "s2", "move-v1-1")...)
 	e2 := mustU(movedEpochTo(moved, e, g, l, "s2"))
 	nw := env.start(t, "blockvolume-s2", "s2")
 	must(checkClaimDoneBy(nw.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in"), e2, "s2"))
