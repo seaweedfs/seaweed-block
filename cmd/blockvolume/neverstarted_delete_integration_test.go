@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -330,4 +332,77 @@ func TestClaimedTargetAfterAMasterRestartIsNotNeverStarted(t *testing.T) {
 	if head := env.headOf(t, "v2"); code == 0 || strings.Contains(head, `"state":"deleted"`) {
 		t.Fatalf("a claimed target was deleted without a revoke after a master restart; exit %d, HEAD %s:\n%s", code, head, out)
 	}
+}
+
+// Exploratory (r2.75 follow-up): after the wrong-flag stranding, does a start
+// with the RIGHT flags serve, and when? One target per case: (a) at once,
+// (b) after the lease lapsed, (c) after the lapse plus the skew barrier, (d)
+// at once with a fresh --durable-root, (e) at once after removing what the
+// wrong-flag run left under its durable root. Records the files left, whether
+// each start served, and the last lines of its log.
+func TestStrandedTargetRightFlagStartExplore(t *testing.T) {
+	type tcase struct {
+		name, v string
+		wait    time.Duration
+		root    string // "fresh" or "cleared"
+	}
+	cases := []tcase{{"a-at-once", "v2", 0, ""}, {"b-lease-lapsed", "v3", 70 * time.Second, ""},
+		{"c-lapse-plus-barrier", "v4", 90 * time.Second, ""}, {"d-fresh-root", "v5", 0, "fresh"}, {"e-cleared-root", "v6", 0, "cleared"}}
+	env := startSourceWithSnapshot(t, "v2", "v3", "v4", "v5", "v6")
+	for _, c := range cases {
+		env.strandTarget(t, c.v)
+		stranded := time.Now()
+		b := env.hosts["n-"+c.v]
+		t.Logf("%s: files under the durable root after the wrong-flag run:\n%s", c.name, listTree(b.root))
+		switch c.root {
+		case "fresh":
+			b.root += "-fresh"
+		case "cleared":
+			entries, _ := os.ReadDir(b.root)
+			for _, e := range entries {
+				_ = os.RemoveAll(filepath.Join(b.root, e.Name()))
+			}
+		}
+		time.Sleep(time.Until(stranded.Add(c.wait)))
+		d := env.h.start(t, "blockvolume-"+c.v+"-right-"+c.name, env.h.volume, env.volArgsFor(b)...)
+		served := false
+		deadline := time.Now().Add(3 * time.Minute)
+		for time.Now().Before(deadline) && !served {
+			served = volumeFrontendReady(b.status, c.v)
+			select {
+			case <-d.done:
+				deadline = time.Now()
+			case <-time.After(time.Second):
+			}
+		}
+		exited := "running"
+		select {
+		case <-d.done:
+			exited = fmt.Sprint(d.err)
+		default:
+		}
+		t.Logf("%s: right-flag start (+%v after the stranding): served %v, process %s, HEAD %s\nworkspace show:\n%s\nlast log lines:\n%s",
+			c.name, c.wait, served, exited, env.headOf(t, c.v), env.workspaceShow(t, c.v), lastLines(d.log, 15))
+		d.kill(t)
+	}
+}
+
+func listTree(root string) string {
+	var sb strings.Builder
+	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err == nil {
+			fmt.Fprintf(&sb, "  %s %d\n", strings.TrimPrefix(p, root), info.Size())
+		}
+		return nil
+	})
+	return sb.String()
+}
+
+func lastLines(path string, n int) string {
+	data, _ := os.ReadFile(path)
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
