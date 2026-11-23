@@ -403,6 +403,26 @@ and step 4 is refused with `live authority requires clean revocation ACK`. Nothi
 was deleted. Start `blockvolume` again with the same flags and local root, then do
 step 2 and continue. This recovery is not run by a test in this release.
 
+## Snapshot names and retries
+
+A snapshot request first takes its name, then publishes the snapshot. Three rules
+follow from that order:
+
+- **A name taken by an unfinished request is not listed, but it is held.**
+  `sw-block ops chunk snapshots` shows only published snapshots. If a snapshot request
+  was interrupted after it took its name (the process crashed, or the caller gave up),
+  the name does not appear in the list, yet another request for that name is refused
+  with `snapshot_exists`, and deleting the volume is refused with `volume v1 has
+  snapshots (NAME); delete them first`. Free it with
+  `sw-block ops chunk snapshot-delete --volume v1 --chunk-filer FILER --name NAME`,
+  or finish it by repeating the request with the same `--request-id`.
+- **After `outcome_unknown`, repeat the request with the same `--request-id` within
+  5 minutes.** Later, the unfinished attempt may have been swept, and the request is
+  then refused with `this request's attempt was aborted; delete the name to reuse
+  it`: delete the name and take the snapshot again.
+- **A `--request-id` protects against a duplicate only while its snapshot name
+  exists.** After `snapshot-delete`, repeating the same request takes a new snapshot.
+
 ## Symptoms
 
 | You see | It means | Do |
@@ -411,7 +431,8 @@ step 2 and continue. This recovery is not run by a test in this release.
 | detach answers `detach_aborted` | Nothing was published; the volume serves here again | Retry step 3 |
 | detach answers `outcome_unknown` | The seal may have landed; I/O stays stopped | Retry step 3: it settles the outcome |
 | volume-delete: `volume_in_use: ... live authority requires clean revocation ACK` | The volume was sealed (or only stopped) but never revoked and acknowledged; nothing was deleted | "Delete a volume", step 2 |
-| volume-delete: `volume v1 has snapshots (s1); delete them first` | Snapshots still exist; nothing was deleted | "Delete a volume", step 3 |
+| volume-delete: `volume v1 has snapshots (s1); delete them first` | Snapshots still exist, or a name is held by an unfinished request (such a name is not in the list); nothing was deleted | "Delete a volume", step 3; for a name that is not listed, "Snapshot names and retries" |
+| snapshot: `snapshot_exists ... this request's attempt was aborted; delete the name to reuse it` | An earlier attempt of this request did not finish and was swept | `snapshot-delete` the name, then take the snapshot again |
 | revoke: `workspace revoke: no matching lease` | `--replica`/`--epoch` are not the current holder | Read them again with `show` |
 | move: `workspace clean move needs detached HEAD and matching revocation ACK` | No ACK yet, or its generation differs from HEAD | Wait for the ACK line (step 5); compare `G` with `ops chunk show` |
 | move: `move target node "S2" is not registered` | `S2` is not under `nodes` | Add it to the cluster spec, restart blockmaster |
