@@ -845,6 +845,10 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	if err := geometry.ValidateBlockGeometry(uint64(p.cfg.NumBlocks), uint64(p.cfg.BlockSize)); err != nil {
 		return nil, err
 	}
+	// Headroom before any sidecar: a refused create leaves nothing behind.
+	if err := p.refuseCreateWithoutHeadroom(volumeID); err != nil {
+		return nil, err
+	}
 	if p.cfg.Impl == ImplWALStoreChunk {
 		// Durable before the volume file exists: a crash anywhere between
 		// here and the first successful attach leaves a fresh volume.
@@ -989,7 +993,7 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 		var err error
 		if p.testWALStoreFactory != nil {
 			ws, err = p.testWALStoreFactory(path, true)
-		} else if err = p.refuseCreateWithoutHeadroom(volumeID); err == nil {
+		} else {
 			ws, err = storage.CreateWALStoreWithOptions(path, p.cfg.NumBlocks, p.cfg.BlockSize, storage.WALStoreOptions{ChunkBlocks: p.cfg.ChunkBlocks})
 		}
 		if err != nil {

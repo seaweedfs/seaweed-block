@@ -35,7 +35,8 @@ func (p *DurableProvider) warnLowHeadroom(volumeID, path string, size int64) {
 		return
 	}
 	have, err := free()
-	growth := max(size-allocatedBytes(path), 0)
+	// The store's allocation includes its WAL; only the rest is data.
+	growth := max(size-max(allocatedBytes(path)-storage.DefaultWALBytes, 0), 0)
 	if err == nil && have < growth+storage.DefaultWALBytes {
 		log.Printf("durable: WARNING volume %s: %s has %d bytes free, less than the volume's remaining growth %d + WAL %d; when the disk fills, guest writes fail: free space on it",
 			volumeID, p.cfg.StorageRoot, have, growth, storage.DefaultWALBytes)
