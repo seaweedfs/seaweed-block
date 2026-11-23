@@ -21,7 +21,7 @@ that runs it.
 While volumes are served, blockmaster's host must keep its wall clock **slewed, not stepped**. Configure chrony to
 allow `makestep` only at boot (for example, `makestep 1 3` for the initial updates), and do not run `ntpdate` from a
 timer. Do not restart an initial-step clock configuration while leases are live. A wall-clock step larger than the
-configured clock-skew bound while a lease is live is **outside the v1.0 supported envelope**.
+configured clock-skew bound while a lease is live is **outside the v1.0 supported envelope**. Blockmaster requires half of `--workspace-max-clock-skew` to exceed its fence-exit bound (50 ms detection plus 5 s cleanup), so the bound must be above 10.1 s; the default 20 s passes.
 
 This is a safety premise, not a tested wall-step guarantee. The host's monotonic lease deadline does not remove this
 requirement on blockmaster's clock. See Part T `TERM-LEASE-NOW-001` in the [invariant contract](design/invariants.md).
