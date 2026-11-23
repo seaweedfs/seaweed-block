@@ -1084,7 +1084,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 	}
 	report := Recover(h.storage, volumeID)
 	if report.Err != nil {
-		h.backend.SetOperational(false, report.Evidence)
+		h.backend.setRecoveryFailure(report.Evidence, report.Err)
 		return report, report.Err
 	}
 	if chunked {
