@@ -241,7 +241,7 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		}
 		cum = mergeImages(cum, post)
 	}
-	t.Logf("kill steps: %v", steps)
+	t.Logf("kill steps: %v; the catalog steps (CATALOG, PUBLISHED) are pinned per step by TestCatalogRestartAfterAbandonedSnapshot", steps)
 	if steps["PUBLISHED"]+steps["CATALOG"]+steps["CUT"] == 0 {
 		t.Fatalf("inconclusive: no kill landed inside a snapshot (steps %v)", steps)
 	}
