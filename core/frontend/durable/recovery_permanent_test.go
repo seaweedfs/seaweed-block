@@ -67,4 +67,17 @@ func TestRecoveryStoreFaultRemainsPermanentAtGuestIO(t *testing.T) {
 	if !errors.Is(err, storage.ErrWALIntegrityFault) {
 		t.Errorf("guest error lost permanent WAL-integrity cause: %v", err)
 	}
+	// A later successful recovery clears the old cause. A subsequent ordinary
+	// readiness pause must not inherit a repaired fault's permanent class.
+	restore()
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatalf("recovery after repair: %v", err)
+	}
+	readEq(t, s, 5, block(0xA7), "repaired acknowledged record")
+	b.SetOperational(false, "maintenance pause")
+	_, err = b.Read(ctx, 5, make([]byte, 4096))
+	if !errors.Is(err, frontend.ErrNotReady) || errors.Is(err, storage.ErrWALIntegrityFault) ||
+		frontend.ClassifyBackendError(ctx, err) != frontend.BackendErrorNotReady {
+		t.Fatalf("ordinary pause retained the repaired recovery fault: %v", err)
+	}
 }
