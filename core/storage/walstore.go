@@ -171,6 +171,9 @@ type WALStore struct {
 // numBlocks defines the addressable block range; blockSize is the IO
 // unit (default 4096 if zero). The on-disk file is preallocated to
 // hold the superblock + WAL region + a fully addressable extent.
+// DefaultWALBytes is the WAL region a created store reserves.
+const DefaultWALBytes = 64 << 20
+
 func CreateWALStore(path string, numBlocks uint32, blockSize int) (*WALStore, error) {
 	return CreateWALStoreWithOptions(path, numBlocks, blockSize, WALStoreOptions{})
 }
@@ -192,7 +195,7 @@ func CreateWALStoreWithOptions(path string, numBlocks uint32, blockSize int, opt
 	if cb == 0 {
 		cb = 1024
 	}
-	return createWALStoreV3Configured(path, numBlocks, uint32(blockSize), 64*1024*1024, opts.WMode, 0, uint64(cb), opts)
+	return createWALStoreV3Configured(path, numBlocks, uint32(blockSize), DefaultWALBytes, opts.WMode, 0, uint64(cb), opts)
 }
 
 // OpenWALStore opens an existing store file WITHOUT recovering it.
