@@ -179,17 +179,31 @@ type handoffEnv struct {
 	chunkPath string
 	show      []string
 	hosts     map[string]bvHost
+	// volExtra is appended to every blockvolume command (a test that pins
+	// a default the page leaves alone, for example).
+	volExtra []string
 }
 
-// bvHost is one host's blockvolume: its server id, endpoints and local root.
+// bvHost is one host's blockvolume: its server id, endpoints, local root
+// and the volume it serves (v1 when empty).
 type bvHost struct {
 	id, data, ctrl, status, nvme, root string
+	volume                             string
 }
 
 // startHandoffEnv runs the chapter's steps 1-3: a weed cluster, the cluster
 // spec with hosts s1..sN, blockmaster with the lifecycle store (and
 // masterArgs), and the setup check.
 func startHandoffEnv(t *testing.T, n int, masterArgs ...string) *handoffEnv {
+	t.Helper()
+	return startHandoffEnvWith(t, n, nil, masterArgs...)
+}
+
+// startHandoffEnvWith is startHandoffEnv with more volume records in the
+// cluster spec: each of targets (a volume id) is placed on a node of its
+// own, named after it, with its own endpoints and local root (a restore
+// target, for example).
+func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...string) *handoffEnv {
 	t.Helper()
 	h := newPlannedHandoffHarness(t)
 	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
@@ -199,23 +213,30 @@ func startHandoffEnv(t *testing.T, n int, masterArgs ...string) *handoffEnv {
 		id := fmt.Sprintf("s%d", i)
 		env.hosts[id] = bvHost{id: id, data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t), root: filepath.Join(h.dir, "vol-"+id)}
 	}
+	for _, v := range targets {
+		id := "n-" + v
+		env.hosts[id] = bvHost{id: id, data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t), root: filepath.Join(h.dir, "vol-"+id), volume: v}
+	}
 	cluster, chunkPath := env.cluster, env.chunkPath
 
 	// 1. The cluster spec.
-	var nodes strings.Builder
-	for i := 1; i <= n; i++ {
-		b := env.hosts[fmt.Sprintf("s%d", i)]
+	var nodes, volumes strings.Builder
+	node := func(b bvHost) {
 		fmt.Fprintf(&nodes, "  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", b.id, b.data, b.ctrl)
 	}
+	volume := func(v, server string) {
+		fmt.Fprintf(&volumes, "  - id: %s\n    size_bytes: 268435456\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: r1\n", v, server)
+	}
+	for i := 1; i <= n; i++ {
+		node(env.hosts[fmt.Sprintf("s%d", i)])
+	}
+	volume("v1", "s1")
+	for _, v := range targets {
+		node(env.hosts["n-"+v])
+		volume(v, "n-"+v)
+	}
 	spec := filepath.Join(h.dir, "cluster-spec.yaml")
-	must(os.WriteFile(spec, []byte("nodes:\n"+nodes.String()+`volumes:
-  - id: v1
-    size_bytes: 268435456
-    replication_factor: 1
-    placements:
-      - server_id: s1
-        replica_id: r1
-`), 0o644))
+	must(os.WriteFile(spec, []byte("nodes:\n"+nodes.String()+"volumes:\n"+volumes.String()), 0o644))
 
 	// 2. blockmaster with the lifecycle store and the cluster spec.
 	mstate := filepath.Join(h.dir, "master")
@@ -246,12 +267,16 @@ func (env *handoffEnv) volArgs(id string) []string { return env.volArgsFor(env.h
 func (env *handoffEnv) volArgsFor(b bvHost) []string {
 	lockDir := b.root + ".locks" // each simulated host has its own
 	_ = os.MkdirAll(lockDir, 0o700)
-	return []string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", "v1", "--replica-id", "r1",
+	vol := b.volume
+	if vol == "" {
+		vol = "v1"
+	}
+	return append([]string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", b.id, "--volume-id", vol, "--replica-id", "r1",
 		"--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
 		"--durable-blocks", "65536", "--durable-blocksize", "4096",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--chunk-control-endpoint",
-		"--workspace-lease", "--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}
+		"--workspace-lease", "--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}, env.volExtra...)
 }
 
 func fatalOn(t *testing.T) (func(error), func(uint64, error) uint64) {
