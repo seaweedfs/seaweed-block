@@ -264,6 +264,10 @@ func f1Restore(t *testing.T, env *handoffEnv, src, snap, target string) *daemon 
 	return d
 }
 
+// f1CommandDeadline bounds one load write (and its flush): a write held
+// longer than this by a cut fails the rung.
+const f1CommandDeadline = 30 * time.Second
+
 // f1Block is one deterministic 4096-byte block (pattern needs a length that
 // divides 4096; these labels do not, so the block is filled explicitly).
 func f1Block(vol string, round int, kind string, lba uint64) []byte {
@@ -328,6 +332,9 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 				}
 				lba := first + uint64(n)
 				s := time.Now()
+				// Per command: dialNVMe's deadline is 60 s from the dial,
+				// shorter than the write period.
+				_ = c.io.SetDeadline(s.Add(f1CommandDeadline))
 				err := c.tryWrite(lba, f1Block(vol, round, "load", lba))
 				if err == nil && n%16 == 15 {
 					err = c.tryFlush()
@@ -387,6 +394,9 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 		}
 		r.SnapshotMs = ms(res[i].end.Sub(res[i].start))
 		f1Latencies(&r, w.samples, res[i].start, res[i].end)
+		if r.WritesIn == 0 {
+			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: no load write was issued inside the snapshot window", v.id, round))
+		}
 		f1CutStats(t, env, v, &r)
 		r.RSSKiB = f1RSS(v.d)
 		target := f1RestoreTarget(i+1, round)
