@@ -327,6 +327,14 @@ func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
 		{"blockmaster", &h.master}, {"blockvolume", &h.volume}, {"sw-block", &h.cli},
 	} {
 		*b.dst = filepath.Join(h.dir, b.name+suffix)
+		if d := os.Getenv("SWBLOCK_TEST_BINS"); d != "" {
+			// Prebuilt binaries, for a test host without a Go toolchain.
+			*b.dst = filepath.Join(d, b.name+suffix)
+			if _, err := os.Stat(*b.dst); err != nil {
+				t.Fatalf("SWBLOCK_TEST_BINS: %v", err)
+			}
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		cmd := exec.CommandContext(ctx, "go", "build", "-o", *b.dst, "github.com/seaweedfs/seaweed-block/cmd/"+b.name)
 		cmd.WaitDelay = 5 * time.Second
