@@ -52,6 +52,14 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal
   `size_bytes` in the cluster spec (for example 65536 x 4096 = 268435456).
+  If a blockvolume's first start for a volume used the wrong `--durable-blocks`, its log repeats `chunk attach check: chunkstore:
+  geometry_mismatch` and it exits; waiting or restarting with the right flags does not help, because its local store
+  was created at the wrong size. In one sitting: stop the unit first; then check that the volume never served:
+  `sw-block ops chunk show --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
+  `"holder":""` in its head; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
+  `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. If the head shows an epoch above 0 or
+  a holder, do not remove these files; if the volume served before, its local store has its original size: correct the
+  flag and start it again (not run as a test in this release).
 - **Memory:** plan for about 32-36 MiB per running volume. That was measured with 150-200 volumes on one host.
 - **Measured throughput on one host** (16 cores, 23.7 GB RAM, one consumer NVMe drive, fsync on every volume):
 
@@ -189,6 +197,7 @@ Every command on the pages above, and the test that runs it.
 | `systemctl enable`, `stop`, `disable`, `reset-failed`, `systemd-tmpfiles --create` as written on these pages | not run: the tests above start transient units, not the installed ones | not run |
 | Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesARestoreAndAForkTargetThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
 | Full local disk; full `--host-limit-dir` | `TestProcedureLocalDiskFull` (`cmd/blockvolume`, root, `testdata/diskfull.sh`); what a Linux guest sees: `TestProcedureLocalDiskFullKernelInitiator` (kernel NVMe/TCP host) | binary |
+| A start with the wrong `--durable-blocks` (`geometry_mismatch`): the guard (`sw-block ops chunk show`), removing the local files, a start with the right flags | `TestWrongGeometryCureAsWritten` (`cmd/blockvolume`) | binary |
 | SeaweedFS (filer or volume server) down during a cut | `TestProcedureStoreDownDuringACut` (`cmd/blockvolume`) | binary |
 | `blockmaster` refuses a `--workspace-max-clock-skew` whose half does not exceed its fence-exit budget (at or below 10.1 s) | `TestBlockmasterRefusesASkewBoundAtOrBelowTheFenceExit` (`cmd/blockvolume`, tag `subprocess`) | binary |
 | The missing lock directory (`host volume lock directory unavailable`) and its cure (tmpfiles entry or chown) | not run in 1.0 | not run |
