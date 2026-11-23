@@ -76,9 +76,10 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
   N (size S + WAL W)`), so the shipped unit starts it again every 5 s, refusing each time, until its start limit stops
   it; free space on that file system, then start the unit again. A restore or fork target refused this way exists in
   the catalog but cannot start, and it can be neither deleted nor moved until it has started once: a delete wants
-  it sealed, revoked and acknowledged, and a forced move is refused because the master knows no holder of it. The
-  only way out is to free space on that file system and start it; then delete it with the usual steps if it is not
-  wanted.
+  it sealed, revoked and acknowledged, and a forced move is refused because the master knows no holder of it. To
+  recover it, free space on that file system, or start it again on the same host with `--durable-root` on a local
+  file system with room; then delete it with the usual steps if it is not wanted. A refused target does not block
+  its source: the source's snapshot and the source volume can still be deleted.
 
   Alert on local free space. On a full local disk, a Linux guest's writes fail after about 75 s with an I/O error
   (EREMOTEIO), and the guest file system may then go read-only. Once space is freed, new writes succeed without a
