@@ -22,12 +22,14 @@ import (
 // read back every block acknowledged by a sync.
 //
 // Environment, set by the external replay harness (root, dm_log_writes):
-//   SWBLOCK_REPLAY_ROOT       mount point of the dm-log-writes filesystem
-//   SWBLOCK_REPLAY_CUT        executable: "mark" marks the log, "replay"
-//                             unmounts, replays to the mark and remounts
-//   SWBLOCK_REPLAY_BINS       optional dir with prebuilt blockmaster/blockvolume
-//   SWBLOCK_REPLAY_DROP_SYNC  "1" = negative control: no SYNCHRONIZE CACHE, so
-//                             the acknowledged writes must be lost
+//
+//	SWBLOCK_REPLAY_ROOT       mount point of the dm-log-writes filesystem
+//	SWBLOCK_REPLAY_CUT        executable: "mark" marks the log, "replay"
+//	                          unmounts, replays to the mark and remounts
+//	SWBLOCK_REPLAY_BINS       optional dir with prebuilt blockmaster/blockvolume
+//	SWBLOCK_REPLAY_LOGS       optional existing dir for master state and logs
+//	SWBLOCK_REPLAY_DROP_SYNC  "1" = negative control: no SYNCHRONIZE CACHE, so
+//	                          the acknowledged writes must be lost
 func TestPowerLossReplayAckedWritesSurvive(t *testing.T) {
 	root, cut := os.Getenv("SWBLOCK_REPLAY_ROOT"), os.Getenv("SWBLOCK_REPLAY_CUT")
 	if root == "" || cut == "" {
@@ -36,6 +38,9 @@ func TestPowerLossReplayAckedWritesSurvive(t *testing.T) {
 	dropSync := os.Getenv("SWBLOCK_REPLAY_DROP_SYNC") == "1"
 	bins := powerLossBins(t)
 	art := t.TempDir() // master state and logs stay off the replayed device
+	if d := os.Getenv("SWBLOCK_REPLAY_LOGS"); d != "" {
+		art = d // kept for the receipts
+	}
 	_, masterAddr := startSingleSlotMaster(t, bins, art)
 
 	iqn := "iqn.2026-11.example.powerloss:v1"
