@@ -110,9 +110,17 @@ func logUint(t *testing.T, d *daemon, re *regexp.Regexp) uint64 {
 // and clean exit, then volume-delete, which must complete.
 func (env *handoffEnv) deleteServingTarget(t *testing.T, vol string, b bvHost, d *daemon, e uint64) {
 	t.Helper()
-	_, mustU := fatalOn(t)
 	out, errOut := env.h.command(t, "ops", "chunk", "detach", "--plain", "--volume", vol, "--status-addr", b.status, "--timeout", "120s")
-	g := mustU(sealedGen(out, errOut, e))
+	var a struct {
+		VolumeID  string `json:"volumeID"`
+		HeadGen   uint64 `json:"headGen"`
+		HeadEpoch uint64 `json:"headEpoch"`
+	}
+	if err := json.Unmarshal([]byte(out), &a); err != nil || a.VolumeID != vol || a.HeadGen == 0 || a.HeadEpoch != e ||
+		strings.TrimSpace(errOut) != fmt.Sprintf("sealed HEAD generation: %d", a.HeadGen) {
+		t.Fatalf("plain detach of %s: %v %q %q; want %s sealed at epoch %d with its generation line", vol, err, out, errOut, vol, e)
+	}
+	g := a.HeadGen
 	env.h.command(t, "ops", "workspace", "revoke", "--master", env.h.masterAddr, "--volume", vol, "--replica", "r1",
 		"--epoch", fmt.Sprint(e), "--sealed-gen", fmt.Sprint(g))
 	if err := d.wait(30 * time.Second); err != nil {
