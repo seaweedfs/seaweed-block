@@ -317,7 +317,8 @@ func (s *ObservationStore) ingest(obs Observation) ([]SlotHealthTransition, erro
 	s.mu.Lock()
 	prev, hadPrev := s.observations[obs.ServerID]
 	// Health transitions, from this accepted report against the same
-	// slot's stored fact. V1-SPEC r2.53: timestamps order one sender's
+	// slot's stored fact. INV-OBS-SLOT-ORDER-001 / V1-SPEC r2.53:
+	// timestamps order one sender's
 	// slot only; a later report from another slot cannot supersede it.
 	accepted := make([]SlotFact, 0, len(obs.Slots))
 	for _, slot := range obs.Slots {
