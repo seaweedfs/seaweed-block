@@ -4,6 +4,7 @@ package main_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -20,22 +21,25 @@ import (
 // records how the cut answers and how much copy-on-write side data the
 // stalled cut keeps on the local root. Then the store comes back.
 //
-// Asserted: every guest command answers within storeDownBound and a guest
-// write that was flushed is never lost; the cut answers (an error is
-// allowed) once the store is back at the latest; the next cut moves HEAD and
-// verifies at depth data; no COW side file is left; a snapshot restored into
-// a new volume is the last flushed image. Recorded for the operator guide:
-// guest errors and the slowest answer while the store is down, when and how
-// the cut answered, the peak COW side bytes.
+// Asserted, in every variant: the store goes down mid-cut (uploads begun,
+// HEAD unmoved); the guest keeps writing with no error and every command
+// answers within storeDownBound; the cut the outage hit fails; after the
+// store returns a later cut moves HEAD and verifies at depth data; no COW
+// side file is left; a snapshot restored into a new volume is the last
+// flushed image (each pass writes new bytes). Recorded for the operator
+// guide: the slowest answer, when and how the stalled cut answered, the peak
+// COW side bytes.
+//
+// Runs 4 variants of about 2-3 minutes: go test -timeout 30m.
 const storeDownBound = 20 * time.Second
 
 func TestProcedureStoreDownDuringACut(t *testing.T) {
 	for _, down := range []string{"filer", "volume"} {
 		t.Run(down, func(t *testing.T) { storeDownDuringACut(t, down, 0, false) })
 	}
-	// The limit (claude06's variant): the stalled cut's copy-on-write reserve
-	// (--host-limit-cow-bytes) is 4 MiB, less than the 12 MiB of its capture
-	// that the guest overwrites during the outage. The outcome is recorded.
+	// 4 MiB: the reserve's half holds no 4 MiB chunk, so stage() uploads the
+	// whole dirty set before the cut point and opens no copy-on-write window;
+	// with the store down that upload fails. No local space, guest undisturbed.
 	t.Run("volume-cow-reserve-exceeded", func(t *testing.T) { storeDownDuringACut(t, "volume", 4<<20, false) })
 	// 400 MiB: the 48 captured 4 MiB chunks fit in half of it, so the cut
 	// opens its copy-on-write window; asserted to stay within reserve/2 and
@@ -102,11 +106,26 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 	}
 	answered := make(chan cutAnswer, 1)
 	cutStart := time.Now()
+	cutCtx, cutCancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	cutDone := make(chan struct{})
+	// Off the test goroutine: runCLI never fails the test, and cleanup waits
+	// for it so nothing outlives the test.
 	go func() {
-		out, errOut, rc := env.h.run(t, cut...)
+		defer close(cutDone)
+		out, errOut, rc, err := runCLI(cutCtx, env.h, cut...)
+		if err != nil {
+			rc, errOut = -1, errOut+err.Error()
+		}
 		answered <- cutAnswer{rc, out + errOut, time.Since(cutStart)}
 	}()
-	for end := time.Now().Add(10 * time.Second); f1FilerEntries(t, env) <= entries && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+	t.Cleanup(func() { cutCancel(); <-cutDone })
+	for end := time.Now().Add(10 * time.Second); f1FilerEntries(t, env) <= entries; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("%s: the cut uploaded nothing within 10s: the store would not go down mid-cut", down)
+		}
+	}
+	if g := headGen(); g != gen {
+		t.Fatalf("%s: the cut committed (HEAD gen %d -> %d) before the store went down: not mid-cut", down, gen, g)
 	}
 	env.cluster.stopProc(t, down)
 	downAt := time.Now()
@@ -115,7 +134,7 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 	// A minute of guest writes and flushes while the store is down.
 	c := dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
 	var pending []uint64
-	var errs, timeouts int
+	var errs int
 	var slowest time.Duration
 	var cutWhileDown *cutAnswer
 	peakSide := sideBytes()
@@ -128,36 +147,35 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 		}
 		var ne interface{ Timeout() bool }
 		if errors.As(err, &ne) && ne.Timeout() {
-			if cowBytes == 0 {
-				t.Fatalf("%s down: a guest command did not answer within %s: %v", down, storeDownBound, err)
-			}
-			timeouts++
-			// The queue is mid-command after a timeout: a new connection.
-			c.close()
-			c = dialNVMe(t, env.hosts["s1"].nvme, plannedHandoffNQN)
+			t.Fatalf("%s down: a guest command did not answer within %s: %v", down, storeDownBound, err)
 		}
 		return err
 	}
 	written := 0
+	pendingBytes := map[uint64][]byte{}
 	for n := 0; time.Since(downAt) < time.Minute; n++ {
 		ch, i := (n/cutCrashPer)%cutCrashChunks, n%cutCrashPer
 		lba := uint64(ch*ladderChunkBlocks + i)
-		b := cutCrashBlock('C', lba)
+		// Each pass over the image writes new bytes ('C', 'D', ...), so a lost
+		// tail of rewrites is visible at the read-back.
+		b := cutCrashBlock(byte('C'+n/(cutCrashChunks*cutCrashPer)), lba)
 		if err := op(func() error { return c.tryWrite(lba, b) }); err != nil {
 			errs++
 			continue
 		}
 		written++
 		pending = append(pending, lba)
+		pendingBytes[lba] = b
 		if len(pending) == 8 {
 			if err := op(c.tryFlush); err != nil {
 				errs++
 			} else {
 				for _, l := range pending {
-					want[l] = cutCrashBlock('C', l)
+					want[l] = pendingBytes[l]
 				}
 			}
 			pending = pending[:0]
+			clear(pendingBytes)
 		}
 		if s := sideBytes(); s > peakSide {
 			peakSide = s
@@ -172,8 +190,12 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 		time.Sleep(10 * time.Millisecond)
 	}
 	c.close()
-	t.Logf("%s down 60s (COW reserve %d): guest writes %d, errors %d (of them over %s: %d), slowest answer %s, frontend ready %v, peak COW side bytes %d",
-		down, cowBytes, written, errs, storeDownBound, timeouts, slowest.Round(time.Millisecond), env.frontendReadyAt("s1"), peakSide)
+	t.Logf("%s down 60s (COW reserve %d): guest writes %d, errors %d, slowest answer %s, frontend ready %v, peak COW side bytes %d",
+		down, cowBytes, written, errs, slowest.Round(time.Millisecond), env.frontendReadyAt("s1"), peakSide)
+	// Guest I/O is not delayed by the outage, in every variant.
+	if written == 0 || errs != 0 || slowest >= storeDownBound {
+		t.Fatalf("%s down: the guest was disturbed: %d writes, %d errors, slowest answer %s", down, written, errs, slowest)
+	}
 	if cutWhileDown != nil {
 		t.Logf("%s down: the cut answered while it was down, after %s, exit %d: %s", down, cutWhileDown.at.Round(time.Millisecond), cutWhileDown.rc, firstLine(cutWhileDown.out))
 	} else {
@@ -201,14 +223,22 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 	if down == "filer" {
 		w4WaitTCP(t, env.cluster.filerGRPC, 30*time.Second)
 	}
-	if cutWhileDown == nil {
+	stalled := cutWhileDown
+	if stalled == nil {
 		select {
 		case a := <-answered:
+			stalled = &a
 			t.Logf("%s back: the stalled cut answered %s after the restart, exit %d: %s", down, time.Since(backAt).Round(time.Millisecond), a.rc, firstLine(a.out))
 		case <-time.After(5 * time.Minute):
 			t.Fatalf("%s back: the cut started before the outage never answered", down)
 		}
 	}
+	// The cut the outage hit must have failed; HEAD is read again after its
+	// answer, so only a later cut can satisfy the check below.
+	if stalled.rc == 0 {
+		t.Fatalf("%s: the cut the outage hit reported success: %s", down, firstLine(stalled.out))
+	}
+	gen = headGen()
 	var g uint64
 	for end := time.Now().Add(2 * time.Minute); ; time.Sleep(2 * time.Second) {
 		_, _, rc := env.h.run(t, cut...)
