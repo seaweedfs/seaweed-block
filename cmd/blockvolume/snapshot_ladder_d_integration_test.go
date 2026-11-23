@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -57,13 +59,14 @@ func (env *handoffEnv) requireSnapshotNames(t *testing.T, vol string, names ...s
 	}
 }
 
-// restoreChecked restores snap of v1 into target to independence and checks
-// it equals img.
-func (env *handoffEnv) restoreChecked(t *testing.T, snap, target string, img map[uint64][]byte) {
+// restoreChecked restores snap of v1 into target until its status says
+// independent and checks it equals img, with every block of later that img
+// does not hold reading zero.
+func (env *handoffEnv) restoreChecked(t *testing.T, snap, target string, img map[uint64][]byte, later ...map[uint64][]byte) {
 	t.Helper()
 	env.restoreInto(t, "v1", snap, target)
 	env.waitIndependent(t, target)
-	env.requireImage(t, "n-"+target, img)
+	env.requireImage(t, "n-"+target, img, later...)
 }
 
 // TestSnapshotLadderD1DeleteTheNewest: three snapshots over overlapping
@@ -79,8 +82,8 @@ func TestSnapshotLadderD1DeleteTheNewest(t *testing.T) {
 	}
 	env.deleteSnapshot(t, "v1", "s3")
 	env.requireSnapshotNames(t, "v1", "s1", "s2")
-	env.restoreChecked(t, "s1", "v2", img1)
-	env.restoreChecked(t, "s2", "v3", mergeImages(img1, img2))
+	env.restoreChecked(t, "s1", "v2", img1, img2, img3)
+	env.restoreChecked(t, "s2", "v3", mergeImages(img1, img2), img3)
 }
 
 // TestSnapshotLadderD2DeleteAMiddleOne: four snapshots, each sharing chunks
@@ -99,22 +102,25 @@ func TestSnapshotLadderD2DeleteAMiddleOne(t *testing.T) {
 	}
 	env.deleteSnapshot(t, "v1", "s2")
 	env.requireSnapshotNames(t, "v1", "s1", "s3", "s4")
-	env.restoreChecked(t, "s1", "v2", img1)
-	env.restoreChecked(t, "s3", "v3", mergeImages(img1, img2, img3))
+	env.restoreChecked(t, "s1", "v2", img1, img2, img3, img4)
+	env.restoreChecked(t, "s3", "v3", mergeImages(img1, img2, img3), img4)
 	env.restoreChecked(t, "s4", "v4", mergeImages(img1, img2, img3, img4))
 }
 
 // TestSnapshotLadderD3DeleteWhenContentRecurs: the A, B, A volume of A4
-// (one block holds A, then B, then A again, a snapshot after each); the
-// first snapshot is deleted; the third, whose content equals the first's,
-// and the second restore as they were.
+// (one block holds A, then B, then A again, a snapshot after each), then the
+// live block is overwritten with C; the first snapshot is deleted; the
+// third, whose content equals the first's, and the second restore as they
+// were, not as HEAD is now. No collector runs here: this is the logical
+// delete and restore, not the reclamation of a recurring chunk.
 func TestSnapshotLadderD3DeleteWhenContentRecurs(t *testing.T) {
 	env := startLadderEnv(t, "v2", "v3")
-	a, b := pattern("ladder-d3-blk-A!"), pattern("ladder-d3-blk-B!")
+	a, b, c := pattern("ladder-d3-blk-A!"), pattern("ladder-d3-blk-B!"), pattern("ladder-d3-blk-C!")
 	for i, content := range [][]byte{a, b, a} {
 		env.writeBlock(t, "s1", 7, content)
 		env.snapshot(t, "s1", "v1", fmt.Sprintf("s%d", i+1))
 	}
+	env.writeBlock(t, "s1", 7, c) // HEAD now differs from every snapshot
 	env.deleteSnapshot(t, "v1", "s1")
 	env.requireSnapshotNames(t, "v1", "s2", "s3")
 	env.restoreChecked(t, "s3", "v2", map[uint64][]byte{7: a})
@@ -126,6 +132,73 @@ type gcObject struct {
 	Volume string `json:"volume"`
 	Key    string `json:"key"`
 	FID    string `json:"fid"`
+}
+
+// chunkKeys lists the names (unescaped) of v1's chunk-key bindings, read
+// straight from the filer's directory listing, not through the collector.
+func (env *handoffEnv) chunkKeys(t *testing.T, vol string) map[string]bool {
+	t.Helper()
+	c := &http.Client{Timeout: 10 * time.Second}
+	dir := path.Join(env.chunkPath, vol, "keys") + "/"
+	keys := map[string]bool{}
+	for last := ""; ; {
+		req, _ := http.NewRequest("GET", "http://"+env.cluster.filerHTTP+dir+"?limit=1000&lastFileName="+url.QueryEscape(last), nil)
+		req.Header.Set("Accept", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var page struct {
+			Entries []struct {
+				FullPath string `json:"FullPath"`
+			} `json:"Entries"`
+			LastFileName          string `json:"LastFileName"`
+			ShouldDisplayLoadMore bool   `json:"ShouldDisplayLoadMore"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("filer listing of %s: status %d %v", dir, resp.StatusCode, err)
+		}
+		for _, e := range page.Entries {
+			name, err := url.PathUnescape(path.Base(e.FullPath))
+			if err != nil {
+				t.Fatalf("chunk key %q: %v", e.FullPath, err)
+			}
+			keys[name] = true
+		}
+		if !page.ShouldDisplayLoadMore || page.LastFileName == "" || page.LastFileName == last {
+			return keys
+		}
+		last = page.LastFileName
+	}
+}
+
+// uniqueObjects checks every object is v1's and named once (by key and by
+// fid), and returns them by key.
+func uniqueObjects(t *testing.T, what string, objs []gcObject) map[string]gcObject {
+	t.Helper()
+	byKey, fids := map[string]gcObject{}, map[string]bool{}
+	for _, o := range objs {
+		if o.Volume != "v1" || o.Key == "" || o.FID == "" || fids[o.FID] {
+			t.Fatalf("%s: object %+v is not a distinct v1 chunk object: %+v", what, o, objs)
+		}
+		if _, dup := byKey[o.Key]; dup {
+			t.Fatalf("%s: key %q named twice: %+v", what, o.Key, objs)
+		}
+		byKey[o.Key], fids[o.FID] = o, true
+	}
+	return byKey
+}
+
+// requireBudget fails the test before it starts anything when the test
+// binary's deadline leaves less than need: a wait cut short by the package
+// timeout would skip the harness's cleanup.
+func requireBudget(t *testing.T, need time.Duration) {
+	t.Helper()
+	if dl, ok := t.Deadline(); ok && time.Until(dl) < need {
+		t.Fatalf("this test needs %v; the test deadline leaves %v (run with -timeout 45m)", need, time.Until(dl).Round(time.Second))
+	}
 }
 
 // gc runs one collector pass (applying or a preview) and returns the chunk
@@ -218,36 +291,50 @@ func (env *handoffEnv) blobStored(t *testing.T, fid string) bool {
 
 // TestSnapshotLadderD4DeleteAllButOneThenCollect: three snapshots, each
 // overwriting the same four chunks; the third and then the second are
-// deleted. The third's chunks are still HEAD's, so only the chunks the
-// second's cut uploaded are referenced by nothing; usage says deleting it
-// makes chunk bytes eligible. Two collector passes the grace apart reclaim
-// the CHUNK DATA of exactly those chunks: a preview before the second pass
-// names one eligible object per chunk the second's cut uploaded, each still
-// readable from the weed store; the applying pass reclaims those and only
-// those, and each is then gone from the store. HEAD still reads the newest
-// content and the remaining snapshot restores as it was.
+// deleted. The third's chunks are still HEAD's, so only the bindings the
+// second's cut created are referenced by nothing; usage says deleting it
+// makes chunk bytes eligible. The expected set is taken independently of
+// the collector: the chunk-key bindings that appear in the filer between the
+// first and the second snapshot. Two collector passes the grace apart then
+// reclaim the CHUNK DATA of exactly that set: a preview before the second
+// pass names exactly those keys, each once, each still readable from the
+// weed store; the applying pass reclaims exactly those, and each is then
+// gone from the store. HEAD still reads the newest content and the
+// remaining snapshot restores as it was.
 //
-// What is measured is chunk data in the weed store, not filer entries, and
-// the bound is exact only for objects the collector can enumerate. Excluded,
-// known limits of today's format:
+// What is measured is chunk data in the weed store for the bindings the
+// deleted snapshot alone created, not filer entries and not the whole store.
+// Excluded, known limits of today's format:
 //   - a reclaimed binding's filer entry is kept for ever (marked reclaimed),
 //     so filer entry counts and usage's stored bindings and stored bytes do
 //     not fall after collection and are not compared;
 //   - a needle uploaded before its binding was written (a retried upload)
 //     cannot be enumerated and is never reclaimed; a run without upload
-//     retries makes none, and the test does not look for them.
-//
-// So after collection the store's enumerable chunk data is at most what HEAD
-// and the remaining snapshot reference; unenumerable needles are not bounded.
+//     retries makes none, and the test does not look for them;
+//   - disk space is not measured: a deleted needle's space returns only
+//     when weed compacts its volume.
 func TestSnapshotLadderD4DeleteAllButOneThenCollect(t *testing.T) {
+	requireBudget(t, 2*ladderGCWait+10*time.Minute)
 	env := startLadderEnv(t, "v2")
 	chunks := []uint64{0, 1, 2, 3}
 	imgs := []map[uint64][]byte{ladderImage("d4one", chunks, 4), ladderImage("d4two", chunks, 4), ladderImage("d4three", chunks, 4)}
 	uploads := make([]int, len(imgs))
+	keysAfter := make([]map[string]bool, len(imgs))
 	for i, img := range imgs {
 		env.writeImage(t, "s1", img)
 		env.snapshot(t, "s1", "v1", fmt.Sprintf("s%d", i+1))
 		uploads[i] = env.lastCutUploads(t, "s1", "v1")
+		keysAfter[i] = env.chunkKeys(t, "v1")
+	}
+	expected := map[string]bool{} // the bindings the second snapshot's cut created
+	for k := range keysAfter[1] {
+		if !keysAfter[0][k] {
+			expected[k] = true
+		}
+	}
+	t.Logf("the second snapshot's cut uploaded %d chunks and created %d bindings", uploads[1], len(expected))
+	if len(expected) < len(chunks) {
+		t.Fatalf("the second snapshot's cut created %d bindings; want at least one per overwritten chunk (%d)", len(expected), len(chunks))
 	}
 	if uploads[1] != len(chunks) {
 		t.Fatalf("the second snapshot's cut uploaded %d chunks; want the %d it overwrote", uploads[1], len(chunks))
@@ -262,30 +349,35 @@ func TestSnapshotLadderD4DeleteAllButOneThenCollect(t *testing.T) {
 	env.requireSnapshotNames(t, "v1", "s1")
 	deleted := time.Now()
 
+	requireBudget(t, time.Until(deleted.Add(ladderGCWait))+ladderGCWait+5*time.Minute)
 	time.Sleep(time.Until(deleted.Add(ladderGCWait))) // the chunks are older than the grace
 	if _, n := env.gc(t, true); n != 0 {
 		t.Fatalf("the first mark reclaimed %d chunks; a chunk is reclaimed only by a second mark", n)
 	}
 	first := time.Now()
+	requireBudget(t, ladderGCWait+5*time.Minute)
 	time.Sleep(time.Until(first.Add(ladderGCWait))) // a second mark the grace after the first
 
 	eligible, _ := env.gc(t, false)
-	if len(eligible) != uploads[1] {
-		t.Fatalf("%d chunk objects eligible: %+v; want the %d the second snapshot's cut uploaded", len(eligible), eligible, uploads[1])
+	want := uniqueObjects(t, "preview", eligible)
+	if len(want) != len(expected) {
+		t.Fatalf("%d chunk objects eligible: %+v; want exactly the %d bindings the second snapshot's cut created", len(want), eligible, len(expected))
 	}
-	want := map[string]bool{}
-	for _, o := range eligible {
-		if o.Volume != "v1" || !env.blobStored(t, o.FID) {
-			t.Fatalf("eligible object %+v is not v1 chunk data in the store", o)
+	for k, o := range want {
+		if !expected[k] {
+			t.Fatalf("eligible object %+v is not one the second snapshot's cut created", o)
 		}
-		want[o.FID] = true
+		if !env.blobStored(t, o.FID) {
+			t.Fatalf("eligible object %+v is not in the store before the applying pass", o)
+		}
 	}
 	reclaimedObjs, n := env.gc(t, true)
-	if n != len(want) || len(reclaimedObjs) != len(want) {
-		t.Fatalf("the second mark reclaimed %d of %d eligible: %+v", n, len(want), reclaimedObjs)
+	got := uniqueObjects(t, "apply", reclaimedObjs)
+	if n != len(expected) || len(got) != len(expected) {
+		t.Fatalf("the second mark reclaimed %d (%d distinct) of the %d expected: %+v", n, len(got), len(expected), reclaimedObjs)
 	}
-	for _, o := range reclaimedObjs {
-		if !want[o.FID] {
+	for k, o := range got {
+		if w, ok := want[k]; !ok || w.FID != o.FID {
 			t.Fatalf("the second mark reclaimed %+v, which the preview did not name", o)
 		}
 		if env.blobStored(t, o.FID) {
@@ -293,5 +385,5 @@ func TestSnapshotLadderD4DeleteAllButOneThenCollect(t *testing.T) {
 		}
 	}
 	env.requireImage(t, "s1", imgs[2])
-	env.restoreChecked(t, "s1", "v2", imgs[0])
+	env.restoreChecked(t, "s1", "v2", imgs[0], imgs[1], imgs[2])
 }
