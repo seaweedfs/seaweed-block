@@ -52,14 +52,14 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal
   `size_bytes` in the cluster spec (for example 65536 x 4096 = 268435456).
-  If a blockvolume was started with the wrong `--durable-blocks`, its log repeats `chunk attach check: chunkstore:
+  If a blockvolume's first start for a volume used the wrong `--durable-blocks`, its log repeats `chunk attach check: chunkstore:
   geometry_mismatch` and it exits; waiting or restarting with the right flags does not help, because its local store
   was created at the wrong size. In one sitting: stop the unit first; then check that the volume never served:
   `sw-block ops chunk show --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
   `"holder":""` in its head; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
   `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. If the head shows an epoch above 0 or
-  a holder, do not remove these files, even if this host never served the volume (for example after a forced move):
-  they may hold acknowledged writes; use the normal move or delete procedure instead.
+  a holder, do not remove these files; if the volume served before, its local store has its original size: correct the
+  flag and start it again (not run as a test in this release).
 - **Memory:** plan for about 32-36 MiB per running volume. That was measured with 150-200 volumes on one host.
 - **Measured throughput on one host** (16 cores, 23.7 GB RAM, one consumer NVMe drive, fsync on every volume):
 
