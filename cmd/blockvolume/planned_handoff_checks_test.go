@@ -338,3 +338,31 @@ func TestPlannedHandoffChecksReadCapturedProductOutput(t *testing.T) {
 		t.Error("status check does not read the epoch of a healthy primary")
 	}
 }
+
+// lastCutUploadedChunks reads Chunk.Stats.LastCut.UploadedChunks of vol from a
+// /status/durable body.
+func lastCutUploadedChunks(body []byte, vol string) (int, error) {
+	var st struct {
+		Volumes []struct {
+			VolumeID string
+			Chunk    *struct {
+				Stats struct {
+					LastCut *struct{ UploadedChunks int }
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal(body, &st); err != nil {
+		return 0, fmt.Errorf("durable status is not JSON: %v", err)
+	}
+	for _, v := range st.Volumes {
+		if v.VolumeID != vol {
+			continue
+		}
+		if v.Chunk == nil || v.Chunk.Stats.LastCut == nil {
+			return 0, fmt.Errorf("durable status of %s has no last cut", vol)
+		}
+		return v.Chunk.Stats.LastCut.UploadedChunks, nil
+	}
+	return 0, fmt.Errorf("durable status has no volume %s", vol)
+}
