@@ -81,3 +81,110 @@ func TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot(t *testing.T) {
 	out, errOut, code = env.volumeDelete(t, "del-v1")
 	requireDeleteCompleted(t, out, errOut, code, false)
 }
+
+// TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC: a restore
+// target (v2) refused for local headroom has never hydrated, so its HEAD
+// names its source's chunks. While it waits, the source's snapshot is
+// deleted and then the source volume (seal, revoke, ACK, volume-delete), and
+// the collector runs two applying passes a grace apart (its shortest grace;
+// about 25 minutes). Then space is freed and v2 starts: it must read back
+// the snapshot exactly, at once and again after its restore reaches
+// independence. A read that differs or reads zero is a data-loss path and
+// fails the test as such; a target that refuses to start fails with its
+// reason.
+func TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC(t *testing.T) {
+	small, filler := os.Getenv("CHUNKSTORE_SMALL_ROOT"), os.Getenv("CHUNKSTORE_SMALL_FILLER")
+	if small == "" || filler == "" {
+		t.Skip("CHUNKSTORE_SMALL_ROOT and CHUNKSTORE_SMALL_FILLER name a small file system and its filler file")
+	}
+	need := int64(headroomVolumeBytes + headroomWALBytes)
+	if free := freeBytes(t, small); free >= need {
+		t.Fatalf("the small file system has %d bytes free, not less than the %d a volume needs: fix the runner", free, need)
+	}
+	requireBudget(t, 2*ladderGCWait+10*time.Minute)
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(small, t.Name())) })
+
+	env := startHandoffEnvWith(t, 1, []string{"v2"})
+	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
+	src := env.start(t, "blockvolume-v1", "s1")
+	e := env.adopt(t, src, "s1")
+	b2 := env.hosts["n-v2"]
+	b2.root = filepath.Join(small, t.Name(), "vol-n-v2")
+	env.hosts["n-v2"] = b2
+	if err := os.MkdirAll(b2.root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	img := ladderImage("srcgone", []uint64{0, 3, 9}, 4)
+	env.writeImage(t, "s1", img)
+	env.snapshot(t, "s1", "v1", "base")
+	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", "v2",
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	env.refusedForHeadroom(t, "v2", "blockvolume-v2-no-room")
+
+	// The source goes: its snapshot, then the volume, by the documented steps.
+	env.deleteSnapshot(t, "v1", "base")
+	g := env.seal(t, "s1", e)
+	env.revoke(t, e, g)
+	if err := src.wait(30 * time.Second); err != nil {
+		t.Fatalf("s1 after the revocation: %v; want a clean exit by itself", err)
+	}
+	env.waitAck(t, e, g)
+	out, errOut, code := env.volumeDelete(t, "del-v1")
+	requireDeleteCompleted(t, out, errOut, code, false)
+	deleted := time.Now()
+
+	// Two collector passes a grace apart.
+	requireBudget(t, time.Until(deleted.Add(ladderGCWait))+ladderGCWait+5*time.Minute)
+	time.Sleep(time.Until(deleted.Add(ladderGCWait)))
+	objs1, n1 := env.gc(t, true)
+	first := time.Now()
+	requireBudget(t, ladderGCWait+5*time.Minute)
+	time.Sleep(time.Until(first.Add(ladderGCWait)))
+	objs2, n2 := env.gc(t, true)
+	for _, o := range append(objs1, objs2...) {
+		t.Logf("GC reclaimed %s %s (fid %s)", o.Volume, o.Key, o.FID)
+	}
+	t.Logf("GC: first pass reclaimed %d, second %d", n1, n2)
+
+	// The refused target, now with room, must read the snapshot exactly.
+	if err := os.Remove(filler); err != nil {
+		t.Fatal(err)
+	}
+	d2 := env.h.start(t, "blockvolume-v2-with-room", env.h.volume, env.volArgsFor(b2)...)
+	adopted := false
+	for end := time.Now().Add(60 * time.Second); time.Now().Before(end) && !adopted; time.Sleep(200 * time.Millisecond) {
+		select {
+		case <-d2.done:
+			t.Fatalf("v2 refused to start after its source was deleted and collected: %v; %q", d2.err, strings.TrimSpace(d2.line("blockvolume:")))
+		default:
+		}
+		adopted = d2.has("blockvolume: volume v2 adopted as PRIMARY at r1@")
+	}
+	if !adopted {
+		t.Fatal("v2 never adopted after its source was deleted and collected")
+	}
+	poll(t, 60*time.Second, "v2 never reported its frontend ready", func() bool { return volumeFrontendReady(b2.status, "v2") })
+	requireImageExact(t, env, "n-v2", img, "after its source was deleted and collected")
+	env.h.command(t, "ops", "chunk", "restore", "--volume", "v2", "--status-addr", b2.status)
+	env.waitIndependent(t, "v2")
+	requireImageExact(t, env, "n-v2", img, "after its restore reached independence")
+}
+
+// requireImageExact reads every block of img on the host and fails, marked
+// as a data-loss path, on any block that differs (or reads zero).
+func requireImageExact(t *testing.T, env *handoffEnv, hostID string, img map[uint64][]byte, when string) {
+	t.Helper()
+	c := dialNVMe(t, env.hosts[hostID].nvme, plannedHandoffNQN)
+	defer c.close()
+	bad := 0
+	for lba, want := range img {
+		if got := c.read(t, lba, 4096); string(got) != string(want) {
+			bad++
+		}
+	}
+	if bad != 0 {
+		t.Fatalf("DATA LOSS PATH: %s, %d of %d snapshot blocks on %s differ from what was written", when, bad, len(img), hostID)
+	}
+	env.requireEdges(t, hostID)
+	t.Logf("%s: all %d snapshot blocks on %s read back exactly", when, len(img), hostID)
+}
