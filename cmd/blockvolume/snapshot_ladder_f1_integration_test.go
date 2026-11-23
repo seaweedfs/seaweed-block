@@ -77,9 +77,17 @@ func f1ConfigFromEnv(t *testing.T) f1Config {
 		}
 		return def
 	}
+	retry := 60 // the snapshot command's default --timeout; 0 = no retry (the negative control)
+	if v := os.Getenv("F1_SLOT_RETRY_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			t.Fatalf("F1_SLOT_RETRY_SECONDS=%q: want a whole number of seconds, 0 or more", v)
+		}
+		retry = n
+	}
 	c := f1Config{Volumes: num("F1_VOLUMES", 10), Rounds: num("F1_ROUNDS", 3), WriteSeconds: num("F1_WRITE_SECONDS", 120),
 		HostLimitDir: os.Getenv("F1_HOST_LIMIT_DIR"), Slots: num("F1_HOST_LIMIT_SLOTS", hostlimit.DefaultConfig("").NormalSlots),
-		SlotRetryBound: time.Duration(num("F1_SLOT_RETRY_SECONDS", 60)) * time.Second, Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: num("F1_LOAD_SPAN", 8192)}
+		Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: num("F1_LOAD_SPAN", 8192), SlotRetryBound: time.Duration(retry) * time.Second}
 	if v := os.Getenv("F1_CONTROL_PAUSE_SECONDS"); v != "" {
 		c.ControlPauseSecs = num("F1_CONTROL_PAUSE_SECONDS", 0)
 	}
