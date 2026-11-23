@@ -1,6 +1,7 @@
 package durable_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -57,9 +58,9 @@ func TestRecoveryStoreFaultRemainsPermanentAtGuestIO(t *testing.T) {
 	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrWALIntegrityFault) {
 		t.Fatalf("expected real WAL integrity recovery failure: %v", err)
 	}
-	_, err = b.Read(ctx, 5, make([]byte, 4096))
-	if err == nil {
-		t.Fatal("failed recovery admitted a guest read")
+	n, err := b.Read(ctx, 5*4096, make([]byte, 4096))
+	if n != 0 || !errors.Is(err, frontend.ErrNotReady) {
+		t.Fatalf("failed recovery guest read: n=%d, want 0 and not-ready: %v", n, err)
 	}
 	if got := frontend.ClassifyBackendError(ctx, err); got != frontend.BackendErrorPermanent {
 		t.Errorf("store-fault recovery became guest retry class %v, want permanent: %v", got, err)
@@ -73,9 +74,14 @@ func TestRecoveryStoreFaultRemainsPermanentAtGuestIO(t *testing.T) {
 	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
 		t.Fatalf("recovery after repair: %v", err)
 	}
-	readEq(t, s, 5, block(0xA7), "repaired acknowledged record")
+	want := block(0xA7)
+	got := make([]byte, len(want))
+	n, err = b.Read(ctx, 5*4096, got)
+	if err != nil || n != len(want) || !bytes.Equal(got, want) {
+		t.Fatalf("repaired acknowledged record through backend: n=%d, want %d; matching bytes=%t: %v", n, len(want), bytes.Equal(got, want), err)
+	}
 	b.SetOperational(false, "maintenance pause")
-	_, err = b.Read(ctx, 5, make([]byte, 4096))
+	_, err = b.Read(ctx, 5*4096, make([]byte, 4096))
 	if !errors.Is(err, frontend.ErrNotReady) || errors.Is(err, storage.ErrWALIntegrityFault) ||
 		frontend.ClassifyBackendError(ctx, err) != frontend.BackendErrorNotReady {
 		t.Fatalf("ordinary pause retained the repaired recovery fault: %v", err)
