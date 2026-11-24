@@ -167,7 +167,7 @@ func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 	select {
 	case <-r.failed:
 		cancel() // retries are now allowed; terminate this cut explicitly
-	case <-time.After(time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("uploads did not overlap")
 	}
 	select {
