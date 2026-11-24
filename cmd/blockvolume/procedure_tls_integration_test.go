@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -146,5 +147,30 @@ func TestProcedureTLSMasterRestartWithAHolderRemoved(t *testing.T) {
 	}
 	if d2.has("workspace lease: fenced") {
 		t.Fatal("n-v2 fenced although its line is still in the role file")
+	}
+}
+
+// T13: sw-block without a client certificate against the TLS master is
+// refused at the handshake; it exits "not authorized" (5) and names the cure.
+// With an operator certificate, a forced move is refused as not authorized
+// too (it needs admin).
+func TestProcedureTLSPlaintextClientIsRefusedWithTheCure(t *testing.T) {
+	env := startTLSEnv(t, 1, nil, nil)
+	admin := env.h.cliEnv
+	env.h.cliEnv = []string{"SW_BLOCK_TLS_CERT=", "SW_BLOCK_TLS_KEY=", "SW_BLOCK_TLS_CA="}
+	_, stderr, code := env.h.run(t, env.show...)
+	if code != 5 || !strings.Contains(stderr, "SW_BLOCK_TLS_CERT") || !strings.Contains(stderr, "mutual TLS") {
+		t.Fatalf("plaintext sw-block against the TLS master: exit %d, stderr %q; want 5 naming SW_BLOCK_TLS_CERT and mutual TLS", code, stderr)
+	}
+	env.h.cliEnv = env.tls.cliEnv("operator")
+	_, stderr, code = env.h.run(t, "ops", "workspace", "force-move", "--master", env.h.masterAddr, "--volume", "v1",
+		"--target-host", "s1", "--target-data", env.hosts["s1"].data, "--target-ctrl", env.hosts["s1"].ctrl,
+		"--request-id", "t13-operator", "--confirm-forced", "v1@1")
+	if code != 5 || !strings.Contains(stderr, "admin") {
+		t.Fatalf("operator forced move: exit %d, stderr %q; want 5 naming admin", code, stderr)
+	}
+	env.h.cliEnv = admin
+	if _, _, code := env.h.run(t, env.show...); code != 0 {
+		t.Fatalf("admin show: exit %d", code)
 	}
 }
