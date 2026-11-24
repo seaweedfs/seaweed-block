@@ -9,9 +9,11 @@ import (
 // A scheduled snapshot is named, and requested, for the slot it was due
 // for: "sched-" and the slot's start, UTC to the second. Every attempt for
 // one slot (a retry, a restart, another holder) uses that one name, so
-// they converge on one snapshot. The slot in the name is the scheduled
-// snapshot's time: the schedule decides from the newest one, and retention
-// ranks the class by it.
+// they converge on one snapshot. The slot in the name decides idempotency
+// (one snapshot per slot) and coverage (the schedule is due when no
+// published scheduled snapshot names the current slot, and retention keeps
+// the one naming the greatest slot); it never decides order, which is the
+// HEAD generation a snapshot copied.
 const (
 	scheduledNamePrefix = "sched-"
 	scheduledNameLayout = "20060102T150405Z"
