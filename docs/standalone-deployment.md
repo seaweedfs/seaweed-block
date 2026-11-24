@@ -603,8 +603,8 @@ Prerequisites: `v1` is serving, its only snapshot is `seed`, and the standalone 
 5. Verify both surviving images, including the holder's template snapshot:
 
    ```bash
-   sw-block ops chunk verify --volume template-holder --all-snapshots --depth data --chunk-filer FILER
-   sw-block ops chunk verify --volume consumer --all-snapshots --depth data --chunk-filer FILER
+   sw-block ops chunk verify --volume template-holder --all-snapshots --depth data --timeout 2m --chunk-filer FILER
+   sw-block ops chunk verify --volume consumer --all-snapshots --depth data --timeout 2m --chunk-filer FILER
    sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
    ```
 

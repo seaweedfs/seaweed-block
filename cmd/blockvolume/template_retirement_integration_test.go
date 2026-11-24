@@ -46,7 +46,7 @@ func TestProcedureRetireTemplateSource(t *testing.T) {
 	env.requireDeletedForGood(t, "delete-template-source")
 	check := func() {
 		for _, vol := range []string{template, "consumer"} {
-			env.h.command(t, "ops", "chunk", "verify", "--volume", vol, "--all-snapshots", "--depth", "data",
+			env.h.command(t, "ops", "chunk", "verify", "--volume", vol, "--all-snapshots", "--depth", "data", "--timeout", "2m",
 				"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 			env.requireBlocks(t, "n-"+vol, 0, 16, want)
 			env.requireEdges(t, "n-"+vol)
