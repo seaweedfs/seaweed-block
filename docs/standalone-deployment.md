@@ -561,8 +561,8 @@ therefore see every chunk of every volume and snapshot as unreferenced.
   `-reallyDeleteFromVolume`** on such a cluster either.
 - `volume.fsck` **without** those flags only reports. Its orphan list will contain the chunk needles; that is
   expected and is not a fault.
-- **Chunk data has its own collection** (`--chunk-collection`, `SWB_CHUNK_COLLECTION`, required) so cluster
-  maintenance can be kept away from it. Use it for nothing else. Do not put a TTL on that collection and do not delete it: both remove needles
+- **Chunk data has its own collection** (`--chunk-collection`, `SWB_CHUNK_COLLECTION`, required). It is not a
+  fence: it confines these rules to one collection. Use it for nothing else. Do not put a TTL on that collection and do not delete it: both remove needles
   without regard to what refers to them.
 - `filer.sync`, `filer.backup` and `filer.replicate` copy file chunk lists. They do **not** copy a walstore-chunk
   volume: the copied records would point at needles that do not exist on the target.

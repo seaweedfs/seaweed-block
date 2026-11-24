@@ -10,8 +10,8 @@ import (
 )
 
 // First public release, G3 red: chunk needles must live in a collection used
-// only by sw-block, the only fence between SeaweedFS's own fsck and vacuum
-// and the chunk data. A chunk volume whose effective collection is empty
+// only by sw-block, which scopes the documented fsck/TTL ban to one
+// collection (it is not a fence). A chunk volume whose effective collection is empty
 // (no --chunk-collection, and the filer gives none) must refuse to start:
 // exit 78 (no restart under the shipped unit), a line naming
 // --chunk-collection as the cure, and nothing created under --durable-root.

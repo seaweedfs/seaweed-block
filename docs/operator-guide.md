@@ -48,8 +48,9 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 - Without it, blockvolume exits at start with `host volume lock directory unavailable`. Install the entry, or chown
   the directory to the unit's user.
 
-**Chunk collection (required).** Chunk needles must live in a SeaweedFS collection used only by sw-block, so that
-cluster maintenance (fsck with a delete flag, a TTL, deleting a collection) is kept away from them.
+**Chunk collection (required).** Chunk needles must live in a SeaweedFS collection used only by sw-block. This does
+not protect them: it confines the rules below (no fsck with a delete flag, no TTL, no collection delete) to that one
+collection, so the rest of the cluster keeps its normal maintenance.
 - Set `SWB_CHUNK_COLLECTION=<name>` in every host's blockvolume env file (`--chunk-collection`), the same name on
   every host, and pass `--chunk-collection <name>` to `sw-block ops chunk gc`. A filer default or storage rule does
   not count.

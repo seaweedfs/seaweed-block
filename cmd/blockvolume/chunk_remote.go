@@ -251,8 +251,10 @@ func geometryFlagsRefusal(ctx context.Context, cat *chunkstore.Catalog, volumeID
 }
 
 // chunkCollectionRefusal requires chunk needles to live in a collection used
-// only by sw-block (INV-CHUNK-DEDICATED-COLLECTION-001): it is the only fence
-// between SeaweedFS's own fsck and vacuum and the chunk data. Only an
+// only by sw-block (INV-CHUNK-DEDICATED-COLLECTION-001). It is not a fence:
+// it scopes the documented ban (no fsck delete flags, no TTL, no collection
+// delete) to one collection, so the rest of the cluster keeps its normal
+// maintenance. Only an
 // explicit --chunk-collection counts; a filer default or storage rule may be
 // shared and is not visible in the unit. It returns the refusal line, or ""
 // when the flag is set or the volume is not a chunk volume. Checked before
