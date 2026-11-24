@@ -103,7 +103,7 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 - Each HEAD is logically full: restore never chains deltas.
 - A flat (format 1) HEAD is upgraded at its next cut ([chunk manifests](../chunk-manifests.md)). In a host-side proxy, the root of a 10 GiB volume shrank from 261,531 bytes (flat) to 2,172 bytes (two-level) (§13).
 
-**How versions share data.** A HEAD, a snapshot and a fork root are each a complete map from chunk index to chunk key. There is no backing chain and no per-layer bitmap that falls through to a parent, as qcow2 backing files or overlay layers have.
+**How versions share data.** A HEAD, a snapshot and a fork root are each a complete map from chunk index to chunk key. There is no backing chain and no per-layer bitmap that falls through to a parent, as qcow2 backing files or overlay layers have. This is `INV-HEAD-FLAT-001`: immutable segment indirection is part of one image map, not a parent-image chain.
 - A cut uploads a new key only for a chunk whose content changed (§5, step 6) and rewrites only the segments that list such chunks. Every other index keeps its key, and every other segment its object, from the previous HEAD. A snapshot copies the root; a fork writes a new root with the same references (§6). Neither copies a chunk or a segment.
 - So a chunk that was not rewritten after a snapshot is the same object in that snapshot, in every later snapshot and in HEAD. A chunk rewritten after the snapshot has an old key that only the snapshot (and any earlier version that shares it) still references.
 - A read looks up one map: the root, one segment, one chunk. It never walks a chain, and deleting a version never requires merging another one.

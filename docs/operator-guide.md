@@ -135,10 +135,10 @@ default) can expire the host's slots; keep host clocks synchronized.
 - scheduled and manual snapshots;
 - deleting snapshots, and getting space back:
   - GC deletes the chunks after the grace (`--grace`, 1 hour by default), so a deleted snapshot's space is
-    reclaimed about 2 hours after the delete;
+    reclaimed about 2 hours after the delete unless still referenced by a snapshot, fork or restore;
   - then the asynchronous SeaweedFS vacuum compacts the volume files;
 - `ops chunk verify`;
-- restoring a snapshot into a new, independent volume.
+- forking a snapshot into a new volume that shares immutable objects, or restoring it into a new, independent volume.
 
 A snapshot can be refused with `host_slot_busy` / `no background slot` (retryable) while every host slot is held by
 other volumes' cuts; retry with the same request id. With many volumes on a host, a snapshot may wait for a slot:
