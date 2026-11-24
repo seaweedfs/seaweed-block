@@ -171,3 +171,51 @@ func TestIntegration_FsckReportsOnlyTrueOrphans(t *testing.T) {
 	}
 	t.Logf("fsck report:\n%s", report)
 }
+
+// On a real filer: a refused volume-delete over an absent HEAD removes the
+// deleting HEAD it wrote by a conditional DeleteEntry (generation 1), and a
+// conditional delete on another generation is refused and leaves HEAD.
+func TestIntegration_RefusedDeleteRemovesFirstHeadConditionally(t *testing.T) {
+	c := startWeed(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	const base = "/swblock/cond"
+	cl := c.client(t, AssignPathFor(base))
+	cat, err := NewCatalog(cl, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.EnsureVolume(ctx, "v1", Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
+		t.Fatal(err)
+	}
+	root := base + "/v1"
+	// A conditional delete on the wrong generation is refused by the filer.
+	if err := cl.DeleteEntry(ctx, root, headName, map[string][]byte{extGen: []byte("7")}); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("conditional delete on gen 7 of a gen-1 HEAD: %v; want a precondition failure", err)
+	}
+	if _, err := cl.LookupEntry(ctx, root, headName); err != nil {
+		t.Fatalf("HEAD after the refused conditional delete: %v", err)
+	}
+	if err := cl.DeleteEntry(ctx, root, headName, nil); err != nil { // HEAD pruned
+		t.Fatal(err)
+	}
+	cat.retainHook = func(stage, _ string) {
+		if stage != hookHeadMarked {
+			return
+		}
+		cat.retainHook = nil
+		rec, err := nameRecordEntry(nameRecord{Format: snapFormat, VolumeID: "v1", Name: "late", Attempt: "1-0000000000000001", RequestID: "late"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cl.CreateEntry(ctx, root+"/"+snapNamesDir, rec, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := cat.DeleteVolume(ctx, "v1", nil); CodeOf(err) != CodeVolumeHasSnapshots {
+		t.Fatalf("delete with a late snapshot over an absent HEAD: %v", err)
+	}
+	if _, err := cl.LookupEntry(ctx, root, headName); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("HEAD after the refused delete: %v; want it removed (absent)", err)
+	}
+}

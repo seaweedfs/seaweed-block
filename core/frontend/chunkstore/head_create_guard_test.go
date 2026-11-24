@@ -58,6 +58,9 @@ func TestHeadCreate_SourceGuard(t *testing.T) {
 				}
 				return true
 			})
+			if calls["headCreateCtx"] && fn.Name.Name != "createHead" && fn.Name.Name != "fork" {
+				t.Errorf("%s: %s marks a HEAD create (headCreateCtx); only createHead and the fork publish may", fset.Position(fn.Pos()), fn.Name.Name)
+			}
 			if calls["headEntry"] && (calls["CreateEntry"] || calls["createResolved"] || calls["createHead"]) {
 				creators = append(creators, fn.Name.Name)
 				if !calls["createHead"] && !calls["headCreateCheck"] {

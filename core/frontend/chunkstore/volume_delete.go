@@ -188,6 +188,15 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 			// HEAD restored or marked since has another generation and is
 			// left to the ordinary revert.
 			c.hook(hookBlocked, vol)
+			// Remove only the deleting generation-1 HEAD read now: a fresh
+			// generation-1 HEAD in another state is not this incarnation.
+			cur, has, err := c.ReadHead(ctx, vol)
+			if err != nil {
+				return res, err
+			}
+			if !has || cur.Gen != 1 || cur.State != storage.ChunkHeadDeleting {
+				return giveBack(live)
+			}
 			if err := c.f.DeleteEntry(ctx, root, headName, map[string][]byte{extGen: []byte("1")}); err != nil && !errors.Is(err, ErrNotFound) {
 				res.Uncertain = true
 				return res, catErr(CodeOutcomeUnknown, true, err, "volume %s: %v; removing the deleting HEAD this delete wrote failed: rerun the delete", vol, live)

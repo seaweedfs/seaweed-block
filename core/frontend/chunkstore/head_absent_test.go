@@ -622,3 +622,39 @@ func TestVolumeDelete_JoinedFirstHeadRemovedNotReverted(t *testing.T) {
 		t.Fatalf("HEAD after the refused delete: %+v present=%t %v; want it removed", got, ok, err)
 	}
 }
+
+// The cleanup removes only the deleting generation-1 HEAD it reads now: a
+// fresh generation-1 HEAD in another state (made after the mark) survives.
+func TestVolumeDelete_CleanupSparesAFreshActiveHead(t *testing.T) {
+	f, _, c, _ := catalogFixture(t)
+	ctx := context.Background()
+	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	c.retainHook = func(stage, _ string) {
+		if stage != hookHeadMarked {
+			return
+		}
+		c.retainHook = nil
+		fresh, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.mu.Lock()
+		f.entries[catBase+"/v1/HEAD"] = fresh // a later HEAD at generation 1, not deleting
+		f.mu.Unlock()
+		rec, err := nameRecordEntry(nameRecord{Format: snapFormat, VolumeID: "v1", Name: "late", Attempt: "1-0000000000000001", RequestID: "late"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.CreateEntry(ctx, catBase+"/v1/"+snapNamesDir, rec, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.DeleteVolume(ctx, "v1", nil); CodeOf(err) != CodeVolumeHasSnapshots {
+		t.Fatalf("delete: %v; want volume_has_snapshots", err)
+	}
+	if got, ok, err := c.ReadHead(ctx, "v1"); err != nil || !ok || got.State != storage.ChunkHeadActive {
+		t.Fatalf("fresh HEAD after the refused delete: %+v %t %v; want it kept", got, ok, err)
+	}
+}
