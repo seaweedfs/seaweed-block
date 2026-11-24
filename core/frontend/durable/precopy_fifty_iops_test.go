@@ -103,6 +103,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 			if err != nil {
 				if !stopped.Load() {
 					at := time.Now()
+					callerErr := ctx.Err()
 					sinceDetach, sinceFreeze := "not-started", "not-frozen"
 					if start := detachStart.Load(); start != nil {
 						sinceDetach = at.Sub(*start).String()
@@ -111,7 +112,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 						sinceFreeze = at.Sub(freeze).String()
 					}
 					// Sync covers the preceding Write at this offset.
-					t.Logf("guest error op=%s write_offset=4096 at=%s detach_elapsed=%s freeze_elapsed=%s caller_error=%v error=%v", op, at.UTC().Format(time.RFC3339Nano), sinceDetach, sinceFreeze, ctx.Err(), err)
+					t.Logf("guest error op=%s write_offset=4096 at=%s detach_elapsed=%s freeze_elapsed=%s caller_error=%v error=%v", op, at.UTC().Format(time.RFC3339Nano), sinceDetach, sinceFreeze, callerErr, err)
 					guestErrors.Add(1)
 				}
 				return
