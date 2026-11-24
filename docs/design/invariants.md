@@ -504,15 +504,17 @@ A library, `core/frontend/chunkstore/layout`, with no production caller yet. A v
 stateDiagram-v2
   [*] --> idle: HEAD created outside this package
   idle --> snap: Begin(s)
+  snap --> idle: Abort(s)
 ```
 
 | From | To | Guard | Enforced in | Protects |
 |---|---|---|---|---|
 | idle | snap(s) | caller is the holder at HEAD's epoch (epoch and server); HEAD present; snap(s) again is a replay, any other activity is refused | head.go `Head.Begin`, `runTransition` | `INV-SNAPK-HEAD-WRITE-001`, `INV-SNAPK-BEGIN-001` |
+| snap(s) | idle | holder at HEAD's epoch; activity is snap(s); over idle it succeeds without a write and means only that no activity remains | head.go `Head.Abort` | `INV-SNAPK-ABORT-001` |
 
 ## Part B. Invariant ledger
 
-329 rows: 259 ACTIVE, 67 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 314 new.
+330 rows: 260 ACTIVE, 67 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 315 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -1052,6 +1054,7 @@ Notes:
 | `INV-SNAPK-HEAD-WRITE-001` | HEAD changes only by one conditional update on its generation through `runTransition`; no path in the package creates a HEAD, and an absent HEAD is refused. A source scan refuses any other use of `UpdateHead`, a transition without its closure and interrupt tests, and any store remover. | M9 every transition | `core/frontend/chunkstore/layout` `head.go` `runTransition`; `HeadStore` (read and conditional update only) | `TestGuard_WritersTransitionsAndRemovers`, `TestGuard_Controls`, `TestRunBegin` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-HEAD-CODEC-001` | HEAD is canonical JSON with at most 100 snapshots and sorted unique dependents; unknown fields, non-canonical bytes and names that are not valid UTF-8 are refused at encode and decode, and the next HEAD is checked before it is written. | M9 every transition | `core/frontend/chunkstore/layout` `head.go` `Head.check`, `Head.Encode`, `DecodeHead` | `TestHead_GoldenEncodingRoundTrip`, `TestHead_Refusals`, `TestHead_RefusesInvalidUTF8` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-BEGIN-001` | Begin opens snap(s) only for the holder at HEAD's epoch and only from idle; a re-run of the open session writes nothing; killed at its write and re-run, it ends in snap(s) at one generation step. | M9 idle → snap | `core/frontend/chunkstore/layout` `head.go` `Head.Begin`, `RunBegin` | `TestBegin_Closure`, `TestRunBegin_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-ABORT-001` | Abort closes the holder's own snap(s) and changes nothing else; after its own crash a holder rolls the open session back before beginning another; over idle Abort writes nothing and its success never says whether the work was committed. | M9 snap → idle (Abort) | `core/frontend/chunkstore/layout` `head.go` `Head.Abort`, `RunAbort` | `TestAbort_Closure`, `TestAbort_IdleMeansNoActivityRemains`, `TestAbort_RollBackAfterOwnCrash`, `TestRunAbort_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 
 Notes:
 
