@@ -11,6 +11,7 @@ that runs it.
 - **Frontend:** NVMe/TCP, the standalone default (the example units). iSCSI is supported too, and is the Kubernetes CSI default.
 - **Layout:** `blockmaster` and its authority store run **off every volume host**, on a node of their own (for
   example the SeaweedFS master or filer node), with durable storage. A volume host holds no authority state.
+  - Do not run two `blockmaster` processes against the same store.
   - Why: a forced move after a host loss needs the authority record, the lease horizon and the lost range.
   - If those lived on the lost host, the volume could not be moved anywhere.
 - **SeaweedFS durability (a premise):** sw-block assumes SeaweedFS acknowledges a write only when it is durable;
