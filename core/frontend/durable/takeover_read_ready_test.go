@@ -167,6 +167,8 @@ func TestWALStoreChunk_PendingReadHonoursEarlierDeadline(t *testing.T) {
 	}
 }
 
+// Wall-clock integration smoke; exact outcomes are required by the virtual-time
+// TestAttachWriteBeforeReadinessBudgetSucceeds and AfterReadinessBudget controls.
 func TestWALStoreChunk_TakeoverWriteWaitsForAttach(t *testing.T) {
 	const hold = 100 * time.Millisecond
 	_, backend, _ := pendingTakeoverRead(t, hold)
