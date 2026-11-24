@@ -15,17 +15,16 @@ import (
 	"time"
 )
 
-// A long blockmaster outage under real systemd (root), with the shipped
-// unit's restart policy AND its shipped start limit: a serving volume's
-// blockvolume fences, exits 75 and is restarted by the unit; each start
-// waits for a grant and exits 75 again. The test keeps the master down until
-// systemd stops retrying (the start limit) or 12 minutes pass, records when
-// and after how many restarts, then brings the master back and records
-// whether the volume serves by itself, and, if the unit failed, how long
-// `systemctl reset-failed` + `systemctl start` take to serve it.
+// A 10-minute blockmaster outage under real systemd (root), with the shipped
+// unit's restart policy and start limit: the serving process fences once and
+// exits 75; the unit starts it again and that process waits inside itself
+// (no restart loop): the unit never reaches its start limit (NRestarts 1, 2
+// starts), /status shows MasterWait unreachable with its age, and when the
+// master returns the volume serves by itself within 2 s of the master's
+// barrier time.
 //
 // A runtime unit file (/run/systemd/system) stands for the installed unit.
-func TestSystemdMasterOutagePastTheStartLimit(t *testing.T) {
+func TestUnitSurvivesTenMinuteMasterOutage(t *testing.T) {
 	if os.Getenv("GAP1_SYSTEMD_AUTHORIZED") != "1" {
 		t.Fatal("explicit real-systemd qualification authorization required; no skip counts as proof")
 	}
@@ -55,43 +54,49 @@ func TestSystemdMasterOutagePastTheStartLimit(t *testing.T) {
 	killAt := time.Now()
 	env.masterProcess.kill(t)
 	var state map[string]string
-	gaveUp := false
-	for deadline := killAt.Add(12 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
+	for deadline := killAt.Add(10 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
 		s, err := gap1ReadUnit(unit)
-		if err == nil {
-			state = s
-			if s["ActiveState"] == "failed" {
-				gaveUp = true
-				break
-			}
+		if err != nil {
+			continue
+		}
+		state = s
+		if s["ActiveState"] == "failed" {
+			t.Fatalf("the unit gave up %v into the outage (NRestarts %s, Result %s)", time.Since(killAt).Round(time.Second), s["NRestarts"], s["Result"])
 		}
 	}
-	downFor := time.Since(killAt)
-	journal := unitJournal(unit)
-	t.Logf("PHASE0-SYSTEMD master down %v: unit gave up (start limit %s in %s) %v; NRestarts %s; ActiveState %s; Result %s; 'Start request repeated too quickly' %v",
-		downFor.Round(time.Second), burst, interval, gaveUp, state["NRestarts"], state["ActiveState"], state["Result"], strings.Contains(journal, "Start request repeated too quickly"))
+	mw, ok := masterWaitOf(b.status)
+	t.Logf("PHASE0-SYSTEMD master down %v: ActiveState %s NRestarts %s; MasterWait %+v",
+		time.Since(killAt).Round(time.Second), state["ActiveState"], state["NRestarts"], mw)
+	if state["ActiveState"] != "active" || state["NRestarts"] != "1" {
+		t.Fatalf("after 10 min: ActiveState %s NRestarts %s; want active after exactly one restart (the fence)", state["ActiveState"], state["NRestarts"])
+	}
+	if !ok || mw.Reason != "unreachable" || time.Since(mw.Since) < 9*time.Minute {
+		t.Fatalf("/status MasterWait %+v (present %v); want unreachable for most of the outage", mw, ok)
+	}
 
 	env.masterProcess = env.h.start(t, "blockmaster-back", env.h.master, env.masterArgs...)
 	env.masterProcess.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
-	backAt := time.Now()
-	served := false
-	for deadline := backAt.Add(90 * time.Second); time.Now().Before(deadline) && !served; time.Sleep(time.Second) {
-		served = volumeFrontendReady(b.status, "v1")
+	var until time.Time
+	poll(t, 30*time.Second, "/status never showed the master's barrier", func() bool {
+		mw, ok := masterWaitOf(b.status)
+		if ok && mw.Reason == "barrier" && !mw.Until.IsZero() {
+			until = mw.Until
+			return true
+		}
+		return false
+	})
+	for !volumeFrontendReady(b.status, "v1") {
+		if time.Now().After(until.Add(60 * time.Second)) {
+			t.Fatal("v1 never served by itself after the master returned")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	if served {
-		t.Logf("PHASE0-SYSTEMD with the master back, v1 served by itself after %v", time.Since(backAt).Round(time.Millisecond))
-		return
+	late := time.Since(until)
+	s, _ := gap1ReadUnit(unit)
+	t.Logf("PHASE0-SYSTEMD master back: served %v after the barrier time; NRestarts %s", late.Round(time.Millisecond), s["NRestarts"])
+	if late > 2*time.Second || s["NRestarts"] != "1" {
+		t.Fatalf("served %v after the barrier (want <= 2 s), NRestarts %s (want 1)", late.Round(time.Millisecond), s["NRestarts"])
 	}
-	t.Logf("PHASE0-SYSTEMD with the master back, v1 did not serve by itself within 90 s (unit %s)", state["ActiveState"])
-	if out, err := runSystemctl("reset-failed", unit); err != nil {
-		t.Fatalf("systemctl reset-failed %s: %v %s", unit, err, out)
-	}
-	resetAt := time.Now()
-	if out, err := runSystemctl("start", unit); err != nil {
-		t.Fatalf("systemctl start %s: %v %s", unit, err, out)
-	}
-	poll(t, 3*time.Minute, "v1 never served after reset-failed and start", func() bool { return volumeFrontendReady(b.status, "v1") })
-	t.Logf("PHASE0-SYSTEMD after reset-failed + start, v1 served after %v", time.Since(resetAt).Round(time.Millisecond))
 }
 
 // shippedStartLimit reads StartLimitIntervalSec and StartLimitBurst from the

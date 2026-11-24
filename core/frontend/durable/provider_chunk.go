@@ -159,17 +159,41 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		limit = 30 * time.Second
 	}
 	start := time.Now()
-	log.Printf("durable: chunk layer for volume=%s waits for master authority (up to %s): projection lacks %s",
-		volumeID, limit, chunkAuthorityGap(p.view.Projection(), volumeID))
+	bound := fmt.Sprintf("up to %s", limit)
+	if p.cfg.ChunkMasterWait != nil {
+		bound = fmt.Sprintf("%s of answered contact with the master", limit)
+	}
+	log.Printf("durable: chunk layer for volume=%s waits for master authority (%s): projection lacks %s",
+		volumeID, bound, chunkAuthorityGap(p.view.Projection(), volumeID))
 	ended := "superseded by a later recovery"
 	defer func() {
 		log.Printf("durable: chunk authority wait for volume=%s ended after %s: %s", volumeID, time.Since(start), ended)
 	}()
 	retained := false // this generation already chose sealed replay or diagnostics
-	waitCtx, endWait := context.WithTimeout(p.closeCtx, limit)
+	// expired: the wait gave up (deadline, or a permanent refusal). Without
+	// ChunkMasterWait the deadline is the fixed limit from now; with it the
+	// host's bound, which does not run while the master gives no reply.
+	expired := false
+	var waitCtx context.Context
+	var endWait context.CancelFunc
+	if p.cfg.ChunkMasterWait == nil {
+		waitCtx, endWait = context.WithTimeout(p.closeCtx, limit)
+	} else {
+		waitCtx, endWait = context.WithCancel(p.closeCtx)
+	}
 	defer endWait()
+	// gaveUp: a permanent refusal, or the host's one bound for this wait has
+	// passed (the window opens at the first reply after this wait started;
+	// none while the master gives no reply or refuses the node).
+	gaveUp := func() bool {
+		if p.cfg.ChunkMasterWait == nil {
+			return false
+		}
+		deadline, final := p.cfg.ChunkMasterWait(start)
+		return final || (!deadline.IsZero() && !time.Now().Before(deadline))
+	}
 	defer func() {
-		if retained || !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+		if retained || !(expired || errors.Is(waitCtx.Err(), context.DeadlineExceeded)) {
 			return
 		}
 		// The old wait must not overwrite a newer recovery's readiness.
@@ -177,7 +201,11 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		defer h.attachMu.Unlock()
 		if p.current(h, gen) && h.chunk == nil {
 			ended = fmt.Sprintf("assignment unavailable, not serving (projection lacks %s)", chunkAuthorityGap(p.view.Projection(), volumeID))
-			h.backend.SetOperational(false, "chunk assignment unavailable: "+waitCtx.Err().Error())
+			why := "master wait ended"
+			if !expired {
+				why = waitCtx.Err().Error() // the fixed limit: context deadline exceeded
+			}
+			h.backend.SetOperational(false, "chunk assignment unavailable: "+why)
 			p.endChunkStartup(h, gen, nil)
 		}
 	}()
@@ -206,6 +234,12 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		}
 		proj := p.view.Projection()
 		if !chunkAuthority(proj, volumeID) {
+			// Authority first: a grant that arrives on the same tick as the
+			// bound attaches instead of giving up.
+			if gaveUp() {
+				expired, ended = true, "master wait ended (bound reached or permanent refusal)"
+				return
+			}
 			continue
 		}
 		if attempts++; attempts == 1 {
@@ -261,6 +295,12 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			continue
 		}
 		log.Printf("durable: chunk layer attach for volume=%s: %v (retrying)", volumeID, err)
+		// A granted attach that keeps failing stays inside the bound: it
+		// must not hold the lease while never serving.
+		if gaveUp() {
+			expired, ended = true, "master wait ended while the attach kept failing"
+			return
+		}
 		select {
 		case <-waitCtx.Done():
 			ended = "provider closed during the retry backoff"
