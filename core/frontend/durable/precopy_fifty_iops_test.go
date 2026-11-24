@@ -31,7 +31,6 @@ func TestPrecopyFiftyIOPSColdCostsKeepAdmissionHonest(t *testing.T) {
 }
 
 func TestPrecopyFiftyIOPSSlowMeasuredCostsKeepServing(t *testing.T) {
-	t.Skip("#537 RED quarantine: 2026-11-24 ruling; pre-copy round-accounting and guest WAL-admission automaton review pending")
 	precopyFiftyIOPS(t, 3, false, 1300*time.Millisecond)
 }
 
