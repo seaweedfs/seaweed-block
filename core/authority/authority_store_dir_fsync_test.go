@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -72,20 +74,77 @@ func TestPutFailStopsWhenTheDirectoryFsyncFailsAfterRename(t *testing.T) {
 				!strings.Contains(string(out), "directory "+step+": injected directory "+step+" failure") {
 				t.Fatalf("missing the typed fail-stop line:\n%s", out)
 			}
-			// The restart reloads whatever survived: the new record or none, never an error.
-			s, err := NewFileAuthorityStore(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer s.Close()
-			recs, err := s.Load()
-			if err != nil {
+			// The restart reloads whatever survived. The child stopped after the
+			// rename without a power loss, so the record is on disk: the reload
+			// must return exactly it, with no skipped (corrupt) record.
+			if err := reloadExactly(dir, failStopRecord(kind)); err != nil {
 				t.Fatalf("reload after the fail-stop: %v", err)
 			}
-			if len(recs) > 1 || (len(recs) == 1 && (recs[0].VolumeID != "v1" || recs[0].Epoch != 7)) {
-				t.Fatalf("reload after the fail-stop: %+v, want the written record or none", recs)
-			}
 		})
+	}
+}
+
+// reloadExactly reopens the store at dir and returns nil only if it loads
+// exactly want and skips nothing.
+func reloadExactly(dir string, want DurableRecord) error {
+	s, err := NewFileAuthorityStore(dir)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	recs, skips, err := s.LoadWithSkips()
+	switch {
+	case err != nil:
+		return err
+	case len(skips) != 0:
+		return fmt.Errorf("%d skipped record(s): %v", len(skips), skips)
+	case len(recs) != 1:
+		return fmt.Errorf("%d records, want exactly the written one", len(recs))
+	case !reflect.DeepEqual(recs[0], want):
+		return fmt.Errorf("reloaded %+v, want %+v", recs[0], want)
+	}
+	return nil
+}
+
+// The reload check refuses each way the restart could mislead it: a corrupt
+// record (skipped by Load), no record, a different record.
+func TestReloadExactlyRefusesCorruptMissingOrDifferent(t *testing.T) {
+	want := failStopRecord("assignment")
+	put := func(t *testing.T, r DurableRecord) string {
+		dir := t.TempDir()
+		s, err := NewFileAuthorityStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Put(r); err != nil {
+			t.Fatal(err)
+		}
+		s.Close()
+		return dir
+	}
+	if err := reloadExactly(put(t, want), want); err != nil {
+		t.Fatalf("control: the written record must reload: %v", err)
+	}
+	if reloadExactly(t.TempDir(), want) == nil {
+		t.Fatal("an empty store passed")
+	}
+	other := want
+	other.Epoch = 8
+	if reloadExactly(put(t, other), want) == nil {
+		t.Fatal("a different record passed")
+	}
+	dir := put(t, want)
+	ents, err := os.ReadDir(dir)
+	if err != nil || len(ents) == 0 {
+		t.Fatalf("store dir: %v %d", err, len(ents))
+	}
+	for _, e := range ents {
+		if err := os.WriteFile(filepath.Join(dir, e.Name()), []byte("corrupt"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reloadExactly(dir, want) == nil {
+		t.Fatal("a corrupt record passed")
 	}
 }
 
