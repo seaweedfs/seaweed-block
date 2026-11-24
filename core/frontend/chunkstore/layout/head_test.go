@@ -210,9 +210,11 @@ func TestRunBegin_InterruptAtEveryStep(t *testing.T) {
 	})
 }
 
-// interruptHead kills run at each of its HEAD writes (before it applies,
-// and applied with its reply lost), re-runs it, and checks the end state:
-// want at exactly start.Gen+steps, and a further re-run writes nothing.
+// interruptHead kills run at its one HEAD write (before it applies, and
+// applied with its reply lost), re-runs it, and checks the end state: want
+// at exactly start.Gen+1, and a further re-run writes nothing. Every
+// transition is exactly one conditional update; a run that makes another
+// number of writes fails.
 func interruptHead(t *testing.T, start Head, run func(HeadStore) error, want func(*testing.T, Head)) {
 	t.Helper()
 	fresh := func() *Head { h := start.clone(); return &h }
@@ -222,8 +224,8 @@ func interruptHead(t *testing.T, start Head, run func(HeadStore) error, want fun
 	}
 	want(t, *count.h)
 	steps := count.updates
-	if steps == 0 {
-		t.Fatal("the run made no HEAD write")
+	if steps != 1 {
+		t.Fatalf("the transition made %d HEAD writes; want exactly 1", steps)
 	}
 	for k := 1; k <= steps; k++ {
 		for _, after := range []bool{false, true} {
@@ -290,6 +292,22 @@ func TestAbort_Closure(t *testing.T) {
 	}
 	if _, _, err := h.Abort(me, ""); err == nil {
 		t.Error("Abort without a session id accepted")
+	}
+}
+
+// Abort over idle succeeds and writes nothing whatever came before: a
+// session that never began, one already committed, one already aborted.
+// Success means only that no activity remains; it never says whether the
+// session's work was committed (that is read from HEAD's current root).
+func TestAbort_IdleMeansNoActivityRemains(t *testing.T) {
+	for name, h := range map[string]Head{
+		"never begun":     idleHead(),
+		"already aborted": func() Head { n, _, _ := snapHead("s1").Abort(me, "s1"); return n }(),
+	} {
+		next, changed, err := h.Abort(me, "s1")
+		if err != nil || changed || next.Activity.Kind != ActIdle || next.Gen != h.Gen {
+			t.Errorf("Abort over idle (%s): %+v %t %v; want unchanged, no error", name, next, changed, err)
+		}
 	}
 }
 
