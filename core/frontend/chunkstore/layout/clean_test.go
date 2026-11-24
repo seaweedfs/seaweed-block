@@ -54,12 +54,27 @@ func TestEndClean_Closure(t *testing.T) {
 		me   HolderID
 		want error
 	}{
-		"snapshot open":  {snapHead("c1"), me, ErrNoSession},
-		"other cleaning": {cleanHead("c2"), me, ErrNoSession},
-		"other epoch":    {h, HolderID{Epoch: 4, Holder: "srv-a"}, ErrNotHolder},
+		"snapshot open":            {snapHead("c1"), me, ErrNoSession},
+		"other cleaning":           {cleanHead("c2"), me, ErrNoSession},
+		"other epoch":              {h, HolderID{Epoch: 4, Holder: "srv-a"}, ErrNotHolder},
+		"same epoch, other holder": {h, HolderID{Epoch: 3, Holder: "srv-b"}, ErrNotHolder},
 	} {
 		if _, _, err := tc.h.EndClean(tc.me, "c1"); !errors.Is(err, tc.want) {
 			t.Errorf("%s: %v; want %v", name, err, tc.want)
+		}
+	}
+}
+
+// EndClean over idle succeeds and writes nothing whatever came before (a
+// cleaning ended, or never begun): it means only that no activity remains.
+func TestEndClean_IdleMeansNoActivityRemains(t *testing.T) {
+	for name, h := range map[string]Head{
+		"never begun":   idleHead(),
+		"already ended": func() Head { n, _, _ := cleanHead("c1").EndClean(me, "c1"); return n }(),
+	} {
+		next, changed, err := h.EndClean(me, "c1")
+		if err != nil || changed || next.Activity.Kind != ActIdle {
+			t.Errorf("EndClean over idle (%s): %+v %t %v; want unchanged, no error", name, next, changed, err)
 		}
 	}
 }

@@ -29,8 +29,9 @@ func (h Head) BeginClean(me HolderID, session string) (next Head, changed bool, 
 }
 
 // EndClean is transition 8: activity clean(session) -> idle, by the holder
-// at HEAD's epoch. EndClean over idle is a replay of a lost reply; another
-// open session or cleaning is ErrNoSession.
+// at HEAD's epoch. EndClean over idle succeeds and writes nothing: it means
+// only that no activity remains (the cleaning ended, or never began).
+// Another open session or cleaning is ErrNoSession.
 func (h Head) EndClean(me HolderID, session string) (next Head, changed bool, err error) {
 	if session == "" {
 		return Head{}, false, errors.New("layout: EndClean needs a session id")
