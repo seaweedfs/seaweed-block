@@ -31,6 +31,11 @@ func SetPutAfterRenameFaultForTest(hook func(DurableRecord) error) {
 // every FileAuthorityStore.Put. Tests only.
 var dirSyncFault atomic.Pointer[func() error]
 
+// ExitDurabilityUnknown is blockmaster's exit code when a record's rename
+// may or may not survive a crash (sysexits EX_IOERR). Declared before the
+// fail-stop exists so the red test compiles.
+const ExitDurabilityUnknown = 74
+
 // SetDirSyncFaultForTest installs (nil clears) that fault.
 func SetDirSyncFaultForTest(fault func() error) {
 	if fault == nil {
