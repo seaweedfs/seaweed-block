@@ -23,8 +23,11 @@ import (
 // A runtime unit file (/run/systemd/system) stands for the installed unit:
 // a transient systemd-run unit would be removed by reset-failed.
 func TestSystemdFirstStartDuringAFilerOutageThenResetFailedServes(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("real systemd units need root")
+	if os.Getenv("GAP1_SYSTEMD_AUTHORIZED") != "1" {
+		t.Fatal("explicit real-systemd qualification authorization required; no skip counts as proof")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("systemd qualification needs root")
 	}
 	env := startSourceWithSnapshot(t, "v2")
 	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
