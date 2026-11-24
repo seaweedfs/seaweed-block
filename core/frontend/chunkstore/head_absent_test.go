@@ -484,3 +484,33 @@ func TestUsage_RefusesAbsentHead(t *testing.T) {
 		t.Fatalf("usage with another live volume's HEAD absent: %v; want head_missing", err)
 	}
 }
+
+// A volume-delete over an absent HEAD writes the first HEAD (deleting); a
+// snapshot that appears before its re-check makes it refuse, and the HEAD
+// stays deleting: it is never reverted to an active, empty HEAD over keys.
+func TestVolumeDelete_FirstHeadNeverRevertedToActive(t *testing.T) {
+	f, _, c, _ := catalogFixture(t)
+	ctx := context.Background()
+	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	c.retainHook = func(stage, _ string) {
+		if stage == hookHeadMarked { // an in-flight snapshot's name lands before the re-check
+			c.retainHook = nil
+			rec, err := nameRecordEntry(nameRecord{Format: snapFormat, VolumeID: "v1", Name: "late", Attempt: "1-0000000000000001", RequestID: "late"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.CreateEntry(ctx, catBase+"/v1/"+snapNamesDir, rec, true); err != nil {
+				t.Errorf("late snapshot name: %v", err)
+			}
+		}
+	}
+	if _, err := c.DeleteVolume(ctx, "v1", nil); CodeOf(err) != CodeVolumeHasSnapshots {
+		t.Fatalf("delete with a late snapshot: %v; want volume_has_snapshots", err)
+	}
+	got, ok, err := c.ReadHead(ctx, "v1")
+	if err != nil || !ok || got.State != storage.ChunkHeadDeleting {
+		t.Fatalf("HEAD after the refused delete: %+v %t %v; want it left deleting", got, ok, err)
+	}
+}

@@ -496,19 +496,15 @@ func (c *Catalog) ensureInitialHead(ctx context.Context, vol, root string) error
 		return nil
 	}
 	// An absent HEAD over existing keys is a pruned HEAD, not a new volume:
-	// its image is unknown and is never recreated empty.
-	keys, err := c.f.ListEntries(ctx, path.Join(root, keysDir), "", "", 1)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return remoteErr(err, "list the chunk keys of %s", vol)
-	}
-	if len(keys) != 0 {
-		return catErr(CodeHeadMissing, false, nil, "volume %s has chunk keys but no HEAD: its image is unknown and is not recreated empty; restore its HEAD, or delete it with sw-block ops chunk volume-delete", vol)
-	}
+	// createHead refuses it (head_missing).
 	he, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
 	if err != nil {
 		return err
 	}
-	if err := c.f.CreateEntry(ctx, root, he, true); err != nil && !errors.Is(err, ErrExists) {
+	if err := createHead(ctx, c.f, c.blobs, root, he, headCreateInitial); err != nil && !errors.Is(err, ErrExists) {
+		if CodeOf(err) == CodeHeadMissing {
+			return err
+		}
 		return remoteErr(err, "create the initial HEAD of %s", vol)
 	}
 	return nil
@@ -977,12 +973,12 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 	if err != nil {
 		return SnapshotInfo{}, err
 	}
-	headEnt, err := headEntry(head)
+	headDoc, err := headDocument(head)
 	if err != nil {
 		return SnapshotInfo{}, err
 	}
 	doc := snapDoc{Format: snapFormat, VolumeID: vol, Name: req.Name, RequestID: req.RequestID, CreatedNs: c.now().UnixNano(),
-		CreatedBy: req.CreatedBy, Consistency: consistency, Head: headEnt.Content, Geometry: v.Geometry, Parent: v.Parent,
+		CreatedBy: req.CreatedBy, Consistency: consistency, Head: headDoc, Geometry: v.Geometry, Parent: v.Parent,
 		Labels: req.Labels, ExpiresAtNs: req.ExpiresAtNs, Class: req.Class}
 	body, err := json.Marshal(doc)
 	if err != nil {
@@ -1487,6 +1483,10 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 	// (attach refuses a fork without HEAD), so a HEAD found there completes
 	// the fork; if it is another attempt's and this create is unsettled,
 	// this attempt's intent stays (the create may land after HEAD is gone).
+	if err := headCreateCheck(ctx, c.f, c.blobs, dstRoot, headCreateFork); err != nil {
+		c.dropIntent(ctx, dstRoot, id) // clean abort: HEAD was never sent
+		return ForkResult{}, err
+	}
 	pctx, cancel := c.publishCtx(ctx, deadline)
 	outcome, got, cerr := c.createResolved(ctx, pctx, dstRoot, he, id)
 	cancel()

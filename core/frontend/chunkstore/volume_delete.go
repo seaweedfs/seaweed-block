@@ -177,6 +177,13 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 		if err != nil {
 			return res, err
 		}
+		if live != nil && !hasHead {
+			// This delete wrote the first HEAD (deleting) where none was
+			// read: reverting it would leave an active, empty HEAD over the
+			// volume's keys. Leave it deleting and refuse.
+			c.hook(hookBlocked, vol)
+			return giveBack(live)
+		}
 		if live != nil {
 			c.hook(hookBlocked, vol)
 			out, u, rerr := c.revertHeadDeleting(ctx, vol, root, gen)
@@ -277,7 +284,7 @@ func (c *Catalog) writeHead(ctx context.Context, root string, cur, next storage.
 		return err
 	}
 	if cur.Gen == 0 {
-		err = c.f.CreateEntry(ctx, root, e, true)
+		err = createHead(ctx, c.f, c.blobs, root, e, headCreateDelete)
 	} else {
 		err = c.f.UpdateEntry(ctx, root, e, map[string][]byte{
 			extGen: []byte(strconv.FormatUint(cur.Gen, 10)), extEpoch: []byte(strconv.FormatUint(cur.Epoch, 10)),
