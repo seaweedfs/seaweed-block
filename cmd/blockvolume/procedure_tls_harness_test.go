@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/auth/authtest"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // procedureTLS is the procedure harness's mutual-TLS setup: one CA, the
@@ -116,4 +119,19 @@ func (p *procedureTLS) volumeArgs(server string) []string {
 // cliEnv is the identity name (admin, operator, a server id) for sw-block.
 func (p *procedureTLS) cliEnv(name string) []string {
 	return []string{"SW_BLOCK_TLS_CERT=" + p.path(name, ".crt"), "SW_BLOCK_TLS_KEY=" + p.path(name, ".key"), "SW_BLOCK_TLS_CA=" + p.path("ca", ".crt")}
+}
+
+// masterDialOption is the transport for a test's own gRPC client of the env's
+// master, acting as name (admin, operator or a server id) with mutual TLS,
+// plaintext otherwise.
+func (env *handoffEnv) masterDialOption(t *testing.T, name string) grpc.DialOption {
+	t.Helper()
+	if env.tls == nil {
+		return grpc.WithTransportCredentials(insecure.NewCredentials())
+	}
+	d, err := link.ClientCredentials(link.TLSFiles{Cert: env.tls.path(name, ".crt"), Key: env.tls.path(name, ".key"), CA: env.tls.path("ca", ".crt")}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
