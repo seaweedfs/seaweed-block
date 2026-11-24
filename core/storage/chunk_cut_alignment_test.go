@@ -48,7 +48,9 @@ func TestCutCOWV3_CaptureDoesNotPinWAL(t *testing.T) {
 	results := make(chan chunkCutResult, 1)
 	errs := make(chan error, 1)
 	t.Cleanup(func() { free(); cowWaitSignal(t, done, "held WAL reader cleanup") })
-	go func() { defer close(done); r, e := l.Cut(ctTimeout(t)); results <- r; errs <- e }()
+	cutCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	go func() { defer close(done); r, e := l.Cut(cutCtx); results <- r; errs <- e }()
 	cowWaitSignal(t, entered, "resolved held WAL tuple")
 	if err = s.flusher.flushOnce(); err != nil {
 		t.Fatal(err)
