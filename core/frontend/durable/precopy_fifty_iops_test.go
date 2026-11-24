@@ -30,6 +30,8 @@ func TestPrecopyFiftyIOPSColdCostsKeepAdmissionHonest(t *testing.T) {
 	precopyFiftyIOPS(t, 1, true, 0)
 }
 
+// Wall-clock remote/detach smoke. Deterministic readiness outcomes are
+// required separately by TestPrecopyWriteReadyBefore/AfterAllowance.
 func TestPrecopyFiftyIOPSSlowMeasuredCostsKeepServing(t *testing.T) {
 	precopyFiftyIOPS(t, 3, false, 1300*time.Millisecond)
 }
