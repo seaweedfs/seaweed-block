@@ -80,16 +80,16 @@ type GCRefusal struct {
 }
 
 // refusalReason names what is missing and the remedy that works for it.
-func refusalReason(vol string, hasVolume bool, binding string) string {
+func refusalReason(vol string, hasVolume bool) string {
 	if hasVolume {
-		return fmt.Sprintf("volume %s is live but has no HEAD while %s is a live binding no intent names; its keys are kept: restore HEAD (an attach of the volume never recreates it over keys), or delete the volume with sw-block ops chunk volume-delete", vol, binding)
+		return fmt.Sprintf("volume %s is live but has no HEAD: restore its HEAD, or delete it with sw-block ops chunk volume-delete (an attach refuses while keys remain)", vol)
 	}
-	return fmt.Sprintf("directory %s has neither VOLUME nor HEAD while %s is a live binding no intent names; its keys are kept: its image cannot be read, so once you decide it is lost, remove the directory with the filer (fs.rm -r deletes its needles)", vol, binding)
+	return fmt.Sprintf("directory %s holds HEAD or chunk keys but no VOLUME: its image and what it rooted are unknown; once you decide its data is lost, remove the directory with the filer (fs.rm -r deletes its needles)", vol)
 }
 
 type GCResult struct {
-	// RefusedVolumes are volumes whose HEAD (or VOLUME and HEAD) is missing
-	// while live keys remain: none of their keys is reclaimed.
+	// RefusedVolumes are volumes whose HEAD (or VOLUME) is missing: while
+	// any is listed the pass fails and reclaims nothing anywhere.
 	RefusedVolumes                                          []GCRefusal `json:"refused_volumes"`
 	Roots                                                   []GCRoot    `json:"roots"`
 	WouldDelete                                             []GCObject  `json:"would_delete"`
@@ -208,11 +208,42 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		if e != nil {
 			return result, e
 		}
+		// An absent HEAD is unknown, never empty: a live volume without
+		// HEAD (or a directory holding HEAD or keys but no VOLUME) may have
+		// rooted keys anywhere (a fork's HEAD names its source's keys), so
+		// the pass reclaims nothing anywhere (INV-GC-HEAD-ABSENT-001).
+		if hasVolume && v.State == "" && !headPresent {
+			// The one exception: a fork or restore in flight (VOLUME written,
+			// HEAD not yet) whose own copy intent roots what its HEAD will.
+			inFlight := false
+			if isForked(v.Origin) {
+				intents, e := r.ListIntents(ctx)
+				if e != nil {
+					return result, e
+				}
+				for _, in := range intents {
+					inFlight = inFlight || strings.HasPrefix(in.Holder, "fork:"+vol+"/")
+				}
+			}
+			if !inFlight {
+				result.RefusedVolumes = append(result.RefusedVolumes, GCRefusal{Volume: vol, Reason: refusalReason(vol, true)})
+				continue
+			}
+		}
+		if !hasVolume {
+			keys, e := g.cat.f.ListEntries(ctx, r.keyDir(), "", "", 1)
+			if e != nil && !errors.Is(e, ErrNotFound) {
+				return result, e
+			}
+			if headPresent || len(keys) != 0 {
+				result.RefusedVolumes = append(result.RefusedVolumes, GCRefusal{Volume: vol, Reason: refusalReason(vol, false)})
+				continue
+			}
+		}
 		h, e := r.GetHead(ctx)
 		if e != nil {
 			return result, e
 		}
-		intentNamed := map[string]bool{}
 		addHead := func(kind, id string, head storage.ChunkHead) error {
 			var err error
 			head, err = r.resolveManifest(ctx, head)
@@ -281,11 +312,6 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			return result, e
 		}
 		for _, in := range intents {
-			for _, key := range in.Keys {
-				if dir, name, e := r.keyLocation(key); e == nil {
-					intentNamed[path.Join(dir, name)] = true
-				}
-			}
 			result.Intents++
 			if in.CreatedNs <= 0 {
 				return result, errors.New("chunkstore: invalid intent creation time")
@@ -341,8 +367,6 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			continue
 		}
 		pageAfter := ""
-		volBindings := len(bindings)
-	keys:
 		for {
 			page, e := g.cat.f.ListEntries(ctx, r.keyDir(), "", pageAfter, listPage)
 			if e != nil {
@@ -352,18 +376,8 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				if entry.GetName() <= pageAfter || entry.Attributes == nil || entry.Attributes.Crtime <= 0 {
 					return result, fmt.Errorf("chunkstore: invalid GC binding %s/%s", r.keyDir(), entry.GetName())
 				}
-				bound, e := decodeBinding(entry)
-				if e != nil {
+				if _, e := decodeBinding(entry); e != nil {
 					return result, fmt.Errorf("chunkstore: invalid GC binding %s/%s: %v", r.keyDir(), entry.GetName(), e)
-				}
-				if (!hasVolume || (v.State == "" && !headPresent)) && !bound.done && !intentNamed[path.Join(r.keyDir(), entry.GetName())] {
-					// HEAD (or VOLUME and HEAD) was removed (a stock tool
-					// pruning an entry whose needle is missing, or by hand):
-					// its keys would all look unrooted. None of this volume's
-					// keys is a candidate in this pass; the other volumes go on.
-					bindings = bindings[:volBindings]
-					result.RefusedVolumes = append(result.RefusedVolumes, GCRefusal{Volume: vol, Reason: refusalReason(vol, hasVolume, path.Join(r.keyDir(), entry.GetName()))})
-					break keys
 				}
 				key, e := url.PathUnescape(entry.GetName())
 				if e != nil {
@@ -384,6 +398,13 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				break
 			}
 		}
+	}
+	if len(result.RefusedVolumes) != 0 {
+		reasons := make([]string, len(result.RefusedVolumes))
+		for i, r := range result.RefusedVolumes {
+			reasons[i] = r.Reason
+		}
+		return result, fmt.Errorf("chunkstore: GC reclaims nothing while a HEAD is missing: %s", strings.Join(reasons, "; "))
 	}
 	if g.cfg.Now().Sub(start)+g.cat.deadline() >= g.cfg.Grace {
 		return result, errors.New("chunkstore: GC mark exceeded grace safety margin")

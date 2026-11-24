@@ -14,8 +14,8 @@ import (
 )
 
 // T3(b): a live volume whose HEAD entry is removed (a stock tool pruning an
-// entry whose needle is missing) keeps every key: GC reports it refused,
-// marks none of its keys, and goes on with the other volumes.
+// entry whose needle is missing) stops every pass: nothing is reclaimed
+// anywhere, the refusal names the volume and a remedy that works.
 func TestGC_HeadAbsentFailsClosed(t *testing.T) {
 	f, b, c, g, now := gcFixture(t)
 	ctx := context.Background()
@@ -26,23 +26,16 @@ func TestGC_HeadAbsentFailsClosed(t *testing.T) {
 	if err := f.DeleteEntry(ctx, path.Join(catBase, "v1"), headName, nil); err != nil {
 		t.Fatal(err)
 	}
-	other := otherVolumeOrphan(t, f, b, c)
-	reclaimed := 0
+	otherVolumeOrphan(t, f, b, c)
 	for i := 0; i < 3; i++ {
 		res, err := g.Run(ctx)
-		if err != nil || len(res.RefusedVolumes) != 1 || res.RefusedVolumes[0].Volume != "v1" || !strings.Contains(res.RefusedVolumes[0].Reason, "volume-delete") {
-			t.Fatalf("pass %d with HEAD pruned: %+v %v; want v1 refused with its remedy", i, res, err)
+		if err == nil || len(res.RefusedVolumes) != 1 || res.RefusedVolumes[0].Volume != "v1" || !strings.Contains(err.Error(), "volume-delete") || res.Reclaimed != 0 {
+			t.Fatalf("pass %d with HEAD pruned: %+v %v; want the whole pass refused, naming v1 and its remedy", i, res, err)
 		}
-		for _, w := range res.WouldDelete {
-			if w.Volume == "v1" {
-				t.Fatalf("pass %d: v1 key %s is a candidate", i, w.Key)
-			}
-		}
-		reclaimed += res.Reclaimed
 		*now = now.Add(2*time.Hour + g.cfg.ClockSkew)
 	}
-	if reclaimed != 1 || len(f.dropped) != 1 || f.dropped[0] != other {
-		t.Fatalf("reclaimed %d, dropped %v; want only the other volume's orphan %s", reclaimed, f.dropped, other)
+	if len(f.dropped) != 0 {
+		t.Fatalf("dropped %v; want nothing reclaimed anywhere", f.dropped)
 	}
 }
 
@@ -101,9 +94,9 @@ func TestGC_HeadAbsentRemedyDeleteVolume(t *testing.T) {
 	}
 }
 
-// A live volume without HEAD whose every live binding an intent names (its
-// first cut in flight) is not refused.
-func TestGC_HeadAbsentWithIntentNamedKeysPasses(t *testing.T) {
+// A created volume without HEAD is refused even when intents name its keys:
+// the decision is from VOLUME and HEAD alone.
+func TestGC_HeadAbsentIntentsDoNotExempt(t *testing.T) {
 	f, b, _, g, _ := gcFixture(t)
 	ctx := context.Background()
 	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
@@ -116,8 +109,29 @@ func TestGC_HeadAbsentWithIntentNamedKeysPasses(t *testing.T) {
 	if err := f.DeleteEntry(ctx, path.Join(catBase, "v1"), headName, nil); err != nil {
 		t.Fatal(err)
 	}
-	if res, err := g.Run(ctx); err != nil {
-		t.Fatalf("intent-named keys without HEAD: %+v %v", res, err)
+	if res, err := g.Run(ctx); err == nil || len(res.RefusedVolumes) != 1 {
+		t.Fatalf("intent-named keys without HEAD: %+v %v; want a refusal", res, err)
+	}
+}
+
+// Attach never recreates an empty HEAD over existing keys: the pruned
+// HEAD's image is unknown, and an empty HEAD would read zeros and let GC
+// reclaim every key.
+func TestCatalog_AttachRefusesHeadMissingOverKeys(t *testing.T) {
+	f, b, c, _, _ := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err := r.Put(ctx, "chunks/e1/c0/k", []byte("published data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.DeleteEntry(ctx, path.Join(catBase, "v1"), headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.EnsureVolume(ctx, "v1", catGeo); CodeOf(err) != CodeHeadMissing {
+		t.Fatalf("attach over keys without HEAD: %v; want head_missing", err)
+	}
+	if _, err := f.LookupEntry(ctx, path.Join(catBase, "v1"), headName); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("attach wrote a HEAD: %v", err)
 	}
 }
 
@@ -176,8 +190,8 @@ func TestGC_VolumeAndHeadAbsentFailsClosed(t *testing.T) {
 		}
 	}
 	res, err := g.Run(ctx)
-	if err != nil || len(res.RefusedVolumes) != 1 || !strings.Contains(res.RefusedVolumes[0].Reason, "fs.rm") || res.Candidates != 0 {
-		t.Fatalf("VOLUME and HEAD pruned: %+v %v; want v1 refused with its remedy", res, err)
+	if err == nil || !strings.Contains(err.Error(), "fs.rm") || res.Reclaimed != 0 {
+		t.Fatalf("VOLUME and HEAD pruned: %+v %v; want the whole pass refused with its remedy", res, err)
 	}
 }
 
@@ -198,5 +212,88 @@ func TestFork_TargetWithStaleKeysRefused(t *testing.T) {
 	}
 	if _, err := f.LookupEntry(ctx, path.Join(catBase, "v2"), volumeName); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("target VOLUME written: %v", err)
+	}
+}
+
+// forkSharedFixture: v2 is a fork of v1's snapshot s1; v1's HEAD then moved
+// on to an empty image and s1 was deleted, so v2's HEAD is the only root of
+// the chunks they shared. It returns the shared keys' bindings' fids.
+func forkSharedFixture(t *testing.T) (*fakeFiler, *Collector, *time.Time, []string) {
+	t.Helper()
+	f, b, c, h := catalogFixture(t)
+	f.deleteChunk = gcBlobs{b}.deleteChunk
+	ctx := context.Background()
+	for _, v := range []string{"v1", "v2"} {
+		if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: v, IsDirectory: true}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"}); err != nil {
+		t.Fatal(err)
+	}
+	r1, _ := NewChunkRemote(f, b, catBase+"/v1")
+	if _, err := r1.CASHead(ctx, storage.ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}, storage.ChunkHead{Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN, Chunks: map[uint64]storage.ChunkRef{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteSnapshot(ctx, "v1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	var shared []string
+	f.mu.Lock()
+	for p, e := range f.entries {
+		if strings.HasPrefix(p, catBase+"/v1/keys/") {
+			if bound, err := decodeBinding(e); err == nil && !bound.done {
+				shared = append(shared, bound.fid)
+			}
+		}
+	}
+	f.mu.Unlock()
+	now := time.Now().Add(24 * time.Hour)
+	g, err := NewCollector(c, gcBlobs{b}, GCConfig{Grace: time.Hour, IntentTTL: time.Hour, Now: func() time.Time { return now }, IssuedEpoch: func(context.Context, string) (uint64, error) { return 1, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, g, &now, shared
+}
+
+// A fork whose HEAD is pruned stops the whole pass: the source's shared
+// keys, which only that HEAD rooted, are never reclaimed.
+func TestGC_ForkHeadAbsentStopsThePass(t *testing.T) {
+	f, g, now, shared := forkSharedFixture(t)
+	ctx := context.Background()
+	if len(shared) == 0 {
+		t.Fatal("fixture has no shared keys")
+	}
+	if err := f.DeleteEntry(ctx, catBase+"/v2", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		res, err := g.Run(ctx)
+		if err == nil || !strings.Contains(err.Error(), "v2 is live but has no HEAD") || res.Reclaimed != 0 {
+			t.Fatalf("pass %d with the fork's HEAD pruned: %+v %v; want the whole pass refused", i, res, err)
+		}
+		*now = now.Add(2*time.Hour + g.cfg.ClockSkew)
+	}
+	if len(f.dropped) != 0 {
+		t.Fatalf("dropped %v; the source's shared keys %v must survive", f.dropped, shared)
+	}
+}
+
+// The control: with the fork's HEAD present the same passes keep the shared
+// keys (the fork roots them) and refuse nothing.
+func TestGC_ForkHeadPresentRootsTheSourceKeys(t *testing.T) {
+	f, g, now, _ := forkSharedFixture(t)
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		if res, err := g.Run(ctx); err != nil || len(res.RefusedVolumes) != 0 {
+			t.Fatalf("pass %d: %+v %v", i, res, err)
+		}
+		*now = now.Add(2*time.Hour + g.cfg.ClockSkew)
+	}
+	for _, fid := range f.dropped {
+		t.Errorf("dropped %s while the fork's HEAD roots the shared keys", fid)
 	}
 }

@@ -108,6 +108,9 @@ const (
 	CodeRemoteUnavailable = "remote_unavailable"
 	CodeOutcomeUnknown    = "outcome_unknown"
 	CodeInvalidLabel      = "invalid_label"
+	// CodeHeadMissing: a volume has chunk keys but no HEAD; its image is
+	// unknown and is never recreated empty.
+	CodeHeadMissing = "head_missing"
 )
 
 // CatalogError is a typed control-plane failure.
@@ -482,6 +485,15 @@ func (c *Catalog) ensureInitialHead(ctx context.Context, vol, root string) error
 	}
 	if has {
 		return nil
+	}
+	// An absent HEAD over existing keys is a pruned HEAD, not a new volume:
+	// its image is unknown and is never recreated empty.
+	keys, err := c.f.ListEntries(ctx, path.Join(root, keysDir), "", "", 1)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return remoteErr(err, "list the chunk keys of %s", vol)
+	}
+	if len(keys) != 0 {
+		return catErr(CodeHeadMissing, false, nil, "volume %s has chunk keys but no HEAD: its image is unknown and is not recreated empty; restore its HEAD, or delete it with sw-block ops chunk volume-delete", vol)
 	}
 	he, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
 	if err != nil {
