@@ -23,6 +23,8 @@ allow `makestep` only at boot (for example, `makestep 1 3` for the initial updat
 timer. Do not restart an initial-step clock configuration while leases are live. A wall-clock step larger than the
 configured clock-skew bound while a lease is live is **outside the v1.0 supported envelope**. Blockmaster requires half of `--workspace-max-clock-skew` to exceed its configured fence-exit budget (watch cadence 50 ms + drain timeout 5 s), assuming normal scheduling, so the skew bound must be above 10.1 s; the default 20 s passes.
 
+**Hosts' clocks stay within `--workspace-max-clock-skew` (default 20 s) of blockmaster's clock.** Beyond it the lease bound does not hold: a volume could keep serving after blockmaster considers its lease over, and a start-up wait can be cut short. Keep every volume host and blockmaster on the same time source.
+
 This is a safety premise, not a tested wall-step guarantee. The host's monotonic lease deadline does not remove this
 requirement on blockmaster's clock. See Part T `TERM-LEASE-NOW-001` in the [invariant contract](design/invariants.md).
 
