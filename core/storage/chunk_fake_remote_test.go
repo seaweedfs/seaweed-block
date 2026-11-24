@@ -727,6 +727,7 @@ func crashableStore(t *testing.T) (*WALStore, string, func()) {
 		if err := s.fd.Close(); err != nil {
 			t.Fatal(err)
 		}
+		crashOwnedMap(s)
 	}
 }
 
@@ -753,6 +754,7 @@ func reopen(t *testing.T, path string) (*WALStore, func()) {
 		if err := s.fd.Close(); err != nil {
 			t.Fatal(err)
 		}
+		crashOwnedMap(s)
 	}
 }
 
@@ -1131,5 +1133,15 @@ func waitReconciledForTest(t *testing.T, layer chunkLayer) {
 			t.Fatalf("chunk layer still reconciling after %v", ctLocalBound)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// crashOwnedMap closes the owned-map file of a crashed store without
+// persisting anything, as the process's exit would; otherwise its handle
+// stays open and a platform that refuses to delete an open file fails the
+// test's directory cleanup.
+func crashOwnedMap(s *WALStore) {
+	if s.v3 != nil && s.v3.ownedMap != nil && s.v3.ownedMap.fd != nil {
+		_ = s.v3.ownedMap.fd.Close()
 	}
 }
