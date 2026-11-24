@@ -177,15 +177,18 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 		if err != nil {
 			return res, err
 		}
-		if live != nil && !hasHead {
-			// This delete wrote the first HEAD (deleting, generation 1) where
-			// none was read. Reverting it to active would leave an empty HEAD
-			// over the volume's keys, and leaving it deleting would root
-			// nothing: either way GC would reclaim them. Remove it again (a
-			// deleting HEAD at generation 1 can only have come from nothing),
-			// so the HEAD is absent and GC keeps refusing.
+		if live != nil && gen == 1 {
+			// A deleting HEAD at generation 1 was created from nothing (by
+			// this delete or another one): attach's initial HEAD is
+			// generation 1 active, and marking it makes generation 2.
+			// Reverting it to active would leave an empty HEAD over the
+			// volume's keys, and leaving it deleting would root nothing:
+			// either way GC would reclaim them. Remove it again, on that
+			// generation, so the HEAD is absent and GC keeps refusing. A
+			// HEAD restored or marked since has another generation and is
+			// left to the ordinary revert.
 			c.hook(hookBlocked, vol)
-			if err := c.f.DeleteEntry(ctx, root, headName, map[string][]byte{extGen: []byte(strconv.FormatUint(gen, 10))}); err != nil && !errors.Is(err, ErrNotFound) {
+			if err := c.f.DeleteEntry(ctx, root, headName, map[string][]byte{extGen: []byte("1")}); err != nil && !errors.Is(err, ErrNotFound) {
 				res.Uncertain = true
 				return res, catErr(CodeOutcomeUnknown, true, err, "volume %s: %v; removing the deleting HEAD this delete wrote failed: rerun the delete", vol, live)
 			}

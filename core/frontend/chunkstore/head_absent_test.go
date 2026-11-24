@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -534,5 +536,89 @@ func TestVolumeDelete_FirstHeadNeverRevertedToActive(t *testing.T) {
 	}
 	if len(f.dropped) != 0 {
 		t.Fatalf("dropped %v after a refused delete", f.dropped)
+	}
+}
+
+// admitHook is an Admission whose Admit runs a step first (a concurrent
+// actor between this delete's first read and its mark).
+type admitHook struct{ step func() }
+
+func (a admitHook) Admit(context.Context, string) error {
+	if a.step != nil {
+		a.step()
+	}
+	return nil
+}
+func (admitHook) Commit(context.Context, string) error { return nil }
+func (admitHook) Abort(context.Context, string) error  { return nil }
+
+// Scenario A: this delete read no HEAD; before its mark the operator
+// restores HEAD, another delete marks it deleting, and a snapshot name
+// lands. This delete joins that incarnation and refuses: the restored HEAD
+// is reverted as usual (never removed), its image intact.
+func TestVolumeDelete_RestoredHeadNotRemovedByAnOlderDelete(t *testing.T) {
+	f, b, c, _ := catalogFixture(t)
+	ctx := context.Background()
+	detachHead(t, f, b, "v1") // the volume is detached, as a delete requires
+	h, _, err := c.ReadHead(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := proto.Clone(recordEntry(t, f, catBase+"/v1/HEAD")).(*filerpb.Entry)
+	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	step := func() {
+		f.mu.Lock()
+		f.entries[catBase+"/v1/HEAD"] = proto.Clone(saved).(*filerpb.Entry) // the operator restores HEAD
+		f.mu.Unlock()
+		if _, _, err := c.markHeadDeleting(ctx, "v1", catBase+"/v1"); err != nil { // another delete marks it
+			t.Fatal(err)
+		}
+		rec, err := nameRecordEntry(nameRecord{Format: snapFormat, VolumeID: "v1", Name: "late", Attempt: "1-0000000000000001", RequestID: "late"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.CreateEntry(ctx, catBase+"/v1/"+snapNamesDir, rec, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.DeleteVolume(ctx, "v1", admitHook{step}); CodeOf(err) != CodeVolumeHasSnapshots {
+		t.Fatalf("delete: %v; want volume_has_snapshots", err)
+	}
+	got, ok, err := c.ReadHead(ctx, "v1")
+	if err != nil || !ok || got.State != h.State || manifestCount(got) != manifestCount(h) {
+		t.Fatalf("restored HEAD after the refused delete: %+v %t %v; want it back (%s) with its image", got, ok, err, h.State)
+	}
+}
+
+// Scenario B: a deleting HEAD at generation 1 (created from nothing by
+// another delete) that this delete joins and must refuse is removed, never
+// reverted to an active, empty HEAD.
+func TestVolumeDelete_JoinedFirstHeadRemovedNotReverted(t *testing.T) {
+	f, _, c, _ := catalogFixture(t)
+	ctx := context.Background()
+	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	other, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadDeleting})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createHead(ctx, c.f, c.blobs, catBase+"/v1", other, headCreateDelete); err != nil {
+		t.Fatal(err) // another delete's mark over the absent HEAD
+	}
+	rec, err := nameRecordEntry(nameRecord{Format: snapFormat, VolumeID: "v1", Name: "late", Attempt: "1-0000000000000001", RequestID: "late"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CreateEntry(ctx, catBase+"/v1/"+snapNamesDir, rec, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteVolume(ctx, "v1", nil); CodeOf(err) != CodeVolumeHasSnapshots {
+		t.Fatalf("delete joining a gen-1 deleting HEAD: %v", err)
+	}
+	if got, ok, err := c.ReadHead(ctx, "v1"); err != nil || ok {
+		t.Fatalf("HEAD after the refused delete: %+v present=%t %v; want it removed", got, ok, err)
 	}
 }
