@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// TestKnownZeroAcceptance is the KNOWN-ZERO acceptance test (V1-SPEC r2.116),
+// TestKnownZeroAcceptance is the KNOWN-ZERO acceptance test of a fresh volume,
 // gated by KZ_RUN=1. Source role (this file, steps 1-2):
 //
 //	(1) a fresh volume of KZ_SIZE (default 1T) and an empty first snapshot S0:
@@ -52,8 +52,8 @@ func TestKnownZeroAcceptance(t *testing.T) {
 		run = fmt.Sprintf("local-%d", time.Now().Unix())
 	}
 	// KZ_ROLE: "" = every step in this process (the smoke); "source" = steps
-	// 1, 2 and 5 here, the restore and fork targets on KZ_TARGET_HOST (r2.116:
-	// "on the second host"), handed over through KZ_HANDOFF; "target" = steps
+	// 1, 2 and 5 here, the restore and fork targets on KZ_TARGET_HOST (the
+	// second host), handed over through KZ_HANDOFF; "target" = steps
 	// 3 and 4 on this host against the source's cluster named in KZ_HANDOFF.
 	role := os.Getenv("KZ_ROLE")
 	rep := &kzReport{Run: run, Size: size, Bytes: bytes, Device: device, Role: role, StartedAt: time.Now().UTC()}
@@ -180,6 +180,48 @@ func kzWaitTargetDone(t *testing.T) {
 	})
 }
 
+// kzTargetEnv reserves the data and ctrl ports the source's cluster spec names
+// for the targets BEFORE the harness picks any port of its own (its
+// constructor allocates five), then builds the env on the source's filer and
+// blockmaster.
+func kzTargetEnv(t *testing.T, ho kzHandoff, newHarness func(*testing.T) *plannedHandoffHarness) *handoffEnv {
+	t.Helper()
+	handoffPorts.Lock()
+	if handoffPorts.used == nil {
+		handoffPorts.used = map[int]bool{}
+	}
+	for _, ht := range ho.Targets {
+		if err := kzReserve(handoffPorts.used, ht.Data, ht.Ctrl); err != nil {
+			handoffPorts.Unlock()
+			t.Fatalf("KZ_HANDOFF target %s: %v", ht.Volume, err)
+		}
+	}
+	handoffPorts.Unlock()
+	h := newHarness(t)
+	h.masterAddr = ho.Master
+	return &handoffEnv{h: h, cluster: &w4WeedCluster{filerGRPC: ho.FilerGRPC, filerHTTP: ho.FilerHTTP}, chunkPath: ho.ChunkPath, hosts: map[string]bvHost{}}
+}
+
+// TestKnownZeroTargetReservesBeforeHarness: when the harness constructor runs,
+// every handed-off port is already reserved, so none of its own five ports can
+// be one of them (and then be refused as a collision).
+func TestKnownZeroTargetReservesBeforeHarness(t *testing.T) {
+	ho := kzHandoff{Master: "10.9.9.1:1", Targets: []kzHandoffTarget{{Volume: "v", Data: "10.9.9.2:19991", Ctrl: "10.9.9.2:19992"}}}
+	called := false
+	kzTargetEnv(t, ho, func(t *testing.T) *plannedHandoffHarness {
+		called = true
+		handoffPorts.Lock()
+		defer handoffPorts.Unlock()
+		if !handoffPorts.used[19991] || !handoffPorts.used[19992] {
+			t.Fatal("the harness was built before the handed-off ports were reserved")
+		}
+		return &plannedHandoffHarness{dir: t.TempDir()}
+	})
+	if !called {
+		t.Fatal("the harness constructor was never called")
+	}
+}
+
 // kzTargetRole runs steps 3 and 4 on this host: no weed cluster or
 // blockmaster of its own; every blockvolume uses the source's filer and
 // blockmaster from KZ_HANDOFF, with the data and ctrl addresses the source's
@@ -197,21 +239,9 @@ func kzTargetRole(t *testing.T, rep *kzReport, bytes uint64, device bool, run st
 	if ho.Run != run || ho.Bytes != bytes || len(ho.Targets) == 0 {
 		t.Fatalf("KZ_HANDOFF run %q bytes %d targets %d; this run %q bytes %d", ho.Run, ho.Bytes, len(ho.Targets), run, bytes)
 	}
-	h := newPlannedHandoffHarness(t)
-	h.masterAddr = ho.Master
-	env := &handoffEnv{h: h, cluster: &w4WeedCluster{filerGRPC: ho.FilerGRPC, filerHTTP: ho.FilerHTTP}, chunkPath: ho.ChunkPath, hosts: map[string]bvHost{}}
+	env := kzTargetEnv(t, ho, newPlannedHandoffHarness)
+	h := env.h
 	rep.ChunkPath = ho.ChunkPath
-	handoffPorts.Lock()
-	if handoffPorts.used == nil {
-		handoffPorts.used = map[int]bool{}
-	}
-	for _, ht := range ho.Targets {
-		if err := kzReserve(handoffPorts.used, ht.Data, ht.Ctrl); err != nil {
-			handoffPorts.Unlock()
-			t.Fatalf("KZ_HANDOFF target %s: %v", ht.Volume, err)
-		}
-	}
-	handoffPorts.Unlock()
 	for _, ht := range ho.Targets {
 		tb := bvHost{id: ht.Volume, server: ht.Server, replica: "r1", volume: ht.Volume, root: filepath.Join(h.dir, "vol-"+ht.Volume),
 			data: ht.Data, ctrl: ht.Ctrl, status: handoffAddress(t), nvme: handoffAddress(t)}
@@ -402,7 +432,7 @@ func kzHoldBin(t *testing.T, rep *kzReport) string {
 	return p
 }
 
-// kzCrashFirstStart is step 5 (V1-SPEC r2.116):
+// kzCrashFirstStart is step 5:
 // the first start of a fresh volume runs the kzhold test binary, which holds
 // at the boundary before the fresh marker is retired; the test requires the
 // .chunkfresh marker present there, then SIGKILLs it. More than one try fails
