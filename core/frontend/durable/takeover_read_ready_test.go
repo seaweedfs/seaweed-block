@@ -32,7 +32,7 @@ func (r *heldTakeoverClaim) GetHead(ctx context.Context) (storage.ChunkHead, err
 	// The permanent-outage case must hold outcome resolution as well as the
 	// CAS reply: a committed CAS with readable HEAD can now settle after the
 	// per-operation deadline. Unbounded diagnostic reads still see the root.
-	if _, bounded := ctx.Deadline(); bounded && r.holdFor == 0 {
+	if _, bounded := ctx.Deadline(); bounded && r.holdFor <= 0 {
 		select {
 		case <-r.claimed:
 			r.resolutionOnce.Do(func() { close(r.resolutionBlocked) })
@@ -76,6 +76,11 @@ func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkH
 }
 
 func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProvider, frontend.Backend, *nvme.IOHandler) {
+	p, b, h, _ := pendingTakeoverReadWithRelease(t, hold)
+	return p, b, h
+}
+
+func pendingTakeoverReadWithRelease(t *testing.T, hold time.Duration) (*durable.DurableProvider, frontend.Backend, *nvme.IOHandler, func()) {
 	t.Helper()
 	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{}), resolutionBlocked: make(chan struct{})}
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
@@ -112,7 +117,7 @@ func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProv
 	var firstWait sync.Once
 	durable.SetTestBeforeAttachWait(backend, func() { firstWait.Do(func() { close(remote.readRegistered) }) })
 	handler := nvme.NewIOHandler(nvme.HandlerConfig{Backend: backend, BlockSize: 4096, VolumeSize: pcBlocks * 4096, NSID: 1})
-	return p, backend, handler
+	return p, backend, handler, remote.unblock
 }
 
 // Model Linux max_retries=5 and CRD=0: at most six attempts, no sleeps.
@@ -167,19 +172,50 @@ func TestWALStoreChunk_PendingReadHonoursEarlierDeadline(t *testing.T) {
 	}
 }
 
+// Wall-clock integration smoke; exact outcomes are required by the virtual-time
+// TestAttachWriteBeforeReadinessBudgetSucceeds and AfterReadinessBudget controls.
 func TestWALStoreChunk_TakeoverWriteWaitsForAttach(t *testing.T) {
-	_, backend, _ := pendingTakeoverRead(t, 1500*time.Millisecond)
+	const hold = 100 * time.Millisecond
+	_, backend, _ := pendingTakeoverRead(t, hold)
 	start := time.Now()
 	n, err := backend.Write(context.Background(), 33*4096, block(0x74))
-	if err != nil || n != 4096 {
-		t.Fatalf("pending write: n=%d err=%v", n, err)
+	elapsed := time.Since(start)
+	want := byte(0x74)
+	if err != nil {
+		// INV-FE-NVME-READY-STATUS-001: the product's 3s readiness
+		// allowance refuses without I/O; NVMe reports retryable 0x82.
+		if n != 0 || !errors.Is(err, frontend.ErrBackendBusy) || !errors.Is(err, context.DeadlineExceeded) || elapsed < 3*time.Second {
+			t.Fatalf("pending write: n=%d wait=%s err=%v", n, elapsed, err)
+		}
+		want = 0x33 // A refused write must preserve the original HEAD bytes.
+	} else if n != 4096 || elapsed < hold {
+		t.Fatalf("write did not wait for attach: n=%d wait=%s hold=%s", n, elapsed, hold)
 	}
-	if elapsed := time.Since(start); elapsed >= 5*time.Second {
-		t.Fatalf("write waited %s", elapsed)
-	}
+	t.Logf("attach write: hold=%s wait=%s n=%d err=%v", hold, elapsed, n, err)
+	// A loaded worker may still be attaching after the first refusal.
+	// Retry only readiness errors; every other error remains a failure.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	got := make([]byte, 4096)
-	if n, err := backend.Read(context.Background(), 33*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x74)) {
-		t.Fatalf("attached write readback: n=%d err=%v", n, err)
+	for {
+		n, err = backend.Read(ctx, 33*4096, got)
+		if !errors.Is(err, frontend.ErrBackendBusy) || ctx.Err() != nil {
+			break
+		}
+	}
+	if err != nil || n != 4096 || !bytes.Equal(got, block(want)) {
+		t.Fatalf("attached write readback: n=%d err=%v want=%x", n, err, want)
+	}
+	if want == 0x33 {
+		if n, err := backend.Write(ctx, 33*4096, block(0x74)); err != nil || n != 4096 {
+			t.Fatalf("retry attached write: n=%d err=%v", n, err)
+		}
+		if n, err := backend.Read(ctx, 33*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x74)) {
+			t.Fatalf("retry write readback: n=%d err=%v", n, err)
+		}
+	}
+	if n, err := backend.Read(ctx, 100*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x64)) {
+		t.Fatalf("takeover lost untouched data: n=%d err=%v", n, err)
 	}
 }
 

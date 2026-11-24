@@ -103,6 +103,12 @@ Two kinds of config are **expected to violate**:
 
 Each `.cfg` names its spec on its first line.
 
+## Never-started delete results
+
+[NeverStarted r2 exhaustive results](NeverStarted-r2-results.md): 21 of 21
+configurations as expected; the two must-not-violate configurations finished
+with no error (25,831,776 and 48,737,939 distinct states, depth 50).
+
 ## Owner-label simulation results
 
 [Workspace owner-label simulation results](WorkspaceRegrant-owner-label-results.md)

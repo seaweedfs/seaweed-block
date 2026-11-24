@@ -11,7 +11,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 )
 
-// V1-SPEC r2.45 (1), as the tmpfiles.d entry lays it out: a lock directory
+// As the tmpfiles.d entry lays out the host-lock rule: a lock directory
 // the provider creates gets a traversable parent (0755) and is itself 0700,
 // whatever the umask. A 0700 parent created by root would keep the unit's
 // user out even after the locks directory is chowned to it.

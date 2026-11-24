@@ -24,7 +24,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 )
 
-// Snapshot ladder rung F1 (V1-SPEC r2.49, r2.52): N volumes on one host,
+// Snapshot ladder rung F1: N volumes on one host,
 // every volume snapshotted at the same instant, round after round, under
 // write load. It must hold: every snapshot restores exactly; no write fails;
 // the host limiter paces the cuts and none starves (every snapshot commits
@@ -194,8 +194,7 @@ func TestSnapshotLadderF1VolumesOneHost(t *testing.T) {
 
 func f1RestoreTarget(vol, round int) string { return fmt.Sprintf("v%dr%d", vol, round) }
 
-// f1StartEnv is the procedure harness laid out as one host (V1-SPEC r2.52,
-// the layout ruling): ONE server id, s1, and one blockvolume process per
+// f1StartEnv is the procedure harness laid out as one host: ONE server id, s1, and one blockvolume process per
 // volume, each with its own replica id and its own data/ctrl/status/NVMe
 // ports. Source v<i> is replica r<i>; the restore target of v<i> in round k
 // is replica r<i+N*k> on the same server. The node record carries the first

@@ -46,7 +46,7 @@ func copyRootFiles(t *testing.T, src, dst string) {
 	}
 }
 
-// V1-SPEC r2.45 (2): an existing root whose HEAD names this holder attaches
+// The durable-reopen rule: an existing root whose HEAD names this holder attaches
 // only if its local durable LSN reaches HEAD's remote_lsn. A rolled-back
 // copy of the root (a backup taken before the last cut) is refused with the
 // stale-root refusal, as a no-retry (superseded) startup outcome, with the

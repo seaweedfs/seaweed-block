@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/auth"
+	"slices"
 	"sync/atomic"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/auth"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/ops"
@@ -107,7 +108,10 @@ func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRe
 		return nil, lifecycleError("delete workspace bindings", err)
 	}
 	_, placed := stores.Placements.GetPlacement(req.GetVolumeId())
-	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, req.GetVolumeId(), bound && placed, func() error {
+	// The lifecycle delete does not read HEAD: a line without an ACK is
+	// refused here even when it never started (INV-WS-DELETE-NO-LIVE-HOLDER-001
+	// admits that only through the chunk volume delete and its HEAD fence).
+	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, req.GetVolumeId(), bound && placed, nil, "", func() error {
 		if e := stores.Placements.DeletePlacement(req.GetVolumeId()); e != nil {
 			return e
 		}
@@ -132,6 +136,11 @@ func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRe
 // workload planner, binding/placement/move RPCs and CreateVolume all refuse
 // it.
 func (s *services) MarkVolumeDeleting(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	// HEAD and the line's owner, read before any lock (as MoveWorkspace
+	// does), bounded: a HEAD below the line's epoch proves the line never
+	// started (TERM-LIVE-HOLDER-001). A read that fails leaves head nil,
+	// which refuses a line without an ACK (fail closed).
+	head, owner := s.deleteHolderEvidence(ctx, req.GetVolumeId())
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -152,7 +161,21 @@ func (s *services) MarkVolumeDeleting(ctx context.Context, req *control.MarkVolu
 	_, placed := stores.Placements.GetPlacement(vol)
 	var res lifecycle.DeletionReservation
 	var persistErr error
-	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, vol, bound && placed, func() error {
+	// A rerun of a delete whose token already holds the reservation (or a
+	// committed one) was decided by its first admission: it is not decided
+	// again. It goes on to the catalog step, whose HEAD compare-and-swap is
+	// the fence: a HEAD a holder claimed in between is refused there and the
+	// reservation given back, so neither the volume nor its id is stranded.
+	if r, held := stores.Deletions.Get(vol); held && (r.State == lifecycle.ReservationCommitted || slices.Contains(r.Tokens, req.GetToken())) {
+		res, persistErr = stores.Deletions.Admit(vol, req.GetToken())
+		if persistErr != nil {
+			return nil, status.Errorf(codes.Unavailable, "mark volume deleting: %v", persistErr)
+		}
+		_, known := stores.Volumes.GetVolume(vol)
+		s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q known=%t state=%s (rerun of a held delete)", vol, known, res.State)
+		return &control.MarkVolumeDeletingResponse{Known: known, State: res.State}, nil
+	}
+	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, vol, bound && placed, head, owner, func() error {
 		res, persistErr = stores.Deletions.Admit(vol, req.GetToken())
 		return persistErr
 	})
@@ -404,7 +427,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 	// from its registered host, so a second host with a copied --server-id never receives (never adopts) it.
 	if s.isWorkspaceVolume(req.VolumeId) {
 		if err := s.host.refuseWorkspaceHolderHost(ctx, "assignment stream", req.GetServerId()); err != nil {
-			return status.Error(codes.FailedPrecondition, err.Error())
+			return identityRefusal(err)
 		}
 	}
 
@@ -985,4 +1008,30 @@ func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.Assignme
 	fact.Peers = s.collectPeers(info.VolumeID, info)
 	fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
 	return fact
+}
+
+// deleteHolderEvidence reads vol's HEAD with the configured reader, bounded
+// at 5 s, and the published line's owner "<server>/<replica>". Either may be
+// missing: no reader, a failed read or no line gives a nil head or "".
+func (s *services) deleteHolderEvidence(ctx context.Context, vol string) (*authority.WorkspaceHead, string) {
+	owner := ""
+	if line, ok := s.host.Publisher().PublishedAuthorityLine(vol); ok {
+		if server := s.host.workspaceLineOwner(line, vol, line.ReplicaID, line.Epoch); server != "" {
+			owner = server + "/" + line.ReplicaID
+		}
+	}
+	if s.host.cfg.WorkspaceHeadReader == nil || vol == "" {
+		return nil, owner
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	head, err := s.host.cfg.WorkspaceHeadReader(readCtx, vol)
+	if errors.Is(err, authority.ErrWorkspaceHeadUnclaimed) || errors.Is(err, authority.ErrWorkspaceHeadDeleting) {
+		return &head, owner // the initial HEAD (never claimed), or one past the delete's fence
+	}
+	if err != nil {
+		s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q: HEAD unreadable (%v); a line without an ACK is refused", vol, err)
+		return nil, owner
+	}
+	return &head, owner
 }

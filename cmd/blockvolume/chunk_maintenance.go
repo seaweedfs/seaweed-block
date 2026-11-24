@@ -27,7 +27,7 @@ func newChunkMaintenance(cat *chunkstore.Catalog, blobs chunkstore.BlobDeleter, 
 		if defaultChunkGCGrace <= max(defaultChunkCutTimeout, chunkstore.DefaultOpDeadline)+defaultChunkMaintenanceTimeout {
 			return nil, closeFn, errors.New("automatic GC grace does not cover cut/copy and mark bounds")
 		}
-		conn, err := link.DialMaster(master, masterTLS)
+		conn, err := link.DialMaster(master, masterTLS, link.MasterReconnect())
 		if err != nil {
 			return nil, closeFn, err
 		}

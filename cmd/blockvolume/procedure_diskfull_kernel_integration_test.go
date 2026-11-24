@@ -14,7 +14,7 @@ import (
 )
 
 // What a real Linux guest sees when the local disk under a volume's WAL fills
-// (V1-SPEC r2.60, issue 484): the kernel NVMe/TCP initiator connects to the
+// (issue #484): the kernel NVMe/TCP initiator connects to the
 // volume's own target on this host, the durable root's disk fills, and dd
 // writes with O_DIRECT. The test records, for the operator guide, whether dd
 // stalls or fails and with what, what the kernel logs, and what happens once

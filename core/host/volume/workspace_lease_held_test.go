@@ -12,7 +12,7 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
-// V1-SPEC r2.37: renewals refused before the first grant (a restart before the
+// Lease-grant rule: renewals refused before the first grant (a restart before the
 // forced-move barrier) leave the lease not held; the first successful renewal
 // is logged as a re-grant after the refused ones, with its time.
 func TestWorkspaceLeaseGrantIsLoggedOnceAfterRefusedRenewals(t *testing.T) {
@@ -90,7 +90,7 @@ func TestWorkspaceLeaseFirstRevokingReplyIsNotLoggedAsAGrant(t *testing.T) {
 	}
 }
 
-// V1-SPEC r2.37: a workspace primary reports NotReadyReason=lease_not_held,
+// Lease-readiness rule: a workspace primary reports NotReadyReason=lease_not_held,
 // first, while its guard is missing or holds no granted lease, even with the
 // backend admitting I/O; ready once the lease is held; lease_not_held again
 // after the guard fences.
