@@ -8,15 +8,14 @@ import (
 	"testing"
 )
 
-// The flusher writes a dirty block's extent before the WAL record behind it
-// is synced (below the WAL pressure threshold it does not sync first), and
-// page writeback has no order across offsets of one file. A crash can then
-// keep the extent bytes of a write whose WAL record is lost (an unacked
-// write). After recovery the chunk's map entry has not moved, so the chunk
-// is not a cut candidate: local reads return the lost write's bytes while
-// the published HEAD holds the chunk without them, and no cut compares the
-// two. Local and published must agree for every block of a chunk that is
-// not a candidate.
+// Page writeback has no order across offsets of one file, so an extent
+// written from a WAL record that is not yet durable could survive a power
+// loss that loses the record (an unacked write). After recovery the chunk's
+// map entry would not have moved, the chunk would not be a cut candidate,
+// and local reads would return the lost write's bytes while the published
+// HEAD holds the chunk without them. The flusher therefore writes extents
+// only from synced records (INV-WAL-V3-WRITE-AHEAD-001). Local and published
+// must agree for every block of a chunk that is not a candidate.
 //
 // The crash is injected, not raced: the real flusher runs and is stopped at
 // its fsync; the store file after the crash is the file as it was before the
@@ -24,6 +23,7 @@ import (
 // only that page had reached the disk. A flusher that writes extents only
 // from synced records leaves the page unchanged and passes.
 func TestRedCrashKeepingAnUnsyncedExtentWriteLeavesLocalAndHEADApart(t *testing.T) {
+	// The name keeps its red-first form so the history and the row match.
 	ctx := context.Background()
 	s, path, crash := crashableStore(t)
 	remote := NewMemChunkRemote()

@@ -126,10 +126,10 @@ func TestCheckpointDiagnostics_LogRateLimit(t *testing.T) {
 	}
 }
 
-// A starved checkpoint: flush cycles keep succeeding (clamped to the
-// acknowledged frontier, nothing persisted moves) while the persisted
-// CheckpointLSN and the last advance stay frozen. Only a real move of the
-// persisted checkpoint counts as an advance.
+// A starved checkpoint: writes that are never synced are never flushed
+// (INV-WAL-V3-WRITE-AHEAD-001), so flush cycles move nothing: the persisted
+// CheckpointLSN, the success count and the last advance stay frozen. Only a
+// real move of the persisted checkpoint counts as an advance.
 func TestCheckpointDiagnostics_StarvedCheckpointIsVisible(t *testing.T) {
 	s, _ := newMappedCheckpointStoreV3(t)
 	mustAttach(t, s, newFakeChunkRemote(), ctConfig(1))
@@ -150,8 +150,8 @@ func TestCheckpointDiagnostics_StarvedCheckpointIsVisible(t *testing.T) {
 		}
 	}
 	starved := s.CheckpointPersistence()
-	if starved.Successes <= first.Successes {
-		t.Fatalf("flush cycles did not keep succeeding: %+v", starved)
+	if starved.Successes != first.Successes {
+		t.Fatalf("flush cycles over unsynced writes made a checkpoint call: first %+v starved %+v", first, starved)
 	}
 	if starved.CheckpointLSN != 1 || starved.Advances != 1 || !starved.LastAdvance.Equal(first.LastAdvance) {
 		t.Fatalf("a clamped success counted as an advance: first %+v starved %+v", first, starved)

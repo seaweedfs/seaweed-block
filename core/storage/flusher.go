@@ -183,6 +183,12 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	recoveryGen = store.v3.recoverGen.Load()
 
 	entries := store.dm.snapshot()
+	// Write-ahead (INV-WAL-V3-WRITE-AHEAD-001): only entries whose WAL
+	// record is durable reach the extent. An entry above the synced WAL
+	// frontier stays dirty for a later cycle: written now, a power loss
+	// could keep its extent page and lose its record, leaving extent bytes
+	// that no recovered record or map entry accounts for.
+	synced := store.v3.wack.Load()
 	store.mu.RUnlock()
 	if len(entries) == 0 {
 
@@ -218,6 +224,9 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	recordCache := &flushRecordCacheV3{recoveryGen: recoveryGen}
 
 	for _, e := range entries {
+		if e.LSN > synced {
+			continue
+		}
 		data, _, err := f.readDirtyRecordV3Cached(e, recordCache)
 		if err != nil {
 			return err
