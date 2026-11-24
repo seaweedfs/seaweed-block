@@ -341,7 +341,10 @@ func DecodeRoot(b []byte) (Root, error) {
 	if r.err != nil {
 		return Root{}, r.err
 	}
-	again, _ := out.Encode()
+	again, err := out.Encode()
+	if err != nil {
+		return Root{}, err
+	}
 	if !bytes.Equal(again, b) {
 		return Root{}, fmt.Errorf("%w: root bytes are not canonical", ErrMalformed)
 	}
