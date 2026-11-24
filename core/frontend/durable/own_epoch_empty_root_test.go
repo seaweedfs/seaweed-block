@@ -141,6 +141,77 @@ func TestOwnEpochExistingLocalRootKeepsAcknowledgedSuffix(t *testing.T) {
 	}
 }
 
+// The server name survives a same-host forced move; its local data lineage
+// does not. A long unpublished suffix is not evidence that this old root
+// contains the shorter image published by its successor.
+func TestSameHostForcedSuccessorRefusesTheRemountedOldRoot(t *testing.T) {
+	ctx := context.Background()
+	remote := storage.NewMemChunkRemote()
+	oldRoot := t.TempDir()
+	old := ownEpochProvider(t, oldRoot, remote, "s1/r1", 3)
+	oldStore := openRecovered(t, old)
+	writeSync(t, oldStore, 0, 'A')
+	if _, err := old.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 16; i++ {
+		writeSync(t, oldStore, 0, 'U') // acknowledged, absent from HEAD
+	}
+	oldLSN, _, _ := oldStore.(*storage.WALStore).Boundaries()
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	missing := ownEpochProvider(t, t.TempDir(), remote, "s1/r1", 3)
+	if _, err := missing.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := missing.RecoverVolume(ctx, "v1"); !errors.Is(err, durable.ErrChunkMissingLocalRoot) {
+		t.Fatalf("own-epoch empty root was not refused: %v", err)
+	}
+	if err := missing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The authority controls separately require the same-host forced move's
+	// barrier and loss record before issuing this successor epoch.
+	successor := ownEpochProvider(t, t.TempDir(), remote, "s1/r1", 4)
+	successorStore := openRecovered(t, successor)
+	writeSync(t, successorStore, 0, 'B')
+	if _, err := successor.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	before := headHolder(t, remote)
+	if before.Epoch != 4 || before.Holder != "s1/r1" || oldLSN <= before.RemoteLSN {
+		t.Fatalf("fixture lacks the divergent same-name lineage: old L=%d HEAD=%+v", oldLSN, before)
+	}
+	if err := successor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	remounted := ownEpochProvider(t, oldRoot, remote, "s1/r1", 4)
+	if _, err := remounted.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := remounted.RecoverVolume(ctx, "v1")
+	if err == nil {
+		got := make([]byte, 4096)
+		n, readErr := remounted.Backend("v1").Read(ctx, 0, got)
+		_, cutErr := remounted.CaptureVolume(ctx, "v1")
+		t.Fatalf("old root served under its successor: old L=%d successor R=%d read n=%d err=%v stale_bytes=%t cut=%v replaced_published_B=%t",
+			oldLSN, before.RemoteLSN, n, readErr, bytes.Equal(got, block('U')), cutErr, bytes.Equal(headBlock(t, remote, 0), block('U')))
+	}
+	if !errors.Is(err, durable.ErrChunkStaleLocalRoot) || !errors.Is(err, storage.ErrChunkLayerFenced) {
+		t.Fatalf("remounted old lineage lacks typed refusal: %v", err)
+	}
+	if err := remounted.Backend("v1").AdmitsIO(); err == nil {
+		t.Fatal("remounted old lineage admits guest I/O")
+	}
+	if after := headHolder(t, remote); !reflect.DeepEqual(after, before) {
+		t.Fatalf("refused remounted root changed HEAD: before=%+v after=%+v", before, after)
+	}
+	if got := headBlock(t, remote, 0); !bytes.Equal(got, block('B')) {
+		t.Fatal("refused root replaced the successor's published data")
+	}
+}
+
 func TestFreshRootAtHigherIssuedEpochRestoresRemoteImage(t *testing.T) {
 	for _, holder := range []string{"s1/r1", "s2/r1"} {
 		t.Run(holder, func(t *testing.T) {
