@@ -486,10 +486,11 @@ func TestUsage_RefusesAbsentHead(t *testing.T) {
 }
 
 // A volume-delete over an absent HEAD writes the first HEAD (deleting); a
-// snapshot that appears before its re-check makes it refuse, and the HEAD
-// stays deleting: it is never reverted to an active, empty HEAD over keys.
+// snapshot that appears before its re-check makes it refuse, and the HEAD it
+// wrote is removed again (never reverted to an active, empty HEAD, nor left
+// deleting, which would root nothing): GC keeps refusing, nothing is dropped.
 func TestVolumeDelete_FirstHeadNeverRevertedToActive(t *testing.T) {
-	f, _, c, _ := catalogFixture(t)
+	f, b, c, _ := catalogFixture(t)
 	ctx := context.Background()
 	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
 		t.Fatal(err)
@@ -509,8 +510,29 @@ func TestVolumeDelete_FirstHeadNeverRevertedToActive(t *testing.T) {
 	if _, err := c.DeleteVolume(ctx, "v1", nil); CodeOf(err) != CodeVolumeHasSnapshots {
 		t.Fatalf("delete with a late snapshot: %v; want volume_has_snapshots", err)
 	}
-	got, ok, err := c.ReadHead(ctx, "v1")
-	if err != nil || !ok || got.State != storage.ChunkHeadDeleting {
-		t.Fatalf("HEAD after the refused delete: %+v %t %v; want it left deleting", got, ok, err)
+	if _, ok, err := c.ReadHead(ctx, "v1"); err != nil || ok {
+		t.Fatalf("HEAD after the refused delete: present=%t %v; want it absent again", ok, err)
+	}
+	if _, err := c.EnsureVolume(ctx, "v1", catGeo); CodeOf(err) != CodeHeadMissing {
+		t.Fatalf("attach after the refused delete: %v; want head_missing", err)
+	}
+	// GC keeps refusing: no needle is dropped (N6).
+	if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v1", IsDirectory: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Add(24 * time.Hour)
+	g, err := NewCollector(c, gcBlobs{b}, GCConfig{Grace: time.Hour, IntentTTL: time.Hour, Now: func() time.Time { return now }, IssuedEpoch: func(context.Context, string) (uint64, error) { return 1, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.deleteChunk = gcBlobs{b}.deleteChunk
+	for i := 0; i < 3; i++ {
+		if res, err := g.Run(ctx); err == nil || res.Reclaimed != 0 {
+			t.Fatalf("pass %d after the refused delete: %+v %v; want refused", i, res, err)
+		}
+		now = now.Add(2*time.Hour + g.cfg.ClockSkew)
+	}
+	if len(f.dropped) != 0 {
+		t.Fatalf("dropped %v after a refused delete", f.dropped)
 	}
 }

@@ -60,6 +60,9 @@ type recordFiler struct {
 // A chunked record's uploads and the write that names them run under the
 // object upload bound, whatever the caller's context.
 func (f recordFiler) CreateEntry(ctx context.Context, dir string, e *filerpb.Entry, oExcl bool) error {
+	if e.GetName() == headName && ctx.Value(headCreateKey{}) == nil {
+		return fmt.Errorf("%w: %s/%s", errHeadCreateBypass, dir, headName)
+	}
 	ctx, cancel := f.bound(ctx, e)
 	defer cancel()
 	e, err := f.chunked(ctx, e)

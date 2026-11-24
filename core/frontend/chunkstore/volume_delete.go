@@ -178,10 +178,17 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 			return res, err
 		}
 		if live != nil && !hasHead {
-			// This delete wrote the first HEAD (deleting) where none was
-			// read: reverting it would leave an active, empty HEAD over the
-			// volume's keys. Leave it deleting and refuse.
+			// This delete wrote the first HEAD (deleting, generation 1) where
+			// none was read. Reverting it to active would leave an empty HEAD
+			// over the volume's keys, and leaving it deleting would root
+			// nothing: either way GC would reclaim them. Remove it again (a
+			// deleting HEAD at generation 1 can only have come from nothing),
+			// so the HEAD is absent and GC keeps refusing.
 			c.hook(hookBlocked, vol)
+			if err := c.f.DeleteEntry(ctx, root, headName, map[string][]byte{extGen: []byte(strconv.FormatUint(gen, 10))}); err != nil && !errors.Is(err, ErrNotFound) {
+				res.Uncertain = true
+				return res, catErr(CodeOutcomeUnknown, true, err, "volume %s: %v; removing the deleting HEAD this delete wrote failed: rerun the delete", vol, live)
+			}
 			return giveBack(live)
 		}
 		if live != nil {

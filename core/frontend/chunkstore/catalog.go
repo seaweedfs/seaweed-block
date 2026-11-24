@@ -1487,7 +1487,7 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		c.dropIntent(ctx, dstRoot, id) // clean abort: HEAD was never sent
 		return ForkResult{}, err
 	}
-	pctx, cancel := c.publishCtx(ctx, deadline)
+	pctx, cancel := c.publishCtx(headCreateCtx(ctx), deadline)
 	outcome, got, cerr := c.createResolved(ctx, pctx, dstRoot, he, id)
 	cancel()
 	// The HEAD now at the target decides, from that one read: a real HEAD

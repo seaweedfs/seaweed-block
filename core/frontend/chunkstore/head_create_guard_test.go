@@ -1,6 +1,8 @@
 package chunkstore
 
 import (
+	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -8,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // TestHeadCreate_SourceGuard holds every HEAD creator to head_create.go: a
@@ -68,5 +72,30 @@ func TestHeadCreate_SourceGuard(t *testing.T) {
 		if i := sort.SearchStrings(creators, want); i == len(creators) || creators[i] != want {
 			t.Errorf("guard did not find HEAD creator %s (found %v)", want, creators)
 		}
+	}
+}
+
+// The runtime guard: the record filer refuses to create an entry named HEAD
+// unless createHead (or the fork publish after its check) marked the call,
+// so a HEAD create built anywhere else is refused, not merely unscanned.
+func TestHeadCreate_RecordFilerRefusesBypass(t *testing.T) {
+	f, _, c, _ := catalogFixture(t)
+	ctx := context.Background()
+	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	he, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.f.CreateEntry(ctx, catBase+"/v1", he, true); !errors.Is(err, errHeadCreateBypass) {
+		t.Fatalf("raw HEAD create through the record filer: %v; want refused", err)
+	}
+	// A volume-delete creates only a deleting HEAD.
+	if err := createHead(ctx, c.f, c.blobs, catBase+"/v1", he, headCreateDelete); err == nil || !strings.Contains(err.Error(), "deleting HEAD") {
+		t.Fatalf("delete-reason create of an active HEAD: %v; want refused", err)
+	}
+	if _, err := f.LookupEntry(ctx, catBase+"/v1", headName); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a HEAD was created: %v", err)
 	}
 }
