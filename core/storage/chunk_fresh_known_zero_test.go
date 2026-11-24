@@ -9,8 +9,17 @@ import (
 // store's.
 func fkzConfig(fresh bool) chunkLayerConfig {
 	cfg := ctConfig(1)
-	cfg.FreshFromHead = fresh
+	cfg.FreshFromHead, cfg.CreatedThisStart = fresh, fresh
 	return cfg
+}
+
+// fkzAttach attaches and applies the certification, as the provider does
+// after its attach commit.
+func fkzAttach(t *testing.T, s *WALStore, r chunkRemote, cfg chunkLayerConfig) chunkLayer {
+	t.Helper()
+	l := mustAttach(t, s, r, cfg)
+	l.(*chunkLayerImpl).ApplyFreshKnownZero()
+	return l
 }
 
 func fkzCandidates(l chunkLayer) int { return l.Stats().DirtyChunks }
@@ -27,7 +36,7 @@ func TestFreshKnownZeroNeverCertifiesARecordedWrite(t *testing.T) {
 	}
 	remote := newFakeChunkRemote()
 	remote.head = chunkHead{Gen: 1, Epoch: 1, RemoteLSN: 100, State: ChunkHeadActive}
-	l := mustAttach(t, s, remote, fkzConfig(true))
+	l := fkzAttach(t, s, remote, fkzConfig(true))
 	if got := fkzCandidates(l); got != 1 {
 		t.Fatalf("fresh attach after a recorded write to chunk 2: %d candidates; want 1 (that chunk only)", got)
 	}
@@ -37,7 +46,7 @@ func TestFreshKnownZeroNeverCertifiesARecordedWrite(t *testing.T) {
 // chunk keeps its persisted UNKNOWN.
 func TestFreshKnownZeroNotWithoutTheFreshPremise(t *testing.T) {
 	s, _ := newChunkTestStore(t)
-	l := mustAttach(t, s, newFakeChunkRemote(), fkzConfig(false))
+	l := fkzAttach(t, s, newFakeChunkRemote(), fkzConfig(false))
 	if got, want := fkzCandidates(l), int(l.(*chunkLayerImpl).numChunks); got != want {
 		t.Fatalf("existing-store attach: %d candidates; want all %d", got, want)
 	}
@@ -60,9 +69,20 @@ func TestFreshKnownZeroSkipsAChunkWrittenAfterTheSample(t *testing.T) {
 	if _, err := s.Write(uint32(3*ctChunkBlocks), bytes.Repeat([]byte{0x33}, ctBlockSize)); err != nil {
 		t.Fatal(err)
 	}
-	l.persistCapturedMapV3(l.freshKnownZero)
-	l.freshKnownZero = nil
+	l.ApplyFreshKnownZero()
 	if got := fkzCandidates(l); got != 1 {
 		t.Fatalf("a write between the sample and the clear: %d candidates; want 1 (the written chunk)", got)
+	}
+}
+
+// A fresh marker alone is not trusted: an attach whose store this start did
+// not create (CreatedThisStart false) certifies nothing.
+func TestFreshKnownZeroNeedsThisStartsCreate(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	cfg := fkzConfig(true)
+	cfg.CreatedThisStart = false
+	l := fkzAttach(t, s, newFakeChunkRemote(), cfg)
+	if got, want := fkzCandidates(l), int(l.(*chunkLayerImpl).numChunks); got != want {
+		t.Fatalf("fresh attach of a store this start did not create: %d candidates; want all %d", got, want)
 	}
 }

@@ -343,6 +343,11 @@ type chunkLayerConfig struct {
 	// HEAD (every block absent, read lazily). False means an existing local
 	// volume. Never inferred from the local contents.
 	FreshFromHead bool
+	// CreatedThisStart says this process start created the local store (an
+	// in-memory fact, never persisted). RULE-FRESH-KNOWN-ZERO samples only
+	// with it and FreshFromHead: a fresh marker left by an earlier start, an
+	// older binary or another opener is never trusted.
+	CreatedThisStart bool
 	// RestoreGuard binds fresh attachment to the HEAD the provider claimed
 	// and durably seeded. A changed read refuses before hooks/readiness; the
 	// next recovery must repeat claim and seed. Nil is for direct layer users.
@@ -653,14 +658,5 @@ var (
 
 // attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).
 func attachChunkLayer(s *WALStore, remote chunkRemote, cfg chunkLayerConfig) (chunkLayer, error) {
-	l, err := attachChunkLayerImpl(s, remote, cfg)
-	if err != nil {
-		return nil, err
-	}
-	// RULE-FRESH-KNOWN-ZERO: outside the capture barrier, as for a cut.
-	if impl, ok := l.(*chunkLayerImpl); ok && impl.freshKnownZero != nil {
-		impl.persistCapturedMapV3(impl.freshKnownZero)
-		impl.freshKnownZero = nil
-	}
-	return l, nil
+	return attachChunkLayerImpl(s, remote, cfg)
 }

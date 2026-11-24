@@ -1,8 +1,9 @@
 package storage
 
-// RULE-FRESH-KNOWN-ZERO (INV-CUT-BITMAP-001). A fresh store (FreshFromHead
-// still true at its attach: the .chunkfresh marker is present and no BASE
-// is installed) has never had a write or a fill reach it: frontend I/O is
+// RULE-FRESH-KNOWN-ZERO (INV-CUT-FRESH-KNOWN-ZERO-001). A store this process
+// start created (CreatedThisStart, in memory) that is still fresh at its
+// attach (FreshFromHead: the .chunkfresh marker is present and no BASE is
+// installed) has never had a write or a fill reach it: frontend I/O is
 // admitted only after the attach commit retires the marker, a chunk volume
 // takes no replication apply, no cut or hydration can resolve the layer
 // before that commit, and no other implementation opens a root that carries
@@ -13,10 +14,12 @@ package storage
 // freshKnownZeroCandidates samples, under the attach's capture barrier, the
 // mutation token of every chunk the claimed HEAD does not name whose owned
 // map entry is still its creation value {LSN 0, Unknown}; the entry test is
-// an extra exclusion, not the premise. attachChunkLayer then clears only the
-// UNKNOWN bit of those whose token is unchanged, through the cut's own
-// persistCapturedMapV3, before the provider's attach commit. A failed map
-// publication leaves them UNKNOWN on disk (conservative).
+// an extra exclusion, not the premise. ApplyFreshKnownZero then clears only
+// the UNKNOWN bit of those whose token is unchanged, through the cut's own
+// persistCapturedMapV3. The order is: the attach commit retires the marker,
+// THEN the marking is made durable, THEN the volume serves. A crash between
+// the first two leaves no marker and every chunk UNKNOWN (one scan); a
+// failed map publication leaves them UNKNOWN on disk (conservative).
 func (l *chunkLayerImpl) freshKnownZeroCandidates(head chunkHead) map[uint64]uint64 {
 	s := l.s
 	if s.v3 == nil || s.v3.ownedMap == nil {
@@ -38,4 +41,14 @@ func (l *chunkLayerImpl) freshKnownZeroCandidates(head chunkHead) map[uint64]uin
 		return nil
 	}
 	return out
+}
+
+// ApplyFreshKnownZero makes the fresh attach's certification durable: called
+// once, by the provider, after the attach commit retired the fresh marker and
+// before the volume serves, outside the capture barrier (as for a cut).
+func (l *chunkLayerImpl) ApplyFreshKnownZero() {
+	if tokens := l.freshKnownZero; tokens != nil {
+		l.freshKnownZero = nil
+		l.persistCapturedMapV3(tokens)
+	}
 }

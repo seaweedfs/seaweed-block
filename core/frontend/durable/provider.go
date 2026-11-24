@@ -267,6 +267,9 @@ type DurableProvider struct {
 
 	// testBeforeChunkFreshRetire holds the real post-presence/pre-marker boundary.
 	testBeforeChunkFreshRetire func() error
+	// testAfterChunkFreshRetire runs after the attach commit retired the
+	// fresh marker, before the known-zero marking is made durable.
+	testAfterChunkFreshRetire func() error
 
 	// testWALStoreFactory selects a dark store only in provider caller controls.
 	// No production option, flag or environment variable installs it.
@@ -298,6 +301,9 @@ type volHandle struct {
 	// after the first attach succeeded, so an interrupted initialization
 	// is still fresh after a restart.
 	fresh    bool
+	// createdThisStart: this process start created the store (in memory,
+	// never persisted); RULE-FRESH-KNOWN-ZERO needs it with fresh.
+	createdThisStart bool
 	attachMu sync.Mutex // serializes recovery and attach of this volume
 	// recoverGen numbers this volume's RecoverVolume calls (written under
 	// attachMu and p.mu). waitGen is the generation of the live authority
@@ -864,7 +870,7 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	}
 	h, err := p.createFresh(volumeID, path, impl)
 	if err == nil && p.cfg.Impl == ImplWALStoreChunk {
-		h.fresh = true
+		h.fresh, h.createdThisStart = true, true
 	}
 	return h, err
 }

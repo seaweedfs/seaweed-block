@@ -79,11 +79,11 @@ func TestNoWriteReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
 	}
 }
 
-// A first start that crashes before its attach commit (the commit fails, the
-// process ends) leaves the fresh marker: the next start decides again on its
-// own claim. It still has no candidates, and a write after it is published
-// by the next cut.
-func TestFreshAttachCrashBeforeCommitDecidesAgain(t *testing.T) {
+// RULE-FRESH-KNOWN-ZERO needs THIS start's create: a first start that
+// crashes before its attach commit leaves the fresh marker, but the next
+// start did not create the store, so it certifies nothing (one scan: every
+// chunk a candidate), and its next cut still publishes a write.
+func TestFreshKnownZeroNotAfterARestartBeforeTheAttachCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	root, remote := t.TempDir(), storage.NewMemChunkRemote()
@@ -102,7 +102,6 @@ func TestFreshAttachCrashBeforeCommitDecidesAgain(t *testing.T) {
 	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); err != nil {
 		t.Fatalf("fresh marker after the crash: %v; want it kept", err)
 	}
-
 	p2 := kzProvider(t, root, remote)
 	if _, err := p2.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
@@ -110,17 +109,84 @@ func TestFreshAttachCrashBeforeCommitDecidesAgain(t *testing.T) {
 	if _, err := p2.RecoverVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
-	if got := kzCandidates(t, p2); got != 0 {
-		t.Fatalf("second start: %d candidate chunks; want 0", got)
+	if got := kzCandidates(t, p2); got != 16 {
+		t.Fatalf("second start: %d candidate chunks; want all 16 (it did not create the store)", got)
 	}
+	kzWriteAndPublish(t, ctx, p2, remote)
+}
+
+// The same after a restart between the create and any attach (test #13).
+func TestFreshKnownZeroNotAfterARestartBeforeAnyAttach(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root, remote := t.TempDir(), storage.NewMemChunkRemote()
+	p := kzProvider(t, root, remote)
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p2 := kzProvider(t, root, remote)
+	if _, err := p2.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p2.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := kzCandidates(t, p2); got != 16 {
+		t.Fatalf("restart before any attach: %d candidate chunks; want all 16", got)
+	}
+}
+
+// The order: the attach commit retires the marker, THEN the marking is made
+// durable, THEN the volume serves. A crash between the first two leaves no
+// marker and every chunk UNKNOWN: the next start scans every chunk once, and
+// is correct. (Marking before the retirement would leave certified chunks
+// behind a marker a later start could trust.)
+func TestFreshKnownZeroCrashBetweenMarkerRetireAndMarking(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root, remote := t.TempDir(), storage.NewMemChunkRemote()
+	p := kzProvider(t, root, remote)
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("crash after the marker retirement, before the marking")
+	p.testAfterChunkFreshRetire = func() error { return crash }
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, crash) {
+		t.Fatalf("first start: %v; want the injected crash", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); !os.IsNotExist(err) {
+		t.Fatalf("fresh marker after the crash: %v; want it retired", err)
+	}
+	p2 := kzProvider(t, root, remote)
+	if _, err := p2.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p2.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := kzCandidates(t, p2); got != 16 {
+		t.Fatalf("restart after a crash between marker retirement and marking: %d candidate chunks; want all 16 (one scan)", got)
+	}
+	kzWriteAndPublish(t, ctx, p2, remote)
+}
+
+// kzWriteAndPublish writes chunk 5, cuts, and checks HEAD publishes it.
+func kzWriteAndPublish(t *testing.T, ctx context.Context, p *DurableProvider, remote *storage.MemChunkRemote) {
+	t.Helper()
 	want := bytes.Repeat([]byte{0x6b}, 4096)
-	if _, err := p2.Backend("v1").Write(ctx, 5*16*4096, want); err != nil {
+	if _, err := p.Backend("v1").Write(ctx, 5*16*4096, want); err != nil {
 		t.Fatal(err)
 	}
-	if err := p2.Backend("v1").Sync(ctx); err != nil {
+	if err := p.Backend("v1").Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p2.CaptureVolume(ctx, "v1"); err != nil {
+	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
 	head, err := remote.GetHead(ctx)
@@ -129,13 +195,13 @@ func TestFreshAttachCrashBeforeCommitDecidesAgain(t *testing.T) {
 	}
 	ref, ok := head.Chunks[5]
 	if !ok {
-		t.Fatal("the cut after the second start did not publish chunk 5")
+		t.Fatal("the cut did not publish chunk 5")
 	}
 	chunk, err := remote.Get(ctx, ref.Key)
 	if err != nil || !bytes.Equal(chunk[:4096], want) {
-		t.Fatalf("published chunk 5: %v, data equal %v", err, err == nil && bytes.Equal(chunk[:4096], want))
+		t.Fatalf("published chunk 5: %v", err)
 	}
-	if got := kzCandidates(t, p2); got != 0 {
+	if got := kzCandidates(t, p); got != 0 {
 		t.Fatalf("after the cut: %d candidate chunks; want 0", got)
 	}
 }
