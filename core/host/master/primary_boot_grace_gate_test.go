@@ -64,6 +64,9 @@ func ingestRF3Incarnations(t *testing.T, h *Host, r1, r2, r3 rf3Slot) {
 type switchProbe struct {
 	mu           sync.Mutex
 	currentReady bool
+	// currentUnknown: the current primary did not answer (status GET
+	// refused or timed out), so CurrentKnown is false.
+	currentUnknown bool
 	// When hold is set, a probe signals entered and then blocks until
 	// release is closed.
 	hold    bool
@@ -99,7 +102,7 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 		// Only r2 is seen, so its promotion needs a known frontier
 		// it covers (#181); r3 is silent in these tests.
 		SyncAckLSN:   70,
-		CurrentKnown: true,
+		CurrentKnown: !p.currentUnknown,
 		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, DurableLSN: 70},
 		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}},
 	}, nil
@@ -211,6 +214,24 @@ func TestBootGrace_UnsupportedPathHonorsGraceThenFailsOver(t *testing.T) {
 	time.Sleep(600 * time.Millisecond)
 	unsupportedTick(t, h, restarting)
 	expectFailoverToR2(t, h, "unready past its boot grace")
+}
+
+// A current primary that did not answer its status probe is UNKNOWN, not
+// failed: the unsupported path never reassigns on it, however ready the
+// survivor (an unknown fact is never read as failed). Only a positive
+// not-ready report from the primary itself moves the line.
+func TestUnsupportedPathNeverReassignsOnAnUnansweredPrimary(t *testing.T) {
+	h := newBootGraceMaster(t, Config{})
+	defer closeTestMaster(t, h)
+	p := probeOf(t, h)
+
+	p.mu.Lock()
+	p.currentUnknown = true
+	p.mu.Unlock()
+	unsupportedTick(t, h, readySlot("r1-a"))
+	expectLineStaysR1(t, h, "status probe of the current primary timed out")
+	unsupportedTick(t, h, readySlot("r1-a"))
+	expectLineStaysR1(t, h, "still unanswered on the next tick")
 }
 
 // An explicit unhealthy current primary gets no grace on this path.

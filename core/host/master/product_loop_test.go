@@ -544,7 +544,7 @@ func TestMountedFailover_ProductLoopRF3ProbeCanAuthorizeStaleHeartbeatReadiness(
 	}
 }
 
-func TestMountedFailover_ProductLoopRF3PromotesWhenCurrentSlotMissingButSurvivorProbeReady(t *testing.T) {
+func TestMountedFailover_ProductLoopRF3DoesNotReassignWhenCurrentSlotMissing(t *testing.T) {
 	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
 		ExpectedSlotsPerVolume: 3,
 	})
@@ -570,28 +570,22 @@ func TestMountedFailover_ProductLoopRF3PromotesWhenCurrentSlotMissingButSurvivor
 	}
 
 	// K8s can keep the server/node fresh while the generated primary
-	// blockvolume pod is gone. That produces PartialInventory and excludes
-	// the volume from the normal supported snapshot; the product loop must
-	// still use placement + probe evidence to promote an eligible survivor.
+	// blockvolume pod is gone: PartialInventory, and the current primary's
+	// status cannot be read (CurrentKnown false). That is UNKNOWN, not
+	// failed: on a partition the primary may still be serving, so no
+	// automatic reassign happens, however ready the survivors. Failover is
+	// an admin forced move with its barrier.
 	ingestRF3PartialInventoryMissingCurrent(t, h, "vol-rf3", "node-a", "node-b", "node-c")
 	placements := h.Lifecycle().Placements.ListPlacements()
 	report := authority.SupportabilityReport{Unsupported: map[string]authority.VolumeUnsupportedEvidence{
 		"vol-rf3": {VolumeID: "vol-rf3", Reasons: []string{authority.ReasonPartialInventory}},
 	}}
-	probes, blocked, asks := h.applyUnsupportedPromotionEvidenceGate(placements, report, nil)
-	if probes != 1 || blocked != 0 || len(asks) != 1 {
-		line, _ := h.Publisher().VolumeAuthorityLine("vol-rf3")
-		t.Fatalf("probes=%d blocked=%d asks=%+v placements=%+v line=%+v want one direct unsupported promotion ask", probes, blocked, asks, placements, line)
+	probes, _, asks := h.applyUnsupportedPromotionEvidenceGate(placements, report, nil)
+	if probes != 1 || len(asks) != 0 {
+		t.Fatalf("probes=%d asks=%+v; want one probe and no reassign for an unanswered current primary", probes, asks)
 	}
-	if asks[0].ReplicaID != "r3" || asks[0].Intent != authority.IntentReassign {
-		t.Fatalf("ask=%+v want highest durable survivor r3 reassign", asks[0])
-	}
-	if err := h.ctrl.SubmitAssignmentAsk(asks[0]); err != nil {
-		t.Fatalf("submit unsupported promotion ask: %v", err)
-	}
-	failover := waitAuthorityReplica(t, h.Publisher(), "vol-rf3", "r3")
-	if failover.Epoch != 2 || failover.EndpointVersion != 1 {
-		t.Fatalf("failover line=%+v want highest durable survivor r3@2/1", failover)
+	if line, _ := h.Publisher().VolumeAuthorityLine("vol-rf3"); line.ReplicaID != "r1" || line.Epoch != initial.Epoch {
+		t.Fatalf("line=%+v; want r1@%d unchanged", line, initial.Epoch)
 	}
 }
 
