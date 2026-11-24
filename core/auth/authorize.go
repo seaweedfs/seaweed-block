@@ -10,10 +10,13 @@ import (
 
 // Rule is who may call one method: people from Min upwards (viewer <
 // operator < admin; "" admits no person), and nodes when Node is set (a
-// handler then checks the node's own server id with RequireNode).
+// handler then checks the node's own server id with RequireNode). Strict
+// marks a mutating operator or admin method: its attempt is written to the
+// audit log before the handler runs, or the call is refused.
 type Rule struct {
-	Min  Role
-	Node bool
+	Min    Role
+	Node   bool
+	Strict bool
 }
 
 func rank(r Role) int {
@@ -139,6 +142,11 @@ func (a *Authenticator) UnaryInterceptor(rules map[string]Rule) grpc.UnaryServer
 		if err != nil {
 			a.audit.call(info.FullMethod, p, err)
 			return nil, err
+		}
+		if rules[info.FullMethod].Strict {
+			if err := a.audit.attempt(info.FullMethod, p); err != nil {
+				return nil, status.Errorf(codes.Unavailable, "%v: %s was not run (an unwritable audit log stops operator changes, never the volumes)", err, info.FullMethod)
+			}
 		}
 		resp, err := handler(ctx, req)
 		a.audit.call(info.FullMethod, p, authzRefusal(err))

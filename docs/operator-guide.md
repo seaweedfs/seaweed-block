@@ -64,7 +64,10 @@ its `--server-id`). A certificate's CN must equal its line's id. A node may act 
 move needs `admin`. `kill -HUP` reloads the file. A removed line is refused from the next call, and its open streams
 end at the reload. A malformed file keeps the previous table and says so in the log. `--audit-log <path>` appends
 one JSON line per person's call, per role-file reload and per refused node call (at most once a minute per
-certificate and method).
+certificate and method). A changing call (create, delete, place, revoke, move, register a binding, failback) is
+written as an attempt before it runs: if the line cannot be written within 2 s the call is refused as "audit
+unavailable" and nothing happens. An unwritable audit log stops operator changes, never the volumes: node calls
+never wait on it, and reads and refusals are dropped and counted (`GET /status/audit`) when it falls behind.
 
 **Issue the certificates** (one CA, one key per host or person; a node key gives control of that host's volumes, so
 never copy it into a host image):

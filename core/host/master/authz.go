@@ -29,20 +29,20 @@ var masterRules = map[string]auth.Rule{
 	control.ClusterEvidenceService_GetVolumeTimeline_FullMethodName:  {Min: auth.RoleViewer},
 	control.ClusterEvidenceService_WatchClusterEvents_FullMethodName: {Min: auth.RoleViewer},
 
-	control.LifecycleService_CreateVolume_FullMethodName:         {Min: auth.RoleOperator},
-	control.LifecycleService_DeleteVolume_FullMethodName:         {Min: auth.RoleAdmin},
-	control.LifecycleService_MarkVolumeDeleting_FullMethodName:   {Min: auth.RoleAdmin},
-	control.LifecycleService_AbortVolumeDeleting_FullMethodName:  {Min: auth.RoleAdmin},
-	control.LifecycleService_CommitVolumeDeleting_FullMethodName: {Min: auth.RoleAdmin},
+	control.LifecycleService_CreateVolume_FullMethodName:         {Min: auth.RoleOperator, Strict: true},
+	control.LifecycleService_DeleteVolume_FullMethodName:         {Min: auth.RoleAdmin, Strict: true},
+	control.LifecycleService_MarkVolumeDeleting_FullMethodName:   {Min: auth.RoleAdmin, Strict: true},
+	control.LifecycleService_AbortVolumeDeleting_FullMethodName:  {Min: auth.RoleAdmin, Strict: true},
+	control.LifecycleService_CommitVolumeDeleting_FullMethodName: {Min: auth.RoleAdmin, Strict: true},
 
-	control.FailbackService_ExecuteFailback_FullMethodName: {Min: auth.RoleAdmin},
+	control.FailbackService_ExecuteFailback_FullMethodName: {Min: auth.RoleAdmin, Strict: true},
 
-	control.WorkspaceService_RegisterWorkspaceBinding_FullMethodName: {Min: auth.RoleAdmin},
-	control.WorkspaceService_PlaceWorkspace_FullMethodName:           {Min: auth.RoleOperator},
+	control.WorkspaceService_RegisterWorkspaceBinding_FullMethodName: {Min: auth.RoleAdmin, Strict: true},
+	control.WorkspaceService_PlaceWorkspace_FullMethodName:           {Min: auth.RoleOperator, Strict: true},
 	control.WorkspaceService_RenewWorkspaceLease_FullMethodName:      {Node: true},
 	control.WorkspaceService_AckWorkspaceRevoked_FullMethodName:      {Node: true},
-	control.WorkspaceService_RevokeWorkspace_FullMethodName:          {Min: auth.RoleOperator},
-	control.WorkspaceService_MoveWorkspace_FullMethodName:            {Min: auth.RoleOperator}, // forced: admin, in the handler
+	control.WorkspaceService_RevokeWorkspace_FullMethodName:          {Min: auth.RoleOperator, Strict: true},
+	control.WorkspaceService_MoveWorkspace_FullMethodName:            {Min: auth.RoleOperator, Strict: true}, // forced: admin, in the handler
 	control.WorkspaceService_QueryWorkspace_FullMethodName:           {Min: auth.RoleViewer},
 	control.WorkspaceService_QueryWorkspaceLostRange_FullMethodName:  {Min: auth.RoleViewer},
 	control.WorkspaceService_PreviewWorkspaceMove_FullMethodName:     {Min: auth.RoleViewer},

@@ -202,3 +202,12 @@ func (a *Authenticator) PeerIdentity(ctx context.Context) (Principal, error) {
 	}
 	return Principal{Role: e.role, ID: e.id, Fingerprint: fp, NotAfter: leaf.NotAfter}, nil
 }
+
+// AuditDropped is how many audit lines were dropped or not written, and
+// whether an audit log is configured.
+func (a *Authenticator) AuditDropped() (int, bool) {
+	if a == nil || a.audit == nil {
+		return 0, false
+	}
+	return a.audit.WriteErrors(), true
+}
