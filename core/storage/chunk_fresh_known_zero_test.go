@@ -40,6 +40,9 @@ func TestFreshKnownZeroNeverCertifiesARecordedWrite(t *testing.T) {
 	if got := fkzCandidates(l); got != 1 {
 		t.Fatalf("fresh attach after a recorded write to chunk 2: %d candidates; want 1 (that chunk only)", got)
 	}
+	if got, want := l.Stats().KnownZeroChunks, uint64(l.(*chunkLayerImpl).numChunks-1); got != want {
+		t.Fatalf("KnownZeroChunks %d; want %d", got, want)
+	}
 }
 
 // Without the fresh premise (an existing store) nothing is certified: every
@@ -49,6 +52,9 @@ func TestFreshKnownZeroNotWithoutTheFreshPremise(t *testing.T) {
 	l := fkzAttach(t, s, newFakeChunkRemote(), fkzConfig(false))
 	if got, want := fkzCandidates(l), int(l.(*chunkLayerImpl).numChunks); got != want {
 		t.Fatalf("existing-store attach: %d candidates; want all %d", got, want)
+	}
+	if got := l.Stats().KnownZeroChunks; got != 0 {
+		t.Fatalf("KnownZeroChunks %d without the fresh premise; want 0", got)
 	}
 }
 
@@ -63,7 +69,8 @@ func TestFreshKnownZeroSkipsAChunkWrittenAfterTheSample(t *testing.T) {
 	}
 	l := raw.(*chunkLayerImpl)
 	t.Cleanup(func() { _ = l.Close() })
-	if len(l.freshKnownZero) == 0 {
+	sampled := len(l.freshKnownZero)
+	if sampled == 0 {
 		t.Fatal("no chunk sampled for certification")
 	}
 	if _, err := s.Write(uint32(3*ctChunkBlocks), bytes.Repeat([]byte{0x33}, ctBlockSize)); err != nil {
@@ -72,6 +79,9 @@ func TestFreshKnownZeroSkipsAChunkWrittenAfterTheSample(t *testing.T) {
 	l.ApplyFreshKnownZero()
 	if got := fkzCandidates(l); got != 1 {
 		t.Fatalf("a write between the sample and the clear: %d candidates; want 1 (the written chunk)", got)
+	}
+	if got := l.Stats().KnownZeroChunks; got != uint64(sampled-1) {
+		t.Fatalf("KnownZeroChunks %d; want %d (every sampled chunk but the written one)", got, sampled-1)
 	}
 }
 

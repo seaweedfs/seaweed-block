@@ -1,5 +1,7 @@
 package storage
 
+import "log"
+
 // RULE-FRESH-KNOWN-ZERO (INV-CUT-FRESH-KNOWN-ZERO-001). A store this process
 // start created (CreatedThisStart, in memory) that is still fresh at its
 // attach (FreshFromHead: the .chunkfresh marker is present and no BASE is
@@ -46,9 +48,31 @@ func (l *chunkLayerImpl) freshKnownZeroCandidates(head chunkHead) map[uint64]uin
 // ApplyFreshKnownZero makes the fresh attach's certification durable: called
 // once, by the provider, after the attach commit retired the fresh marker and
 // before the volume serves, outside the capture barrier (as for a cut).
+// It counts the chunks it certified in Stats.KnownZeroChunks and logs the
+// outcome: a failed map publication or a raced write leaves chunks UNKNOWN,
+// and the first cut then scans them (the log says why).
 func (l *chunkLayerImpl) ApplyFreshKnownZero() {
-	if tokens := l.freshKnownZero; tokens != nil {
-		l.freshKnownZero = nil
-		l.persistCapturedMapV3(tokens)
+	tokens := l.freshKnownZero
+	if tokens == nil {
+		return
+	}
+	l.freshKnownZero = nil
+	l.persistCapturedMapV3(tokens)
+	s := l.s
+	s.mu.RLock()
+	certified := 0
+	for idx := range tokens {
+		if idx < uint64(len(s.v3.mapEntries)) && !s.v3.mapEntries[idx].Unknown {
+			certified++
+		}
+	}
+	s.mu.RUnlock()
+	l.stMu.Lock()
+	l.stats.KnownZeroChunks = uint64(certified)
+	l.stMu.Unlock()
+	if certified == len(tokens) {
+		log.Printf("storage: fresh attach: %d chunks HEAD does not name start known-zero", certified)
+	} else {
+		log.Printf("storage: fresh attach: %d of %d chunks HEAD does not name start known-zero; the rest stay unknown (map publication failed or a write raced) and the first cut scans them", certified, len(tokens))
 	}
 }

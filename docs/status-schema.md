@@ -229,6 +229,7 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.PendingUnresolved` | bool | an unresolved HEAD proposal is held now |
 | `Volumes[].Chunk.Stats.DirtyChunks` | int | chunks dirty since the last HEAD (not counting those awaiting reconciliation): candidates, not progress |
 | `Volumes[].Chunk.Stats.StagedChunks` | uint64 | chunks staged by every cut attempt, failed ones included (in-process) |
+| `Volumes[].Chunk.Stats.KnownZeroChunks` | uint64 | chunks this layer's fresh attach certified known-zero (RULE-FRESH-KNOWN-ZERO); 0 otherwise |
 | `Volumes[].Chunk.Stats.Reconciling` | bool | the dirty set is being reconciled against HEAD; no cut publishes meanwhile |
 | `Volumes[].Chunk.Stats.ReconcileDone` | int | chunks compared so far |
 | `Volumes[].Chunk.Stats.ReconcileTotal` | int | chunks to compare |

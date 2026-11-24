@@ -77,6 +77,11 @@ func TestNoWriteReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
 	if got := kzCandidates(t, p); got != 0 {
 		t.Fatalf("after the commit: %d candidate chunks; want 0 (nothing was written)", got)
 	}
+	for _, st := range p.DurableStatuses() {
+		if st.VolumeID == "v1" && st.Chunk != nil && st.Chunk.Stats.KnownZeroChunks != 16 {
+			t.Fatalf("status KnownZeroChunks %d; want 16", st.Chunk.Stats.KnownZeroChunks)
+		}
+	}
 }
 
 // RULE-FRESH-KNOWN-ZERO needs THIS start's create: a first start that

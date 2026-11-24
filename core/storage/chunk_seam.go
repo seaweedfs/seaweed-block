@@ -524,6 +524,7 @@ type chunkLayerStats struct {
 	PendingUnresolved bool                // an unresolved HEAD proposal is held now
 	DirtyChunks       int                 // chunks dirty since the last HEAD (not counting those awaiting reconciliation): candidates, not progress
 	StagedChunks      uint64              // chunks staged by every cut attempt, failed ones included (in-process)
+	KnownZeroChunks   uint64              // chunks this layer's fresh attach certified known-zero (RULE-FRESH-KNOWN-ZERO); 0 otherwise
 	Reconciling       bool                // the dirty set is being reconciled against HEAD; no cut publishes meanwhile
 	ReconcileDone     int                 // chunks compared so far
 	ReconcileTotal    int                 // chunks to compare
