@@ -837,7 +837,7 @@ func TestNodeLossGateExpectsNoAutomaticPromotion(t *testing.T) {
 			t.Fatalf("node-loss gate still expects %q", gone)
 		}
 	}
-	for _, want := range []string{"SW_BLOCK_DEMO_EXPECT_NO_AUTO_PROMOTION", "failover_status: unexpected_auto_promotion", "failover_status: recovered_same_primary", "kubectl uncordon"} {
+	for _, want := range []string{"SW_BLOCK_DEMO_EXPECT_NO_AUTO_PROMOTION", "failover_status: unexpected_auto_promotion", "failover_status: no_auto_promotion_unproven", "failover_status: recovered_same_primary", "primary frontend_primary_ready=false", "kubectl uncordon"} {
 		if !strings.Contains(demo, want) {
 			t.Fatalf("run-alpha-app-demo.sh missing %q", want)
 		}

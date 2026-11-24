@@ -1011,8 +1011,14 @@ fail_primary_before_reader() {
       # that cannot be read is unknown, not failed. Hold, then return the
       # node and require the SAME primary to serve again.
       log "hold ${NO_PROMOTION_HOLD_SECONDS}s: no automatic promotion while ${primary} is lost"
-      for _ in $(seq 1 $((NO_PROMOTION_HOLD_SECONDS / 2))); do
-        collect_ops_inventory_bundle "$after_dir" || true
+      local hold_rounds=$((NO_PROMOTION_HOLD_SECONDS / 2))
+      local hold_reads=0
+      for _ in $(seq 1 "$hold_rounds"); do
+        # A round counts only when the inventory was actually read: an
+        # unreadable inventory shows no promotion and must not pass the hold.
+        if collect_ops_inventory_bundle "$after_dir" && grep -q '^replica: ' "$after_summary" 2>/dev/null; then
+          hold_reads=$((hold_reads + 1))
+        fi
         after_primary="$(inventory_primary_replica "$after_summary" 2>/dev/null || true)"
         if [[ -n "$after_primary" && "$after_primary" != "$primary" ]]; then
           echo "failover_status: unexpected_auto_promotion" >>"$recovery_marker"
@@ -1021,7 +1027,13 @@ fail_primary_before_reader() {
         fi
         sleep 2
       done
+      if (( hold_reads * 2 < hold_rounds )); then
+        echo "failover_status: no_auto_promotion_unproven" >>"$recovery_marker"
+        echo "no-promotion hold unproven: ${hold_reads} of ${hold_rounds} inventory reads succeeded" >&2
+        exit 1
+      fi
       echo "auto_promotion_while_node_lost=none" >>"$recovery_marker"
+      echo "no_promotion_hold_reads=${hold_reads}/${hold_rounds}" >>"$recovery_marker"
       write_control_plane_timeline_event "$timeline" "no_auto_promotion" "replica=${primary}" "hold_seconds=${NO_PROMOTION_HOLD_SECONDS}"
       if [[ "$node_loss_mode" == "1" ]]; then
         kubectl uncordon "$before_primary_node" | tee "$ARTIFACT_DIR/uncordon-primary-node.log"
@@ -1033,8 +1045,14 @@ fail_primary_before_reader() {
         after_primary="$(inventory_primary_replica "$after_summary" 2>/dev/null || true)"
         after_primary_count="$(grep -c '^replica: .* role=primary ' "$after_summary" 2>/dev/null || true)"
         promoted_line="$(inventory_replica_line "$after_summary" "$primary" 2>/dev/null || true)"
+        # In the inventory summary 'frontend_primary_ready=true' appears only in
+        # the issue "non-primary ... frontend_primary_ready=true" (a replica that
+        # is not primary claims the frontend), so 0 means no such claim; the
+        # recovered primary must itself report ready: no
+        # "primary frontend_primary_ready=false" issue.
         frontend_ready_issue_count="$(grep -c 'frontend_primary_ready=true' "$after_summary" 2>/dev/null || true)"
-        if [[ "$after_primary" == "$primary" && "$after_primary_count" == "1" && "$frontend_ready_issue_count" == "0" ]]; then
+        primary_not_ready_count="$(grep -c 'primary frontend_primary_ready=false' "$after_summary" 2>/dev/null || true)"
+        if [[ "$after_primary" == "$primary" && "$after_primary_count" == "1" && "$frontend_ready_issue_count" == "0" && "$primary_not_ready_count" == "0" ]]; then
           {
             echo "failover_status: recovered_same_primary"
             echo "post_failure_primary_count=${after_primary_count}"
