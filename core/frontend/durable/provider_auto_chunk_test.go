@@ -33,7 +33,11 @@ func TestDurableProvider_AutoRefusesLazyChunkRoot(t *testing.T) {
 
 	// Host B attaches lazily from HEAD and closes before LBA 33 is fetched.
 	rootB := t.TempDir()
-	hostB := chunkProvider(t, rootB, remote, view, 0)
+	if err := hostA.Close(); err != nil {
+		t.Fatal(err)
+	}
+	targetView := viewAs("r1", 4)
+	hostB := chunkProvider(t, rootB, remote, targetView, 0)
 	openRecovered(t, hostB)
 	if err := hostB.Close(); err != nil {
 		t.Fatalf("close host B: %v", err)
@@ -55,7 +59,7 @@ func TestDurableProvider_AutoRefusesLazyChunkRoot(t *testing.T) {
 	_ = auto.Close()
 
 	// The explicit selector with the remote reopens and reads HEAD's bytes.
-	explicit := chunkProvider(t, rootB, remote, view, 0)
+	explicit := chunkProvider(t, rootB, remote, targetView, 0)
 	s := openRecovered(t, explicit)
 	if got, err := s.Read(33); err != nil || !bytes.Equal(got, block(0x33)) {
 		t.Fatalf("explicit walstore-chunk reopen read: %v", err)

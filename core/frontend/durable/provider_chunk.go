@@ -508,8 +508,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		}
 		cfg.PrepareRestore = func(head storage.ChunkHead) error {
 			if head.Gen != 0 && head.Holder != holder {
-				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
+				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; %s",
+					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder, ChunkStaleLocalRootCure)
 				// INV-WS-STARTUP-RETRY-001: at or above this assignment,
 				// the foreign holder is a supersede proof. A lower epoch is
 				// the existing move-back/stale-root diagnostic, never 78.
@@ -529,8 +529,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			if durableLSN, _, _ := ws.Boundaries(); head.Gen != 0 && durableLSN < head.RemoteLSN {
 				log.Printf("durable: refusing to attach volume=%s root=%s: local durable LSN %d is below HEAD gen=%d remote_lsn=%d (remove or quarantine the local root)",
 					volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
-				return fmt.Errorf("%w: %w: %w: volume %s local root %s, local durable LSN %d below HEAD gen %d remote_lsn %d; remove or quarantine the local root to attach fresh from HEAD",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkForeignClaim, volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
+				return fmt.Errorf("%w: %w: %w: volume %s local root %s, local durable LSN %d below HEAD gen %d remote_lsn %d; %s",
+					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkForeignClaim, volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN, ChunkStaleLocalRootCure)
 			}
 			return nil
 		}

@@ -243,7 +243,7 @@ func TestDurableProviderV3_SeedOnlyCheckpointStillRestoresHEAD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := mappedProviderV3(t, t.TempDir(), remote)
+	target := mappedProviderV3(t, t.TempDir(), remote, 4)
 	st, err := target.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)

@@ -165,7 +165,10 @@ func TestWALStoreChunk_FreshHostReadsFromHead(t *testing.T) {
 	if err := p.MakeVolumeRemoteDurable(context.Background(), "v1", 1); err != nil {
 		t.Fatalf("MakeVolumeRemoteDurable: %v", err)
 	}
-	fresh := chunkProvider(t, t.TempDir(), remote, view, 0) // empty local root
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fresh := chunkProvider(t, t.TempDir(), remote, viewAs("r1", 4), 0) // higher issued epoch, empty local root
 	s2 := openRecovered(t, fresh)
 	if got, err := s2.Read(33); err != nil || !bytes.Equal(got, block(0x33)) {
 		t.Fatalf("fresh host read: %v", err)

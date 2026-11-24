@@ -15,9 +15,12 @@ import (
 
 // kzProvider is a walstore-chunk provider for v1 (256 blocks, 16 per
 // chunk: 16 chunks) over root and remote.
-func kzProvider(t *testing.T, root string, remote storage.ChunkRemote) *DurableProvider {
+func kzProvider(t *testing.T, root string, remote storage.ChunkRemote, epochs ...uint64) *DurableProvider {
 	t.Helper()
 	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}
+	if len(epochs) != 0 {
+		id.Epoch = epochs[0]
+	}
 	p, err := NewDurableProvider(ProviderConfig{
 		Impl: ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: 256, ChunkBlocks: 16,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
@@ -108,7 +111,9 @@ func TestFreshKnownZeroNotAfterARestartBeforeTheAttachCommit(t *testing.T) {
 	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); err != nil {
 		t.Fatalf("fresh marker after the crash: %v; want it kept", err)
 	}
-	p2 := kzProvider(t, root, remote)
+	// The incomplete attach has no committed local-lineage proof. Its fresh
+	// marker therefore requires a higher issued epoch before restoring HEAD.
+	p2 := kzProvider(t, root, remote, 4)
 	if _, err := p2.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +263,7 @@ func TestNoFetchOrFillReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
 	}
 
 	remote := &kzCountingRemote{ChunkRemote: mem}
-	p := kzProvider(t, t.TempDir(), remote)
+	p := kzProvider(t, t.TempDir(), remote, 4)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}

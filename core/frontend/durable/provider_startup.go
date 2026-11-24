@@ -56,7 +56,7 @@ func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error)
 }
 
 // ChunkStaleLocalRootCure is the operator's cure of a stale local root.
-const ChunkStaleLocalRootCure = "remove or quarantine the local root to attach fresh from HEAD"
+const ChunkStaleLocalRootCure = "remove or quarantine the local root to attach fresh from HEAD at a higher issued epoch; if HEAD already names this holder at its assigned epoch, first use a forced move (also to the same host) to record the lost range"
 
 // ChunkMissingLocalRootCure preserves the loss-reporting boundary on recovery.
 const ChunkMissingLocalRootCure = "check the data directory and its mount; restore the original local root, or use a forced move (also to the same host) to record the lost range before starting"

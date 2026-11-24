@@ -57,7 +57,10 @@ func TestRestoreCheckpointBeforeAssignmentPreservesRemoteBytes(t *testing.T) {
 	if h, err := p.CaptureVolume(ctx, "v1"); err != nil || h != lsn {
 		t.Fatal("cut", h, err)
 	}
-	fresh := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fresh := chunkProvider(t, t.TempDir(), remote, viewAs("r1", 4), 0)
 	got, err := openRecovered(t, fresh).Read(33)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("remote restore lost checkpointed bytes: got=%x err=%v", sha256.Sum256(got), err)

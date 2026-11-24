@@ -53,7 +53,7 @@ func TestHydrationProgressCountersFollowFirstReads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := kzProvider(t, t.TempDir(), mem)
+	p := kzProvider(t, t.TempDir(), mem, 4)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
