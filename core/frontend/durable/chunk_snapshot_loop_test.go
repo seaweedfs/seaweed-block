@@ -268,25 +268,62 @@ func TestScheduledSnapshotLoop_HungNewestReadTimesOut(t *testing.T) {
 }
 
 // Stopping the loop (detach, fence, Close) cancels a read of the newest
-// scheduled snapshot in flight and returns only after it has returned.
+// scheduled snapshot in flight at once (well inside the pass's 10-minute
+// deadline, so the cancellation is the stop's, not the deadline's), and
+// returns only after the read has returned: the read is held after it sees
+// the cancellation, and stop stays blocked until it is released.
 func TestScheduledSnapshotLoop_StopJoinsAHungNewestRead(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		entered, returned := make(chan struct{}), make(chan struct{})
+		entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 		_, start, stop := snapLoopReading(func(ctx context.Context) (time.Time, error) {
 			close(entered)
 			<-ctx.Done()
-			close(returned)
+			close(cancelled)
+			<-release // returns only when the test allows it
 			return time.Time{}, ctx.Err()
 		}, func(context.Context) error { return nil })
 		start()
+		joined := make(chan bool, 1)
+		var released atomic.Bool
+		free := func() {
+			if released.CompareAndSwap(false, true) {
+				close(release)
+			}
+		}
+		stopStarted := false
+		defer func() {
+			free()
+			if !stopStarted {
+				joined <- stop()
+			}
+			select {
+			case ok := <-joined:
+				if !ok {
+					t.Error("stop was not joined after the read returned")
+				}
+			case <-time.After(2 * time.Hour):
+				t.Error("stop did not return")
+			}
+		}()
 		recv(t, entered, "the read")
-		if !stop() {
-			t.Fatal("stop did not return")
-		}
+		stopStarted = true
+		begin := time.Now()
+		go func() { joined <- stop() }()
 		select {
-		case <-returned:
-		default:
-			t.Fatal("stop returned before the read did")
+		case <-cancelled:
+		case <-time.After(time.Minute):
+			t.Fatal("the read did not see the stop's cancellation within a minute")
 		}
+		if waited := time.Since(begin); waited >= time.Minute {
+			t.Fatalf("cancellation took %v; want it at once, not at the pass deadline", waited)
+		}
+		synctest.Wait()
+		select {
+		case ok := <-joined:
+			joined <- ok
+			t.Fatal("stop returned while the read was still running")
+		default:
+		}
+		free()
 	})
 }
