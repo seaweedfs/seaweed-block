@@ -201,6 +201,17 @@ func kzTargetRole(t *testing.T, rep *kzReport, bytes uint64, device bool, run st
 	h.masterAddr = ho.Master
 	env := &handoffEnv{h: h, cluster: &w4WeedCluster{filerGRPC: ho.FilerGRPC, filerHTTP: ho.FilerHTTP}, chunkPath: ho.ChunkPath, hosts: map[string]bvHost{}}
 	rep.ChunkPath = ho.ChunkPath
+	handoffPorts.Lock()
+	if handoffPorts.used == nil {
+		handoffPorts.used = map[int]bool{}
+	}
+	for _, ht := range ho.Targets {
+		if err := kzReserve(handoffPorts.used, ht.Data, ht.Ctrl); err != nil {
+			handoffPorts.Unlock()
+			t.Fatalf("KZ_HANDOFF target %s: %v", ht.Volume, err)
+		}
+	}
+	handoffPorts.Unlock()
 	for _, ht := range ho.Targets {
 		tb := bvHost{id: ht.Volume, server: ht.Server, replica: "r1", volume: ht.Volume, root: filepath.Join(h.dir, "vol-"+ht.Volume),
 			data: ht.Data, ctrl: ht.Ctrl, status: handoffAddress(t), nvme: handoffAddress(t)}
@@ -481,7 +492,7 @@ func kzCrashFirstStart(t *testing.T, env *handoffEnv, rep *kzReport, bytes uint6
 	}
 	c.close()
 	s0, s1 := kzLC(r.S0.Stats), kzLC(r.S1.Stats)
-	// the stop is deterministic (filer paused), so an acceptance run must catch the marker on the FIRST try
+	// the stop is deterministic (the kzhold hold), so an acceptance run must catch the marker on the FIRST try
 	ok := len(r.Tries) == 1 && r.S0.Completed && r.S1.Completed && r.S0.Stats.KnownZeroChunks == 0 && r.FreshLine == "" &&
 		s0.CandidateChunks == total && s1.CandidateChunks <= r.Dirty1 && r.Equal == r.Blocks && r.Blocks > 0
 	rep.step(t, 5, b.volume, ok, fmt.Sprintf("tries=%d marker_at_stop=%v known_zero=%d fresh_line=%t s0_candidates=%d/%d s0_uploaded=%d s1_candidates=%d (dirtied %d) blocks_equal=%d/%d",
@@ -535,19 +546,6 @@ type kzCutRecord struct {
 	Completed bool      `json:"completed"`
 }
 
-// kzStats is the part of the chunk layer's durable status the test reads.
-type kzStats struct {
-	DirtyChunks     int
-	StagedChunks    uint64
-	KnownZeroChunks uint64
-	AbsentChunks    int
-	Hydration       struct{ WaitCalls, Fetches, Completed, FetchErrors uint64 }
-	LastCut         *struct {
-		CandidateChunks, StagedChunks, UploadedChunks, ZeroedChunks, UnchangedChunks int
-		UploadedBytes                                                                int64
-	}
-}
-
 func kzReadStats(t *testing.T, b bvHost) kzStats {
 	t.Helper()
 	var c struct{ Stats kzStats }
@@ -579,14 +577,15 @@ func kzSource(t *testing.T, env *handoffEnv, rep *kzReport, b bvHost, fs string,
 	cfg := headSzConfig{snapshotTimeout: "120s", attempts: 3, name: "kz-" + b.volume + "-s"}
 	v.S0 = kzCut(t, env, cfg, b, 0, total)
 	st := v.S0.Stats
-	ok1 := v.S0.Completed && st.LastCut != nil && st.LastCut.StagedChunks == 0 && st.LastCut.UploadedChunks == 0 &&
-		v.S0.Cut.HeadSegments == 0 && st.KnownZeroChunks > 0 && v.Fresh != ""
-	rep.step(t, 1, b.volume, ok1, fmt.Sprintf("s0 completed=%v wall_ms=%.0f staged=%d uploaded_chunks=%d head_segments=%d head_bytes=%d known_zero=%d/%d fresh_line=%t",
-		v.S0.Completed, v.S0.WallMs, kzLC(st).StagedChunks, kzLC(st).UploadedChunks, v.S0.Cut.HeadSegments, v.S0.Cut.HeadBytes, st.KnownZeroChunks, total, v.Fresh != ""))
+	ok1, why1 := kzStep1Pass(st, v.S0.Completed, v.S0.Cut.HeadSegments, total, v.Fresh != "")
+	rep.step(t, 1, b.volume, ok1, fmt.Sprintf("%s s0 completed=%v wall_ms=%.0f candidates=%d staged=%d uploaded_chunks=%d head_segments=%d head_bytes=%d known_zero=%d/%d fresh_line=%t",
+		why1, v.S0.Completed, v.S0.WallMs, kzLC(st).CandidateChunks, kzLC(st).StagedChunks, kzLC(st).UploadedChunks, v.S0.Cut.HeadSegments, v.S0.Cut.HeadBytes, st.KnownZeroChunks, total, v.Fresh != ""))
 
 	// (2) mkfs + files + S1
 	if device {
-		v.Identity, v.Discard, v.Files = kzDeviceFiles(t, b, v.NQN, fs, run)
+		var first map[string]uint64
+		v.Identity, v.Discard, v.Files, first = kzDeviceFiles(t, b, v.NQN, fs, run)
+		v.Blocks = kzDeviceWitnesses(t, b, v.NQN, first)
 	} else {
 		v.Files, v.Blocks = kzUserSpaceFiles(t, b, v.NQN, bytes)
 	}
@@ -596,7 +595,8 @@ func kzSource(t *testing.T, env *handoffEnv, rep *kzReport, b bvHost, fs string,
 	st = v.S1.Stats
 	touched := v.Dirty1
 	ok2 := v.S1.Completed && st.LastCut != nil && touched > 0 && st.LastCut.CandidateChunks <= touched &&
-		st.LastCut.StagedChunks <= touched && st.LastCut.UploadedBytes <= int64(touched)*kzChunkBytes && len(v.Files) > 0
+		st.LastCut.StagedChunks <= touched && st.LastCut.UploadedBytes <= int64(touched)*kzChunkBytes && len(v.Files) > 0 &&
+		len(v.Blocks) == len(v.Files) // one block witness per written file or block, for step 4
 	rep.step(t, 2, b.volume, ok2, fmt.Sprintf("s1 completed=%v wall_ms=%.0f dirtied=%d candidates=%d staged=%d uploaded_bytes=%d head_bytes=%d files=%d discard=%q",
 		v.S1.Completed, v.S1.WallMs, touched, kzLC(st).CandidateChunks, kzLC(st).StagedChunks, kzLC(st).UploadedBytes, v.S1.Cut.HeadBytes, len(v.Files), v.Discard))
 	return v
@@ -646,9 +646,9 @@ func kzUserSpaceFiles(t *testing.T, b bvHost, nqn string, bytes uint64) (map[str
 
 // kzDeviceFiles connects this run's NQN through the kernel, resolves the
 // device by NQN, formats it, writes files with known sha256, syncs, unmounts
-// and disconnects. It returns the identity line, whether mkfs sent a discard
-// and the files' sha256.
-func kzDeviceFiles(t *testing.T, b bvHost, nqn, fs, run string) (string, string, map[string]string) {
+// and disconnects. It returns the identity line, whether mkfs sent a discard,
+// the files' sha256 and each file's first device block (FIEMAP, 4 KiB blocks).
+func kzDeviceFiles(t *testing.T, b bvHost, nqn, fs, run string) (string, string, map[string]string, map[string]uint64) {
 	t.Helper()
 	host, port := kzSplit(t, b.nvme)
 	kzSudo(t, "nvme", "connect", "-t", "tcp", "-n", nqn, "-a", host, "-s", port)
@@ -678,9 +678,12 @@ func kzDeviceFiles(t *testing.T, b bvHost, nqn, fs, run string) (string, string,
 		t.Fatal(err)
 	}
 	kzSudo(t, "mount", dev.Path, mnt)
-	files := map[string]string{}
+	files, first := map[string]string{}, map[string]uint64{}
 	func() {
 		defer kzSudo(t, "umount", mnt)
+		if bs := strings.TrimSpace(kzSudo(t, "stat", "-f", "-c", "%S", mnt)); bs != "4096" {
+			t.Fatalf("%s: file-system block size %s, the witness mapping needs 4096", mnt, bs)
+		}
 		for i := 0; i < 4; i++ {
 			name := fmt.Sprintf("kz-%d.bin", i)
 			data := make([]byte, (i+1)*64*1024)
@@ -692,8 +695,43 @@ func kzDeviceFiles(t *testing.T, b bvHost, nqn, fs, run string) (string, string,
 			files[name] = hex.EncodeToString(sum[:])
 		}
 		kzSudo(t, "sync")
+		for name := range files {
+			pb, err := kzFirstPhysical(kzSudo(t, "filefrag", "-e", filepath.Join(mnt, name)))
+			if err != nil {
+				t.Fatalf("filefrag %s: %v", name, err)
+			}
+			first[name] = pb
+		}
 	}()
-	return dev.Identity(), discard, files
+	return dev.Identity(), discard, files, first
+}
+
+// kzDeviceWitnesses reads, through the user-space client after the kernel
+// disconnected, the first block of every file and requires it to be that
+// file's first 4 KiB as written: the block witnesses step 4 reads on the
+// targets before hydration.
+func kzDeviceWitnesses(t *testing.T, b bvHost, nqn string, first map[string]uint64) map[uint64][]byte {
+	t.Helper()
+	c := dialNVMe(t, b.nvme, nqn)
+	defer c.close()
+	out := map[uint64][]byte{}
+	for name, lba := range first {
+		var i int
+		if _, err := fmt.Sscanf(name, "kz-%d.bin", &i); err != nil {
+			t.Fatalf("file %q: %v", name, err)
+		}
+		want := make([]byte, 4096)
+		for j := range want {
+			want[j] = byte(i*31 + j%251)
+		}
+		_ = c.io.SetDeadline(time.Now().Add(60 * time.Second))
+		got := c.read(t, lba, 4096)
+		if string(got) != string(want) {
+			t.Fatalf("%s: device block %d is not the file's first 4 KiB (the witness mapping is wrong)", name, lba)
+		}
+		out[lba] = got
+	}
+	return out
 }
 
 func kzSudo(t *testing.T, args ...string) string {
@@ -709,8 +747,16 @@ func kzSudoWrite(t *testing.T, path string, data []byte) {
 	t.Helper()
 	c := exec.Command("sudo", "-n", "tee", path)
 	c.Stdin = strings.NewReader(string(data))
-	if out, err := c.CombinedOutput(); err != nil && len(out) == 0 {
-		t.Fatalf("sudo tee %s: %v", path, err)
+	out, err := c.CombinedOutput()
+	sum := sha256.Sum256(data)
+	back := ""
+	if err == nil {
+		if f := strings.Fields(kzSudo(t, "sha256sum", path)); len(f) > 0 {
+			back = f[0]
+		}
+	}
+	if err := kzCheckWrite(out, err, hex.EncodeToString(sum[:]), back); err != nil {
+		t.Fatalf("%s: %v", path, err)
 	}
 }
 
