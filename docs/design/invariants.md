@@ -497,7 +497,7 @@ Tests: `TestSnapshotSchedule_SlotsAreOffsetPerVolume`, `_FailureIsTypedAndBacksO
 
 ## Part B. Invariant ledger
 
-320 rows: 249 ACTIVE, 68 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 303 new.
+321 rows: 250 ACTIVE, 68 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 306 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -887,6 +887,7 @@ Notes:
 
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
 |---|---|---|---|---|---|---|
+| `INV-HEAD-FLAT-001` | Every HEAD and snapshot root is a complete image map, directly or through immutable segments. Forks preserve original object owners; reads never fall through to a parent HEAD or snapshot, so successive forks add no backing-chain depth. | M6 snapshot: published → fork | `core/frontend/chunkstore/catalog.go` `Fork`; `core/frontend/chunkstore/manifest.go` `qualifyManifestKey`, `resolveManifest` | `TestForkGrandchildReadsEveryBlockWithoutAncestorImages` (`core/frontend/chunkstore/flat_head_test.go`); `TestFork_ForkOfForkKeepsOriginalOwner` (`core/frontend/chunkstore/catalog_test.go`); `TestManifest_ForkAfterParentSnapshotDelete` (`core/frontend/chunkstore/manifest_test.go`) | —; existing representation, no new transition | ACTIVE |
 | `INV-CHUNK-WRITE-ONCE-001` | Chunk and segment keys are write-once: a key that exists or once existed is refused, and a volume writes only its own keys. | M6 key: Bound | `core/frontend/chunkstore/chunk_remote.go` `putObject` | `TestChunkRemote_KeysAreWriteOnce` (`core/frontend/chunkstore/chunk_remote_test.go`); `TestChunkLayer_C5_ChunksAreImmutable` (`core/storage/chunk_layer_contract_test.go`) | — | ACTIVE |
 | `INV-MAINT-ONE-OWNER` | Only the current attached handle with matching replica/epoch/endpoint admits maintenance; one attached volume admits at most one pass; elapsed ticks coalesce and never enqueue catch-up work. | M8 Armed → Running | `provider_chunk.go` `chunkMaintenanceLoop` | `TestMaintenanceCoalescesWhileOnePassIsHeld`, `TestMaintenancePassHasOneDeadline`, `TestMaintenanceRejectsForeignLineageBeforeAdmission`, `TestMaintenanceSameHandleRearmsAfterJoinedStop` | `MaintenanceOwner` `OneOwner`, `CurrentHandleAtAdmission` | ACTIVE |
 | `INV-MAINT-SCOPE` | Per-volume GC traces foreign roots while restricting candidate reclamation, intent expiry and copy settlement to its volume; namespace coverage is not imported. | M8 scoped GC | `gc.go` `Collector.run`; `gc_copy.go` `SweepCopies`; `gc_execution.go` `ExecuteVolumeGC` | `TestVolumeGC_ForeignIntentRootsAndLocalCandidates`, `TestVolumeGC_DoesNotImportGlobalMark`, `TestVolumeGC_ForeignEligibleCaptureIntentStaysProtected`, `TestVolumeGC_ForeignEligibleCopyIsNotSettled` | `ScopedMaintenanceGC` `ForeignRootSurvives`, `ForeignCandidatesUntouched`, `OwnCoverageOnly` | ACTIVE |

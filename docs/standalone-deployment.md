@@ -506,7 +506,7 @@ Space comes back in two steps. Neither is immediate.
 1. **GC deletes the chunks**, after the grace. The grace is `sw-block ops chunk gc --grace`, **1 hour by default**.
    - A deleted snapshot keeps its chunks rooted for the grace after the delete.
    - A chunk is then reclaimed only once two complete GC marks, at least the grace apart, have both seen it unreferenced.
-   - With the default grace, a deleted snapshot's chunks are reclaimed about **2 hours** after the delete. That needs a GC pass at least 1 hour after the delete and another at least 1 hour after that.
+   - With the default grace, a deleted snapshot's unreferenced chunks are reclaimed about **2 hours** after the delete. Chunks still referenced by another snapshot, fork or restore remain live. That needs a GC pass at least 1 hour after the delete and another at least 1 hour after that.
    - Automatic GC is off by default (`--chunk-maintenance-gc`), so run the passes yourself:
 
    ```bash
@@ -563,6 +563,16 @@ therefore see every chunk of every volume and snapshot as unreferenced.
   volume: the copied records would point at needles that do not exist on the target.
 - Space is returned only by the two steps above (`sw-block ops chunk gc`, then a SeaweedFS vacuum). `volume.vacuum`
   is safe: it compacts needles that were already deleted.
+
+### Forking a snapshot into a new volume
+
+A fork creates a new volume sharing the snapshot's immutable chunks and segments:
+
+```bash
+sw-block ops chunk fork --source v1 --snapshot before-upgrade --target v2 --chunk-filer FILER --request-id fork-v2
+```
+
+Keep the request id to retry an uncertain result. The new HEAD contains a complete image map; reads do not walk back through parent volumes or snapshots. A fork of a fork preserves the original object owners without adding a backing chain. Deleting the source snapshot does not delete objects still referenced by the fork. Use restore when the target must eventually own its data independently.
 
 ### Restoring a snapshot into a new volume
 
