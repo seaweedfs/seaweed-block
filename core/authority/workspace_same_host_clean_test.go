@@ -36,11 +36,6 @@ func TestWorkspaceSameHostCleanMoveUsesOvernightSeal(t *testing.T) {
 			t.Fatal("same-host move bypassed sealed-generation proof", bad)
 		}
 	}
-	forced := req
-	forced.Kind, forced.Force = "forced", true
-	if _, err := p.MoveWorkspace(ctx, forced, head); err == nil {
-		t.Fatal("same-host forced move accepted")
-	}
 	if line, _ := p.VolumeAuthorityLine("v"); line.Epoch != 1 || len(p.WorkspaceState("v").Moves) != 0 {
 		t.Fatal("refusal reserved or published authority", line)
 	}

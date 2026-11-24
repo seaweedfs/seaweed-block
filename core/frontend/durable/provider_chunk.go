@@ -55,6 +55,11 @@ var (
 // from HEAD.
 var ErrChunkStaleLocalRoot = errors.New("durable: local volume predates a HEAD published by another holder")
 
+// ErrChunkMissingLocalRoot means HEAD already names this holder at its assigned
+// epoch, but the fresh local root cannot retain that holder's acknowledged WAL.
+// Starting from HEAD would silently discard the unpublished suffix.
+var ErrChunkMissingLocalRoot = errors.New("durable: holder local root missing at its assigned epoch")
+
 var (
 	errProviderClosed    = errors.New("durable: provider closed")
 	errChunkForeignClaim = errors.New("durable: HEAD claim refused by another holder")
@@ -547,6 +552,13 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 				}
 				cfg.FreshFromHead = false
 				return nil
+			}
+			// A fresh marker is not local-lineage evidence, including after a
+			// failed attach is reopened. A forced successor must record any
+			// abandoned suffix before this host may restore the remote image.
+			if head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder == cfg.Holder {
+				return fmt.Errorf("%w: %w: volume %s local root %s is fresh but HEAD names holder %q at epoch %d; likely wrong or unmounted data directory; %s",
+					ErrChunkMissingLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, cfg.Holder, cfg.Epoch, ChunkMissingLocalRootCure)
 			}
 			// No HEAD is a new lineage; preserve any pre-assignment local
 			// writes instead of replacing their frontier with zero.

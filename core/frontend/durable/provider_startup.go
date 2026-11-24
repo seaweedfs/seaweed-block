@@ -46,6 +46,9 @@ func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error)
 	if errors.Is(cause, ErrChunkStaleLocalRoot) {
 		h.startupCure = ChunkStaleLocalRootCure
 	}
+	if errors.Is(cause, ErrChunkMissingLocalRoot) {
+		h.startupCure = ChunkMissingLocalRootCure
+	}
 	select {
 	case p.startupUpdates <- struct{}{}:
 	default:
@@ -54,6 +57,9 @@ func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error)
 
 // ChunkStaleLocalRootCure is the operator's cure of a stale local root.
 const ChunkStaleLocalRootCure = "remove or quarantine the local root to attach fresh from HEAD"
+
+// ChunkMissingLocalRootCure preserves the loss-reporting boundary on recovery.
+const ChunkMissingLocalRootCure = "check the data directory and its mount; restore the original local root, or use a forced move (also to the same host) to record the lost range before starting"
 
 // ChunkStartupCure is the operator's cure of this exact recovery's startup
 // end ("" when none), for the process's final exit line.
