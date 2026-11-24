@@ -287,7 +287,7 @@ func TestNeverStartedLineIsDeletableWithoutARevoke(t *testing.T) {
 		must, mustU := fatalOn(t)
 		old := env.start(t, "blockvolume-s1", "s1")
 		e := env.adopt(t, old, "s1")
-		env.writeBlock(t, "s1", 0, pattern("never-started-move"))
+		env.writeBlock(t, "s1", 0, pattern("never-start-move"))
 		g := env.seal(t, "s1", e)
 		l := env.sealedLSN(t, e, g)
 		env.revoke(t, e, g)
