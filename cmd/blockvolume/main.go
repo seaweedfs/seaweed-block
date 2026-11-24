@@ -737,7 +737,7 @@ func runVolume(f flags, exits *processExit) int {
 		// between it and the record is the attach check's.
 		if chunkErr == nil && geometryErr == nil && blocks != 0 && chunk.catalog != nil {
 			readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			refusal := geometryFlagsRefusal(readCtx, chunk.catalog, f.volumeID, uint64(blocks), uint32(blockSize))
+			refusal, code := geometryFlagsRefusal(readCtx, chunk.catalog, f.volumeID, uint64(blocks), uint32(blockSize))
 			readCancel()
 			if refusal != "" {
 				fmt.Fprintln(os.Stderr, refusal)
@@ -747,7 +747,7 @@ func runVolume(f flags, exits *processExit) int {
 					shutCancel()
 				}
 				_ = h.Close()
-				return exitGeometryRefused
+				return code
 			}
 		}
 		var dp *durable.DurableProvider

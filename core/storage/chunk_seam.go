@@ -343,6 +343,11 @@ type chunkLayerConfig struct {
 	// HEAD (every block absent, read lazily). False means an existing local
 	// volume. Never inferred from the local contents.
 	FreshFromHead bool
+	// CreatedThisStart says this process start created the local store (an
+	// in-memory fact, never persisted). RULE-FRESH-KNOWN-ZERO samples only
+	// with it and FreshFromHead: a fresh marker left by an earlier start, an
+	// older binary or another opener is never trusted.
+	CreatedThisStart bool
 	// RestoreGuard binds fresh attachment to the HEAD the provider claimed
 	// and durably seeded. A changed read refuses before hooks/readiness; the
 	// next recovery must repeat claim and seed. Nil is for direct layer users.
@@ -489,8 +494,17 @@ type chunkCutStats struct {
 //     results whose outcome stayed unresolved after the HEAD re-read.
 //   - PendingUnresolved: an unresolved proposal is held now.
 //   - DirtyChunks is the number of chunks dirty since the last HEAD now
-//     (the C11 bitmap popcount); the cut scheduler's threshold reads it.
-//     Chunks still awaiting reconciliation are not counted.
+//     (the C11 bitmap popcount): the next cut's candidates, not its
+//     progress (it does not fall while a cut runs or across failed
+//     attempts); the cut scheduler's threshold reads it. Chunks still
+//     awaiting reconciliation are not counted.
+//   - StagedChunks counts the chunks staging finished (read, hashed,
+//     uploaded when not zero, and remembered for reuse) in every cut
+//     attempt of this layer: a failed attempt and an interrupted round
+//     count what they finished. It only grows: a chunk staged again (after
+//     a guest write re-dirtied it, or in a later cut) counts again; it is
+//     in-process (a restart starts at 0). The progress a cut retried after
+//     its deadline has made.
 //   - Reconciling: the dirty set is being reconciled against HEAD; no cut
 //     publishes until it is done. ReconcileDone of ReconcileTotal chunks
 //     are compared.
@@ -508,7 +522,9 @@ type chunkLayerStats struct {
 	CASConflicts      uint64              // HEAD CAS precondition failures
 	CASUnknown        uint64              // HEAD CAS results still unresolved after the re-read
 	PendingUnresolved bool                // an unresolved HEAD proposal is held now
-	DirtyChunks       int                 // chunks dirty since the last HEAD (not counting those awaiting reconciliation)
+	DirtyChunks       int                 // chunks dirty since the last HEAD (not counting those awaiting reconciliation): candidates, not progress
+	StagedChunks      uint64              // chunks staged by every cut attempt, failed ones included (in-process)
+	KnownZeroChunks   uint64              // chunks this layer's fresh attach certified known-zero (RULE-FRESH-KNOWN-ZERO); 0 otherwise
 	Reconciling       bool                // the dirty set is being reconciled against HEAD; no cut publishes meanwhile
 	ReconcileDone     int                 // chunks compared so far
 	ReconcileTotal    int                 // chunks to compare

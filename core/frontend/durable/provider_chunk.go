@@ -321,6 +321,18 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 	} else if err := commit(); err != nil {
 		return err
 	}
+	// RULE-FRESH-KNOWN-ZERO order: the marker is retired (above), THEN the
+	// marking is made durable, THEN the volume serves (after this attach).
+	if h.fresh {
+		if hook := p.testAfterChunkFreshRetire; hook != nil {
+			if err := hook(); err != nil {
+				return err
+			}
+		}
+	}
+	if kz, ok := layer.(interface{ ApplyFreshKnownZero() }); ok {
+		kz.ApplyFreshKnownZero()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -418,6 +430,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		Epoch:               lin.epoch,
 		Holder:              holder,
 		FreshFromHead:       h.fresh,
+		CreatedThisStart:    h.fresh && h.createdThisStart,
 		ReadMissTimeout:     p.cfg.ChunkReadMissTimeout,
 		HydrationWorkers:    p.cfg.ChunkHydrationWorkers,
 		HydrationQueueDepth: p.cfg.ChunkHydrationQueueDepth,

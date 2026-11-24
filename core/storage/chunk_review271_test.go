@@ -202,7 +202,7 @@ func TestCutPayloadReadsOverlapEarlierUploadsWithinBudget(t *testing.T) {
 	t.Cleanup(func() { cancel(); free(); cowWaitSignal(t, done, "overlap cleanup") })
 	go func() {
 		defer close(done)
-		_, _, err := l.streamCutPayloads(ctx, []uint64{0, 1, 2}, chunkHead{}, func(_ context.Context, idx uint64) (capturedChunk, error) {
+		_, _, err := l.streamCutPayloads(ctx, []uint64{0, 1, 2}, chunkHead{}, false, func(_ context.Context, idx uint64) (capturedChunk, error) {
 			if idx == 2 {
 				close(readThird)
 			}
@@ -233,7 +233,7 @@ func TestCutPayloadIntentCountLargeCandidateSets(t *testing.T) {
 		for i := range batch {
 			batch[i] = uint64(i)
 		}
-		_, ids, err := l.streamCutPayloads(ctTimeout(t), batch, chunkHead{}, func(_ context.Context, idx uint64) (capturedChunk, error) {
+		_, ids, err := l.streamCutPayloads(ctTimeout(t), batch, chunkHead{}, false, func(_ context.Context, idx uint64) (capturedChunk, error) {
 			data := makeBlock(ctBlockSize, byte(idx%255+1))
 			return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data)}, nil
 		})

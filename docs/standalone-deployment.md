@@ -202,7 +202,7 @@ with `move target node "s2" is not registered`.
 | `SWB_HEARTBEAT_INTERVAL` | `--heartbeat-interval` | `2s` | Heartbeat interval |
 | `SWB_RECOVER_TIMEOUT` | `--recover-timeout` | `30s` | Time to become promotion-ready before reporting `recovery_timeout` |
 | `SWB_DURABLE_ROOT` | `--durable-root` | empty (in memory, not durable) | Storage directory; writable by the service user |
-| `SWB_DURABLE_IMPL` | `--durable-impl` | empty (auto) | Auto creates new volumes as `walstore`, opens existing ones with their on-disk format, and refuses a `walstore-chunk` root. Explicit: `walstore`, `walstore-chunk` (workspace, proof of concept), `smartwal` (experimental). The examples set `walstore`. |
+| `SWB_DURABLE_IMPL` | `--durable-impl` | empty (auto) | Auto creates new volumes as `walstore`, opens existing ones with their on-disk format, and refuses a `walstore-chunk` root; so does every explicit value other than `walstore-chunk` (a chunk root holds data that may live only in the remote HEAD: open it with `--durable-impl=walstore-chunk` and its remote configuration). Explicit: `walstore`, `walstore-chunk` (workspace, proof of concept), `smartwal` (experimental). The examples set `walstore`. |
 | `SWB_DURABLE_BLOCKS` | `--durable-blocks` | `2048` | Blocks on first create |
 | `SWB_DURABLE_BLOCKSIZE` | `--durable-blocksize` | `4096` | Block size on first create |
 | `SWB_NVME_LISTEN` | `--nvme-listen` | empty (off) | NVMe/TCP target; loopback only, no authentication |
@@ -506,7 +506,7 @@ Space comes back in two steps. Neither is immediate.
 1. **GC deletes the chunks**, after the grace. The grace is `sw-block ops chunk gc --grace`, **1 hour by default**.
    - A deleted snapshot keeps its chunks rooted for the grace after the delete.
    - A chunk is then reclaimed only once two complete GC marks, at least the grace apart, have both seen it unreferenced.
-   - With the default grace, a deleted snapshot's chunks are reclaimed about **2 hours** after the delete. That needs a GC pass at least 1 hour after the delete and another at least 1 hour after that.
+   - With the default grace, a deleted snapshot's unreferenced chunks are reclaimed about **2 hours** after the delete. Chunks still referenced by another snapshot, fork or restore remain live. That needs a GC pass at least 1 hour after the delete and another at least 1 hour after that.
    - Automatic GC is off by default (`--chunk-maintenance-gc`), so run the passes yourself:
 
    ```bash
@@ -563,6 +563,54 @@ therefore see every chunk of every volume and snapshot as unreferenced.
   volume: the copied records would point at needles that do not exist on the target.
 - Space is returned only by the two steps above (`sw-block ops chunk gc`, then a SeaweedFS vacuum). `volume.vacuum`
   is safe: it compacts needles that were already deleted.
+
+### Forking a snapshot into a new volume
+
+A fork creates a new volume sharing the snapshot's immutable chunks and segments:
+
+```bash
+sw-block ops chunk fork --source v1 --snapshot before-upgrade --target v2 --chunk-filer FILER --request-id fork-v2
+```
+
+Keep the request id to retry an uncertain result. The new HEAD contains a complete image map; reads do not walk back through parent volumes or snapshots. A fork of a fork preserves the original object owners without adding a backing chain. Deleting the source snapshot does not delete objects still referenced by the fork. Use restore when the target must eventually own its data independently.
+
+### Retiring the source of a template
+
+A template is an ordinary immutable snapshot, not a separate volume kind. Keep the volume holding an offered template snapshot: volume deletion refuses while any snapshot name exists. To retire the original source instead, first move the template image into a dedicated holder using existing fork and snapshot operations.
+
+Prerequisites: `v1` is serving, its only snapshot is `seed`, and the standalone cluster spec has new volume placements for `template-holder` and `consumer`. Neither target blockvolume has started yet. Use the same filer and chunk namespace throughout.
+
+1. Create the holder:
+
+   ```bash
+   sw-block ops chunk fork --source v1 --snapshot seed --target template-holder --chunk-filer FILER --request-id fork-template-holder
+   ```
+
+2. Start `template-holder` with the normal standalone blockvolume command and its own volume id, endpoints and local root. Wait for its frontend readiness; read back the seed's known data before proceeding. Take the template snapshot:
+
+   ```bash
+   sw-block ops chunk snapshot --volume template-holder --status-addr HOLDER_STATUS --name template-v1
+   ```
+
+3. Create a consumer, start its blockvolume on its own placement and root, and verify its known data:
+
+   ```bash
+   sw-block ops chunk fork --source template-holder --snapshot template-v1 --target consumer --chunk-filer FILER --request-id fork-consumer
+   ```
+
+4. Stop the source writer. Follow [Delete a volume](volume-lifecycle.md#delete-a-volume) for `v1`: plain detach, revoke its exact replica/epoch/sealed generation, wait for its recorded ACK and natural exit, delete `seed`, then delete `v1`. Do not signal the process in place of waiting for its ACK. Require the completed delete answer and `show` state `deleted` before continuing.
+
+5. Verify both surviving images, including the holder's template snapshot:
+
+   ```bash
+   sw-block ops chunk verify --volume template-holder --all-snapshots --depth data --timeout 2m --chunk-filer FILER
+   sw-block ops chunk verify --volume consumer --all-snapshots --depth data --timeout 2m --chunk-filer FILER
+   sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
+   ```
+
+   Read back the known data again and repeat both verify commands after the pass. This immediate pass is not a reclamation measurement: its default grace has not elapsed. Continue namespace-wide GC as described above for unused objects; attached-volume maintenance alone does not collect a deleted source's namespace.
+
+Keep `template-holder/template-v1` while it is offered for new consumers. Retiring that snapshot later does not delete objects still referenced by existing consumers. Deleting the holder volume itself still requires the ordinary seal/revoke/ACK and snapshot-deletion procedure; do not remove its backing filer directory or object bindings by hand.
 
 ### Restoring a snapshot into a new volume
 

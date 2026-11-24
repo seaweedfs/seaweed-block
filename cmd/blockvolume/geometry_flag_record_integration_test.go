@@ -3,7 +3,9 @@
 package main_test
 
 import (
+	"context"
 	"os"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -55,5 +57,81 @@ func TestWrongGeometryFlagIsRefusedBeforeTheStoreIsCreated(t *testing.T) {
 	}
 	if len(problems) > 0 {
 		t.Fatalf("1.0.1: %s", strings.Join(problems, "; "))
+	}
+}
+
+// INV-VOL-GEOMETRY-FLAGS-RECORD-001, the corrupt record: in create mode, a
+// volume record that is there but does not decode is refused for good (exit
+// 78) before any local store exists, never taken as "absent" and never
+// retried. The filer stays up and answers the startup checks; v2's VOLUME
+// entry is made undecodable. A wrong and a right --durable-blocks alike exit
+// 78 and leave nothing under --durable-root. With the entry restored the wrong
+// flag is refused (78, mismatch) and the right flag serves. (A filer that
+// cannot deliver the record is the retryable case, 75: the unit test.)
+func TestCorruptRecordIsRefusedBeforeTheStoreIsCreated(t *testing.T) {
+	env := startSourceWithSnapshot(t, "v2")
+	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	b := env.hosts["n-v2"]
+	right := append([]string{}, env.volArgsFor(b)...)
+	wrong := append([]string{}, right...)
+	for i := range wrong {
+		if wrong[i] == "--durable-blocks" {
+			wrong[i+1] = "32768"
+		}
+	}
+	ctx := context.Background()
+	cl := env.cluster.client(t, "")
+	dir := path.Join(env.chunkPath, "v2")
+	entry, err := cl.LookupEntry(ctx, dir, "VOLUME")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := append([]byte(nil), entry.Content...)
+	entry.Content = []byte("{")
+	if err := cl.UpdateEntry(ctx, dir, entry, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		args []string
+	}{{"wrong", wrong}, {"right", right}} {
+		d := env.h.start(t, "blockvolume-v2-"+c.name+"-corrupt", env.h.volume, c.args...)
+		err := d.wait(60 * time.Second)
+		line := d.line("is unreadable (corrupt:")
+		entries, _ := os.ReadDir(b.root)
+		t.Logf("%s flag over a corrupt record: exit %v; %q; files under --durable-root %d", c.name, err, line, len(entries))
+		if exitCode(err) != 78 || !strings.Contains(line, "no local store was created") || len(entries) != 0 {
+			t.Fatalf("1.0.1: a %s-flag first start over a corrupt record must exit 78 before creating anything; exit %v, line %q, %d files", c.name, err, line, len(entries))
+		}
+	}
+	entry.Content = record
+	if err := cl.UpdateEntry(ctx, dir, entry, nil); err != nil {
+		t.Fatal(err)
+	}
+	d := env.h.start(t, "blockvolume-v2-wrong-readable", env.h.volume, wrong...)
+	if err := d.wait(60 * time.Second); exitCode(err) != 78 {
+		t.Fatalf("with the record readable again, the wrong flag must be refused (78); exit %v", err)
+	}
+	served := env.startTarget(t, "v2", "blockvolume-v2-right-readable")
+	served.kill(t)
+}
+
+// Guard: a first start with the filer stopped ends at the startup filer
+// check (exit 1) before the record check and before any store exists.
+func TestFirstStartWithTheFilerDownCreatesNoStore(t *testing.T) {
+	env := startSourceWithSnapshot(t, "v2")
+	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	b := env.hosts["n-v2"]
+	env.cluster.stopProc(t, "filer")
+	d := env.h.start(t, "blockvolume-v2-filer-down", env.h.volume, env.volArgsFor(b)...)
+	err := d.wait(120 * time.Second)
+	env.cluster.restartProc(t, "filer")
+	w4WaitTCP(t, env.cluster.filerGRPC, 30*time.Second)
+	entries, _ := os.ReadDir(b.root)
+	t.Logf("filer down: exit %v; %q; files under --durable-root %d", err, d.line("needs exactly one filer"), len(entries))
+	if exitCode(err) != 1 || d.line("needs exactly one filer") == "" || len(entries) != 0 {
+		t.Fatalf("a first start with the filer down must end at the startup filer check without a store; exit %v, %d files", err, len(entries))
 	}
 }

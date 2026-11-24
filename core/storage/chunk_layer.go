@@ -62,6 +62,10 @@ type chunkLayerImpl struct {
 	remote chunkRemote
 	cfg    chunkLayerConfig
 
+	// freshKnownZero: the mutation tokens RULE-FRESH-KNOWN-ZERO sampled at a
+	// fresh attach; applied once by ApplyFreshKnownZero.
+	freshKnownZero map[uint64]uint64
+
 	blockSize   int
 	chunkBlocks uint64
 	numChunks   uint64
@@ -287,6 +291,9 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 			l.absentGen[idx]++
 		}
 		l.presenceVer++
+		if cfg.CreatedThisStart {
+			l.freshKnownZero = l.freshKnownZeroCandidates(head)
+		}
 	} else if err := l.loadPresence(); err != nil {
 		l.cancel()
 		return nil, err
@@ -778,9 +785,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if !guestFrozen {
 		staged, intents, err = l.stage(ctx, &st, spill.bytes)
 	}
-	if st.UploadedBytes > 0 {
-		st.PayloadNs += time.Since(stageStart).Nanoseconds()
-	}
+	st.PayloadNs += time.Since(stageStart).Nanoseconds()
 	if err != nil {
 		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, err

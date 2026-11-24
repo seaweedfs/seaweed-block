@@ -41,7 +41,10 @@ func hotChunkKeys(indices map[uint64]bool, recent map[uint64]uint64) []uint64 {
 // image through PUT/retry, then reads its next candidate independently of slow
 // workers. One durable intent covers all candidate keys before the first PUT;
 // unused keys are harmless and retain no payload memory.
-func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, head chunkHead, read func(context.Context, uint64) (capturedChunk, error)) ([]capturedChunk, []string, error) {
+//
+// staging says the batch is a staging round (before the barrier): each chunk
+// it finishes is counted in Stats.StagedChunks as it finishes.
+func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, head chunkHead, staging bool, read func(context.Context, uint64) (capturedChunk, error)) ([]capturedChunk, []string, error) {
 	out := make([]capturedChunk, len(batch))
 	keys := make([]string, len(batch))
 	for i, idx := range batch {
@@ -74,7 +77,7 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 				return fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 			}
 		}
-		l.rememberPayload(c, head.Gen)
+		l.rememberPayload(c, head.Gen, staging)
 		c.data = nil
 		out[i] = c
 		return nil
@@ -86,7 +89,7 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 }
 
 func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, versions map[uint64]uint64, head chunkHead, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
-	out, intents, err := l.streamCutPayloads(ctx, batch, head, func(ctx context.Context, idx uint64) (capturedChunk, error) {
+	out, intents, err := l.streamCutPayloads(ctx, batch, head, true, func(ctx context.Context, idx uint64) (capturedChunk, error) {
 		data, err := l.readChunk(idx)
 		if err != nil {
 			return capturedChunk{}, err
@@ -114,11 +117,16 @@ func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, 
 // until this version is superseded or a confirmed HEAD makes it reachable.
 // This cache belongs to one layer/owner lifetime. Generation equality is not
 // a reuse proof across reopen or takeover; those require content-hash matching.
-func (l *chunkLayerImpl) rememberPayload(c capturedChunk, gen uint64) {
+// A staged chunk is counted in Stats.StagedChunks here, when it is
+// remembered, so an interrupted round counts what it finished.
+func (l *chunkLayerImpl) rememberPayload(c capturedChunk, gen uint64, staged bool) {
 
 	c.data = nil
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
+	if staged {
+		l.stats.StagedChunks++
+	}
 	if l.reusable == nil {
 		l.reusable = make(map[uint64]stagedChunk)
 	}
