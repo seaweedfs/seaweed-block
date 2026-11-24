@@ -58,6 +58,10 @@ type headSzAttempt struct {
 	// DirtyAfter is the volume's DirtyChunks (capture candidates) after the
 	// attempt: on a failed attempt it shows whether the work done was kept.
 	DirtyAfter int `json:"dirty_chunks_after"`
+	// ChunkStatusAfter is the volume's whole chunk section of its durable
+	// status after the attempt, as served (every counter and the full
+	// LastCut), so a term no named field covers can still be read.
+	ChunkStatusAfter json.RawMessage `json:"chunk_status_after,omitempty"`
 	// the volume's last SUCCESSFUL cut's candidates, unchanged chunks and
 	// payload (streaming, copy, upload) wall time, as its durable status
 	// reports them (a failed attempt does not change them)
@@ -292,6 +296,7 @@ func headSzCutOnce(t *testing.T, env *handoffEnv, cfg headSzConfig, b bvHost, cu
 			}
 		}
 		at.DirtyAfter = headSzDirty(t, b)
+		at.ChunkStatusAfter = headSzChunkStatus(t, b)
 		lc := headSzLastCut(t, b)
 		at.LastCutTotalMs, at.LastCutChunks = float64(lc.TotalNs)/1e6, lc.UploadedChunks
 		at.LastCutCandidates, at.LastCutUnchanged, at.LastCutPayloadMs = lc.CandidateChunks, lc.UnchangedChunks, float64(lc.PayloadNs)/1e6
@@ -438,6 +443,27 @@ func headSzRun(t *testing.T, env *handoffEnv, timeout string, args ...string) (s
 	}
 	t.Fatalf("sw-block %q: %v\nstdout: %s\nstderr: %s", args, err, stdout.String(), stderr.String())
 	return "", -1
+}
+
+// headSzChunkStatus returns the volume's chunk section of its durable status
+// as served, unparsed; nil when there is none.
+func headSzChunkStatus(t *testing.T, b bvHost) json.RawMessage {
+	t.Helper()
+	var st struct {
+		Volumes []struct {
+			VolumeID string
+			Chunk    json.RawMessage
+		}
+	}
+	if err := json.Unmarshal(headSzGet(t, "http://"+b.status+"/status/durable?volume="+b.volume, 4<<20), &st); err != nil {
+		t.Fatalf("durable status of %s: %v", b.volume, err)
+	}
+	for _, s := range st.Volumes {
+		if s.VolumeID == b.volume && len(s.Chunk) > 0 && string(s.Chunk) != "null" {
+			return s.Chunk
+		}
+	}
+	return nil
 }
 
 // headSzDirty reads the volume's DirtyChunks (its capture candidates) from
