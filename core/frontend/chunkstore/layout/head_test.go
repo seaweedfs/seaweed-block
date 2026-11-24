@@ -329,3 +329,26 @@ func TestRunAbort_InterruptAtEveryStep(t *testing.T) {
 		}
 	})
 }
+
+// A name that is not valid UTF-8 would be stored as U+FFFD by the JSON
+// encoding (and still re-encode the same), so HEAD would hold another name
+// than the caller gave: refused on every string field.
+func TestHead_RefusesInvalidUTF8(t *testing.T) {
+	rn := RootName{Hash: Sum([]byte("r"))}
+	bad := "a\xff"
+	for name, h := range map[string]Head{
+		"holder":    {Epoch: 1, Holder: bad, Activity: Activity{Kind: ActIdle}},
+		"session":   {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActSnap, Session: bad}},
+		"snapshot":  {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{bad: {Root: rn}}},
+		"dependent": {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{"n": {Root: rn, Dependents: []string{bad}}}},
+	} {
+		if _, err := h.Encode(); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s %q: %v; want ErrMalformed", name, bad, err)
+		}
+	}
+	h := idleHead()
+	st := &memHead{h: &h}
+	if _, err := RunBegin(context.Background(), st, me, bad); err == nil || st.h.Activity.Kind != ActIdle {
+		t.Fatalf("Begin with an invalid UTF-8 session: %v, HEAD %+v; want refused, nothing written", err, st.h.Activity)
+	}
+}
