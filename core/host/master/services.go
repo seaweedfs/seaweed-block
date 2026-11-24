@@ -307,11 +307,13 @@ func (s *services) ExecuteFailback(ctx context.Context, req *control.FailbackReq
 // authority.HeartbeatMessage, and calls the observation host's
 // Ingest path.
 func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatReport) (*control.HeartbeatAck, error) {
-	if err := validateHeartbeat(r); err != nil {
+	// Phase 0: a node reports only for its own server id (TERM-CALLER-001),
+	// decided before the report is validated: a caller acting for another
+	// server is refused whatever it sends.
+	if err := auth.RequireNode(ctx, r.GetServerId()); err != nil {
 		return nil, err
 	}
-	// Phase 0: a node reports only for its own server id (TERM-CALLER-001).
-	if err := auth.RequireNode(ctx, r.ServerId); err != nil {
+	if err := validateHeartbeat(r); err != nil {
 		return nil, err
 	}
 	// Journal isolation: alarm on a durable root sharing the authority
