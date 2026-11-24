@@ -174,9 +174,12 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 	// ChunkMasterWait the deadline is the fixed limit from now; with it the
 	// host's bound, which does not run while the master gives no reply.
 	expired := false
-	waitCtx, endWait := context.WithCancel(p.closeCtx)
+	var waitCtx context.Context
+	var endWait context.CancelFunc
 	if p.cfg.ChunkMasterWait == nil {
 		waitCtx, endWait = context.WithTimeout(p.closeCtx, limit)
+	} else {
+		waitCtx, endWait = context.WithCancel(p.closeCtx)
 	}
 	defer endWait()
 	gaveUp := func() bool {
@@ -195,7 +198,11 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		defer h.attachMu.Unlock()
 		if p.current(h, gen) && h.chunk == nil {
 			ended = fmt.Sprintf("assignment unavailable, not serving (projection lacks %s)", chunkAuthorityGap(p.view.Projection(), volumeID))
-			h.backend.SetOperational(false, "chunk assignment unavailable: master wait ended")
+			why := "master wait ended"
+			if !expired {
+				why = waitCtx.Err().Error() // the fixed limit: context deadline exceeded
+			}
+			h.backend.SetOperational(false, "chunk assignment unavailable: "+why)
 			p.endChunkStartup(h, gen, nil)
 		}
 	}()
