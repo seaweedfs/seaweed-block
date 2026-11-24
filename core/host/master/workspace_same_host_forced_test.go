@@ -51,6 +51,9 @@ func TestWorkspaceRPCSameHostForcedRecoveryRecordsLoss(t *testing.T) {
 	if grant.NewEpoch != line.Epoch+1 || grant.LostRange == nil || grant.LostRange.LostAfterLsn != 42 || grant.LostRange.OldEpoch != line.Epoch {
 		t.Fatalf("recovery omitted the abandoned suffix: %+v", grant)
 	}
+	if bindings, ok, err := h.Lifecycle().WorkspaceBindings.Get("v"); err != nil || !ok || len(bindings) != 1 || bindings[0].Retired {
+		t.Fatalf("recovery retired its own target reservation: %+v %v", bindings, err)
+	}
 	if replay, err := ws.MoveWorkspace(ctx, q); err != nil || !proto.Equal(replay, grant) {
 		t.Fatalf("same-host recovery replay changed: %+v %v", replay, err)
 	}
