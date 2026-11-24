@@ -55,6 +55,15 @@ type headSzAttempt struct {
 	KeysAfter      int     `json:"chunk_keys_after"`
 	LastCutTotalMs float64 `json:"last_cut_total_ms"`
 	LastCutChunks  int     `json:"last_cut_uploaded_chunks"`
+	// DirtyAfter is the volume's DirtyChunks (capture candidates) after the
+	// attempt: on a failed attempt it shows whether the work done was kept.
+	DirtyAfter int `json:"dirty_chunks_after"`
+	// the volume's last SUCCESSFUL cut's candidates, unchanged chunks and
+	// payload (streaming, copy, upload) wall time, as its durable status
+	// reports them (a failed attempt does not change them)
+	LastCutCandidates int     `json:"last_cut_candidate_chunks"`
+	LastCutUnchanged  int     `json:"last_cut_unchanged_chunks"`
+	LastCutPayloadMs  float64 `json:"last_cut_payload_ms"`
 }
 
 type headSzCut struct {
@@ -282,7 +291,10 @@ func headSzCutOnce(t *testing.T, env *handoffEnv, cfg headSzConfig, b bvHost, cu
 				at.Message = strings.TrimSpace(out)
 			}
 		}
-		at.LastCutTotalMs, at.LastCutChunks = headSzLastCut(t, b)
+		at.DirtyAfter = headSzDirty(t, b)
+		lc := headSzLastCut(t, b)
+		at.LastCutTotalMs, at.LastCutChunks = float64(lc.TotalNs)/1e6, lc.UploadedChunks
+		at.LastCutCandidates, at.LastCutUnchanged, at.LastCutPayloadMs = lc.CandidateChunks, lc.UnchangedChunks, float64(lc.PayloadNs)/1e6
 		r.Attempts = append(r.Attempts, at)
 		if code == 0 {
 			r.Completed = true
@@ -329,19 +341,22 @@ func headSzCutOnce(t *testing.T, env *handoffEnv, cfg headSzConfig, b bvHost, cu
 	return r
 }
 
-// headSzLastCut reads the volume's last cut total (ms) and uploaded chunks
-// from its durable status; zeros when there is no last cut yet.
-func headSzLastCut(t *testing.T, b bvHost) (float64, int) {
+// headSzLastCutStats is the part of the volume's last cut an attempt records.
+type headSzLastCutStats struct {
+	TotalNs, PayloadNs                               int64
+	UploadedChunks, CandidateChunks, UnchangedChunks int
+}
+
+// headSzLastCut reads the volume's last cut from its durable status; zeros
+// when there is no last cut yet.
+func headSzLastCut(t *testing.T, b bvHost) headSzLastCutStats {
 	t.Helper()
 	var st struct {
 		Volumes []struct {
 			VolumeID string
 			Chunk    *struct {
 				Stats struct {
-					LastCut *struct {
-						TotalNs        int64
-						UploadedChunks int
-					}
+					LastCut *headSzLastCutStats
 				}
 			}
 		}
@@ -351,10 +366,10 @@ func headSzLastCut(t *testing.T, b bvHost) (float64, int) {
 	}
 	for _, s := range st.Volumes {
 		if s.VolumeID == b.volume && s.Chunk != nil && s.Chunk.Stats.LastCut != nil {
-			return float64(s.Chunk.Stats.LastCut.TotalNs) / 1e6, s.Chunk.Stats.LastCut.UploadedChunks
+			return *s.Chunk.Stats.LastCut
 		}
 	}
-	return 0, 0
+	return headSzLastCutStats{}
 }
 
 // headSzCountDir counts the entries of one filer directory by its JSON
