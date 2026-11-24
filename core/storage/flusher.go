@@ -187,9 +187,17 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	// record is durable reach the extent. An entry above the synced WAL
 	// frontier stays dirty for a later cycle: written now, a power loss
 	// could keep its extent page and lose its record, leaving extent bytes
-	// that no recovered record or map entry accounts for.
+	// that no recovered record or map entry accounts for. A cycle with no
+	// synced entry is idle: no extent write and no fsync.
 	synced := store.v3.wack.Load()
 	store.mu.RUnlock()
+	kept := entries[:0]
+	for _, e := range entries {
+		if e.LSN <= synced {
+			kept = append(kept, e)
+		}
+	}
+	entries = kept
 	if len(entries) == 0 {
 
 		return store.refreshW() // the mode-C idle refresh (DESIGN 6.2)
@@ -224,9 +232,6 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	recordCache := &flushRecordCacheV3{recoveryGen: recoveryGen}
 
 	for _, e := range entries {
-		if e.LSN > synced {
-			continue
-		}
 		data, _, err := f.readDirtyRecordV3Cached(e, recordCache)
 		if err != nil {
 			return err
