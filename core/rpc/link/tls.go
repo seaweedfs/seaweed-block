@@ -126,3 +126,37 @@ func DialMaster(target string, tls grpc.DialOption, opts ...grpc.DialOption) (*g
 	}
 	return DialWith(target, append([]grpc.DialOption{tls}, opts...)...)
 }
+
+// The environment variables a command-line tool (sw-block) reads for its
+// mutual-TLS identity toward blockmaster: a person's or tool's certificate,
+// its key, and the CA the master's certificate must verify against.
+const (
+	EnvTLSCert = "SW_BLOCK_TLS_CERT"
+	EnvTLSKey  = "SW_BLOCK_TLS_KEY"
+	EnvTLSCA   = "SW_BLOCK_TLS_CA"
+)
+
+// MasterTLSFromEnv is the dial option for a tool's master link: mutual TLS
+// when SW_BLOCK_TLS_CERT/_KEY/_CA name files (all three), nil (plaintext,
+// development mode) when none is set.
+func MasterTLSFromEnv() (grpc.DialOption, error) {
+	f := TLSFiles{Cert: os.Getenv(EnvTLSCert), Key: os.Getenv(EnvTLSKey), CA: os.Getenv(EnvTLSCA)}
+	if !f.Enabled() {
+		return nil, nil
+	}
+	d, err := ClientCredentials(f, "")
+	if err != nil {
+		return nil, fmt.Errorf("%s/%s/%s: %w", EnvTLSCert, EnvTLSKey, EnvTLSCA, err)
+	}
+	return d, nil
+}
+
+// DialMasterFromEnv opens a tool's lazy connection to blockmaster with the
+// identity from the environment (MasterTLSFromEnv).
+func DialMasterFromEnv(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	d, err := MasterTLSFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return DialMaster(target, d, opts...)
+}

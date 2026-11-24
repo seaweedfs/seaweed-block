@@ -124,7 +124,7 @@ func New(rpc control.WorkspaceServiceClient) *Client { return &Client{rpc: rpc} 
 // Dial connects to the blockmaster gRPC address (plaintext, as the other
 // operator commands).
 func Dial(addr string) (*Client, error) {
-	conn, err := link.Dial(addr)
+	conn, err := link.DialMasterFromEnv(addr)
 	if err != nil {
 		return nil, err
 	}
