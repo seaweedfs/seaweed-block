@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -217,7 +218,7 @@ func headSzStartCluster(t *testing.T, prefix string, vols []headSzVol) (*handoff
 			server, replica = v.server, "r1"
 		}
 		b := bvHost{id: v.id, server: server, replica: replica, volume: v.id, root: filepath.Join(h.dir, "vol-"+v.id),
-			data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t)}
+			data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: headSzLoopbackAddr(t)}
 		if v.host != "" {
 			b.data, b.ctrl = headSzRemoteAddr(t, v.host), headSzRemoteAddr(t, v.host)
 		}
@@ -242,6 +243,33 @@ func headSzStartCluster(t *testing.T, prefix string, vols []headSzVol) (*handoff
 	master := h.start(t, "blockmaster", h.master, margs...)
 	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
 	return env, clusterDir
+}
+
+// headSzLoopbackAddr picks a free 127.0.0.1 port from the harness's range:
+// blockvolume's NVMe/TCP target refuses any non-loopback bind, and the test
+// (user-space client or kernel nvme connect) always runs on the same host as
+// that blockvolume, also when SWBLOCK_TEST_LISTEN_HOST names a host address.
+func headSzLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	handoffPorts.Lock()
+	defer handoffPorts.Unlock()
+	if handoffPorts.used == nil {
+		handoffPorts.used = map[int]bool{}
+	}
+	for i := 0; i < 500; i++ {
+		p := 10000 + rand.Intn(10000)
+		if handoffPorts.used[p] {
+			continue
+		}
+		addr := fmt.Sprintf("127.0.0.1:%d", p)
+		if ln, err := net.Listen("tcp", addr); err == nil {
+			ln.Close()
+			handoffPorts.used[p] = true
+			return addr
+		}
+	}
+	t.Fatal("no free loopback port")
+	return ""
 }
 
 // headSzRemoteAddr picks host:<port> for a process on another machine from

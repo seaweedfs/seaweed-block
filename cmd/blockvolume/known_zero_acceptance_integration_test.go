@@ -244,7 +244,7 @@ func kzTargetRole(t *testing.T, rep *kzReport, bytes uint64, device bool, run st
 	rep.ChunkPath = ho.ChunkPath
 	for _, ht := range ho.Targets {
 		tb := bvHost{id: ht.Volume, server: ht.Server, replica: "r1", volume: ht.Volume, root: filepath.Join(h.dir, "vol-"+ht.Volume),
-			data: ht.Data, ctrl: ht.Ctrl, status: handoffAddress(t), nvme: handoffAddress(t)}
+			data: ht.Data, ctrl: ht.Ctrl, status: handoffAddress(t), nvme: headSzLoopbackAddr(t)}
 		env.hosts[ht.Volume] = tb
 		src := kzVolume{Volume: ht.Source, S1Name: ht.S1, Dirty1: ht.Dirty1, Files: ht.Files, Blocks: map[uint64][]byte{}}
 		for k, v := range ht.Blocks {
