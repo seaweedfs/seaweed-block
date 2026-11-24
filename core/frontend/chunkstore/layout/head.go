@@ -251,10 +251,11 @@ func RunBegin(ctx context.Context, st HeadStore, me HolderID, session string) (H
 // Abort is transition 5: activity snap(session) -> idle, by the holder at
 // HEAD's epoch. Nothing it prepared is reachable, so nothing else changes.
 // After its own crash a holder rolls back the session HEAD names by
-// aborting it. Abort when HEAD is already idle is a replay (the lost reply
-// of an earlier Abort: no one else can close this holder's session at its
-// epoch) and writes nothing. Another open session or a cleaning is
-// ErrNoSession.
+// aborting it. Abort when HEAD is already idle succeeds and writes
+// nothing: it means only that no activity remains (the session may have
+// been aborted, committed, or never begun); whether its work was committed
+// is read from HEAD's current root, never from Abort's result. Another
+// open session or a cleaning is ErrNoSession.
 func (h Head) Abort(me HolderID, session string) (next Head, changed bool, err error) {
 	if session == "" {
 		return Head{}, false, errors.New("layout: Abort needs a session id")
