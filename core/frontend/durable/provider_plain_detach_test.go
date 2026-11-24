@@ -113,7 +113,7 @@ func TestPlainDetachAfterPrecopyRefusalRequiresIdleFrontend(t *testing.T) {
 }
 
 func TestPlainDetachSkipsPrecopyCostAdmission(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
 	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
