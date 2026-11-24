@@ -37,6 +37,7 @@ func (h *Host) runWorkspaceLease(ctx context.Context, stop func(context.Context,
 			if err != nil {
 				return err
 			}
+			guard.observe = h.mw.renewal
 			if beforeInstall != nil {
 				beforeInstall()
 			}

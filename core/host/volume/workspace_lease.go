@@ -52,6 +52,13 @@ type WorkspaceLeaseGuard struct {
 	// after schedules Run's sleep between renewals (time.After; tests
 	// replace it before Run starts to observe the delays chosen).
 	after func(time.Duration) <-chan time.Time
+	// barrier is the master's barrier time T from the latest BARRIER refusal
+	// (request start + retry_after, under mu): before the first grant Run
+	// sleeps until T instead of polling every second.
+	barrier time.Time
+	// observe, when set, receives every renewal's start and result (the
+	// host's master wait). Set before Run; never called with mu held.
+	observe func(time.Time, error)
 }
 
 // stopPendingPoll caps Run's sleep after a completed renewal while a stop is
@@ -96,12 +103,20 @@ func (g *WorkspaceLeaseGuard) ClearStopPending() {
 // while a stop is pending.
 func (g *WorkspaceLeaseGuard) renewDelay() time.Duration {
 	g.mu.Lock()
-	delay := g.until.Sub(g.now()) / 3
+	now := g.now()
+	delay := g.until.Sub(now) / 3
 	if g.until.IsZero() {
 		delay = time.Second
 	}
+	barrier := g.until.IsZero() && g.barrier.After(now)
+	if barrier {
+		delay = g.barrier.Sub(now) // the master refuses every call before T
+	}
 	pending := g.stopPending
 	g.mu.Unlock()
+	if barrier && !pending {
+		return delay
+	}
 	if delay < 50*time.Millisecond {
 		delay = 50 * time.Millisecond
 	}
@@ -208,6 +223,14 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	}
 	defer cancel()
 	reply, err := g.client.RenewWorkspaceLease(rpcCtx, &g.id)
+	if g.observe != nil && ctx.Err() == nil {
+		g.observe(start, err)
+	}
+	if r := leaseRefusalDetail(err); r != nil && r.GetKind() == control.WorkspaceLeaseRefusal_BARRIER {
+		g.mu.Lock()
+		g.barrier = start.Add(time.Duration(r.GetRetryAfterNs()))
+		g.mu.Unlock()
+	}
 	if err != nil {
 		end := g.now()
 		elapsed := end.Sub(start).Round(time.Millisecond)

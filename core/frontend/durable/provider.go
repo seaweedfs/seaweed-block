@@ -116,6 +116,13 @@ type ProviderConfig struct {
 	// the host can apply its assignment. Zero defaults to 30s.
 	ChunkAssignmentTimeout time.Duration
 
+	// ChunkMasterWait, when set, replaces ChunkAssignmentTimeout's fixed
+	// deadline (a workspace primary): it returns the wait's bound (zero: no
+	// bound, the master gives no reply) and whether a permanent refusal
+	// (moved or deleted) ends the wait now. It is read on the wait's poll
+	// and must not block.
+	ChunkMasterWait func() (deadline time.Time, final bool)
+
 	// WALRetentionLSNs is the operator-tunable retention window past
 	// the substrate's checkpoint LSN (G6 §1.A α). Zero = pre-G6
 	// strict checkpoint-driven recycle. Non-zero relaxes the recycle

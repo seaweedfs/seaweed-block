@@ -695,6 +695,15 @@ func runVolume(f flags, exits *processExit) int {
 			cfg.ChunkMaintenanceInterval = f.chunk.maintenanceInterval
 			cfg.ChunkMaintenanceTimeout = defaultChunkMaintenanceTimeout
 			cfg.ChunkMaintenance = chunk.maintenance
+			if f.workspaceLease {
+				// The startup wait does not run out while the master gives no
+				// reply; it ends 30 s after answered contact (or the master's
+				// barrier), or at once on a moved/deleted refusal.
+				cfg.ChunkMasterWait = func() (time.Time, bool) {
+					deadline, final := h.MasterWaitState()
+					return deadline, final != ""
+				}
+			}
 			if chunk.catalog != nil && f.chunk.snapshotSchedule.period > 0 {
 				cfg.ChunkSnapshotPeriod = f.chunk.snapshotSchedule.period
 				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(chunk.catalog, f.chunk.snapshotSchedule.keep)

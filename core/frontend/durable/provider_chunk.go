@@ -159,17 +159,35 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		limit = 30 * time.Second
 	}
 	start := time.Now()
-	log.Printf("durable: chunk layer for volume=%s waits for master authority (up to %s): projection lacks %s",
-		volumeID, limit, chunkAuthorityGap(p.view.Projection(), volumeID))
+	bound := fmt.Sprintf("up to %s", limit)
+	if p.cfg.ChunkMasterWait != nil {
+		bound = fmt.Sprintf("%s of answered contact with the master", limit)
+	}
+	log.Printf("durable: chunk layer for volume=%s waits for master authority (%s): projection lacks %s",
+		volumeID, bound, chunkAuthorityGap(p.view.Projection(), volumeID))
 	ended := "superseded by a later recovery"
 	defer func() {
 		log.Printf("durable: chunk authority wait for volume=%s ended after %s: %s", volumeID, time.Since(start), ended)
 	}()
 	retained := false // this generation already chose sealed replay or diagnostics
-	waitCtx, endWait := context.WithTimeout(p.closeCtx, limit)
+	// expired: the wait gave up (deadline, or a permanent refusal). Without
+	// ChunkMasterWait the deadline is the fixed limit from now; with it the
+	// host's bound, which does not run while the master gives no reply.
+	expired := false
+	waitCtx, endWait := context.WithCancel(p.closeCtx)
+	if p.cfg.ChunkMasterWait == nil {
+		waitCtx, endWait = context.WithTimeout(p.closeCtx, limit)
+	}
 	defer endWait()
+	gaveUp := func() bool {
+		if p.cfg.ChunkMasterWait == nil {
+			return false
+		}
+		deadline, final := p.cfg.ChunkMasterWait()
+		return final || (!deadline.IsZero() && !time.Now().Before(deadline))
+	}
 	defer func() {
-		if retained || !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+		if retained || !(expired || errors.Is(waitCtx.Err(), context.DeadlineExceeded)) {
 			return
 		}
 		// The old wait must not overwrite a newer recovery's readiness.
@@ -177,7 +195,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		defer h.attachMu.Unlock()
 		if p.current(h, gen) && h.chunk == nil {
 			ended = fmt.Sprintf("assignment unavailable, not serving (projection lacks %s)", chunkAuthorityGap(p.view.Projection(), volumeID))
-			h.backend.SetOperational(false, "chunk assignment unavailable: "+waitCtx.Err().Error())
+			h.backend.SetOperational(false, "chunk assignment unavailable: master wait ended")
 			p.endChunkStartup(h, gen, nil)
 		}
 	}()
@@ -203,6 +221,10 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		}
 		if !p.current(h, gen) {
 			return // a later recovery (successful or failed) owns the volume
+		}
+		if gaveUp() {
+			expired, ended = true, "master wait ended (bound reached or permanent refusal)"
+			return
 		}
 		proj := p.view.Projection()
 		if !chunkAuthority(proj, volumeID) {
