@@ -44,7 +44,11 @@ func attachWriteSchedule(t *testing.T, readyAt time.Duration, refuse bool) {
 	done := make(chan outcome, 1)
 	start := time.Now()
 	go func() { n, err := b.Write(context.Background(), 4096, next); done <- outcome{n, err} }()
-	<-waiting
+	select {
+	case <-waiting:
+	case r := <-done:
+		t.Fatalf("write completed without waiting for attachment: n=%d err=%v", r.n, r.err)
+	}
 	synctest.Wait()
 	select {
 	case r := <-done:
