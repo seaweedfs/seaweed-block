@@ -180,10 +180,21 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		if e != nil {
 			return result, e
 		}
+		// The format gate, and whether the volume is live: a live volume
+		// whose HEAD is absent is checked below (INV-GC-HEAD-ABSENT-001).
+		v, hasVolume, e := g.cat.ReadVolume(ctx, vol)
+		if e != nil {
+			return result, e
+		}
+		headPresent, e := g.cat.headExists(ctx, path.Join(g.cat.base, vol))
+		if e != nil {
+			return result, e
+		}
 		h, e := r.GetHead(ctx)
 		if e != nil {
 			return result, e
 		}
+		intentNamed := map[string]bool{}
 		addHead := func(kind, id string, head storage.ChunkHead) error {
 			var err error
 			head, err = r.resolveManifest(ctx, head)
@@ -252,6 +263,11 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			return result, e
 		}
 		for _, in := range intents {
+			for _, key := range in.Keys {
+				if dir, name, e := r.keyLocation(key); e == nil {
+					intentNamed[path.Join(dir, name)] = true
+				}
+			}
 			result.Intents++
 			if in.CreatedNs <= 0 {
 				return result, errors.New("chunkstore: invalid intent creation time")
@@ -316,8 +332,15 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				if entry.GetName() <= pageAfter || entry.Attributes == nil || entry.Attributes.Crtime <= 0 {
 					return result, fmt.Errorf("chunkstore: invalid GC binding %s/%s", r.keyDir(), entry.GetName())
 				}
-				if _, e := decodeBinding(entry); e != nil {
+				bound, e := decodeBinding(entry)
+				if e != nil {
 					return result, fmt.Errorf("chunkstore: invalid GC binding %s/%s: %v", r.keyDir(), entry.GetName(), e)
+				}
+				if hasVolume && v.State == "" && !headPresent && !bound.done && !intentNamed[path.Join(r.keyDir(), entry.GetName())] {
+					// HEAD was removed (a stock tool pruning an entry whose
+					// needle is missing, or by hand): its keys would all look
+					// unrooted. Refuse the pass rather than reclaim the volume.
+					return result, fmt.Errorf("chunkstore: volume %s is live but has no HEAD while %s/%s is a live binding no intent names; GC refuses (restore HEAD, or delete the volume)", vol, r.keyDir(), entry.GetName())
 				}
 				key, e := url.PathUnescape(entry.GetName())
 				if e != nil {
@@ -435,6 +458,9 @@ func (b gcBlobReader) Put(context.Context, []byte) (string, error) {
 func reclaimBinding(ctx context.Context, f Filer, dir string, entry *filerpb.Entry) error {
 	e := proto.Clone(entry).(*filerpb.Entry)
 	e.Chunks = nil
+	if e.Attributes != nil {
+		e.Attributes.FileSize = 0 // no chunk: a stock read of the file is empty, not zeros
+	}
 	e.Extended[extGCDeleted] = []byte("done")
 	return f.UpdateEntry(ctx, dir, e, map[string][]byte{extKind: []byte(kindChunkKey), extGCDeleted: nil})
 }

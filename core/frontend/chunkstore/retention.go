@@ -152,12 +152,15 @@ func (c *Catalog) volumeEntry(ctx context.Context, vol string) (*filerpb.Entry, 
 	if err != nil {
 		return nil, "", err
 	}
-	e, err := c.f.LookupEntry(ctx, root, volumeName)
+	e, body, err := lookupRecord(ctx, c.f, c.blobs, root, volumeName)
 	if errors.Is(err, ErrNotFound) {
 		return nil, "", catErr(CodeNotChunkVolume, false, nil, "volume %s has no VOLUME entry", vol)
 	}
 	if err != nil {
 		return nil, "", remoteErr(err, "read VOLUME of %s", vol)
+	}
+	if _, err := decodeVolume(path.Join(root, volumeName), e, body); err != nil {
+		return nil, "", err // the format gate
 	}
 	return e, root, nil
 }

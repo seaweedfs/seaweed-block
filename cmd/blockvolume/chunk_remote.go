@@ -167,7 +167,7 @@ func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
 		FilerGRPC:   c.filer,
 		Collection:  c.collection,
 		Replication: c.replication,
-		AssignPath:  c.path,
+		AssignPath:  chunkstore.AssignPathFor(c.path),
 	})
 	if err != nil {
 		return chunkWiring{}, err

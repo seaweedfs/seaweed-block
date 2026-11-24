@@ -37,7 +37,7 @@ func TestOpsChunk_UploadsFollowThePathRule(t *testing.T) {
 			t.Errorf("%s: dialed %d times", args[0], len(got)-n)
 			continue
 		}
-		want := chunkstore.SWFSConfig{FilerGRPC: "filer:18888", AssignPath: "/rule/blocks", Collection: "blk", Replication: "001"}
+		want := chunkstore.SWFSConfig{FilerGRPC: "filer:18888", AssignPath: "/rule/blocks/", Collection: "blk", Replication: "001"}
 		if got[n] != want {
 			t.Errorf("%s: dialed %+v; want %+v", args[0], got[n], want)
 		}

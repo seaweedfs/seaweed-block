@@ -58,3 +58,28 @@ func TestVolumeFormat_PreF4StoreRefused(t *testing.T) {
 		}
 	}
 }
+
+// The frozen pre-F4 stores without their VOLUME entries (a store from
+// before VOLUME entries: HEAD present, no VOLUME) are refused by attach,
+// never stamped format 2, and nothing is written.
+func TestVolumeFormat_PreF4StoreWithoutVolumeRefused(t *testing.T) {
+	for _, segmented := range []bool{false, true} {
+		f, b := loadPreF4(t, segmented)
+		for p := range f.entries {
+			if strings.HasSuffix(p, "/"+volumeName) {
+				delete(f.entries, p)
+			}
+		}
+		c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written := len(f.allWritten())
+		if _, err := c.EnsureVolume(context.Background(), "v1", catGeo); CodeOf(err) != CodeNotChunkVolume {
+			t.Fatalf("segmented=%t: attach to a pre-VOLUME store: %v", segmented, err)
+		}
+		if n := len(f.allWritten()) - written; n != 0 {
+			t.Fatalf("segmented=%t: %d entries written", segmented, n)
+		}
+	}
+}

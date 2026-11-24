@@ -79,6 +79,14 @@ func adapterCatalog(t *testing.T) (*fakeChunkProvider, *chunkstore.Catalog) {
 	head := storage.ChunkHead{Gen: 3, Epoch: 2, Holder: "r1", RemoteLSN: 9, State: storage.ChunkHeadActive,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e2/c0/k1"}, 5: {Key: "chunks/e2/c5/k2"}}}
 	f := &adapterManifestFiler{Filer: chunkstore.NewMemFiler(), blobs: map[string][]byte{}}
+	// VOLUME first, as attach makes it before any cut binds a key.
+	cat, err := chunkstore.NewCatalog(f, "/swblock/chunks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.EnsureVolume(context.Background(), "v1", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
+		t.Fatal(err)
+	}
 	r, err := chunkstore.NewChunkRemote(f, f, "/swblock/chunks/v1")
 	if err != nil {
 		t.Fatal(err)
@@ -88,13 +96,6 @@ func adapterCatalog(t *testing.T) (*fakeChunkProvider, *chunkstore.Catalog) {
 		t.Fatal(err)
 	}
 	fp := &fakeChunkProvider{cut: storage.ChunkCutResult{H: 9, Head: head}}
-	cat, err := chunkstore.NewCatalog(f, "/swblock/chunks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cat.EnsureVolume(context.Background(), "v1", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
-		t.Fatal(err)
-	}
 	return fp, cat
 }
 

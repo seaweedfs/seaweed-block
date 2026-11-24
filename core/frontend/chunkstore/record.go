@@ -41,6 +41,11 @@ var objectUploadTimeout = storage.ObjectUploadTimeout
 // reads. Retryable.
 var ErrRecordBusy = errors.New("chunkstore: record rewritten while being read; retry")
 
+// ErrRecordLost: a record's entry names a payload needle the store reports
+// absent, and a re-read names the same needle: the payload is lost (never an
+// absent or empty record).
+var ErrRecordLost = errors.New("chunkstore: record payload lost")
+
 // errRecordGone: the record vanished between a read and its re-read.
 var errRecordGone = errors.New("chunkstore: record removed while being read")
 
@@ -196,7 +201,7 @@ func readRecord(ctx context.Context, f Filer, blobs Blobs, dir string, e *filerp
 			return nil, nil, lerr
 		}
 		if sameChunks(e, again) {
-			return nil, nil, fmt.Errorf("chunkstore: record %s: payload lost (its needle is absent and the entry still names it): %v", p, err)
+			return nil, nil, fmt.Errorf("%w: %s (its needle is absent and the entry still names it): %v", ErrRecordLost, p, err)
 		}
 		e = again
 	}

@@ -24,53 +24,71 @@ const (
 	filerConfName = "filer.conf"
 )
 
+// AssignPathFor is the assign path of chunk base base: the directory form
+// (base/), the path every entry under base has as a prefix and the one
+// checkPathRule judges, so the rule the check accepts is the rule the filer
+// applies to the needles it assigns.
+func AssignPathFor(base string) string { return strings.TrimSuffix(base, "/") + "/" }
+
 // ErrPathRule: the chunk path's storage rule would lose or block data.
 var ErrPathRule = errors.New("chunkstore: chunk path storage rule refused")
 
 // pathRule is one filer.conf location; the filer writes protojson
-// (lowerCamelCase), and reads either name.
+// (lowerCamelCase), and reads either name. fsync and worm are kept by
+// presence (unset differs from false), as the filer merges them.
 type pathRule struct {
-	prefix          string
-	ttl             string
-	fsync, readOnly bool
-	worm            *bool
+	prefix                      string
+	ttl                         string
+	readOnly, disableChunkDelet bool
+	fsync, worm                 *bool
 }
 
 func parseFilerConf(body []byte) ([]pathRule, error) {
 	var doc struct {
+		Version   int                          `json:"version"`
 		Locations []map[string]json.RawMessage `json:"locations"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, err
 	}
-	field := func(m map[string]json.RawMessage, camel, snake string, v any) error {
+	field := func(m map[string]json.RawMessage, camel, snake string, v any) (bool, error) {
 		raw, ok := m[camel]
 		if !ok {
 			raw, ok = m[snake]
 		}
 		if !ok {
-			return nil
+			return false, nil
 		}
-		return json.Unmarshal(raw, v)
+		return true, json.Unmarshal(raw, v)
 	}
 	out := make([]pathRule, 0, len(doc.Locations))
 	for _, m := range doc.Locations {
 		var r pathRule
-		var worm bool
-		_, hasWorm := m["worm"]
-		for _, err := range []error{
-			field(m, "locationPrefix", "location_prefix", &r.prefix),
-			field(m, "ttl", "ttl", &r.ttl),
-			field(m, "fsync", "fsync", &r.fsync),
-			field(m, "readOnly", "read_only", &r.readOnly),
-			field(m, "worm", "worm", &worm),
+		var fsync, worm bool
+		var hasFsync, hasWorm bool
+		var err error
+		for _, step := range []func() error{
+			func() error { _, err := field(m, "locationPrefix", "location_prefix", &r.prefix); return err },
+			func() error { _, err := field(m, "ttl", "ttl", &r.ttl); return err },
+			func() error { _, err := field(m, "readOnly", "read_only", &r.readOnly); return err },
+			func() error {
+				_, err := field(m, "disableChunkDeletion", "disable_chunk_deletion", &r.disableChunkDelet)
+				return err
+			},
+			func() error { hasFsync, err = field(m, "fsync", "fsync", &fsync); return err },
+			func() error { hasWorm, err = field(m, "worm", "worm", &worm); return err },
 		} {
-			if err != nil {
+			if err := step(); err != nil {
 				return nil, err
 			}
 		}
-		if hasWorm {
+		// Older files were written with every field present: an explicit
+		// false there means unset (worm before version 1, fsync before 2).
+		if hasWorm && (worm || doc.Version >= 1) {
 			r.worm = &worm
+		}
+		if hasFsync && (fsync || doc.Version >= 2) {
+			r.fsync = &fsync
 		}
 		out = append(out, r)
 	}
@@ -78,32 +96,37 @@ func parseFilerConf(body []byte) ([]pathRule, error) {
 }
 
 // checkPathRule judges the rules for the chunk base directory base, with
-// the filer's buckets directory buckets. Stock merging: every rule whose
-// prefix is a prefix of a path applies, shorter first; fsync and readOnly
-// are OR'ed, ttl and worm are taken from the longest rule that sets them.
-// A rule inside the chunk path applies to the entries under it.
+// the filer's buckets directory buckets, merged as the filer merges them
+// (SeaweedFS 4.53 mergePathConf): every rule whose prefix is a prefix of a
+// path applies, shorter first; readOnly and disableChunkDeletion are OR'ed;
+// ttl, fsync and worm come from the longest rule that sets them. A rule
+// inside the chunk path applies to the entries under it, so it must not
+// set ttl, readOnly, disableChunkDeletion or worm, nor turn fsync off.
 func checkPathRule(rules []pathRule, base, buckets string) error {
-	dir := strings.TrimSuffix(base, "/") + "/"
+	dir := AssignPathFor(base)
 	if b := strings.TrimSuffix(buckets, "/"); b != "" && (base == b || strings.HasPrefix(dir, b+"/")) {
 		return fmt.Errorf("%w: %s is under the filer's buckets directory %s (S3 lifecycle can expire it)", ErrPathRule, base, b)
 	}
 	sort.SliceStable(rules, func(i, j int) bool { return len(rules[i].prefix) < len(rules[j].prefix) })
-	var fsync, readOnly, worm bool
+	var fsync, readOnly, worm, noDelete bool
 	ttl := ""
 	for _, r := range rules {
 		switch {
 		case r.prefix != "" && strings.HasPrefix(dir, r.prefix): // applies to the chunk path
-			fsync = fsync || r.fsync
 			readOnly = readOnly || r.readOnly
+			noDelete = noDelete || r.disableChunkDelet
 			if r.ttl != "" {
 				ttl = r.ttl
+			}
+			if r.fsync != nil {
+				fsync = *r.fsync
 			}
 			if r.worm != nil {
 				worm = *r.worm
 			}
 		case strings.HasPrefix(r.prefix, dir): // a rule inside the chunk path
-			if r.ttl != "" || r.readOnly || (r.worm != nil && *r.worm) {
-				return fmt.Errorf("%w: the rule on %s sets ttl %q, readOnly %t or worm", ErrPathRule, r.prefix, r.ttl, r.readOnly)
+			if r.ttl != "" || r.readOnly || r.disableChunkDelet || (r.worm != nil && *r.worm) || (r.fsync != nil && !*r.fsync) {
+				return fmt.Errorf("%w: the rule on %s sets ttl %q, readOnly, disableChunkDeletion or worm, or turns fsync off", ErrPathRule, r.prefix, r.ttl)
 			}
 		}
 	}
@@ -114,6 +137,8 @@ func checkPathRule(rules []pathRule, base, buckets string) error {
 		return fmt.Errorf("%w: the rule on %s is readOnly", ErrPathRule, base)
 	case worm:
 		return fmt.Errorf("%w: the rule on %s is worm", ErrPathRule, base)
+	case noDelete:
+		return fmt.Errorf("%w: the rule on %s sets disableChunkDeletion: reclaimed needles would never be deleted", ErrPathRule, base)
 	case !fsync:
 		return fmt.Errorf("%w: no rule on %s sets fsync; configure one, e.g. fs.configure -locationPrefix=%s -fsync -apply", ErrPathRule, base, dir)
 	}

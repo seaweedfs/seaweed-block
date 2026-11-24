@@ -436,6 +436,33 @@ func (c *Catalog) ReadVolume(ctx context.Context, vol string) (VolumeInfo, bool,
 	return v, true, nil
 }
 
+// refuseVolumelessData refuses vol when it has no VOLUME entry but has a
+// HEAD or a chunk key binding.
+func (c *Catalog) refuseVolumelessData(ctx context.Context, vol, root string) error {
+	has, err := c.headExists(ctx, root)
+	if err != nil {
+		return remoteErr(err, "read HEAD of %s", vol)
+	}
+	if !has {
+		keys, err := c.f.ListEntries(ctx, path.Join(root, keysDir), "", "", 1)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return remoteErr(err, "list the chunk keys of %s", vol)
+		}
+		has = len(keys) != 0
+	}
+	if has {
+		return catErr(CodeNotChunkVolume, false, nil, "volume %s has a HEAD or chunk keys but no VOLUME entry: a store from before volume format %d; it is not converted, recreate it", vol, volumeFormat)
+	}
+	return nil
+}
+
+// checkFormat is the format gate of an operation on vol's records: a VOLUME
+// of another format is refused; an absent VOLUME is left to the operation.
+func (c *Catalog) checkFormat(ctx context.Context, vol string) error {
+	_, _, err := c.ReadVolume(ctx, vol)
+	return err
+}
+
 func (c *Catalog) headExists(ctx context.Context, root string) (bool, error) {
 	_, err := c.f.LookupEntry(ctx, root, headName)
 	if errors.Is(err, ErrNotFound) {
@@ -503,6 +530,12 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 		if g.BlockSize != 0 && g.NumBlocks > geometry.MaxVolumeBytes/uint64(g.BlockSize) {
 			return VolumeInfo{}, catErr(CodeGeometryMismatch, false, nil, "volume size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
 		}
+		// A HEAD or a key binding without VOLUME is a store from before
+		// VOLUME entries, so of volume format 1: stamping it format 2 would
+		// open it in the wrong form. Refuse; it is recreated, not converted.
+		if err := c.refuseVolumelessData(ctx, vol, root); err != nil {
+			return VolumeInfo{}, err
+		}
 		v = VolumeInfo{Format: volumeFormat, VolumeID: vol, Geometry: g, Origin: OriginCreate, CreatedNs: c.now().UnixNano()}
 		e, err := volumeEntry(v, "")
 		if err != nil {
@@ -532,8 +565,8 @@ func (c *Catalog) EnsureVolume(ctx context.Context, vol string, g Geometry) (Vol
 	if v.Origin == OriginCreate {
 		// A created volume gets its initial HEAD with VOLUME (integration
 		// ruling F1): gen 1, epoch 0, no holder, remote_lsn 0, no chunks
-		// (all zero). An exclusive create: an existing HEAD (a volume made
-		// before VOLUME entries, or an earlier attach) is kept.
+		// (all zero). An exclusive create: an existing HEAD (an earlier
+		// attach) is kept.
 		if err := c.ensureInitialHead(ctx, vol, root); err != nil {
 			return VolumeInfo{}, err
 		}
@@ -1082,6 +1115,9 @@ func (c *Catalog) ListSnapshots(ctx context.Context, vol string, opts ListOption
 	if err != nil {
 		return nil, "", err
 	}
+	if err := c.checkFormat(ctx, vol); err != nil {
+		return nil, "", err
+	}
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -1129,6 +1165,9 @@ func (c *Catalog) DeleteSnapshot(ctx context.Context, vol, name string) (string,
 		return "", err
 	}
 	if err := CheckSnapshotName(name); err != nil {
+		return "", err
+	}
+	if err := c.checkFormat(ctx, vol); err != nil {
 		return "", err
 	}
 	dir := path.Join(root, snapsDir, name)
@@ -1359,11 +1398,12 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 			if got == nil {
 				return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: VOLUME create outcome unknown; retry with the same request id", req.Target)
 			}
-			var v VolumeInfo
 			got, body, err := readRecord(ctx, c.f, c.blobs, dstRoot, got)
-			if err == nil {
-				v, err = decodeVolume(path.Join(dstRoot, volumeName), got, body)
+			if err != nil {
+				// Not read, not judged: retryable, never target_exists.
+				return ForkResult{}, catErr(CodeOutcomeUnknown, true, err, "fork %s: read the target VOLUME; retry with the same request id", req.Target)
 			}
+			v, err := decodeVolume(path.Join(dstRoot, volumeName), got, body)
 			if err != nil || c.checkForkRecord(v, req, origin) != nil || v.Fork.HeadSHA256 != digest {
 				return ForkResult{}, catErr(CodeTargetExists, false, nil, "volume %s exists (another request, or another image)", req.Target)
 			}
@@ -1441,6 +1481,9 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 // deleting is refused (snapshot_deleting), an absent or aborted one
 // (snapshot_not_found).
 func (c *Catalog) readForkParent(ctx context.Context, req ForkRequest) (SnapshotInfo, error) {
+	if err := c.checkFormat(ctx, req.Source); err != nil {
+		return SnapshotInfo{}, err
+	}
 	ref, ok, err := c.resolveSnap(ctx, req.Source, req.Snapshot)
 	if err != nil {
 		return SnapshotInfo{}, err

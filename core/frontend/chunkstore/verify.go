@@ -1041,6 +1041,11 @@ func (v *verifier) intents(ctx context.Context, h storage.ChunkHead, chunks map[
 			if errors.Is(err, errRecordGone) {
 				continue // settled since it was listed
 			}
+			if err != nil && !errors.Is(err, ErrRecordLost) {
+				// Unreadable for now (transport, busy): the pass is incomplete,
+				// not a finding.
+				return abortErr(ctx, err, "read intent %s of %s", after, v.vol)
+			}
 			var in storage.ChunkIntent
 			if err == nil {
 				in, err = decodeIntent(path.Join(dir, e.GetName()), e, body)

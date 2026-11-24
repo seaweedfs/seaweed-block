@@ -58,9 +58,9 @@ func chunkPlacementFlags(fs *flag.FlagSet) *chunkPlacement {
 }
 
 // swfsConfig is the client of filer for chunk base base; the assign path is
-// the base, as blockvolume's.
+// the base's directory form, as blockvolume's.
 func (p *chunkPlacement) swfsConfig(filer, base string) chunkstore.SWFSConfig {
-	return chunkstore.SWFSConfig{FilerGRPC: filer, Collection: p.collection, Replication: p.replication, AssignPath: base}
+	return chunkstore.SWFSConfig{FilerGRPC: filer, Collection: p.collection, Replication: p.replication, AssignPath: chunkstore.AssignPathFor(base)}
 }
 
 // checkSingleFiler is the start check of a command that writes chunk
@@ -73,13 +73,29 @@ var checkSingleFiler = func(ctx context.Context, f chunkstore.Filer) error {
 	return nil
 }
 
-// refuseUnlessSingleFiler runs the start check within the command's own
+// checkPathRule is the chunk path storage-rule check blockvolume runs at
+// start (fsync; no ttl, readOnly, worm or disableChunkDeletion; not under
+// the buckets directory); a writing command runs it too. Tests replace it.
+var checkPathRule = func(ctx context.Context, f chunkstore.Filer, base string) error {
+	if s, ok := f.(*chunkstore.SWFS); ok {
+		return s.CheckPathRule(ctx, base)
+	}
+	return nil
+}
+
+// refuseUnlessSingleFiler runs the start checks of a writing command (single
+// filer, then the chunk path's storage rule) within the command's own
 // timeout (a stalled filer or master cannot hold the command longer); exit
 // >= 0 means refused.
-func refuseUnlessSingleFiler(name string, f chunkstore.Filer, timeout time.Duration, stdout, stderr io.Writer) int {
+func refuseUnlessSingleFiler(name string, f chunkstore.Filer, base string, timeout time.Duration, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	err := checkSingleFiler(ctx, f)
+	if err == nil {
+		if err = checkPathRule(ctx, f, base); errors.Is(err, chunkstore.ErrPathRule) {
+			return chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
+		}
+	}
 	switch {
 	case err == nil:
 		return -1
@@ -332,7 +348,7 @@ func chunkCatalog(name, filer, base string, place *chunkPlacement, writes bool, 
 		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 	}
 	if writes {
-		if exit := refuseUnlessSingleFiler(name, f, timeout, stdout, stderr); exit >= 0 {
+		if exit := refuseUnlessSingleFiler(name, f, base, timeout, stdout, stderr); exit >= 0 {
 			_ = closeFn()
 			return nil, nil, exit
 		}

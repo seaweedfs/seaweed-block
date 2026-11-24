@@ -152,7 +152,7 @@ func TestGC_ReclaimIsOneConditionalUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bound, err := decodeBinding(e); err != nil || !bound.done || len(e.Chunks) != 0 {
+	if bound, err := decodeBinding(e); err != nil || !bound.done || len(e.Chunks) != 0 || e.GetAttributes().GetFileSize() != 0 {
 		t.Fatalf("reclaimed binding %+v %v chunks=%d", bound, err, len(e.Chunks))
 	}
 	if len(f.dropped) != 1 || f.dropped[0] != fid {

@@ -663,13 +663,26 @@ func TestCatalog_EnsureVolumeCreatesTheInitialHead(t *testing.T) {
 		t.Fatalf("a repeated attach replaced the HEAD: %+v", again)
 	}
 
-	// A volume published before VOLUME entries existed keeps its HEAD.
+	// A store published before VOLUME entries existed (so of volume format
+	// 1) is refused, never stamped format 2; nothing is written to it.
 	pub := publishSource(t, f, b, "v2", map[uint64][]byte{0: chunkBytes(0x10)})
-	if _, err := c.EnsureVolume(ctx, "v2", catGeo); err != nil {
+	written := len(f.allWritten())
+	if _, err := c.EnsureVolume(ctx, "v2", catGeo); CodeOf(err) != CodeNotChunkVolume || !strings.Contains(err.Error(), "no VOLUME entry") {
+		t.Fatalf("attach to a volume-less store: %v", err)
+	}
+	if n := len(f.allWritten()) - written; n != 0 {
+		t.Fatalf("%d entries written to a volume-less store", n)
+	}
+	if kept, _, _ := c.ReadHead(ctx, "v2"); kept.Gen != pub.Gen {
+		t.Fatalf("its HEAD changed: %+v, published %+v", kept, pub)
+	}
+	// Chunk keys without HEAD or VOLUME are refused the same way.
+	r3, _ := NewChunkRemote(f, b, catBase+"/v3")
+	if err := r3.Put(ctx, "chunks/e1/c0/k", []byte("orphaned key")); err != nil {
 		t.Fatal(err)
 	}
-	if kept, _, _ := c.ReadHead(ctx, "v2"); kept.Gen != pub.Gen || manifestCount(kept) != 1 || kept.Segments[0] != pub.Segments[0] {
-		t.Fatalf("an existing HEAD was replaced by the initial one: %+v, published %+v", kept, pub)
+	if _, err := c.EnsureVolume(ctx, "v3", catGeo); CodeOf(err) != CodeNotChunkVolume {
+		t.Fatalf("attach to keys without VOLUME: %v", err)
 	}
 
 	// VOLUME written, HEAD lost before it (an interrupted first attach).

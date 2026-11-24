@@ -268,6 +268,7 @@ type fakeBlobs struct {
 	puts    int
 	gets    int
 	failPut func(n int) error
+	failGet func(fid string) error // a non-nil return fails that Get
 }
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{data: map[string][]byte{}} }
@@ -307,6 +308,11 @@ func (b *fakeBlobs) Get(_ context.Context, fid string) ([]byte, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.gets++
+	if b.failGet != nil {
+		if err := b.failGet(fid); err != nil {
+			return nil, err
+		}
+	}
 	d, ok := b.data[fid]
 	if !ok {
 		if c, _, err := canonicalFid(fid); err == nil {
