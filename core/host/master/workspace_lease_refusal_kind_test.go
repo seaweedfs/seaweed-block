@@ -38,12 +38,14 @@ func refusalOf(t *testing.T, stage string, err error) (string, *control.Workspac
 // detail (OTHER): a bounded wait, never an early 78.
 func TestLeaseRefusalKinds(t *testing.T) {
 	var nowNS, headEpoch, headGen atomic.Int64
+	var headHolder atomic.Value
+	headHolder.Store("node-a/r1")
 	nowNS.Store(time.Now().UnixNano())
 	headEpoch.Store(1)
 	headGen.Store(9)
 	const ttl = 30 * time.Second
 	h, conn, _ := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
-		return authority.WorkspaceHead{Gen: uint64(headGen.Load()), Epoch: uint64(headEpoch.Load()), Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
+		return authority.WorkspaceHead{Gen: uint64(headGen.Load()), Epoch: uint64(headEpoch.Load()), Holder: headHolder.Load().(string), RemoteLSN: 42, Detached: true}, nil
 	}, func(h *Host) {
 		authority.WithWorkspaceLeaseConfig(ttl, func() time.Time { return time.Unix(0, nowNS.Load()) })(h.Publisher())
 	})
@@ -98,6 +100,7 @@ func TestLeaseRefusalKinds(t *testing.T) {
 			t.Fatal(err)
 		}
 		headEpoch.Store(int64(from.GetEpoch()))
+		headHolder.Store(from.GetServerId() + "/r1")
 		headGen.Add(1)
 		if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: from, HeadGen: uint64(headGen.Load())}); err != nil {
 			t.Fatal(err)
@@ -150,6 +153,7 @@ func TestLeaseRefusalKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	headEpoch.Store(int64(e4.GetEpoch()))
+	headHolder.Store("node-a/r1")
 	headGen.Add(1)
 	if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: e4, HeadGen: uint64(headGen.Load())}); err != nil {
 		t.Fatal(err)
