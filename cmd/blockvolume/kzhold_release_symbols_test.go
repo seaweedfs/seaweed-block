@@ -13,9 +13,6 @@ import (
 // must (the positive control: a check that finds nothing in either build would
 // prove nothing).
 func TestKZHoldNeverInReleaseBuild(t *testing.T) {
-	if testing.Short() {
-		t.Skip("builds blockvolume twice")
-	}
 	dir := t.TempDir()
 	syms := func(name string, tags ...string) string {
 		t.Helper()
