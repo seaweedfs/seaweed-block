@@ -60,7 +60,7 @@ cannot be combined with mutual TLS.
 
 **Who may call.** The role file has one line per certificate: `sha256:<hex fingerprint> <role> <id>`. The role is
 `viewer`, `operator`, `admin` (people and tools; each includes the one before it) or `node` (a volume host; its id is
-its `--server-id`). A certificate's CN must equal its line's id. A node may act only for its own server id. A forced
+its `--server-id`). A certificate's CN must equal its line's id. A node may act only for its own server id. Two lines with one node id are two keys of one server (for a rotation: add the new line, move the host to the new certificate, remove the old line), never two hosts: one server id names one host. A forced
 move needs `admin`. `kill -HUP` reloads the file. A removed line is refused from the next call, and its open streams
 end at the reload. A malformed file keeps the previous table and says so in the log. `--audit-log <path>` appends
 one JSON line per person's call, per role-file reload and per refused node call (at most once a minute per
