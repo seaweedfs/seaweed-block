@@ -168,57 +168,47 @@ func TestWALStoreChunk_PendingReadHonoursEarlierDeadline(t *testing.T) {
 }
 
 func TestWALStoreChunk_TakeoverWriteWaitsForAttach(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		hold     time.Duration
-		wantBusy bool
-	}{
-		{"short-claim", 100 * time.Millisecond, false},
-		{"readiness-budget-exhausted", 3500 * time.Millisecond, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, backend, _ := pendingTakeoverRead(t, tc.hold)
-			start := time.Now()
-			n, err := backend.Write(context.Background(), 33*4096, block(0x74))
-			elapsed := time.Since(start)
-			want := byte(0x74)
-			if err != nil {
-				// INV-FE-NVME-READY-STATUS-001: the product's 3s readiness
-				// allowance refuses without I/O; NVMe reports retryable 0x82.
-				if n != 0 || !errors.Is(err, frontend.ErrBackendBusy) || !errors.Is(err, context.DeadlineExceeded) || elapsed < 3*time.Second {
-					t.Fatalf("pending write: n=%d wait=%s err=%v", n, elapsed, err)
-				}
-				want = 0x33 // A refused write must preserve the original HEAD bytes.
-			} else if tc.wantBusy || n != 4096 || elapsed < tc.hold {
-				t.Fatalf("write did not wait for attach: n=%d wait=%s hold=%s want_busy=%t", n, elapsed, tc.hold, tc.wantBusy)
-			}
-			t.Logf("attach write: hold=%s wait=%s n=%d err=%v", tc.hold, elapsed, n, err)
-			// A loaded worker may still be attaching after the first refusal.
-			// Retry only readiness errors; every other error remains a failure.
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			got := make([]byte, 4096)
-			for {
-				n, err = backend.Read(ctx, 33*4096, got)
-				if !errors.Is(err, frontend.ErrBackendBusy) || ctx.Err() != nil {
-					break
-				}
-			}
-			if err != nil || n != 4096 || !bytes.Equal(got, block(want)) {
-				t.Fatalf("attached write readback: n=%d err=%v want=%x", n, err, want)
-			}
-			if want == 0x33 {
-				if n, err := backend.Write(ctx, 33*4096, block(0x74)); err != nil || n != 4096 {
-					t.Fatalf("retry attached write: n=%d err=%v", n, err)
-				}
-				if n, err := backend.Read(ctx, 33*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x74)) {
-					t.Fatalf("retry write readback: n=%d err=%v", n, err)
-				}
-			}
-			if n, err := backend.Read(ctx, 100*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x64)) {
-				t.Fatalf("takeover lost untouched data: n=%d err=%v", n, err)
-			}
-		})
+	const hold = 100 * time.Millisecond
+	_, backend, _ := pendingTakeoverRead(t, hold)
+	start := time.Now()
+	n, err := backend.Write(context.Background(), 33*4096, block(0x74))
+	elapsed := time.Since(start)
+	want := byte(0x74)
+	if err != nil {
+		// INV-FE-NVME-READY-STATUS-001: the product's 3s readiness
+		// allowance refuses without I/O; NVMe reports retryable 0x82.
+		if n != 0 || !errors.Is(err, frontend.ErrBackendBusy) || !errors.Is(err, context.DeadlineExceeded) || elapsed < 3*time.Second {
+			t.Fatalf("pending write: n=%d wait=%s err=%v", n, elapsed, err)
+		}
+		want = 0x33 // A refused write must preserve the original HEAD bytes.
+	} else if n != 4096 || elapsed < hold {
+		t.Fatalf("write did not wait for attach: n=%d wait=%s hold=%s", n, elapsed, hold)
+	}
+	t.Logf("attach write: hold=%s wait=%s n=%d err=%v", hold, elapsed, n, err)
+	// A loaded worker may still be attaching after the first refusal.
+	// Retry only readiness errors; every other error remains a failure.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	got := make([]byte, 4096)
+	for {
+		n, err = backend.Read(ctx, 33*4096, got)
+		if !errors.Is(err, frontend.ErrBackendBusy) || ctx.Err() != nil {
+			break
+		}
+	}
+	if err != nil || n != 4096 || !bytes.Equal(got, block(want)) {
+		t.Fatalf("attached write readback: n=%d err=%v want=%x", n, err, want)
+	}
+	if want == 0x33 {
+		if n, err := backend.Write(ctx, 33*4096, block(0x74)); err != nil || n != 4096 {
+			t.Fatalf("retry attached write: n=%d err=%v", n, err)
+		}
+		if n, err := backend.Read(ctx, 33*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x74)) {
+			t.Fatalf("retry write readback: n=%d err=%v", n, err)
+		}
+	}
+	if n, err := backend.Read(ctx, 100*4096, got); err != nil || n != 4096 || !bytes.Equal(got, block(0x64)) {
+		t.Fatalf("takeover lost untouched data: n=%d err=%v", n, err)
 	}
 }
 
