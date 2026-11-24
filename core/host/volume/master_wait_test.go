@@ -166,6 +166,10 @@ func TestLeaseGuardSleepsUntilTheBarrier(t *testing.T) {
 	// Cancel during the long barrier sleep: Run returns at once.
 	now = time.Unix(1_800_000_000, 0)
 	g2, _ := NewWorkspaceLeaseGuard(workspaceTestView{}, client, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r", Epoch: 1}, func(context.Context) (uint64, error) { return 7, nil }, func() time.Time { return now })
+	g2.barrierAt = func() time.Time { return now.Add(2 * time.Minute) } // a long sleep to T
+	if d := g2.renewDelay(); d < time.Minute {
+		t.Fatalf("fixture: delay %v; want the long sleep to the barrier", d)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- g2.Run(ctx) }()

@@ -182,12 +182,26 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		waitCtx, endWait = context.WithCancel(p.closeCtx)
 	}
 	defer endWait()
+	// gaveUp: a permanent refusal, or the host's bound passed. The bound
+	// counts from max(contact, the barrier time) on the host, but never
+	// ends before limit from this wait's own start: the lease guard, the
+	// only source of the barrier time, starts after the local open and
+	// recovery, so a slow open must not find the bound already spent.
 	gaveUp := func() bool {
 		if p.cfg.ChunkMasterWait == nil {
 			return false
 		}
 		deadline, final := p.cfg.ChunkMasterWait()
-		return final || (!deadline.IsZero() && !time.Now().Before(deadline))
+		if final {
+			return true
+		}
+		if deadline.IsZero() {
+			return false
+		}
+		if floor := start.Add(limit); deadline.Before(floor) {
+			deadline = floor
+		}
+		return !time.Now().Before(deadline)
 	}
 	defer func() {
 		if retained || !(expired || errors.Is(waitCtx.Err(), context.DeadlineExceeded)) {
@@ -229,12 +243,14 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		if !p.current(h, gen) {
 			return // a later recovery (successful or failed) owns the volume
 		}
-		if gaveUp() {
-			expired, ended = true, "master wait ended (bound reached or permanent refusal)"
-			return
-		}
 		proj := p.view.Projection()
 		if !chunkAuthority(proj, volumeID) {
+			// Authority first: a grant that arrives on the same tick as the
+			// bound attaches instead of giving up.
+			if gaveUp() {
+				expired, ended = true, "master wait ended (bound reached or permanent refusal)"
+				return
+			}
 			continue
 		}
 		if attempts++; attempts == 1 {

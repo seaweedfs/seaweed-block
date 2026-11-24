@@ -67,3 +67,46 @@ func TestChunkAuthorityWaitFollowsTheMasterWait(t *testing.T) {
 		})
 	}
 }
+
+// A slow open: the first answer from the master came long before the
+// authority wait started, so the host's bound (contact + 30 s) is already in
+// the past. The wait still gets its full limit from its own start (it cannot
+// have learned the barrier time before the lease guard ran), or the start
+// exits 75 every time and the unit loops to its start limit.
+func TestChunkAuthorityWaitAfterASlowOpenGetsItsFullLimit(t *testing.T) {
+	logs := &lockedLog{}
+	captureWriteLogs(t, logs)
+	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
+	const limit = 400 * time.Millisecond
+	past := time.Now().Add(-time.Hour) // contact + 30 s, long gone
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
+		BlockSize: 4096, ChunkBlocks: 4, ChunkAssignmentTimeout: limit,
+		ChunkMasterWait: func() (time.Time, bool) { return past, false },
+		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
+			t.Error("remote reached without authority")
+			return storage.NewMemChunkRemote(), nil
+		},
+	}, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	v.active.Store(true)
+	started := time.Now()
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	outcomes := any(p).(interface{ ChunkStartupOutcome(string) (uint64, bool) })
+	time.Sleep(limit / 2)
+	if _, failed := outcomes.ChunkStartupOutcome("v1"); failed {
+		t.Fatalf("the wait ended %v after it started, on a bound that passed before it began", time.Since(started).Round(time.Millisecond))
+	}
+	waitLog(t, logs, "assignment unavailable, not serving")
+	if took := time.Since(started); took < limit {
+		t.Fatalf("the wait ended after %v; want at least its limit %v from its start", took, limit)
+	}
+}
