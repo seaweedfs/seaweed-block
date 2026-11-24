@@ -83,6 +83,12 @@ func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authori
 			return authority.WorkspaceHead{}, err
 		}
 		// DecodeHeadDocument above owns the supported-format checks.
+		// The initial HEAD of a volume no holder ever claimed: epoch 0, no
+		// holder, active. It names no identity, so callers that need one get
+		// an error as before; the delete reads it as "never started".
+		if doc.Gen > 0 && doc.Epoch == 0 && doc.Holder == "" && doc.LegacyDetached == nil && doc.DetachedBy == nil && (doc.State == "" || doc.State == "active") {
+			return authority.WorkspaceHead{Gen: doc.Gen, FilerMtimeNS: headFilerMtimeNS(res.Header)}, authority.ErrWorkspaceHeadUnclaimed
+		}
 		if doc.Gen == 0 || doc.Epoch == 0 || doc.Holder == "" || doc.LegacyDetached != nil || (doc.State != "" && doc.State != "active" && doc.State != "detached") {
 			return authority.WorkspaceHead{}, fmt.Errorf("invalid HEAD identity/state")
 		}

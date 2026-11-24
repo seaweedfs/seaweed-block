@@ -27,11 +27,10 @@ func TestDeleteAdmitsANeverStartedLine(t *testing.T) {
 			return authority.WorkspaceHead{}, errors.New("filer unreachable")
 		}
 		e := uint64(headEpoch.Load())
-		holder := ""
-		if e > 0 {
-			holder = "node-a/r1"
+		if e == 0 { // the initial HEAD, as the filer reader returns it
+			return authority.WorkspaceHead{Gen: 2}, authority.ErrWorkspaceHeadUnclaimed
 		}
-		return authority.WorkspaceHead{Gen: 2, Epoch: e, Holder: holder}, nil
+		return authority.WorkspaceHead{Gen: 2, Epoch: e, Holder: "node-a/r1"}, nil
 	}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)

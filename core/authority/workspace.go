@@ -19,6 +19,13 @@ type WorkspaceHead struct {
 	FilerMtimeNS          int64
 }
 
+// ErrWorkspaceHeadUnclaimed is a HEAD reader's answer for a volume's initial
+// HEAD that no holder ever claimed (epoch 0, no holder, active): the head
+// returned with it carries its generation and epoch 0. It names no identity,
+// so a caller that needs one treats it as any read error; the delete
+// admission reads it as never started (TERM-LIVE-HOLDER-001).
+var ErrWorkspaceHeadUnclaimed = errors.New("HEAD never claimed: epoch 0, no holder")
+
 // ErrWorkspaceOutcomeUncertain marks a move whose outcome is unknown: its
 // issuing write failed after it may have reached the store, or the volume's
 // workspace persistence is already uncertain. Memory shows it unissued, but
