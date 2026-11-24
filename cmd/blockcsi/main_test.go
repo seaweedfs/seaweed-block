@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -342,6 +343,7 @@ func startG15aVolume(t *testing.T, bin, art string, o g15aVolumeOpts) *g15aProc 
 		"--replica-id", o.replicaID,
 		"--data-addr", o.dataAddr,
 		"--ctrl-addr", o.ctrlAddr,
+		"--volume-lock-dir-test-only", t.TempDir(),
 		"--durable-root", filepath.Join(art, "store-"+o.logTag),
 		"--durable-impl", "walstore",
 		"--durable-blocks", "256",
@@ -349,6 +351,12 @@ func startG15aVolume(t *testing.T, bin, art string, o g15aVolumeOpts) *g15aProc 
 		"--heartbeat-interval", "200ms",
 		"--t1-readiness",
 	)
+	// The test override is refused under systemd; do not inherit the test runner's invocation.
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "INVOCATION_ID=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
 	if o.iscsiAddr != "" {
 		cmd.Args = append(cmd.Args,
 			"--iscsi-listen", o.iscsiAddr,
