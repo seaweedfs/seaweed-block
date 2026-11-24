@@ -21,6 +21,7 @@ func TestAuthFlags(t *testing.T) {
 		{"authenticated, off loopback", append([]string{"--listen", "10.0.0.5:9180"}, all...), ""},
 		{"partial: no role file", []string{"--listen", "10.0.0.5:9180", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem"}, "together"},
 		{"partial: role file only", []string{"--role-file", "roles"}, "together"},
+		{"audit log without authentication", []string{"--audit-log", "audit.log"}, "needs authentication"},
 		{"authenticated with --insecure-external-bind", append([]string{"--listen", "10.0.0.5:9180", "--insecure-external-bind"}, all...), "cannot be combined"},
 	} {
 		_, err := parseFlags(append(append([]string{}, base...), c.args...))

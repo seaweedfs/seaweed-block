@@ -96,30 +96,43 @@ func RequireRole(ctx context.Context, min Role) error {
 	return nil
 }
 
-func (a *Authenticator) admit(ctx context.Context, method string, rules map[string]Rule) (context.Context, error) {
+func (a *Authenticator) admit(ctx context.Context, method string, rules map[string]Rule) (context.Context, Principal, error) {
 	p, err := a.PeerIdentity(ctx)
 	if err != nil {
-		return nil, err
+		return nil, Principal{}, err
 	}
 	r, ok := rules[method]
 	if !ok {
-		return nil, forbidden("method %s has no authorization rule", method)
+		return nil, p, forbidden("method %s has no authorization rule", method)
 	}
 	if !r.Allows(p) {
-		return nil, forbidden("%s %s may not call %s", p.Role, p.ID, method)
+		return nil, p, forbidden("%s %s may not call %s", p.Role, p.ID, method)
 	}
-	return context.WithValue(ctx, ctxKey{}, callAuth{p: p}), nil
+	return context.WithValue(ctx, ctxKey{}, callAuth{p: p}), p, nil
+}
+
+// authzRefusal is err when it is an authentication or authorization refusal
+// (raised by the interceptor or by a handler's RequireNode / RequireRole).
+func authzRefusal(err error) error {
+	switch status.Code(err) {
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return err
+	}
+	return nil
 }
 
 // UnaryInterceptor authenticates every call (PeerIdentity) and applies its
 // method's rule.
 func (a *Authenticator) UnaryInterceptor(rules map[string]Rule) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		ctx, err := a.admit(ctx, info.FullMethod, rules)
+		ctx, p, err := a.admit(ctx, info.FullMethod, rules)
 		if err != nil {
+			a.audit.call(info.FullMethod, p, err)
 			return nil, err
 		}
-		return handler(ctx, req)
+		resp, err := handler(ctx, req)
+		a.audit.call(info.FullMethod, p, authzRefusal(err))
+		return resp, err
 	}
 }
 
@@ -130,8 +143,9 @@ func (a *Authenticator) UnaryInterceptor(rules map[string]Rule) grpc.UnaryServer
 func (a *Authenticator) StreamInterceptor(rules map[string]Rule) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		changed := a.Changed()
-		ctx, err := a.admit(ss.Context(), info.FullMethod, rules)
+		ctx, p, err := a.admit(ss.Context(), info.FullMethod, rules)
 		if err != nil {
+			a.audit.call(info.FullMethod, p, err)
 			return err
 		}
 		ctx, cancel := context.WithCancelCause(ctx)
@@ -152,8 +166,9 @@ func (a *Authenticator) StreamInterceptor(rules map[string]Rule) grpc.StreamServ
 		}()
 		err = handler(srv, &authStream{ServerStream: ss, ctx: ctx, a: a})
 		if cause := context.Cause(ctx); cause != nil && status.Code(cause) == codes.Unauthenticated {
-			return cause
+			err = cause
 		}
+		a.audit.call(info.FullMethod, p, authzRefusal(err))
 		return err
 	}
 }

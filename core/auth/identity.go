@@ -117,7 +117,12 @@ type Authenticator struct {
 
 	mu      sync.Mutex
 	changed chan struct{} // closed (and replaced) by every Swap
+	audit   *AuditLog     // nil: no audit log
 }
+
+// SetAudit sends every call's authorization outcome and every reload to l.
+// Set before serving.
+func (a *Authenticator) SetAudit(l *AuditLog) { a.audit = l }
 
 // NewAuthenticator starts with t; now nil is time.Now.
 func NewAuthenticator(t *Table, now func() time.Time) *Authenticator {
@@ -149,6 +154,7 @@ func (a *Authenticator) Changed() <-chan struct{} {
 // Reload parses path and installs it; on any error the current table stays.
 func (a *Authenticator) Reload(path string) error {
 	t, err := LoadRoleFile(path)
+	a.audit.Reload(path, err)
 	if err != nil {
 		return err
 	}

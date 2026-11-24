@@ -85,6 +85,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.auth.tlsCert, "tls-cert", "", "blockmaster's TLS certificate (PEM): with --tls-key, --tls-client-ca and --role-file, every gRPC call needs mutual TLS")
 	fs.StringVar(&f.auth.tlsKey, "tls-key", "", "the key of --tls-cert (PEM)")
 	fs.StringVar(&f.auth.tlsClientCA, "tls-client-ca", "", "CA (PEM) every client certificate must verify against")
+	fs.StringVar(&f.auth.auditLog, "audit-log", "", "append-only audit log (JSON lines): every operator and admin call, refused node calls, role-file reloads")
 	fs.StringVar(&f.auth.roleFile, "role-file", "", "role file: lines 'sha256:<fingerprint> <viewer|operator|admin|node> <id>'; SIGHUP reloads it")
 	fs.BoolVar(&f.insecureExternalBind, "insecure-external-bind", false, "allow the unauthenticated control listeners (--listen, --frontend-publication-runtime-listen) on non-loopback addresses")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")

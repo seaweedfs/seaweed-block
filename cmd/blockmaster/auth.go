@@ -20,6 +20,7 @@ import (
 // development mode (plaintext, loopback only).
 type authFlags struct {
 	tlsCert, tlsKey, tlsClientCA, roleFile string
+	auditLog                               string // append-only audit log (optional)
 }
 
 func (a authFlags) enabled() bool {
@@ -33,6 +34,9 @@ func (a authFlags) files() link.TLSFiles {
 // validate refuses a partial set, and the plaintext escape hatch together
 // with authentication.
 func (a authFlags) validate(insecureExternalBind bool) error {
+	if a.auditLog != "" && !a.enabled() {
+		return fmt.Errorf("--audit-log needs authentication (--tls-cert, --tls-key, --tls-client-ca, --role-file)")
+	}
 	if !a.enabled() {
 		return nil
 	}
@@ -60,7 +64,15 @@ func (a authFlags) build() (*auth.Authenticator, []grpc.ServerOption, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return auth.NewAuthenticator(table, nil), []grpc.ServerOption{creds, link.ConnectionAge(link.MasterConnectionAge)}, nil
+	authn := auth.NewAuthenticator(table, nil)
+	if a.auditLog != "" {
+		l, _, err := auth.OpenAuditLog(a.auditLog)
+		if err != nil {
+			return nil, nil, err
+		}
+		authn.SetAudit(l)
+	}
+	return authn, []grpc.ServerOption{creds, link.ConnectionAge(link.MasterConnectionAge)}, nil
 }
 
 // certDaysLeft is the days to expiry of the certificate file at path.
