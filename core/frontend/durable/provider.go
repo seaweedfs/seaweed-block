@@ -267,6 +267,9 @@ type DurableProvider struct {
 
 	// testBeforeChunkFreshRetire holds the real post-presence/pre-marker boundary.
 	testBeforeChunkFreshRetire func() error
+	// testAfterChunkFreshRetire runs after the attach commit retired the
+	// fresh marker, before the known-zero marking is made durable.
+	testAfterChunkFreshRetire func() error
 
 	// testWALStoreFactory selects a dark store only in provider caller controls.
 	// No production option, flag or environment variable installs it.
@@ -297,8 +300,11 @@ type volHandle struct {
 	// volume file, written before the file is created and removed only
 	// after the first attach succeeded, so an interrupted initialization
 	// is still fresh after a restart.
-	fresh    bool
-	attachMu sync.Mutex // serializes recovery and attach of this volume
+	fresh bool
+	// createdThisStart: this process start created the store (in memory,
+	// never persisted); RULE-FRESH-KNOWN-ZERO needs it with fresh.
+	createdThisStart bool
+	attachMu         sync.Mutex // serializes recovery and attach of this volume
 	// recoverGen numbers this volume's RecoverVolume calls (written under
 	// attachMu and p.mu). waitGen is the generation of the live authority
 	// wait, 0 if none: a recovered volume whose layer waits for master
@@ -809,17 +815,19 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("durable: stat %s: %w", path, err)
 	}
-	if p.cfg.Impl == ImplAuto {
+	if p.cfg.Impl != ImplWALStoreChunk {
 		// A walstore-chunk volume shares walstore's on-disk format, and its
 		// authoritative bytes may live only in the remote HEAD. Opened as
-		// plain walstore it would serve local (possibly absent) extents, so
-		// auto refuses any root carrying chunk metadata; it never deletes
-		// or converts it.
+		// plain walstore it would serve local (possibly absent) extents, and
+		// a write through it would reach a store whose fresh marker still
+		// says no write ever did (RULE-FRESH-KNOWN-ZERO). So every other
+		// implementation, auto or explicit, refuses a root carrying chunk
+		// metadata; it never deletes or converts it.
 		if side, err := chunkSidecars(path); err != nil {
 			return nil, err
 		} else if len(side) > 0 {
-			return nil, fmt.Errorf("%w: %s is a chunk-managed volume (%s present); auto cannot open it: set --durable-impl=walstore-chunk with its remote configuration",
-				ErrImplKindMismatch, path, strings.Join(side, ", "))
+			return nil, fmt.Errorf("%w: %s is a chunk-managed volume (%s present); %s cannot open it: set --durable-impl=walstore-chunk with its remote configuration",
+				ErrImplKindMismatch, path, strings.Join(side, ", "), p.cfg.Impl)
 		}
 	}
 
@@ -862,7 +870,7 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	}
 	h, err := p.createFresh(volumeID, path, impl)
 	if err == nil && p.cfg.Impl == ImplWALStoreChunk {
-		h.fresh = true
+		h.fresh, h.createdThisStart = true, true
 	}
 	return h, err
 }

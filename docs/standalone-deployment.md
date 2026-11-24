@@ -202,7 +202,7 @@ with `move target node "s2" is not registered`.
 | `SWB_HEARTBEAT_INTERVAL` | `--heartbeat-interval` | `2s` | Heartbeat interval |
 | `SWB_RECOVER_TIMEOUT` | `--recover-timeout` | `30s` | Time to become promotion-ready before reporting `recovery_timeout` |
 | `SWB_DURABLE_ROOT` | `--durable-root` | empty (in memory, not durable) | Storage directory; writable by the service user |
-| `SWB_DURABLE_IMPL` | `--durable-impl` | empty (auto) | Auto creates new volumes as `walstore`, opens existing ones with their on-disk format, and refuses a `walstore-chunk` root. Explicit: `walstore`, `walstore-chunk` (workspace, proof of concept), `smartwal` (experimental). The examples set `walstore`. |
+| `SWB_DURABLE_IMPL` | `--durable-impl` | empty (auto) | Auto creates new volumes as `walstore`, opens existing ones with their on-disk format, and refuses a `walstore-chunk` root; so does every explicit value other than `walstore-chunk` (a chunk root holds data that may live only in the remote HEAD: open it with `--durable-impl=walstore-chunk` and its remote configuration). Explicit: `walstore`, `walstore-chunk` (workspace, proof of concept), `smartwal` (experimental). The examples set `walstore`. |
 | `SWB_DURABLE_BLOCKS` | `--durable-blocks` | `2048` | Blocks on first create |
 | `SWB_DURABLE_BLOCKSIZE` | `--durable-blocksize` | `4096` | Block size on first create |
 | `SWB_NVME_LISTEN` | `--nvme-listen` | empty (off) | NVMe/TCP target; loopback only, no authentication |

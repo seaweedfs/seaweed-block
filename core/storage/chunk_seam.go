@@ -343,6 +343,11 @@ type chunkLayerConfig struct {
 	// HEAD (every block absent, read lazily). False means an existing local
 	// volume. Never inferred from the local contents.
 	FreshFromHead bool
+	// CreatedThisStart says this process start created the local store (an
+	// in-memory fact, never persisted). RULE-FRESH-KNOWN-ZERO samples only
+	// with it and FreshFromHead: a fresh marker left by an earlier start, an
+	// older binary or another opener is never trusted.
+	CreatedThisStart bool
 	// RestoreGuard binds fresh attachment to the HEAD the provider claimed
 	// and durably seeded. A changed read refuses before hooks/readiness; the
 	// next recovery must repeat claim and seed. Nil is for direct layer users.
@@ -519,6 +524,7 @@ type chunkLayerStats struct {
 	PendingUnresolved bool                // an unresolved HEAD proposal is held now
 	DirtyChunks       int                 // chunks dirty since the last HEAD (not counting those awaiting reconciliation): candidates, not progress
 	StagedChunks      uint64              // chunks staged by every cut attempt, failed ones included (in-process)
+	KnownZeroChunks   uint64              // chunks this layer's fresh attach certified known-zero (RULE-FRESH-KNOWN-ZERO); 0 otherwise
 	Reconciling       bool                // the dirty set is being reconciled against HEAD; no cut publishes meanwhile
 	ReconcileDone     int                 // chunks compared so far
 	ReconcileTotal    int                 // chunks to compare
