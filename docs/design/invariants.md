@@ -524,16 +524,18 @@ stateDiagram-v2
   [*] --> idle: HEAD created outside this package
   idle --> snap: Begin(s)
   snap --> idle: Abort(s)
+  snap --> idle: Commit(s, root)
 ```
 
 | From | To | Guard | Enforced in | Protects |
 |---|---|---|---|---|
 | idle | snap(s) | caller is the holder at HEAD's epoch (epoch and server); HEAD present; snap(s) again is a replay, any other activity is refused | head.go `Head.Begin`, `runTransition` | `INV-SNAPK-HEAD-WRITE-001`, `INV-SNAPK-BEGIN-001` |
 | snap(s) | idle | holder at HEAD's epoch; activity is snap(s); over idle it succeeds without a write and means only that no activity remains | head.go `Head.Abort` | `INV-SNAPK-ABORT-001` |
+| snap(s) | idle, current = root | holder at HEAD's epoch; activity is snap(s); the previous manifest builds to HEAD's current root; the new own chunks, every segment and the root are present | commit.go `Head.Commit`, `RunCommit` | `INV-SNAPK-COMMIT-REACH-001`, `INV-SNAPK-TXN-INTERRUPT-001` |
 
 ## Part B. Invariant ledger
 
-332 rows: 261 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 317 new.
+334 rows: 263 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 319 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -1077,6 +1079,8 @@ Notes:
 | `INV-SNAPK-HEAD-CODEC-001` | HEAD is canonical JSON with at most 100 snapshots and sorted unique dependents; unknown fields, non-canonical bytes and names that are not valid UTF-8 are refused at encode and decode, and the next HEAD is checked before it is written. | M9 every transition | `core/frontend/chunkstore/layout` `head.go` `Head.check`, `Head.Encode`, `DecodeHead` | `TestHead_GoldenEncodingRoundTrip`, `TestHead_Refusals`, `TestHead_RefusesInvalidUTF8` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-BEGIN-001` | Begin opens snap(s) only for the holder at HEAD's epoch and only from idle; a re-run of the open session writes nothing; killed at its write and re-run, it ends in snap(s) at one generation step. | M9 idle → snap | `core/frontend/chunkstore/layout` `head.go` `Head.Begin`, `RunBegin` | `TestBegin_Closure`, `TestRunBegin_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-ABORT-001` | Abort closes the holder's own snap(s) and changes nothing else; after its own crash a holder rolls the open session back before beginning another; over idle Abort writes nothing and its success never says whether the work was committed. | M9 snap → idle (Abort) | `core/frontend/chunkstore/layout` `head.go` `Head.Abort`, `RunAbort` | `TestAbort_Closure`, `TestAbort_IdleMeansNoActivityRemains`, `TestAbort_RollBackAfterOwnCrash`, `TestRunAbort_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-COMMIT-REACH-001` | A commit never names an object that is not written: before its one HEAD update it finds present the own chunks new against HEAD's current root (that root rebuilt from the previous manifest, an empty image included), every segment and the root; unchanged and foreign chunks are not looked up. | M9 snap → idle (Commit) | `core/frontend/chunkstore/layout` `commit.go` `RunCommit`, `Head.Commit` | `TestCommit_Closure`, `TestRunCommit_LooksUpOnlyWhatIsNew`, `TestRunCommit_RefusesUnwrittenObjects`, `TestRunCommit_StaleBaseAndLookupFailure`, `TestRunCommit_AfterAnEmptyPublishedRoot`, `TestRunCommit_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-TXN-INTERRUPT-001` | A snapshot transaction killed at any of its writes (Begin, each object, Commit), before the write or after it applied with its reply lost, never leaves HEAD reaching a missing object, and the restarted holder (roll back, new session, base recomputed from HEAD) ends at the committed image. | M9 idle → snap → idle | `core/frontend/chunkstore/layout` `head.go`, `commit.go` (the transitions above) | `TestSnapshotSession_InterruptAtEveryStep`, `TestReachableMissing_Controls`, `TestAbort_AfterCommitLeavesTheCommit` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 
 Notes:
 
