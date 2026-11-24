@@ -335,4 +335,72 @@ func TestGC_HostileTwinStaleForkIntentAndPrunedHead(t *testing.T) {
 	if len(f.dropped) != 0 {
 		t.Fatalf("dropped %v; the shared keys %v must survive", f.dropped, shared)
 	}
+	// The stale intent is never cleaned without a readable HEAD: the copy
+	// sweep settles a fork intent only from a HEAD it reads.
+	if list, _ := f.ListEntries(ctx, catBase+"/v2/"+intentsDir, "", "", 0); len(list) != 1 {
+		t.Fatalf("intents %d; the stale intent was cleaned without a readable HEAD", len(list))
+	}
+}
+
+// A fork replay never recreates the fork-time HEAD over keys the fork wrote
+// after it published (its HEAD pruned since): it refuses head_missing.
+func TestFork_ReplayRefusesHeadMissingOverKeys(t *testing.T) {
+	f, g, _, _ := forkSharedFixture(t)
+	ctx := context.Background()
+	c := g.cat
+	r2, _ := NewChunkRemote(f, g.blobs.(gcBlobs).fakeBlobs, catBase+"/v2")
+	if err := r2.Put(ctx, "chunks/e1/c0/post-fork", []byte("written after the fork published")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.DeleteEntry(ctx, catBase+"/v2", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeHeadMissing {
+		t.Fatalf("replay over keys without HEAD: %v; want head_missing", err)
+	}
+	if _, err := f.LookupEntry(ctx, catBase+"/v2", headName); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the replay wrote a HEAD: %v", err)
+	}
+}
+
+// pruneAfterFirstRead removes HEAD of vol right after its first read (the
+// up-front check), before the mark reads it again.
+type pruneAfterFirstRead struct {
+	*fakeFiler
+	p     string
+	reads int
+}
+
+func (x *pruneAfterFirstRead) LookupEntry(ctx context.Context, dir, name string) (*filerpb.Entry, error) {
+	e, err := x.fakeFiler.LookupEntry(ctx, dir, name)
+	if path.Join(dir, name) == x.p {
+		if x.reads++; x.reads == 1 {
+			_ = x.fakeFiler.DeleteEntry(ctx, dir, name, nil)
+		}
+	}
+	return e, err
+}
+
+// A HEAD pruned between the up-front check and the mark's own read is the
+// same refusal: none of the volume's keys becomes a candidate.
+func TestGC_HeadPrunedDuringThePassRefuses(t *testing.T) {
+	f, b, _, _, now := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err := r.Put(ctx, "chunks/e1/c0/k", []byte("published data")); err != nil {
+		t.Fatal(err)
+	}
+	pr := &pruneAfterFirstRead{fakeFiler: f, p: path.Join(catBase, "v1", headName)}
+	c, err := NewCatalog(manifestFilerBlobs{pr, b}, catBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := NewCollector(c, b, GCConfig{Grace: time.Hour, IntentTTL: time.Hour, Now: func() time.Time { return *now }, IssuedEpoch: func(context.Context, string) (uint64, error) { return 1, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := g.Run(ctx)
+	if err == nil || res.Candidates != 0 || len(res.RefusedVolumes) != 1 {
+		t.Fatalf("HEAD pruned mid-pass: %+v %v; want a refusal, no candidate", res, err)
+	}
 }

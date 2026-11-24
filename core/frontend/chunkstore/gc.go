@@ -123,7 +123,7 @@ func (g *Collector) missingHeads(ctx context.Context, vols []string) ([]GCRefusa
 // refusalReason names what is missing and the remedy that works for it.
 func refusalReason(vol string, hasVolume bool) string {
 	if hasVolume {
-		return fmt.Sprintf("volume %s is live but has no HEAD: restore its HEAD, or (a fork or restore) retry it with its request id, or delete it with sw-block ops chunk volume-delete (an attach refuses while keys remain)", vol)
+		return fmt.Sprintf("volume %s is live but has no HEAD: restore its HEAD, or delete it with sw-block ops chunk volume-delete; a fork or restore that has no chunk keys yet may instead be retried with its request id (with keys, attach and replay refuse: head_missing)", vol)
 	}
 	return fmt.Sprintf("directory %s holds HEAD or chunk keys but no VOLUME: its image and what it rooted are unknown; once you decide its data is lost, remove the directory with the filer (fs.rm -r deletes its needles)", vol)
 }
@@ -245,6 +245,14 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		h, e := r.GetHead(ctx)
 		if e != nil {
 			return result, e
+		}
+		if h.Gen == 0 {
+			// Absent at this read (pruned since the check above): the same
+			// refusal, decided again for this volume.
+			if refused, e := g.missingHeads(ctx, []string{vol}); e != nil {
+				result.RefusedVolumes = append(result.RefusedVolumes, refused...)
+				return result, e
+			}
 		}
 		addHead := func(kind, id string, head storage.ChunkHead) error {
 			var err error

@@ -1336,6 +1336,16 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		if has {
 			return forkResult(existing, true), nil
 		}
+		// No HEAD over existing keys: the fork published and was written
+		// to, then its HEAD was pruned. A replay would recreate the
+		// fork-time HEAD and roll it back; refuse (INV-GC-HEAD-ABSENT-001).
+		keys, err := c.f.ListEntries(ctx, path.Join(c.base, req.Target, keysDir), "", "", 1)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return ForkResult{}, remoteErr(err, "list the chunk keys of %s", req.Target)
+		}
+		if len(keys) != 0 {
+			return ForkResult{}, catErr(CodeHeadMissing, false, nil, "%s %s has chunk keys but no HEAD: a replay would roll it back to its fork-time image; restore its HEAD, or delete it with sw-block ops chunk volume-delete", origin, req.Target)
+		}
 	}
 
 	// The deadline starts before the parent is read, and every attempt
