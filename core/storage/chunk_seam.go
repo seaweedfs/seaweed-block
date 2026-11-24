@@ -653,5 +653,14 @@ var (
 
 // attachChunkLayer attaches a chunk layer to an open store (chunk_layer.go).
 func attachChunkLayer(s *WALStore, remote chunkRemote, cfg chunkLayerConfig) (chunkLayer, error) {
-	return attachChunkLayerImpl(s, remote, cfg)
+	l, err := attachChunkLayerImpl(s, remote, cfg)
+	if err != nil {
+		return nil, err
+	}
+	// RULE-FRESH-KNOWN-ZERO: outside the capture barrier, as for a cut.
+	if impl, ok := l.(*chunkLayerImpl); ok && impl.freshKnownZero != nil {
+		impl.persistCapturedMapV3(impl.freshKnownZero)
+		impl.freshKnownZero = nil
+	}
+	return l, nil
 }

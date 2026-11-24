@@ -1,15 +1,16 @@
 package durable_test
 
-// The first cut of a volume. A local store created empty against a HEAD
-// that was never claimed and holds no segments knows every chunk it has not
-// written is zero, so its first cut scans only the chunks written since; a
-// store whose relation to HEAD is not known (a claimed HEAD, a restore or
-// fork target, a store an earlier release created) keeps scanning every
-// chunk it holds locally.
+// The first cut of a volume. A fresh local store (its first attach not yet
+// committed) knows every chunk its claimed HEAD does not name is zero on both
+// sides, so its first cut scans only the chunks written since; a
+// store that is not fresh (one an earlier release created, or any store
+// after its first attach commit) keeps its chunks' state as persisted. Chunks
+// HEAD names stay absent and are hydrated from HEAD.
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -118,10 +119,12 @@ func TestRedFirstCutOfAFreshVolumeScansOnlyWrittenChunks(t *testing.T) {
 	}
 }
 
-// TestFirstCutAgainstAClaimedHeadScansEveryChunk: a store created empty
-// against a HEAD another store already claimed (no segments yet) keeps
-// every chunk a candidate. Passes today; pins the fix's scope.
-func TestFirstCutAgainstAClaimedHeadScansEveryChunk(t *testing.T) {
+// TestFirstCutAgainstAClaimedHeadCertifiesUnnamedChunks: a store created
+// empty against a HEAD another store already claimed (no data published) is
+// fresh too: every chunk that HEAD does not name starts equal to it (both
+// zero), so the first cut has no candidates. General form of the rule: the
+// premise is the store's fresh marker, not the HEAD's history.
+func TestFirstCutAgainstAClaimedHeadCertifiesUnnamedChunks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
@@ -130,28 +133,28 @@ func TestFirstCutAgainstAClaimedHeadScansEveryChunk(t *testing.T) {
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if head, err := remote.GetHead(ctx); err != nil || head.Gen == 0 || len(head.Segments) != 0 {
-		t.Fatalf("setup: HEAD %+v %v; want a claimed HEAD with no segments", head, err)
+	if head, err := remote.GetHead(ctx); err != nil || head.Gen == 0 || len(head.Chunks) != 0 {
+		t.Fatalf("setup: HEAD %+v %v; want a claimed HEAD naming no chunk", head, err)
 	}
 	p := fcutProvider(t, t.TempDir(), remote)
 	fcutOpen(t, ctx, p)
-	if got := fcutStats(t, p).DirtyChunks; got != fcutChunks {
-		t.Fatalf("store created against a claimed HEAD: %d candidate chunks; want all %d", got, fcutChunks)
+	if got := fcutStats(t, p).DirtyChunks; got != 0 {
+		t.Fatalf("fresh store against a claimed HEAD naming nothing: %d candidate chunks; want 0", got)
 	}
 }
 
-// TestFirstCutOfARestoreTargetKeepsItsHydrationPath: a store created on a
-// new root against a HEAD that names chunks hydrates them (they are
-// absent, not candidates) and keeps every other chunk a candidate. Passes
-// today; pins the fix's scope.
+// TestFirstCutOfARestoreTargetKeepsItsHydrationPath: a fresh store against a
+// HEAD that names chunks keeps those chunks absent (hydrated from HEAD; a
+// read returns HEAD's data, never zeros) and starts every other chunk equal
+// to HEAD (zero), so its first cut has no candidates.
 func TestFirstCutOfARestoreTargetKeepsItsHydrationPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	remote := storage.NewMemChunkRemote()
 	first := fcutProvider(t, t.TempDir(), remote)
 	fcutOpen(t, ctx, first)
-	fcutWrite(t, ctx, first, pcChunkBlocks*3, 0x33)
-	fcutWrite(t, ctx, first, pcChunkBlocks*7, 0x37)
+	a := fcutWrite(t, ctx, first, pcChunkBlocks*3, 0x33)
+	b := fcutWrite(t, ctx, first, pcChunkBlocks*7, 0x37)
 	if _, err := first.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -160,8 +163,36 @@ func TestFirstCutOfARestoreTargetKeepsItsHydrationPath(t *testing.T) {
 	}
 	p := fcutProvider(t, t.TempDir(), remote)
 	fcutOpen(t, ctx, p)
-	s := fcutStats(t, p)
-	if s.AbsentChunks != 2 || s.DirtyChunks != fcutChunks-2 {
-		t.Fatalf("restore target: %d absent, %d candidate chunks; want 2 absent and %d candidates", s.AbsentChunks, s.DirtyChunks, fcutChunks-2)
+	if s := fcutStats(t, p); s.AbsentChunks != 2 || s.DirtyChunks != 0 {
+		t.Fatalf("restore target: %d absent, %d candidate chunks; want 2 absent and 0 candidates", s.AbsentChunks, s.DirtyChunks)
+	}
+	got := make([]byte, 4096)
+	for lba, want := range map[int][]byte{pcChunkBlocks * 3: a, pcChunkBlocks * 7: b} {
+		if n, err := p.Backend("v1").Read(ctx, int64(lba)*4096, got); err != nil || n != len(got) || !bytes.Equal(got, want) {
+			t.Fatalf("restore target read of HEAD-named block %d: %d %v, data equal %v; want HEAD's data, not zeros", lba, n, err, bytes.Equal(got, want))
+		}
+	}
+}
+
+// TestExplicitWALStoreRefusesAFreshChunkRoot: a root carrying chunk metadata
+// (here the fresh marker of a store that never attached) is refused by an
+// explicitly configured plain walstore as by auto, so no write can reach a
+// store whose marker says none ever did.
+func TestExplicitWALStoreRefusesAFreshChunkRoot(t *testing.T) {
+	root := t.TempDir()
+	p := fcutProvider(t, root, storage.NewMemChunkRemote())
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStore, StorageRoot: root, BlockSize: 4096, NumBlocks: pcBlocks}, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = plain.Close() })
+	if _, err := plain.EnsureStorage("v1"); !errors.Is(err, durable.ErrImplKindMismatch) {
+		t.Fatalf("explicit walstore on a fresh chunk root: %v; want ErrImplKindMismatch", err)
 	}
 }

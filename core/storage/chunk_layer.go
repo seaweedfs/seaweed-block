@@ -62,6 +62,10 @@ type chunkLayerImpl struct {
 	remote chunkRemote
 	cfg    chunkLayerConfig
 
+	// freshKnownZero: the mutation tokens RULE-FRESH-KNOWN-ZERO sampled at a
+	// fresh attach; applied and cleared by attachChunkLayer.
+	freshKnownZero map[uint64]uint64
+
 	blockSize   int
 	chunkBlocks uint64
 	numChunks   uint64
@@ -287,6 +291,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 			l.absentGen[idx]++
 		}
 		l.presenceVer++
+		l.freshKnownZero = l.freshKnownZeroCandidates(head)
 	} else if err := l.loadPresence(); err != nil {
 		l.cancel()
 		return nil, err

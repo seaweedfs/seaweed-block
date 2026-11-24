@@ -809,17 +809,19 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("durable: stat %s: %w", path, err)
 	}
-	if p.cfg.Impl == ImplAuto {
+	if p.cfg.Impl != ImplWALStoreChunk {
 		// A walstore-chunk volume shares walstore's on-disk format, and its
 		// authoritative bytes may live only in the remote HEAD. Opened as
-		// plain walstore it would serve local (possibly absent) extents, so
-		// auto refuses any root carrying chunk metadata; it never deletes
-		// or converts it.
+		// plain walstore it would serve local (possibly absent) extents, and
+		// a write through it would reach a store whose fresh marker still
+		// says no write ever did (RULE-FRESH-KNOWN-ZERO). So every other
+		// implementation, auto or explicit, refuses a root carrying chunk
+		// metadata; it never deletes or converts it.
 		if side, err := chunkSidecars(path); err != nil {
 			return nil, err
 		} else if len(side) > 0 {
-			return nil, fmt.Errorf("%w: %s is a chunk-managed volume (%s present); auto cannot open it: set --durable-impl=walstore-chunk with its remote configuration",
-				ErrImplKindMismatch, path, strings.Join(side, ", "))
+			return nil, fmt.Errorf("%w: %s is a chunk-managed volume (%s present); %s cannot open it: set --durable-impl=walstore-chunk with its remote configuration",
+				ErrImplKindMismatch, path, strings.Join(side, ", "), p.cfg.Impl)
 		}
 	}
 
