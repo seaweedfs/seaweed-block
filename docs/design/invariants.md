@@ -525,6 +525,9 @@ stateDiagram-v2
   idle --> snap: Begin(s)
   snap --> idle: Abort(s)
   snap --> idle: Commit(s, root)
+  idle --> idle: Claim(e)
+  snap --> idle: Claim(e), s void
+  clean --> idle: Claim(e), c void
 ```
 
 | From | To | Guard | Enforced in | Protects |
@@ -532,10 +535,11 @@ stateDiagram-v2
 | idle | snap(s) | caller is the holder at HEAD's epoch (epoch and server); HEAD present; snap(s) again is a replay, any other activity is refused | head.go `Head.Begin`, `runTransition` | `INV-SNAPK-HEAD-WRITE-001`, `INV-SNAPK-BEGIN-001` |
 | snap(s) | idle | holder at HEAD's epoch; activity is snap(s); over idle it succeeds without a write and means only that no activity remains | head.go `Head.Abort` | `INV-SNAPK-ABORT-001` |
 | snap(s) | idle, current = root | holder at HEAD's epoch; activity is snap(s); the previous manifest builds to HEAD's current root; the new own chunks, every segment and the root are present | commit.go `Head.Commit`, `RunCommit` | `INV-SNAPK-COMMIT-REACH-001`, `INV-SNAPK-TXN-INTERRUPT-001` |
+| any | idle at epoch e | e above HEAD's epoch (the same epoch and server is a replay); every older holder's lease has ended, checked after the read and before the update | claim.go `Head.Claim`, `RunClaim` (`LeaseWait.OldLeaseEnded`) | `INV-SNAPK-CLAIM-LEASE-001` |
 
 ## Part B. Invariant ledger
 
-334 rows: 263 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 319 new.
+335 rows: 264 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 320 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -1081,6 +1085,7 @@ Notes:
 | `INV-SNAPK-ABORT-001` | Abort closes the holder's own snap(s) and changes nothing else; after its own crash a holder rolls the open session back before beginning another; over idle Abort writes nothing and its success never says whether the work was committed. | M9 snap → idle (Abort) | `core/frontend/chunkstore/layout` `head.go` `Head.Abort`, `RunAbort` | `TestAbort_Closure`, `TestAbort_IdleMeansNoActivityRemains`, `TestAbort_RollBackAfterOwnCrash`, `TestRunAbort_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-COMMIT-REACH-001` | A commit never names an object that is not written: before its one HEAD update it finds present the own chunks new against HEAD's current root (that root rebuilt from the previous manifest, an empty image included), every segment and the root; unchanged and foreign chunks are not looked up. | M9 snap → idle (Commit) | `core/frontend/chunkstore/layout` `commit.go` `RunCommit`, `Head.Commit` | `TestCommit_Closure`, `TestRunCommit_LooksUpOnlyWhatIsNew`, `TestRunCommit_RefusesUnwrittenObjects`, `TestRunCommit_StaleBaseAndLookupFailure`, `TestRunCommit_AfterAnEmptyPublishedRoot`, `TestRunCommit_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-TXN-INTERRUPT-001` | A snapshot transaction killed at any of its writes (Begin, each object, Commit), before the write or after it applied with its reply lost, never leaves HEAD reaching a missing object, and the restarted holder (roll back, new session, base recomputed from HEAD) ends at the committed image. | M9 idle → snap → idle | `core/frontend/chunkstore/layout` `head.go`, `commit.go` (the transitions above) | `TestSnapshotSession_InterruptAtEveryStep`, `TestReachableMissing_Controls`, `TestAbort_AfterCommitLeavesTheCommit` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-CLAIM-LEASE-001` | A claim takes HEAD only at a newer epoch and only after every older holder's lease has ended (checked after the read, before the update); it voids any open session or cleaning, so the old holder's commit, abort and begin are refused. | M9 any → idle (Claim) | `core/frontend/chunkstore/layout` `claim.go` `RunClaim`, `Head.Claim` | `TestClaim_Closure`, `TestRunClaim_WaitsForTheOldLease`, `TestRunClaim_VoidsTheOldSession`, `TestRunClaim_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 
 Notes:
 
