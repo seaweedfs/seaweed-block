@@ -323,11 +323,12 @@ for 5 s), does not serve meanwhile, and `/status` shows `MasterWait` with reason
 nothing acknowledged is lost.
 
 **A start waits for its lease.** While blockmaster gives no reply, or refuses the
-node's credentials, the wait has no bound: the process serves nothing, holds no lease,
+node's credentials or identity, the wait has no bound: the process serves nothing, holds no lease,
 and logs `blockvolume: waiting for the master: <reason> since <time> (no bound)` when
 the reason changes and every 10 minutes (`/status` shows the same as `MasterWait`).
-Once blockmaster answers, the wait ends 30 seconds after the first answer, or 30
-seconds after the master's barrier time when that is later (fixed, no flag). If the
+The wait ends 30 seconds after the first answer received once the local store is
+open and recovered, or 30 seconds after the master's barrier time when that is later
+(fixed, no flag): a slow open does not use up the wait. If the
 grant comes inside the wait, the process serves. If it does not, the process logs
 `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable,
 not serving (...)` and exits with `blockvolume: exiting status=75
@@ -459,6 +460,7 @@ follow from that order:
 | renewal fails with `... clock-skew margin has not elapsed (re-grant refused until <time>, ...)` | Waiting for the re-grant barrier | Wait: the process sleeps until that time (at most 65 s after the stop, with defaults) |
 | `blockvolume: waiting for the master: unreachable since <time> (no bound)` | blockmaster gives no reply; the process waits without exiting | Bring blockmaster back; the process continues by itself |
 | `blockvolume: waiting for the master: credentials since <time> (no bound)` | blockmaster refuses this node's credentials; the process waits without exiting | Fix the node's certificate or role; the next call passes without a restart |
+| `blockvolume: waiting for the master: identity refused: unregistered` (or `wrong_host`) `since <time> (no bound)` | blockmaster does not know this `--server-id`, or the node calls from another host than its registered one; the process waits, never serves | Fix the cluster spec (the node's id and the address it connects from) or the unit's `--server-id`; the next call passes without a restart |
 | `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable, not serving` | blockmaster answered for 30 s (past its barrier) and granted no lease; the process then exits 75 (`reason=assignment_timeout`) | Nothing under the example unit: it is started again. A unit for a volume this host no longer serves stops at its start limit: disable it |
 | `blockvolume: exiting status=78 reason=moved` | blockmaster refused the lease: the volume moved to another host at a newer epoch. Not restarted | The volume serves elsewhere. If it is later moved back to this host, start the unit again (`systemctl start`); otherwise disable it |
 | `blockvolume: exiting status=78 reason=deleted` | blockmaster refused the lease: the volume's delete is committed. Not restarted | Disable the unit and remove its settings |
