@@ -3,6 +3,7 @@ package master
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,10 +35,10 @@ func TestDeleteAdmitsANeverStartedLine(t *testing.T) {
 	}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
-	for _, vol := range []string{"v", "w"} {
+	for i, vol := range []string{"v", "w"} {
 		reviewCreate(t, conn, ctx, vol)
 		ws := control.NewWorkspaceServiceClient(conn)
-		b := &control.WorkspaceBinding{VolumeId: vol, ServerId: "node-a", DataAddr: "127.0.0.1:10000", CtrlAddr: "127.0.0.1:10001"}
+		b := &control.WorkspaceBinding{VolumeId: vol, ServerId: "node-a", DataAddr: fmt.Sprintf("127.0.0.1:%d", 10000+2*i), CtrlAddr: fmt.Sprintf("127.0.0.1:%d", 10001+2*i)}
 		if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
 			t.Fatal(err)
 		}
