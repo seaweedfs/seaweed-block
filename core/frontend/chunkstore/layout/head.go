@@ -223,6 +223,43 @@ type HeadStore interface {
 // finds snap(session) and returns without writing. An absent HEAD refuses
 // (no path creates a HEAD here).
 func RunBegin(ctx context.Context, st HeadStore, me HolderID, session string) (Head, error) {
+	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.Begin(me, session) })
+}
+
+// Abort is transition 5: activity snap(session) -> idle, by the holder at
+// HEAD's epoch. Nothing it prepared is reachable, so nothing else changes.
+// After its own crash a holder rolls back the session HEAD names by
+// aborting it. Abort when HEAD is already idle is a replay (the lost reply
+// of an earlier Abort: no one else can close this holder's session at its
+// epoch) and writes nothing. Another open session or a cleaning is
+// ErrNoSession.
+func (h Head) Abort(me HolderID, session string) (next Head, changed bool, err error) {
+	if session == "" {
+		return Head{}, false, errors.New("layout: Abort needs a session id")
+	}
+	if !h.heldBy(me) {
+		return Head{}, false, fmt.Errorf("%w: HEAD epoch %d holder %q, caller epoch %d holder %q", ErrNotHolder, h.Epoch, h.Holder, me.Epoch, me.Holder)
+	}
+	switch {
+	case h.Activity.Kind == ActIdle:
+		return h, false, nil
+	case h.Activity != Activity{Kind: ActSnap, Session: session}:
+		return Head{}, false, fmt.Errorf("%w: HEAD has %s(%s), not snap(%s)", ErrNoSession, h.Activity.Kind, h.Activity.Session, session)
+	}
+	next = h.clone()
+	next.Activity = Activity{Kind: ActIdle}
+	return next, true, nil
+}
+
+// RunAbort reads HEAD, applies Abort and commits it by one conditional
+// update. An absent HEAD refuses.
+func RunAbort(ctx context.Context, st HeadStore, me HolderID, session string) (Head, error) {
+	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.Abort(me, session) })
+}
+
+// runTransition is read HEAD, apply t, and one conditional update when t
+// changed it. An absent HEAD is refused: no transition creates one.
+func runTransition(ctx context.Context, st HeadStore, t func(Head) (Head, bool, error)) (Head, error) {
 	h, found, err := st.ReadHead(ctx)
 	if err != nil {
 		return Head{}, err
@@ -230,7 +267,7 @@ func RunBegin(ctx context.Context, st HeadStore, me HolderID, session string) (H
 	if !found {
 		return Head{}, ErrHeadAbsent
 	}
-	next, changed, err := h.Begin(me, session)
+	next, changed, err := t(h)
 	if err != nil || !changed {
 		return next, err
 	}
