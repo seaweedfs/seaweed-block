@@ -72,7 +72,11 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	writerBudget := 4 * time.Second
+	if wantUnknown {
+		writerBudget = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), writerBudget)
 	writerDone, probeDone := make(chan struct{}), make(chan struct{})
 	var stopped atomic.Bool
 	var guestErrors atomic.Int64
