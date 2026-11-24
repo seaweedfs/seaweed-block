@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 )
 
 // HEAD is the one mutable entry of a volume: who holds it (epoch, holder),
@@ -63,7 +64,21 @@ type snapDoc struct {
 	Dependents []string `json:"dependents,omitempty"`
 }
 
+// validName refuses a string the JSON encoding would not keep byte for
+// byte (invalid UTF-8 becomes U+FFFD).
+func validName(field, v string) error {
+	if !utf8.ValidString(v) {
+		return fmt.Errorf("%w: %s %q is not valid UTF-8", ErrMalformed, field, v)
+	}
+	return nil
+}
+
 func (h Head) check() error {
+	for field, v := range map[string]string{"holder": h.Holder, "session": h.Activity.Session} {
+		if err := validName(field, v); err != nil {
+			return err
+		}
+	}
 	switch h.Activity.Kind {
 	case ActIdle:
 		if h.Activity.Session != "" {
@@ -86,7 +101,13 @@ func (h Head) check() error {
 		if n == "" {
 			return fmt.Errorf("%w: unnamed snapshot", ErrMalformed)
 		}
+		if err := validName("snapshot", n); err != nil {
+			return err
+		}
 		for i, d := range s.Dependents {
+			if err := validName("dependent", d); err != nil {
+				return err
+			}
 			if err := checkOwner(d); err != nil {
 				return err
 			}
@@ -270,6 +291,9 @@ func runTransition(ctx context.Context, st HeadStore, t func(Head) (Head, bool, 
 	next, changed, err := t(h)
 	if err != nil || !changed {
 		return next, err
+	}
+	if err := next.check(); err != nil {
+		return Head{}, err
 	}
 	if err := st.UpdateHead(ctx, h.Gen, next); err != nil {
 		return Head{}, err
