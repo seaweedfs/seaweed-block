@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 const (
@@ -31,6 +32,10 @@ const (
 // recordInline is the inline threshold; tests set it to 0 to chunk every
 // record.
 var recordInline = recordInlineMax
+
+// objectUploadTimeout bounds an upload and the write that names it
+// (storage.ObjectUploadTimeout; tests shorten it).
+var objectUploadTimeout = storage.ObjectUploadTimeout
 
 // ErrRecordBusy: a record was rewritten under every one of recordLookups
 // reads. Retryable.
@@ -47,7 +52,11 @@ type recordFiler struct {
 	blobs Blobs // nil: only inline records can be written or read
 }
 
+// A chunked record's uploads and the write that names them run under the
+// object upload bound, whatever the caller's context.
 func (f recordFiler) CreateEntry(ctx context.Context, dir string, e *filerpb.Entry, oExcl bool) error {
+	ctx, cancel := f.bound(ctx, e)
+	defer cancel()
 	e, err := f.chunked(ctx, e)
 	if err != nil {
 		return err
@@ -56,11 +65,20 @@ func (f recordFiler) CreateEntry(ctx context.Context, dir string, e *filerpb.Ent
 }
 
 func (f recordFiler) UpdateEntry(ctx context.Context, dir string, e *filerpb.Entry, expected map[string][]byte) error {
+	ctx, cancel := f.bound(ctx, e)
+	defer cancel()
 	e, err := f.chunked(ctx, e)
 	if err != nil {
 		return err
 	}
 	return f.Filer.UpdateEntry(ctx, dir, e, expected)
+}
+
+func (f recordFiler) bound(ctx context.Context, e *filerpb.Entry) (context.Context, context.CancelFunc) {
+	if n := len(e.GetContent()); n == 0 || n < recordInline {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, objectUploadTimeout)
 }
 
 // chunked returns e, or a copy whose content is uploaded as chunks when it

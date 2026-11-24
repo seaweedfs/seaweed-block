@@ -17,12 +17,19 @@ func (l *chunkLayerImpl) putCaptured(ctx context.Context, key string, data []byt
 	return l.putCapturedWith(ctx, key, data, func(ctx context.Context) error { return l.remote.Put(ctx, key, data) })
 }
 
+// ObjectUploadTimeout bounds one object's upload and the write that names it
+// (its key binding, or the record whose chunk it is), retries included. It
+// is the upload-to-bind bound: a needle is named within it of its upload or
+// never, so a stock volume.fsck cutoff far above it cannot delete a needle a
+// later bind names.
+const ObjectUploadTimeout = 30 * time.Second
+
 // putCapturedWith is putCaptured over put, one object's slot in an upload
 // round: every retry sends through the same put.
 func (l *chunkLayerImpl) putCapturedWith(ctx context.Context, key string, data []byte, put func(context.Context) error) error {
 	// The per-object retry deadline also bounds a contextless cut. It retains
 	// the same point and buffer through a remote outage, never re-reads live data.
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, ObjectUploadTimeout)
 	defer cancel()
 	backoff := 100 * time.Millisecond
 	var lastErr error

@@ -154,11 +154,20 @@ func (r *ChunkRemote) PrepareManifest(ctx context.Context, base, next storage.Ch
 	}
 	ids := []string{id}
 	for _, u := range uploads {
-		if err := r.putObject(ctx, u.key, u.data, "segment"); err != nil {
+		if err := r.putSegment(ctx, u.key, u.data); err != nil {
 			return next, ids, err
 		}
 	}
 	return next, ids, nil
+}
+
+// putSegment uploads and binds one segment under the object upload bound,
+// whatever the caller's context (a background cut or a takeover's legacy
+// upgrade has none).
+func (r *ChunkRemote) putSegment(ctx context.Context, key string, data []byte) error {
+	ctx, cancel := context.WithTimeout(ctx, objectUploadTimeout)
+	defer cancel()
+	return r.putObject(ctx, key, data, "segment")
 }
 
 func (r *ChunkRemote) resolveManifest(ctx context.Context, h storage.ChunkHead) (storage.ChunkHead, error) {
