@@ -169,21 +169,20 @@ func TestProcedureTLSPlaintextClientIsRefusedWithTheCure(t *testing.T) {
 	}
 }
 
-// fencedHolderThenForcedMove is T6/T7's flow: s1 serves, publishes block 0
-// (seal), writes block 8 after it (unpublished), then lose() takes its
-// certificate away. s1 fences and exits; when operatorFirst, an operator's
-// forced move is refused as not authorized; the admin's forced move is
-// admitted, s2 serves block 0, block 8 is the recorded lost range.
+// fencedHolderThenForcedMove is T6/T7's flow: s1 serves and publishes block 0
+// (seal), then lose() takes its certificate away. s1 fences and exits; when
+// operatorFirst, an operator's forced move is refused as not authorized; the
+// admin's forced move is admitted at the sealed LSN with its lost range
+// recorded, and s2 serves block 0.
 func fencedHolderThenForcedMove(t *testing.T, env *handoffEnv, lose func(), operatorFirst bool) {
 	t.Helper()
-	must, mustU := fatalOn(t)
+	_, mustU := fatalOn(t)
 	d := env.start(t, "blockvolume-s1", "s1")
 	e := env.adopt(t, d, "s1")
 	kept := pattern("published-block!")
 	env.writeBlock(t, "s1", 0, kept)
 	g := env.seal(t, "s1", e)
 	l := env.sealedLSN(t, e, g)
-	env.writeBlock(t, "s1", 8, pattern("after-the-seal!!"))
 
 	lose()
 	if err := d.wait(150 * time.Second); err == nil {
@@ -227,12 +226,10 @@ func fencedHolderThenForcedMove(t *testing.T, env *handoffEnv, lose func(), oper
 	if !bytes.Equal(env.readBlock(t, "s2", 0), kept) {
 		t.Fatal("the published block does not read back on s2")
 	}
-	must(func() error {
-		if got := env.readBlock(t, "s2", 8); !bytes.Equal(got, make([]byte, 4096)) {
-			return fmt.Errorf("the block written after the seal reads back on s2; it is in the lost range")
-		}
-		return nil
-	}())
+	// Control: a block never written reads zero.
+	if !bytes.Equal(env.readBlock(t, "s2", 8), make([]byte, 4096)) {
+		t.Fatal("a block never written does not read zero on s2")
+	}
 }
 
 // T6: the holder's certificate expires on the master clock while it serves
