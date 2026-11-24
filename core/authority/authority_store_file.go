@@ -26,6 +26,19 @@ func SetPutAfterRenameFaultForTest(hook func(DurableRecord) error) {
 	putAfterRenameFault.Store(&hook)
 }
 
+// dirSyncFault, when set, replaces the directory fsync after the rename in
+// every FileAuthorityStore.Put. Tests only.
+var dirSyncFault atomic.Pointer[func() error]
+
+// SetDirSyncFaultForTest installs (nil clears) that fault.
+func SetDirSyncFaultForTest(fault func() error) {
+	if fault == nil {
+		dirSyncFault.Store(nil)
+		return
+	}
+	dirSyncFault.Store(&fault)
+}
+
 // ============================================================
 // P14 S5 — File-Per-Volume Authority Store
 //
@@ -217,6 +230,9 @@ func (s *FileAuthorityStore) Put(record DurableRecord) error {
 	// supported; skip silently.
 	if d, derr := os.Open(s.dir); derr == nil {
 		syncErr := d.Sync()
+		if f := dirSyncFault.Load(); f != nil {
+			syncErr = (*f)()
+		}
 		closeErr := d.Close()
 		if record.Workspace != nil {
 			if syncErr != nil {
