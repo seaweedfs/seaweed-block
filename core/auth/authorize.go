@@ -209,3 +209,10 @@ type devStream struct {
 }
 
 func (s *devStream) Context() context.Context { return s.ctx }
+
+// DevCall marks an in-process call (a test calling a handler directly, with
+// no gRPC server and so no interceptor) as development mode. Every network
+// call is decided by the server's interceptor instead.
+func DevCall(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKey{}, callAuth{dev: true})
+}

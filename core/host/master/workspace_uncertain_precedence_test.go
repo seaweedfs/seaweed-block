@@ -3,6 +3,7 @@ package master
 import (
 	"context"
 	"errors"
+	"github.com/seaweedfs/seaweed-block/core/auth"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc/codes"
@@ -96,7 +97,7 @@ func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 			liveParent := context.Background()
 			for _, mode := range []int32{2, 3} {
 				headFailure.Store(mode)
-				_, err := (&services{host: h}).MoveWorkspace(liveParent, request("clean"))
+				_, err := (&services{host: h}).MoveWorkspace(auth.DevCall(liveParent), request("clean"))
 				if liveParent.Err() != nil || (mode == 2 && !childDeadlineObserved.Load()) {
 					t.Fatal("dependency-end witness did not preserve live request")
 				}
@@ -107,7 +108,7 @@ func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 			caller, cancelCaller := context.WithCancel(context.Background())
 			cancelRequest = cancelCaller
 			headFailure.Store(4)
-			_, err := (&services{host: h}).MoveWorkspace(caller, request("clean"))
+			_, err := (&services{host: h}).MoveWorkspace(auth.DevCall(caller), request("clean"))
 			cancelCaller()
 			if caller.Err() != context.Canceled || status.Code(err) != codes.Canceled {
 				t.Errorf("actual caller end lost to dependency status: %v", err)
@@ -125,7 +126,7 @@ func TestWorkspaceMoveUnknownPrecedesAdmissionRefusals(t *testing.T) {
 					ended, end = context.WithCancel(ctx)
 					end()
 				}
-				_, err := (&services{host: h}).MoveWorkspace(ended, request("forced"))
+				_, err := (&services{host: h}).MoveWorkspace(auth.DevCall(ended), request("forced"))
 				end()
 				if status.Code(err) != want {
 					t.Errorf("server caller-end classification changed: %v want %v", err, want)
