@@ -59,10 +59,25 @@ message Entry {
     bytes content = 9; // if not empty, the file content
 }
 
-// Only file_id is modelled: chunkstore never writes chunks, and reads them
-// only to refuse a HEAD entry that carries any.
+// The fields a standard file's chunk needs: a key binding names its needle
+// as one chunk, and a large control record's content is chunks. Field
+// numbers are stock's; sse_type, sse_metadata, e_tag and the source ids are
+// not modelled (kept as unknown fields on decode).
 message FileChunk {
     string file_id = 1;
+    int64 offset = 2;
+    uint64 size = 3;
+    int64 modified_ts_ns = 4;
+    FileId fid = 7;
+    bytes cipher_key = 9;
+    bool is_compressed = 10;
+    bool is_chunk_manifest = 11;
+}
+
+message FileId {
+    uint32 volume_id = 1;
+    uint64 file_key = 2;
+    fixed32 cookie = 3;
 }
 
 message FuseAttributes {
