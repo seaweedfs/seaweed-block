@@ -122,9 +122,9 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 			t.Fatal("same-host force bypassed the renewed lease")
 		}
 		clock.at(86400)
-		grant, err := p.MoveWorkspace(ctx, q, WorkspaceHead{Gen: before.Gen, Epoch: before.Epoch, Holder: before.Holder, RemoteLSN: before.RemoteLSN})
-		if err != nil {
-			t.Fatal(err)
+		grant, moveErr := p.MoveWorkspace(ctx, q, WorkspaceHead{Gen: before.Gen, Epoch: before.Epoch, Holder: before.Holder, RemoteLSN: before.RemoteLSN})
+		if moveErr != nil {
+			t.Fatal(moveErr)
 		}
 		lost := p.WorkspaceLostRanges("v")
 		if len(lost) != 1 || lost[0].NewEpoch != grant.NewEpoch || lost[0].LostAfterLSN != before.RemoteLSN {
