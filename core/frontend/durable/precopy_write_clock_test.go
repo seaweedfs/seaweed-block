@@ -45,11 +45,12 @@ func precopyWriteReadySchedule(t *testing.T, late bool) {
 	type outcome struct {
 		n   int
 		err error
+		at  time.Time
 	}
 	done := make(chan outcome, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	go func() { n, err := b.Write(ctx, 4096, next); done <- outcome{n, err} }()
+	go func() { n, err := b.Write(ctx, 4096, next); done <- outcome{n, err, time.Now()} }()
 	<-queued
 	synctest.Wait()
 	select {
@@ -67,6 +68,7 @@ func precopyWriteReadySchedule(t *testing.T, late bool) {
 		t.Fatalf("no attach wait: %+v", r)
 	}
 	synctest.Wait()
+	readyWaitStart := time.Now()
 	want := next
 	if late {
 		time.Sleep(3 * time.Second)
@@ -74,6 +76,9 @@ func precopyWriteReadySchedule(t *testing.T, late bool) {
 		r := <-done
 		if r.n != 0 || !errors.Is(r.err, frontend.ErrBackendBusy) || !errors.Is(r.err, context.DeadlineExceeded) || frontend.ClassifyBackendError(ctx, r.err) != frontend.BackendErrorBusy {
 			t.Fatalf("expired readiness n=%d err=%v", r.n, r.err)
+		}
+		if r.at.Sub(readyWaitStart) != 3*time.Second {
+			t.Fatal("readiness timer changed")
 		}
 		if ctx.Err() != nil {
 			t.Fatal("product readiness must expire before the caller's 4s deadline")
