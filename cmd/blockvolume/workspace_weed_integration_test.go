@@ -71,6 +71,17 @@ func startWorkspaceWeed(t *testing.T) *w4WeedCluster {
 // when external-service cleanup is uncertain. Existing tests keep TempDir.
 func startWorkspaceWeedAt(t *testing.T, dir string) *w4WeedCluster {
 	t.Helper()
+	return startWorkspaceWeedWith(t, dir, w4WeedOpts{VolumeSizeLimitMB: 256, VolumeMax: 32})
+}
+
+// w4WeedOpts sizes the weed volume server: VolumeMax volumes of
+// VolumeSizeLimitMB each (the default holds about 8 GiB of chunks).
+type w4WeedOpts struct {
+	VolumeSizeLimitMB, VolumeMax int
+}
+
+func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedCluster {
+	t.Helper()
 	weed := os.Getenv("CHUNKSTORE_WEED")
 	if weed == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
@@ -110,9 +121,9 @@ func startWorkspaceWeedAt(t *testing.T, dir string) *w4WeedCluster {
 			t.Fatal(err)
 		}
 	}
-	run("master", "master", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", mp), "-mdir="+filepath.Join(dir, "m"), "-volumeSizeLimitMB=256", "-defaultReplication=000")
+	run("master", "master", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", mp), "-mdir="+filepath.Join(dir, "m"), fmt.Sprintf("-volumeSizeLimitMB=%d", o.VolumeSizeLimitMB), "-defaultReplication=000")
 	w4WaitTCP(t, c.master, 20*time.Second)
-	run("volume", "volume", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+c.master, "-max=32")
+	run("volume", "volume", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+c.master, fmt.Sprintf("-max=%d", o.VolumeMax))
 	run("filer", "filer", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", fp), "-master="+c.master, "-defaultStoreDir="+filepath.Join(dir, "f"))
 	w4WaitTCP(t, c.filerGRPC, 30*time.Second)
 
