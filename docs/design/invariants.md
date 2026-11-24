@@ -150,6 +150,24 @@ flowchart LR
   Stream --> Initial[Move-less epoch: placement owner]
 ```
 
+**Chunk volume delete and its re-run.**
+
+```mermaid
+flowchart LR
+  Ask[MarkVolumeDeleting with token] --> Held{Token holds the reservation, or it is committed?}
+  Held -->|yes: re-run| Catalog[Catalog step: HEAD compare-and-swap to deleting]
+  Held -->|no| Verdict{WorkspaceHolderState}
+  Verdict -->|never started or deleting| Admit[Reservation admitted]
+  Verdict -->|live, sealed, unknown| Refuse[Refused: volume_in_use]
+  Admit --> Catalog
+  Catalog -->|HEAD not held| Mark[HEAD deleting, then purge, then commit]
+  Catalog -->|a holder claimed HEAD| GiveBack[Refused; reservation given back]
+  Mark -->|stopped before commit| Ask
+  Admit -->|stopped before the mark| Ask
+```
+
+Model: [NeverStarted r2 exhaustive results](../spec/NeverStarted-r2-results.md).
+
 Model trace: [WorkspaceRegrant round 4 pins and simulation results](../spec/WorkspaceRegrant-owner-label-results.md)
 binds the owner-label switch, five configurations and reported results to exact
 hashes. Captured labels use StreamLabelFromStore=FALSE; the mutant models a
