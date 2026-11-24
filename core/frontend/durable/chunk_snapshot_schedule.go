@@ -256,12 +256,14 @@ func (sl *snapshotSlot) record(now, slot time.Time, err error) {
 }
 
 // chunkSnapshotLoop takes volumeID's scheduled snapshots while the
-// attachment is current. At each decision it reads the newest published
-// scheduled snapshot (ChunkScheduledNewest) and runs only when the current
-// slot has none. A restoring volume is skipped. Each attempt is one bounded
-// pass: one urgent cut and the snapshot record, named for its slot. An
-// attempt cut short by the loop's own end is not recorded. chunkBackground
-// joins it with its other workers (INV-MAINT-JOIN).
+// attachment is current. Each decision is one bounded pass (its deadline,
+// and cancelled when the layer is fenced or the attachment is no longer
+// current): it reads the newest published scheduled snapshot
+// (ChunkScheduledNewest) and, only when the current slot has none, takes
+// one urgent cut and the snapshot record, named for its slot. A restoring
+// volume is skipped. A pass cut short by the loop's own end is not
+// recorded. chunkBackground joins it with its other workers
+// (INV-MAINT-JOIN).
 func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, slot *snapshotSlot) {
 	timer := time.NewTimer(time.Until(slot.due()))
 	defer timer.Stop()
@@ -283,27 +285,27 @@ func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string
 			return
 		}
 		var at time.Time
-		newest, err := p.cfg.ChunkScheduledNewest(ctx, volumeID)
-		if ctx.Err() != nil {
-			return
-		}
-		if err == nil {
-			var due bool
+		due := true
+		err := boundedPass(ctx, layer, current, timeout, func(passCtx context.Context) error {
+			newest, err := p.cfg.ChunkScheduledNewest(passCtx, volumeID)
+			if err != nil {
+				return err
+			}
 			if at, due = slot.decide(time.Now(), newest); !due {
-				timer.Reset(time.Until(slot.due()))
-				continue
+				return nil
 			}
 			if layer.Stats().AbsentChunks > 0 {
 				// Restoring: HEAD names chunks this volume has not fetched yet.
-				err = &SnapshotSkip{Reason: SnapshotSkipRestoring}
-			} else {
-				err = boundedPass(ctx, layer, current, timeout, func(passCtx context.Context) error {
-					return p.cfg.ChunkScheduledSnapshot(passCtx, volumeID, at, cut)
-				})
+				return &SnapshotSkip{Reason: SnapshotSkipRestoring}
 			}
-		}
+			return p.cfg.ChunkScheduledSnapshot(passCtx, volumeID, at, cut)
+		})
 		if ctx.Err() != nil {
 			return
+		}
+		if err == nil && !due {
+			timer.Reset(time.Until(slot.due()))
+			continue
 		}
 		slot.record(time.Now(), at, err)
 		if err != nil {

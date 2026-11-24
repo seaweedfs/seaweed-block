@@ -28,6 +28,12 @@ func (snapStubLayer) Stats() storage.ChunkLayerStats { return storage.ChunkLayer
 // loop; stop stops it and reports whether it was joined within an hour of
 // virtual time.
 func snapLoop(take func(context.Context) error) (h *volHandle, start func(), stop func() bool) {
+	return snapLoopReading(nil, take)
+}
+
+// snapLoopReading is snapLoop whose read of the newest scheduled snapshot
+// is read (nil: the slot of the newest successful attempt).
+func snapLoopReading(read func(context.Context) (time.Time, error), take func(context.Context) error) (h *volHandle, start func(), stop func() bool) {
 	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}
 	layer := &snapStubLayer{}
 	h = &volHandle{chunk: layer, chunkLineage: chunkLineage{"v1", "r1", 3, 1}}
@@ -35,7 +41,10 @@ func snapLoop(take func(context.Context) error) (h *volHandle, start func(), sto
 	var newest time.Time
 	p := &DurableProvider{volumes: map[string]*volHandle{"v1": h}, view: precopyQueueView{id},
 		cfg: ProviderConfig{ChunkSnapshotPeriod: 24 * time.Hour,
-			ChunkScheduledNewest: func(context.Context, string) (time.Time, error) {
+			ChunkScheduledNewest: func(ctx context.Context, _ string) (time.Time, error) {
+				if read != nil {
+					return read(ctx)
+				}
 				mu.Lock()
 				defer mu.Unlock()
 				return newest, nil
@@ -227,6 +236,57 @@ func TestScheduledSnapshotLoop_OverdueWithNoSuccess(t *testing.T) {
 		synctest.Wait()
 		if st := h.snapshots.status(time.Now()); !st.Overdue || st.LastFailure == nil {
 			t.Fatalf("past one period plus the retry cap with only failures: %+v; want overdue with the failure", st)
+		}
+	})
+}
+
+// The read of the newest scheduled snapshot is part of the bounded pass: a
+// read that never answers is cancelled at the pass deadline (10 min with no
+// cut timeout configured) and recorded as a failure, and no snapshot is
+// attempted; the schedule decides again after its backoff.
+func TestScheduledSnapshotLoop_HungNewestReadTimesOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var reads, takes atomic.Int64
+		h, start, stop := snapLoopReading(func(ctx context.Context) (time.Time, error) {
+			reads.Add(1)
+			<-ctx.Done()
+			return time.Time{}, ctx.Err()
+		}, func(context.Context) error { takes.Add(1); return nil })
+		start()
+		defer func() {
+			if !stop() {
+				t.Error("the loop was not joined")
+			}
+		}()
+		time.Sleep(10*time.Minute + time.Second)
+		synctest.Wait()
+		st := h.snapshots.status(time.Now())
+		if reads.Load() != 1 || takes.Load() != 0 || st.Attempts != 1 || st.LastFailure == nil {
+			t.Fatalf("after the pass deadline: %d reads, %d attempts taken, status %+v; want the hung read cancelled and recorded as one failure", reads.Load(), takes.Load(), st)
+		}
+	})
+}
+
+// Stopping the loop (detach, fence, Close) cancels a read of the newest
+// scheduled snapshot in flight and returns only after it has returned.
+func TestScheduledSnapshotLoop_StopJoinsAHungNewestRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered, returned := make(chan struct{}), make(chan struct{})
+		_, start, stop := snapLoopReading(func(ctx context.Context) (time.Time, error) {
+			close(entered)
+			<-ctx.Done()
+			close(returned)
+			return time.Time{}, ctx.Err()
+		}, func(context.Context) error { return nil })
+		start()
+		recv(t, entered, "the read")
+		if !stop() {
+			t.Fatal("stop did not return")
+		}
+		select {
+		case <-returned:
+		default:
+			t.Fatal("stop returned before the read did")
 		}
 	})
 }
