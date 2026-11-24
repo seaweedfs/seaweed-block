@@ -1,4 +1,4 @@
-package durable
+package durable_test
 
 import (
 	"bytes"
@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 )
 
 // INV-FE-NVME-READY-STATUS-001: each schedule has one required outcome.
-// Virtual time controls the readiness publication; the production 3s timer
-// and public Write/Read paths are unchanged. The memory store excludes disk IO.
+// Virtual time releases the real provider's held CAS/outcome-resolution hook;
+// the production 3s timer, chunk claim and public Write/Read paths are unchanged.
 func TestAttachWriteBeforeReadinessBudgetSucceeds(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) { attachWriteSchedule(t, 2*time.Second, false) })
 }
@@ -24,26 +25,22 @@ func TestAttachWriteAfterReadinessBudgetRefusesWithoutIO(t *testing.T) {
 
 func attachWriteSchedule(t *testing.T, readyAt time.Duration, refuse bool) {
 	t.Helper()
-	b := precopyMemoryBackend(t)
-	old, next := bytes.Repeat([]byte{0x33}, 4096), bytes.Repeat([]byte{0x74}, 4096)
-	if n, err := b.Write(context.Background(), 4096, old); n != len(old) || err != nil {
-		t.Fatalf("seed: n=%d err=%v", n, err)
-	}
-	b.setChunkAttachPending("controlled attachment")
+	_, b, _, publishReady := pendingTakeoverReadWithRelease(t, 0)
+	old, next := block(0x33), block(0x74)
 	waiting := make(chan struct{}, 1)
-	b.testBeforeReadReadyWait = func() {
+	durable.SetTestBeforeAttachWait(b, func() {
 		select {
 		case waiting <- struct{}{}:
 		default:
 		}
-	}
+	})
 	type outcome struct {
 		n   int
 		err error
 	}
 	done := make(chan outcome, 1)
 	start := time.Now()
-	go func() { n, err := b.Write(context.Background(), 4096, next); done <- outcome{n, err} }()
+	go func() { n, err := b.Write(context.Background(), 33*4096, next); done <- outcome{n, err} }()
 	select {
 	case <-waiting:
 	case r := <-done:
@@ -69,7 +66,7 @@ func attachWriteSchedule(t *testing.T, readyAt time.Duration, refuse bool) {
 	} else {
 		time.Sleep(readyAt)
 	}
-	b.SetOperational(true, "controlled attach completed")
+	publishReady()
 	synctest.Wait()
 	want := old
 	if !refuse {
@@ -83,14 +80,14 @@ func attachWriteSchedule(t *testing.T, readyAt time.Duration, refuse bool) {
 		want = next
 	}
 	got := make([]byte, 4096)
-	if n, err := b.Read(context.Background(), 4096, got); err != nil || n != len(got) || !bytes.Equal(got, want) {
+	if n, err := b.Read(context.Background(), 33*4096, got); err != nil || n != len(got) || !bytes.Equal(got, want) {
 		t.Fatalf("readback n=%d err=%v correct=%t", n, err, bytes.Equal(got, want))
 	}
 	if refuse {
-		if n, err := b.Write(context.Background(), 4096, next); err != nil || n != len(next) {
+		if n, err := b.Write(context.Background(), 33*4096, next); err != nil || n != len(next) {
 			t.Fatalf("ready retry n=%d err=%v", n, err)
 		}
-		if n, err := b.Read(context.Background(), 4096, got); err != nil || n != len(got) || !bytes.Equal(got, next) {
+		if n, err := b.Read(context.Background(), 33*4096, got); err != nil || n != len(got) || !bytes.Equal(got, next) {
 			t.Fatalf("retry bytes n=%d err=%v", n, err)
 		}
 	}

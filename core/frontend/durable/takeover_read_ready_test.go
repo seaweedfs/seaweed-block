@@ -76,6 +76,11 @@ func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkH
 }
 
 func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProvider, frontend.Backend, *nvme.IOHandler) {
+	p, b, h, _ := pendingTakeoverReadWithRelease(t, hold)
+	return p, b, h
+}
+
+func pendingTakeoverReadWithRelease(t *testing.T, hold time.Duration) (*durable.DurableProvider, frontend.Backend, *nvme.IOHandler, func()) {
 	t.Helper()
 	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{}), resolutionBlocked: make(chan struct{})}
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
@@ -112,7 +117,7 @@ func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProv
 	var firstWait sync.Once
 	durable.SetTestBeforeAttachWait(backend, func() { firstWait.Do(func() { close(remote.readRegistered) }) })
 	handler := nvme.NewIOHandler(nvme.HandlerConfig{Backend: backend, BlockSize: 4096, VolumeSize: pcBlocks * 4096, NSID: 1})
-	return p, backend, handler
+	return p, backend, handler, remote.unblock
 }
 
 // Model Linux max_retries=5 and CRD=0: at most six attempts, no sleeps.
