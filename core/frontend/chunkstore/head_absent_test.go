@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path"
 	"strings"
 	"testing"
@@ -94,5 +95,44 @@ func TestVolumeFormat_EveryPathRefusesFormat1(t *testing.T) {
 	}
 	if n := len(f.allWritten()) - written; n != 0 {
 		t.Fatalf("%d entries written to a format 1 store", n)
+	}
+}
+
+// A volume directory with live bindings but neither VOLUME nor HEAD (both
+// pruned) is refused by GC the same way.
+func TestGC_VolumeAndHeadAbsentFailsClosed(t *testing.T) {
+	f, b, _, g, _ := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err := r.Put(ctx, "chunks/e1/c0/k", []byte("published data")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{headName, volumeName} {
+		if err := f.DeleteEntry(ctx, path.Join(catBase, "v1"), name, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res, err := g.Run(ctx); err == nil || !strings.Contains(err.Error(), "no HEAD") || res.Candidates != 0 {
+		t.Fatalf("VOLUME and HEAD pruned: %+v %v; want a refusal", res, err)
+	}
+}
+
+// A fork target holding stale keys but no VOLUME or HEAD is refused, never
+// given a VOLUME.
+func TestFork_TargetWithStaleKeysRefused(t *testing.T) {
+	f, b, c, h := catalogFixture(t)
+	ctx := context.Background()
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := NewChunkRemote(f, b, path.Join(catBase, "v2"))
+	if err := stale.Put(ctx, "chunks/e1/c0/k", []byte("stale")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"}); CodeOf(err) != CodeNotChunkVolume {
+		t.Fatalf("fork onto stale keys: %v", err)
+	}
+	if _, err := f.LookupEntry(ctx, path.Join(catBase, "v2"), volumeName); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("target VOLUME written: %v", err)
 	}
 }

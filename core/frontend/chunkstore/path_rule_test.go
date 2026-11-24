@@ -67,7 +67,7 @@ func TestPathRule_StartCheck(t *testing.T) {
 func TestPathRule_UnreadableConfFails(t *testing.T) {
 	f := newFakeFiler()
 	withFilerConf(t, f, `{"locations":[`)
-	if err := CheckPathRule(context.Background(), f, newFakeBlobs(), "/swblock/chunks", ""); err == nil {
-		t.Fatal("malformed filer.conf accepted")
+	if err := CheckPathRule(context.Background(), f, newFakeBlobs(), "/swblock/chunks", ""); !errors.Is(err, ErrPathRule) {
+		t.Fatalf("malformed filer.conf: %v; want a refusal", err)
 	}
 }

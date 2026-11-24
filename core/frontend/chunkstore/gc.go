@@ -336,11 +336,12 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				if e != nil {
 					return result, fmt.Errorf("chunkstore: invalid GC binding %s/%s: %v", r.keyDir(), entry.GetName(), e)
 				}
-				if hasVolume && v.State == "" && !headPresent && !bound.done && !intentNamed[path.Join(r.keyDir(), entry.GetName())] {
-					// HEAD was removed (a stock tool pruning an entry whose
-					// needle is missing, or by hand): its keys would all look
-					// unrooted. Refuse the pass rather than reclaim the volume.
-					return result, fmt.Errorf("chunkstore: volume %s is live but has no HEAD while %s/%s is a live binding no intent names; GC refuses (restore HEAD, or delete the volume)", vol, r.keyDir(), entry.GetName())
+				if (!hasVolume || (v.State == "" && !headPresent)) && !bound.done && !intentNamed[path.Join(r.keyDir(), entry.GetName())] {
+					// HEAD (or VOLUME and HEAD) was removed (a stock tool
+					// pruning an entry whose needle is missing, or by hand):
+					// its keys would all look unrooted. Refuse the pass rather
+					// than reclaim the volume.
+					return result, fmt.Errorf("chunkstore: volume %s has no HEAD (VOLUME present: %t) while %s/%s is a live binding no intent names; GC refuses (restore HEAD, or delete the volume)", vol, hasVolume, r.keyDir(), entry.GetName())
 				}
 				key, e := url.PathUnescape(entry.GetName())
 				if e != nil {

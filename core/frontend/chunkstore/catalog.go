@@ -1385,6 +1385,10 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		if !c.now().Before(deadline) {
 			return ForkResult{}, catErr(CodeDeadlineExceeded, true, nil, "fork %s: deadline passed; VOLUME not written", req.Target)
 		}
+		// Stale data at the target without VOLUME: never adopt it.
+		if err := c.refuseVolumelessData(ctx, req.Target, path.Join(c.base, req.Target)); err != nil {
+			return ForkResult{}, err
+		}
 		vol := VolumeInfo{Format: volumeFormat, VolumeID: req.Target, Geometry: snap.geo, Origin: origin, CreatedNs: c.now().UnixNano(),
 			Parent: &Parent{VolumeID: req.Source, Snapshot: req.Snapshot, Gen: snap.HeadGen}, Fork: record}
 		ve, err := volumeEntry(vol, req.RequestID)

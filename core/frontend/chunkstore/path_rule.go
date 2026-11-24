@@ -161,7 +161,9 @@ func CheckPathRule(ctx context.Context, f Filer, blobs Blobs, base, buckets stri
 		return fmt.Errorf("chunkstore: read %s/%s: %w", filerConfDir, filerConfName, err)
 	default:
 		if rules, err = parseFilerConf(body); err != nil {
-			return fmt.Errorf("chunkstore: parse %s/%s: %v", filerConfDir, filerConfName, err)
+			// A rule set nobody can read cannot be judged: a refusal, not
+			// an outage (fix the file and start again).
+			return fmt.Errorf("%w: parse %s/%s: %v", ErrPathRule, filerConfDir, filerConfName, err)
 		}
 	}
 	return checkPathRule(rules, base, buckets)
