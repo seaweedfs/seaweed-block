@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -24,9 +25,12 @@ type masterWaitView struct {
 }
 
 // masterWaitOf reads /status MasterWait for v1 (ok false when absent).
-func masterWaitOf(statusAddr string) (masterWaitView, bool) {
+func masterWaitOf(statusAddr string) (masterWaitView, bool) { return masterWaitOfVolume(statusAddr, "v1") }
+
+// masterWaitOfVolume reads /status MasterWait for vol.
+func masterWaitOfVolume(statusAddr, vol string) (masterWaitView, bool) {
 	c := &http.Client{Timeout: 2 * time.Second}
-	resp, err := c.Get("http://" + statusAddr + "/status?volume=v1")
+	resp, err := c.Get("http://" + statusAddr + "/status?volume=" + vol)
 	if err != nil {
 		return masterWaitView{}, false
 	}
@@ -259,4 +263,85 @@ func TestWaitingVolumeDeletedDuringOutageExits78(t *testing.T) {
 			t.Fatalf("waiting process under an admitted delete: %v after %v; want the bounded 75 assignment_timeout", err, time.Since(at))
 		}
 	})
+}
+
+// After a master restart every lapsed volume gets the same barrier time; with
+// 20 volume processes (one per volume) waiting, each must serve within 2 s of
+// its barrier: the guards' jittered wake and the publisher's busy refusals
+// must not keep them in step. Twenty processes: run only when
+// SWB_MANY_VOLUMES=1 (not in every CI pass).
+func TestManyVolumesServeTogetherAfterMasterRestart(t *testing.T) {
+	if os.Getenv("SWB_MANY_VOLUMES") != "1" {
+		t.Skip("20 volume processes: set SWB_MANY_VOLUMES=1")
+	}
+	const n = 20
+	var targets []string
+	for i := 2; i <= n; i++ {
+		targets = append(targets, fmt.Sprintf("v%d", i))
+	}
+	env := startHandoffEnvWith(t, 1, targets)
+	hosts := []bvHost{env.hosts["s1"]}
+	hosts[0].volume = "v1"
+	for _, v := range targets {
+		hosts = append(hosts, env.hosts["n-"+v])
+	}
+	start := func(round string) []*daemon {
+		ds := make([]*daemon, len(hosts))
+		for i, b := range hosts {
+			ds[i] = env.h.start(t, fmt.Sprintf("bv-%s-%s", round, b.volume), env.h.volume, env.volArgsFor(b)...)
+		}
+		return ds
+	}
+	first := start("first")
+	for _, b := range hosts {
+		poll(t, 3*time.Minute, b.volume+" never served", func() bool { return volumeFrontendReady(b.status, b.volume) })
+	}
+	env.masterProcess.kill(t)
+	for i, d := range first {
+		if code := exitCode(d.wait(90 * time.Second)); code != 75 {
+			t.Fatalf("%s holder exited %v with the master down; want 75", hosts[i].volume, d.err)
+		}
+	}
+	waiting := start("waiting")
+	time.Sleep(10 * time.Second)
+	env.masterProcess = env.h.start(t, "blockmaster-back", env.h.master, env.masterArgs...)
+	env.masterProcess.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
+
+	until := make([]time.Time, len(hosts))
+	served := make([]time.Time, len(hosts))
+	deadline := time.Now().Add(3 * time.Minute)
+	for left := len(hosts); left > 0; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d volumes never served after the master returned", left, len(hosts))
+		}
+		for i, b := range hosts {
+			if !served[i].IsZero() {
+				continue
+			}
+			if until[i].IsZero() {
+				if mw, ok := masterWaitOfVolume(b.status, b.volume); ok && mw.Reason == "barrier" {
+					until[i] = mw.Until
+				}
+			}
+			if volumeFrontendReady(b.status, b.volume) {
+				served[i] = time.Now()
+				left--
+			}
+		}
+	}
+	var worst time.Duration
+	for i, b := range hosts {
+		stillRunning(t, waiting[i], b.volume)
+		if until[i].IsZero() {
+			t.Errorf("%s served without /status ever showing the barrier", b.volume)
+			continue
+		}
+		late := served[i].Sub(until[i])
+		t.Logf("%s served %v after its barrier", b.volume, late.Round(time.Millisecond))
+		worst = max(worst, late)
+	}
+	t.Logf("%d volumes: worst %v after the barrier", len(hosts), worst.Round(time.Millisecond))
+	if worst > 2*time.Second {
+		t.Fatalf("a volume served %v after its barrier; want every one within 2 s", worst.Round(time.Millisecond))
+	}
 }
