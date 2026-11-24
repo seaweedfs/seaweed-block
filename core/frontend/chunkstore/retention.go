@@ -25,10 +25,10 @@ import (
 //     ExpiresAtNs set is pinned whatever its class.
 //   - "scheduled": a scheduled snapshot. Retention keeps the newest K of
 //     this class, where K is the LabelScheduleKeep of the newest one
-//     (DefaultScheduleKeep when absent). The class ranks by the slot in a
-//     scheduled snapshot's name (ScheduledSlot), the time the schedule
-//     decides by, so the newest slot is never planned for deletion; one
-//     with another name ranks by its creation time.
+//     (DefaultScheduleKeep when absent), and always the one holding the
+//     schedule's coverage: the published scheduled snapshot with the
+//     greatest slot in its name (ScheduledSlot), which the schedule decides
+//     by.
 //     They are not counted against KeepNewest, and the age and log-spaced
 //     keeps do not apply to them, so other snapshots are unaffected.
 //   - "" (snapshots made before classes existed): treated as unpinned.
@@ -43,6 +43,11 @@ import (
 //
 // and deletes every other snapshot. A pinned snapshot past its ExpiresAtNs
 // is treated as unpinned. GC reclaims the chunks.
+//
+// "Newer" is the HEAD generation a snapshot copied, for every class: the
+// order cuts were published in, never a publisher's clock. Snapshots of one
+// generation hold the same image and rank by name. Ages (KeepYounger and
+// the log-spaced windows) are measured from the creation time.
 //
 // Log-spaced keeps use rolling windows anchored at now: window k of a
 // period P holds the snapshots whose age is in [k*P, (k+1)*P). For
@@ -215,21 +220,22 @@ const (
 	keepDaily     = "daily"
 	keepWeekly    = "weekly"
 	keepScheduled = "scheduled_newest"
+	keepCovered   = "schedule_coverage"
 	reasonExpired = "expired"
 )
 
 // planRetention decides, from one listing, which snapshots policy keeps at
-// now. Snapshots are ranked newest first (a scheduled one by its slot,
-// every other by its creation time); equal times rank by name, so the plan
-// is deterministic.
+// now. Snapshots are ranked newest first by the HEAD generation they copied;
+// equal generations rank by name, so the plan is deterministic.
 func planRetention(p RetentionPolicy, snaps []SnapshotInfo, now time.Time) []RetentionDecision {
 	ordered := append([]SnapshotInfo(nil), snaps...)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		if ti, tj := retentionRank(ordered[i]), retentionRank(ordered[j]); ti != tj {
-			return ti > tj
+		if ordered[i].HeadGen != ordered[j].HeadGen {
+			return ordered[i].HeadGen > ordered[j].HeadGen
 		}
 		return ordered[i].Name < ordered[j].Name
 	})
+	covering := coverageHolder(snaps)
 	nowNs := now.UnixNano()
 	out := make([]RetentionDecision, len(ordered))
 	unpinned, scheduled := 0, 0
@@ -249,6 +255,9 @@ func planRetention(p RetentionPolicy, snaps []SnapshotInfo, now time.Time) []Ret
 			}
 			if scheduled < scheduleKeep {
 				d.Reasons = append(d.Reasons, keepScheduled)
+			}
+			if s.Name == covering {
+				d.Reasons = append(d.Reasons, keepCovered)
 			}
 			scheduled++
 			d.Keep = len(d.Reasons) > 0
@@ -301,13 +310,18 @@ func planRetention(p RetentionPolicy, snaps []SnapshotInfo, now time.Time) []Ret
 	return out
 }
 
-// retentionRank is the time s ranks by: a scheduled snapshot's slot, else
-// its creation time.
-func retentionRank(s SnapshotInfo) int64 {
-	if t, ok := ScheduledSlot(s); ok {
-		return t.UnixNano()
+// coverageHolder is the name of the snapshot holding the schedule's
+// coverage: the scheduled snapshot with the greatest slot in its name; ""
+// when there is none.
+func coverageHolder(snaps []SnapshotInfo) string {
+	var name string
+	var newest time.Time
+	for _, s := range snaps {
+		if t, ok := ScheduledSlot(s); ok && t.After(newest) {
+			name, newest = s.Name, t
+		}
 	}
-	return s.CreatedNs
+	return name
 }
 
 // scheduleKeepOf is the count a scheduled snapshot's schedule keeps.

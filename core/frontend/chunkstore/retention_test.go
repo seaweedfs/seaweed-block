@@ -17,8 +17,11 @@ import (
 
 var retBase = time.Unix(1_000_000, 0)
 
+// snapAt is a snapshot created at at; its HEAD generation follows its
+// creation (one per second after retBase), as when each snapshot copies a
+// later cut.
 func snapAt(name string, at time.Time, class string, expiresAt time.Time, labels map[string]string) SnapshotInfo {
-	s := SnapshotInfo{Name: name, CreatedNs: at.UnixNano(), Class: class, Labels: labels}
+	s := SnapshotInfo{Name: name, CreatedNs: at.UnixNano(), HeadGen: uint64(at.Unix() - retBase.Unix() + 1_000_000), Class: class, Labels: labels}
 	if !expiresAt.IsZero() {
 		s.ExpiresAtNs = expiresAt.UnixNano()
 	}
@@ -142,7 +145,9 @@ func retentionFixture(t *testing.T, n int) (*fakeFiler, *Catalog, storage.ChunkH
 	c.SetClock(func() time.Time { return clock })
 	for i := 0; i < n; i++ {
 		clock = retBase.Add(time.Duration(i) * time.Minute)
-		if _, err := c.CreateSnapshot(context.Background(), "v1", SnapshotRequest{Name: fmt.Sprintf("s%02d", i), RequestID: fmt.Sprintf("r%02d", i), Class: SnapshotClassSemantic}, h); err != nil {
+		hi := h
+		hi.Gen = h.Gen + uint64(i) // each snapshot copies a later cut
+		if _, err := c.CreateSnapshot(context.Background(), "v1", SnapshotRequest{Name: fmt.Sprintf("s%02d", i), RequestID: fmt.Sprintf("r%02d", i), Class: SnapshotClassSemantic}, hi); err != nil {
 			t.Fatal(err)
 		}
 	}
