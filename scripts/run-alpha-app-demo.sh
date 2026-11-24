@@ -33,6 +33,8 @@ BREAK_AFTER_BLOCKVOLUME_READY="${SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_READY:-}"
 BREAK_AFTER_BLOCKVOLUME_RESTART="${SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_RESTART:-}"
 FAIL_PRIMARY_BEFORE_READER="${SW_BLOCK_DEMO_FAIL_PRIMARY_BEFORE_READER:-}"
 REQUIRE_PROMOTION_READY_BEFORE_FAILURE="${SW_BLOCK_DEMO_REQUIRE_PROMOTION_READY_BEFORE_FAILURE:-0}"
+EXPECT_NO_AUTO_PROMOTION="${SW_BLOCK_DEMO_EXPECT_NO_AUTO_PROMOTION:-0}"
+NO_PROMOTION_HOLD_SECONDS="${SW_BLOCK_DEMO_NO_PROMOTION_HOLD_SECONDS:-30}"
 WRITER_TIMEOUT="${SW_BLOCK_DEMO_WRITER_TIMEOUT:-240}"
 DELETE_ALL_BLOCKVOLUMES="${SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES:-0}"
 PIN_APP_NODE="${SW_BLOCK_DEMO_PIN_APP_NODE:-1}"
@@ -1003,6 +1005,72 @@ fail_primary_before_reader() {
     echo "target_ready_replicas=${ready:-0}" >>"$recovery_marker"
     echo "old_primary_stale_io_success_count=0" >>"$recovery_marker"
     echo "stale_primary_fence_evidence=target_ready_replicas=${ready:-0}" >>"$recovery_marker"
+
+    if [[ "$EXPECT_NO_AUTO_PROMOTION" == "1" || "$EXPECT_NO_AUTO_PROMOTION" == "true" ]]; then
+      # This release claims no automatic promotion on node loss: a primary
+      # that cannot be read is unknown, not failed. Hold, then return the
+      # node and require the SAME primary to serve again.
+      log "hold ${NO_PROMOTION_HOLD_SECONDS}s: no automatic promotion while ${primary} is lost"
+      local hold_rounds=$((NO_PROMOTION_HOLD_SECONDS / 2))
+      local hold_reads=0
+      for _ in $(seq 1 "$hold_rounds"); do
+        # A round counts only when the inventory was actually read: an
+        # unreadable inventory shows no promotion and must not pass the hold.
+        if collect_ops_inventory_bundle "$after_dir" && grep -q '^replica: ' "$after_summary" 2>/dev/null; then
+          hold_reads=$((hold_reads + 1))
+        fi
+        after_primary="$(inventory_primary_replica "$after_summary" 2>/dev/null || true)"
+        if [[ -n "$after_primary" && "$after_primary" != "$primary" ]]; then
+          echo "failover_status: unexpected_auto_promotion" >>"$recovery_marker"
+          echo "automatic promotion to ${after_primary} while the primary node was lost" >&2
+          exit 1
+        fi
+        sleep 2
+      done
+      if (( hold_reads * 2 < hold_rounds )); then
+        echo "failover_status: no_auto_promotion_unproven" >>"$recovery_marker"
+        echo "no-promotion hold unproven: ${hold_reads} of ${hold_rounds} inventory reads succeeded" >&2
+        exit 1
+      fi
+      echo "auto_promotion_while_node_lost=none" >>"$recovery_marker"
+      echo "no_promotion_hold_reads=${hold_reads}/${hold_rounds}" >>"$recovery_marker"
+      write_control_plane_timeline_event "$timeline" "no_auto_promotion" "replica=${primary}" "hold_seconds=${NO_PROMOTION_HOLD_SECONDS}"
+      if [[ "$node_loss_mode" == "1" ]]; then
+        kubectl uncordon "$before_primary_node" | tee "$ARTIFACT_DIR/uncordon-primary-node.log"
+      fi
+      kubectl -n "$BLOCKVOLUME_NAMESPACE" scale "$deploy" --replicas=1 | tee "$ARTIFACT_DIR/scale-primary-one.log"
+      log "wait for the same primary ${primary} to serve again"
+      for _ in $(seq 1 120); do
+        collect_ops_inventory_bundle "$after_dir" || true
+        after_primary="$(inventory_primary_replica "$after_summary" 2>/dev/null || true)"
+        after_primary_count="$(grep -c '^replica: .* role=primary ' "$after_summary" 2>/dev/null || true)"
+        promoted_line="$(inventory_replica_line "$after_summary" "$primary" 2>/dev/null || true)"
+        # In the inventory summary 'frontend_primary_ready=true' appears only in
+        # the issue "non-primary ... frontend_primary_ready=true" (a replica that
+        # is not primary claims the frontend), so 0 means no such claim; the
+        # recovered primary must itself report ready: no
+        # "primary frontend_primary_ready=false" issue.
+        frontend_ready_issue_count="$(grep -c 'frontend_primary_ready=true' "$after_summary" 2>/dev/null || true)"
+        primary_not_ready_count="$(grep -c 'primary frontend_primary_ready=false' "$after_summary" 2>/dev/null || true)"
+        if [[ "$after_primary" == "$primary" && "$after_primary_count" == "1" && "$frontend_ready_issue_count" == "0" && "$primary_not_ready_count" == "0" ]]; then
+          {
+            echo "failover_status: recovered_same_primary"
+            echo "post_failure_primary_count=${after_primary_count}"
+            echo "recovered_replica=${primary}"
+            echo "promoted_replica=${primary}"
+            echo "promoted_replica_node=${before_primary_node:-unavailable}"
+            echo "after_publish_target_evidence=${promoted_line}"
+            echo "after_publish_target_frontend=$(promotion_evidence_field "$promoted_line" "frontend")"
+          } >>"$recovery_marker"
+          write_control_plane_timeline_event "$timeline" "primary_recovered" "replica=${primary}" "primary_count=${after_primary_count}" "evidence=${promoted_line}"
+          return 0
+        fi
+        sleep 2
+      done
+      echo "failover_status: recovery_timeout" >>"$recovery_marker"
+      echo "the primary ${primary} did not serve again after its node returned" >&2
+      exit 1
+    fi
 
     log "wait for promoted primary ${candidate_replica} after controlled failure"
     for _ in $(seq 1 120); do
