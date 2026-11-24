@@ -96,6 +96,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 		defer ticker.Stop()
 		for {
 			op := "Write"
+			opStarted := time.Now()
 			n, err := backend.Write(ctx, 4096, block(0x5b))
 			if err == nil {
 				op = "Sync"
@@ -114,13 +115,16 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 					}
 					deadline, _ := ctx.Deadline()
 					class := frontend.ClassifyBackendError(ctx, err)
-					// The caller's 4s allowance is not a product availability promise.
-					// Permanent causes still win over retry markers in the classifier.
-					budgetBusy := fixedDelay > 0 && !at.Before(deadline) &&
+					operationElapsed := at.Sub(opStarted)
+					// Either the caller's 4s or this operation's 3s readiness
+					// allowance can expire. Permanent causes still win.
+					budgetExhausted := !at.Before(deadline) ||
+						(operationElapsed >= 3*time.Second && errors.Is(err, context.DeadlineExceeded))
+					budgetBusy := fixedDelay > 0 && budgetExhausted &&
 						(op != "Write" || n == 0) &&
 						(class == frontend.BackendErrorBusy || class == frontend.BackendErrorNotReady)
 					// Sync covers the preceding Write at this offset.
-					t.Logf("guest error op=%s write_offset=4096 at=%s detach_elapsed=%s freeze_elapsed=%s caller_error=%v class=%d budget_busy=%t error=%v", op, at.UTC().Format(time.RFC3339Nano), sinceDetach, sinceFreeze, callerErr, class, budgetBusy, err)
+					t.Logf("guest error op=%s write_offset=4096 at=%s operation_elapsed=%s detach_elapsed=%s freeze_elapsed=%s caller_error=%v class=%d budget_busy=%t error=%v", op, at.UTC().Format(time.RFC3339Nano), operationElapsed, sinceDetach, sinceFreeze, callerErr, class, budgetBusy, err)
 					if budgetBusy {
 						guestBudgetBusy.Add(1)
 					} else {
