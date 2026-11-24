@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,7 +67,11 @@ func TestGC_CopySweepClaimsSnapshotAttemptBeforeRelease(t *testing.T) {
 	}
 }
 
-func TestGC_CopySweepClaimsForkHEADNotExistingVolume(t *testing.T) {
+// The sweep never creates a fork's HEAD from nothing: past the deadline an
+// absent HEAD (never published, or published then pruned: unknown) stops the
+// pass with the intent kept; the held publish can still land, and the next
+// sweep settles the attempt from the HEAD it reads.
+func TestGC_CopySweepNeverCreatesAForkHEAD(t *testing.T) {
 	f, b, c, g, now := gcFixture(t)
 	ctx := context.Background()
 	c.SetClock(func() time.Time { return *now })
@@ -90,18 +95,23 @@ func TestGC_CopySweepClaimsForkHEADNotExistingVolume(t *testing.T) {
 	}
 	*now = now.Add(DefaultOpDeadline + time.Second)
 	count, e := g.SweepCopies(ctx)
-	if e != nil || count != 1 {
-		t.Fatalf("fork sweep: %d %v", count, e)
+	if e == nil || count != 0 || !strings.Contains(e.Error(), "no HEAD") {
+		t.Fatalf("fork sweep over an absent HEAD: %d %v; want the pass stopped", count, e)
 	}
-	head, ok, e := c.ReadHead(ctx, "v2")
-	if e != nil || !ok || head.State != storage.ChunkHeadAborted {
-		t.Fatalf("final HEAD not claimed: %+v %v", head, e)
+	if _, ok, e := c.ReadHead(ctx, "v2"); e != nil || ok {
+		t.Fatalf("the sweep created a HEAD: %v %v", ok, e)
 	}
-	if n := f.releaseDeferredCreates(); n != 0 {
-		t.Fatalf("late fork HEAD published over claim: %d", n)
+	if list, _ := f.ListEntries(ctx, path.Join(catBase, "v2", intentsDir), "", "", 0); len(list) != 1 {
+		t.Fatalf("intents %d; want the fork intent kept", len(list))
 	}
-	if _, e := c.EnsureVolume(ctx, "v2", catGeo); CodeOf(e) != CodeForkIncomplete {
-		t.Fatalf("aborted target attached: %v", e)
+	if n := f.releaseDeferredCreates(); n != 1 {
+		t.Fatalf("the late fork HEAD did not land: %d", n)
+	}
+	if count, e = g.SweepCopies(ctx); e != nil || count != 1 {
+		t.Fatalf("sweep after the publish landed: %d %v", count, e)
+	}
+	if head, ok, e := c.ReadHead(ctx, "v2"); e != nil || !ok || head.State == storage.ChunkHeadAborted {
+		t.Fatalf("fork HEAD after the sweep: %+v %v", head, e)
 	}
 	if _, e := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "new"}); CodeOf(e) != CodeTargetExists {
 		t.Fatalf("volume id reused: %v", e)

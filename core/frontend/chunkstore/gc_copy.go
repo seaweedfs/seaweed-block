@@ -24,6 +24,10 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	// Before any sweep action: a missing HEAD anywhere stops the pass.
+	if _, err := g.missingHeads(ctx, vols); err != nil {
+		return 0, err
+	}
 	type copyAttempt struct {
 		vol    string
 		remote *ChunkRemote
@@ -95,15 +99,16 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 			if !ok || !isForked(v.Origin) || v.Fork == nil || v.Fork.RequestID != parts[1] {
 				return settled, errors.New("chunkstore: fork intent has no matching target VOLUME")
 			}
-			if _, err = g.cat.AbortFork(ctx, a.vol); err != nil {
-				return settled, err
-			}
+			// Act only on a HEAD read: a published or aborted HEAD settles
+			// the attempt. No step creates a HEAD from nothing (an absent
+			// HEAD cannot tell "never published" from "pruned"; the check
+			// above already stopped the pass).
 			h, ok, readErr := g.cat.ReadHead(ctx, a.vol)
 			if readErr != nil {
 				return settled, readErr
 			}
 			if !ok || h.Gen == 0 {
-				return settled, errors.New("chunkstore: fork claim did not settle the publishing HEAD")
+				return settled, fmt.Errorf("chunkstore: fork target %s has no HEAD; the sweep never creates one", a.vol)
 			}
 		}
 		// Both a valid published immutable entry and a valid permanent aborted

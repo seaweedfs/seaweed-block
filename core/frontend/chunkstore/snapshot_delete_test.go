@@ -143,8 +143,10 @@ func TestSnapshotDelete_UnknownPublishKeepsTheKeysWhileItsIntentExists(t *testin
 		t.Fatal("the unknown publish left no intent")
 	}
 	for i := 0; i < 4; i++ {
-		if _, err := g.Run(ctx); err != nil {
-			t.Fatalf("gc: %v", err)
+		// The fork's HEAD is absent (its publish is unknown): GC acts on
+		// nothing while it is (INV-GC-HEAD-ABSENT-001).
+		if res, err := g.Run(ctx); err == nil || len(res.RefusedVolumes) != 1 || res.Reclaimed != 0 {
+			t.Fatalf("gc with the fork's HEAD absent: %+v %v; want the pass refused", res, err)
 		}
 		*now = now.Add(2 * time.Hour) // far past the grace
 	}

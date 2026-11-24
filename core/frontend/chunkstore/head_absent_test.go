@@ -297,3 +297,42 @@ func TestGC_ForkHeadPresentRootsTheSourceKeys(t *testing.T) {
 		t.Errorf("dropped %s while the fork's HEAD roots the shared keys", fid)
 	}
 }
+
+// The hostile twin: a COMPLETED fork whose copy intent stayed (its drop
+// failed after the publish), past the intent's deadline, then its HEAD
+// pruned. Full apply passes (copy sweep, then mark) must never create a
+// HEAD for it nor reclaim the fork's or the source's shared keys.
+func TestGC_HostileTwinStaleForkIntentAndPrunedHead(t *testing.T) {
+	f, g, now, shared := forkSharedFixture(t)
+	ctx := context.Background()
+	c := g.cat
+	h2, ok, err := c.ReadHead(ctx, "v2")
+	if err != nil || !ok || len(h2.Segments) == 0 {
+		t.Fatalf("fork HEAD: %+v %t %v", h2, ok, err)
+	}
+	var keys []string
+	for _, ref := range h2.Segments {
+		keys = append(keys, ref.Key)
+	}
+	r2, _ := NewChunkRemote(f, g.blobs.(gcBlobs).fakeBlobs, catBase+"/v2")
+	if _, err := r2.PutIntent(ctx, storage.ChunkIntent{Holder: "fork:v2/f", Keys: keys, Segments: h2.Segments, ChunkBytes: h2.ChunkBytes,
+		DeadlineNs: time.Now().Add(time.Minute).UnixNano()}); err != nil {
+		t.Fatal(err) // the stale intent, as the fork left it
+	}
+	if err := f.DeleteEntry(ctx, catBase+"/v2", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		out, err := c.ExecuteGC(ctx, g.blobs, g.cfg, true)
+		if err == nil || out.Reclaimed != 0 {
+			t.Fatalf("pass %d: %+v %v; want the pass stopped", i, out.GCResult, err)
+		}
+		if _, ok, _ := c.ReadHead(ctx, "v2"); ok {
+			t.Fatalf("pass %d created a HEAD for the fork", i)
+		}
+		*now = now.Add(2*time.Hour + g.cfg.ClockSkew)
+	}
+	if len(f.dropped) != 0 {
+		t.Fatalf("dropped %v; the shared keys %v must survive", f.dropped, shared)
+	}
+}

@@ -79,10 +79,51 @@ type GCRefusal struct {
 	Reason string `json:"reason"`
 }
 
+// missingHeads is the format gate and INV-GC-HEAD-ABSENT-001, run over every
+// volume before any sweep or mark action: an absent HEAD is unknown, never
+// empty. A live volume without HEAD, or a directory holding HEAD or keys
+// without VOLUME, may have rooted keys in any volume (a fork's HEAD names
+// its source's keys), so while any exists the pass acts on nothing: it
+// returns them all with a non-nil error naming each and its remedy.
+func (g *Collector) missingHeads(ctx context.Context, vols []string) ([]GCRefusal, error) {
+	refused := []GCRefusal{}
+	for _, vol := range vols {
+		root := path.Join(g.cat.base, vol)
+		v, hasVolume, err := g.cat.ReadVolume(ctx, vol) // the format gate
+		if err != nil {
+			return refused, err
+		}
+		headPresent, err := g.cat.headExists(ctx, root)
+		if err != nil {
+			return refused, err
+		}
+		switch {
+		case hasVolume && v.State == "" && !headPresent:
+			refused = append(refused, GCRefusal{Volume: vol, Reason: refusalReason(vol, true)})
+		case !hasVolume:
+			keys, err := g.cat.f.ListEntries(ctx, path.Join(root, keysDir), "", "", 1)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return refused, err
+			}
+			if headPresent || len(keys) != 0 {
+				refused = append(refused, GCRefusal{Volume: vol, Reason: refusalReason(vol, false)})
+			}
+		}
+	}
+	if len(refused) == 0 {
+		return refused, nil
+	}
+	reasons := make([]string, len(refused))
+	for i, r := range refused {
+		reasons[i] = r.Reason
+	}
+	return refused, fmt.Errorf("chunkstore: GC acts on nothing while a HEAD is missing: %s", strings.Join(reasons, "; "))
+}
+
 // refusalReason names what is missing and the remedy that works for it.
 func refusalReason(vol string, hasVolume bool) string {
 	if hasVolume {
-		return fmt.Sprintf("volume %s is live but has no HEAD: restore its HEAD, or delete it with sw-block ops chunk volume-delete (an attach refuses while keys remain)", vol)
+		return fmt.Sprintf("volume %s is live but has no HEAD: restore its HEAD, or (a fork or restore) retry it with its request id, or delete it with sw-block ops chunk volume-delete (an attach refuses while keys remain)", vol)
 	}
 	return fmt.Sprintf("directory %s holds HEAD or chunk keys but no VOLUME: its image and what it rooted are unknown; once you decide its data is lost, remove the directory with the filer (fs.rm -r deletes its needles)", vol)
 }
@@ -193,52 +234,13 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 		return result, err
 	}
 	result.Volumes = len(volumes)
+	if result.RefusedVolumes, err = g.missingHeads(ctx, volumes); err != nil {
+		return result, err
+	}
 	for _, vol := range volumes {
 		r, e := NewChunkRemote(g.cat.f, gcBlobReader{g.blobs}, path.Join(g.cat.base, vol))
 		if e != nil {
 			return result, e
-		}
-		// The format gate, and whether the volume is live: a live volume
-		// whose HEAD is absent is checked below (INV-GC-HEAD-ABSENT-001).
-		v, hasVolume, e := g.cat.ReadVolume(ctx, vol)
-		if e != nil {
-			return result, e
-		}
-		headPresent, e := g.cat.headExists(ctx, path.Join(g.cat.base, vol))
-		if e != nil {
-			return result, e
-		}
-		// An absent HEAD is unknown, never empty: a live volume without
-		// HEAD (or a directory holding HEAD or keys but no VOLUME) may have
-		// rooted keys anywhere (a fork's HEAD names its source's keys), so
-		// the pass reclaims nothing anywhere (INV-GC-HEAD-ABSENT-001).
-		if hasVolume && v.State == "" && !headPresent {
-			// The one exception: a fork or restore in flight (VOLUME written,
-			// HEAD not yet) whose own copy intent roots what its HEAD will.
-			inFlight := false
-			if isForked(v.Origin) {
-				intents, e := r.ListIntents(ctx)
-				if e != nil {
-					return result, e
-				}
-				for _, in := range intents {
-					inFlight = inFlight || strings.HasPrefix(in.Holder, "fork:"+vol+"/")
-				}
-			}
-			if !inFlight {
-				result.RefusedVolumes = append(result.RefusedVolumes, GCRefusal{Volume: vol, Reason: refusalReason(vol, true)})
-				continue
-			}
-		}
-		if !hasVolume {
-			keys, e := g.cat.f.ListEntries(ctx, r.keyDir(), "", "", 1)
-			if e != nil && !errors.Is(e, ErrNotFound) {
-				return result, e
-			}
-			if headPresent || len(keys) != 0 {
-				result.RefusedVolumes = append(result.RefusedVolumes, GCRefusal{Volume: vol, Reason: refusalReason(vol, false)})
-				continue
-			}
 		}
 		h, e := r.GetHead(ctx)
 		if e != nil {
@@ -398,13 +400,6 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				break
 			}
 		}
-	}
-	if len(result.RefusedVolumes) != 0 {
-		reasons := make([]string, len(result.RefusedVolumes))
-		for i, r := range result.RefusedVolumes {
-			reasons[i] = r.Reason
-		}
-		return result, fmt.Errorf("chunkstore: GC reclaims nothing while a HEAD is missing: %s", strings.Join(reasons, "; "))
 	}
 	if g.cfg.Now().Sub(start)+g.cat.deadline() >= g.cfg.Grace {
 		return result, errors.New("chunkstore: GC mark exceeded grace safety margin")
