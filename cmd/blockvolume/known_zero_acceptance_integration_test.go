@@ -344,6 +344,25 @@ func kzTarget(t *testing.T, env *handoffEnv, rep *kzReport, src kzVolume, kind s
 	return r
 }
 
+// kzWaitDevice resolves this run's NQN from sysfs for up to 30 s; on timeout
+// the last refusal is in the failure, so a lab log names the check that held.
+func kzWaitDevice(t *testing.T, nqn string) kzDevice {
+	t.Helper()
+	sys := os.DirFS("/sys/class")
+	var last error
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		d, err := kzResolve(sys, nqn, "")
+		if err == nil {
+			return d
+		}
+		last = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("kernel device for %s never appeared: %v", nqn, last)
+	return kzDevice{}
+}
+
 // kzDeviceVerify connects the target through the kernel, resolves it by
 // NQN, mounts it read-only under the run's scratch, compares every source
 // file's sha256, unmounts and disconnects.
@@ -353,15 +372,7 @@ func kzDeviceVerify(t *testing.T, tb bvHost, nqn string, src kzVolume, run strin
 	kzSudo(t, "nvme", "connect", "-t", "tcp", "-n", nqn, "-a", host, "-s", port)
 	defer kzSudo(t, "nvme", "disconnect", "-n", nqn)
 	var dev kzDevice
-	poll(t, 30*time.Second, "kernel device for "+nqn+" never appeared", func() bool {
-		out, err := exec.Command("sudo", "-n", "nvme", "list-subsys", "-o", "json").Output()
-		if err != nil {
-			return false
-		}
-		d, err := kzResolve(out, nqn, "")
-		dev = d
-		return err == nil
-	})
+	dev = kzWaitDevice(t, nqn)
 	t.Log(dev.Identity())
 	mnt := filepath.Join(os.TempDir(), "kz-"+run, tb.volume)
 	if err := os.MkdirAll(mnt, 0o755); err != nil {
@@ -684,15 +695,7 @@ func kzDeviceFiles(t *testing.T, b bvHost, nqn, fs, run string) (string, string,
 	kzSudo(t, "nvme", "connect", "-t", "tcp", "-n", nqn, "-a", host, "-s", port)
 	defer kzSudo(t, "nvme", "disconnect", "-n", nqn)
 	var dev kzDevice
-	poll(t, 30*time.Second, "kernel device for "+nqn+" never appeared", func() bool {
-		out, err := exec.Command("sudo", "-n", "nvme", "list-subsys", "-o", "json").Output()
-		if err != nil {
-			return false
-		}
-		d, err := kzResolve(out, nqn, "")
-		dev = d
-		return err == nil
-	})
+	dev = kzWaitDevice(t, nqn)
 	t.Log(dev.Identity())
 	mkfs := map[string][]string{"ext4": {"mkfs.ext4", "-F", "-v"}, "xfs": {"mkfs.xfs", "-f"}}[fs]
 	if mkfs == nil {
