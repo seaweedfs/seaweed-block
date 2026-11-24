@@ -48,6 +48,29 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 - Without it, blockvolume exits at start with `host volume lock directory unavailable`. Install the entry, or chown
   the directory to the unit's user.
 
+**Chunk collection (required).** Chunk needles must live in a SeaweedFS collection used only by sw-block, so that
+cluster maintenance (fsck with a delete flag, a TTL, deleting a collection) is kept away from them.
+- Set `SWB_CHUNK_COLLECTION=<name>` in every host's blockvolume env file (`--chunk-collection`), the same name on
+  every host, and pass `--chunk-collection <name>` to `sw-block ops chunk gc`. A filer default or storage rule does
+  not count.
+- Without it, blockvolume exits 78 (not restarted) before it creates anything, with `chunk volumes need a collection
+  used only by sw-block: set --chunk-collection <name>`; gc fails before it dials the filer. With it, blockvolume
+  logs `blockvolume: chunk collection "<name>"` at start.
+- Do not put a TTL on that collection, do not delete it, and use it for nothing else.
+
+## Upgrade
+
+Upgrade `blockmaster` first, then `blockvolume` ([upgrade order](standalone-deployment.md#upgrade-order)).
+
+**Chunk collection now required.** A deployment that ran chunk volumes without `--chunk-collection` must add it
+before it upgrades blockvolume; otherwise each upgraded volume exits 78 and stays stopped.
+1. Set `SWB_CHUNK_COLLECTION=<name>` in each host's env file, then upgrade and restart blockvolume. A volume
+   refused before the setting was added stays stopped; start its unit again once the setting is in place.
+2. Needles written before the upgrade stay in the collection they were written to (the filer default or a storage
+   rule's). They are still read, and GC still reclaims them: it deletes by needle id. Keep the cluster maintenance
+   rules above for that collection until the volumes that use it are deleted.
+3. Add `--chunk-collection <name>` to every scripted `sw-block ops chunk gc`.
+
 ## Size a host
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal

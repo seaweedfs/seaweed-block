@@ -38,4 +38,12 @@ func TestChunkVolumeWithoutACollectionIsRefused(t *testing.T) {
 	if exitCode(err) != 78 || served || !strings.Contains(cure, "collection") || len(entries) != 0 {
 		t.Fatalf("G3: a chunk volume without a dedicated collection must refuse to start (exit 78, a --chunk-collection cure line, nothing created); exit %v, served %v, %d files", err, served, len(entries))
 	}
+
+	// The operator guide's cure, as written: set the collection and start
+	// the same volume again. It creates its root, logs the collection and serves.
+	d = env.h.start(t, "blockvolume-with-collection", env.h.volume, all...)
+	poll(t, 60*time.Second, "the volume never served after --chunk-collection was set", func() bool { return volumeFrontendReady(b.status, "v1") })
+	if logged := d.line("chunk collection"); !strings.Contains(logged, `"swblock"`) {
+		t.Fatalf("G3: the collection must be logged at start; got %q", logged)
+	}
 }

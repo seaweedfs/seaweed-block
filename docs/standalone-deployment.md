@@ -23,7 +23,7 @@ matching as a compatibility fallback. See [holder identity and upgrades](release
 
 Chunk volumes now refuse to start without `--chunk-collection`: set
 `SWB_CHUNK_COLLECTION` before you upgrade blockvolume. See
-[chunk volumes need their own collection](releases/chunk-collection-required.md).
+[upgrade](operator-guide.md#upgrade) in the operator guide.
 ## Get the matching files
 
 The unit and settings files must come from the same commit as your

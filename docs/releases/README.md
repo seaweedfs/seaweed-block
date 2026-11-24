@@ -7,7 +7,6 @@ is still outside the supported boundary.
 - [Holder identity and pre-release upgrades](holder-identity.md)
 - [One live process per volume per host](one-process-per-volume.md)
 - [Local disk headroom at volume create](local-disk-headroom.md)
-- [Chunk volumes need their own collection](chunk-collection-required.md) (behaviour change)
 - [v0.1 Alpha — Kubernetes Block Foundation](v0.1-alpha.md)
 - [v0.2 Alpha — Day-1 Activation And First Volume](v0.2-alpha.md)
 - [v0.3 Alpha — Helm Install And Observable First Volume](v0.3-alpha.md)
