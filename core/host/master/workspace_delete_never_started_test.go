@@ -102,4 +102,11 @@ func TestDeleteAdmitsANeverStartedLine(t *testing.T) {
 	if err != nil || res.GetState() != lifecycle.ReservationAdmitted {
 		t.Fatalf("re-run after a commit that timed out: %+v %v; want admitted again", res, err)
 	}
+	// A NEW delete request (another token, so no held-token skip) meeting the
+	// deleting HEAD is decided by the verdict, and the verdict admits it: a
+	// HEAD past the fence is HolderDeleting, not a live holder.
+	res, err = lc.MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-second-request"})
+	if err != nil || res.GetState() != lifecycle.ReservationAdmitted {
+		t.Fatalf("a new delete request meeting a deleting HEAD: %+v %v; want admitted by the verdict", res, err)
+	}
 }
