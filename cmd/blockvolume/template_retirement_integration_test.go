@@ -17,7 +17,7 @@ func TestProcedureRetireTemplateSource(t *testing.T) {
 	source := env.start(t, "blockvolume-source", "s1")
 	e := env.adopt(t, source, "s1")
 	const template = "template-holder"
-	want := map[uint64][]byte{5: pattern("template-seed!!")}
+	want := map[uint64][]byte{5: pattern("template-seed!!!")}
 	env.writeBlock(t, "s1", 5, want[5])
 	env.snapshot(t, "s1", "v1", "seed")
 	for _, step := range []struct{ source, snapshot, target string }{
