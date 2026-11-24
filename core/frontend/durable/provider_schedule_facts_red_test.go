@@ -92,15 +92,14 @@ func (f *schedFacts) snapshot() (calls int, names map[string]time.Time) {
 }
 
 // factsProvider opens a provider for v1 with a schedule of period p over
-// root and remote; facts is the store its schedule decides from. Today the
-// provider has no such input (its schedule lives in memory), so facts is
-// only the callback's store.
+// root and remote; facts is the store its schedule decides from.
 func factsProvider(t *testing.T, root string, remote storage.ChunkRemote, p time.Duration, facts *schedFacts) *durable.DurableProvider {
 	t.Helper()
 	pr, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkSnapshotPeriod:    p,
+		ChunkScheduledNewest:   func(context.Context, string) (time.Time, error) { return facts.newest(), nil },
 		ChunkScheduledSnapshot: facts.take,
 		ChunkRemoteFor:         func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())
@@ -110,7 +109,11 @@ func factsProvider(t *testing.T, root string, remote storage.ChunkRemote, p time
 	return pr
 }
 
-func schedPhase(p time.Duration) time.Duration { return hostlimit.Phase("v1:snapshot", p) }
+// schedPhase is v1's offset within p, in whole seconds (a scheduled
+// snapshot's name carries its slot to the second).
+func schedPhase(p time.Duration) time.Duration {
+	return hostlimit.Phase("v1:snapshot", p).Truncate(time.Second)
+}
 
 // slotStart is the start of the slot holding t on v1's grid of period p.
 func slotStart(t time.Time, p time.Duration) time.Time {
@@ -261,7 +264,8 @@ func TestRedScheduleOutcomeUnknownThenRestartIsOneSnapshot(t *testing.T) {
 
 // TestRedScheduleOverdueFromNewestAfterRestart: overdue is computed from
 // the newest scheduled snapshot, so a process that starts while the newest
-// is older than one period plus the retry cap reports overdue at once.
+// is older than one period plus the retry cap reports overdue as soon as it
+// has read it.
 // Today it counts from the process start and reports not overdue.
 func TestRedScheduleOverdueFromNewestAfterRestart(t *testing.T) {
 	const p = time.Hour
@@ -272,8 +276,8 @@ func TestRedScheduleOverdueFromNewestAfterRestart(t *testing.T) {
 	pr := factsProvider(t, t.TempDir(), storage.NewMemChunkRemote(), p, facts)
 	t.Cleanup(func() { _ = pr.Close() })
 	openRecovered(t, pr)
-	waitFor(t, 5*time.Second, "the schedule's status", func() bool { return scheduledStatus(t, pr) != nil })
-	if st := scheduledStatus(t, pr); !st.Overdue {
-		t.Fatalf("newest scheduled snapshot %s, period %v: status %+v; want overdue", facts.newest().Format(time.RFC3339), p, *st)
-	}
+	waitFor(t, 5*time.Second, "overdue in the status (newest "+facts.newest().Format(time.RFC3339)+", period 1h)", func() bool {
+		st := scheduledStatus(t, pr)
+		return st != nil && st.Overdue
+	})
 }

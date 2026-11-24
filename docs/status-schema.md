@@ -282,14 +282,16 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.HostBudget` | interface | the host background-cut budget state, with --host-limit-dir (omitted when empty) |
 | `Volumes[].Chunk.ScheduledSnapshot` | object | the scheduled-snapshot state; absent when the schedule is off or its loop has not started (omitted when empty) |
 | `Volumes[].Chunk.ScheduledSnapshot.periodNs` | int64 | PeriodNs is the schedule period; zero means off. |
-| `Volumes[].Chunk.ScheduledSnapshot.lastOkNs` | int64 | LastOkNs is when the last scheduled snapshot succeeded; zero: none since the schedule started. |
-| `Volumes[].Chunk.ScheduledSnapshot.nextDueNs` | int64 | NextDueNs is when the next attempt is due. |
+| `Volumes[].Chunk.ScheduledSnapshot.newestNs` | int64 | NewestNs is the slot of the newest published scheduled snapshot, as last read; zero: none, or not read yet. (omitted when empty) |
+| `Volumes[].Chunk.ScheduledSnapshot.lastOkNs` | int64 | LastOkNs is when this process last took a scheduled snapshot; zero: none since it started. |
+| `Volumes[].Chunk.ScheduledSnapshot.nextDueNs` | int64 | NextDueNs is when the schedule next decides whether a run is due. |
 | `Volumes[].Chunk.ScheduledSnapshot.lastFailure` | object | LastFailure is the last failed attempt since the last success. (omitted when empty) |
 | `Volumes[].Chunk.ScheduledSnapshot.lastFailure.code` | string | Code is the failure's code, as the control endpoint reports it. |
 | `Volumes[].Chunk.ScheduledSnapshot.lastFailure.atNs` | int64 | AtNs is when the attempt failed. |
 | `Volumes[].Chunk.ScheduledSnapshot.attempts` | int | Attempts counts the failed attempts since the last success. |
 | `Volumes[].Chunk.ScheduledSnapshot.skipped{}` | int64 | Skipped counts attempts not made, by reason. (omitted when empty) |
-| `Volumes[].Chunk.ScheduledSnapshot.snapshot_overdue` | bool | Overdue reports that no scheduled snapshot succeeded within one period plus the retry cap, counted from the last success or, before any, from the start of the schedule. |
+| `Volumes[].Chunk.ScheduledSnapshot.snapshot_overdue` | bool | Overdue reports that the newest scheduled snapshot is older than one period plus the retry cap (before the newest is read: counted from the start of the schedule). |
+| `Volumes[].Chunk.ScheduledSnapshot.clock_suspect` | bool | ClockSuspect reports a newest scheduled snapshot whose slot lies more than the retry cap ahead of this host's clock: a clock stepped back here, or one that ran ahead where it was taken. No run is due until the clock passes that slot. (omitted when empty) |
 | `Volumes[].Chunk.CutSchedule` | object | the automatic-cut timer's state; absent when the timer is off or its loop has not started (omitted when empty) |
 | `Volumes[].Chunk.CutSchedule.HostSlotWaits` | uint64 | automatic cuts refused because every host slot was held |
 | `Volumes[].Chunk.CutSchedule.HostSlotWaitSinceNs` | int64 | wall time of the first such refusal since the last successful cut; 0 when not waiting |

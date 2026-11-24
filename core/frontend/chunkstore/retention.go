@@ -25,7 +25,10 @@ import (
 //     ExpiresAtNs set is pinned whatever its class.
 //   - "scheduled": a scheduled snapshot. Retention keeps the newest K of
 //     this class, where K is the LabelScheduleKeep of the newest one
-//     (DefaultScheduleKeep when absent).
+//     (DefaultScheduleKeep when absent). The class ranks by the slot in a
+//     scheduled snapshot's name (ScheduledSlot), the time the schedule
+//     decides by, so the newest slot is never planned for deletion; one
+//     with another name ranks by its creation time.
 //     They are not counted against KeepNewest, and the age and log-spaced
 //     keeps do not apply to them, so other snapshots are unaffected.
 //   - "" (snapshots made before classes existed): treated as unpinned.
@@ -216,14 +219,14 @@ const (
 )
 
 // planRetention decides, from one listing, which snapshots policy keeps at
-// now. Unpinned snapshots
-// are ranked newest first; equal creation times rank by name, so the plan
+// now. Snapshots are ranked newest first (a scheduled one by its slot,
+// every other by its creation time); equal times rank by name, so the plan
 // is deterministic.
 func planRetention(p RetentionPolicy, snaps []SnapshotInfo, now time.Time) []RetentionDecision {
 	ordered := append([]SnapshotInfo(nil), snaps...)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		if ordered[i].CreatedNs != ordered[j].CreatedNs {
-			return ordered[i].CreatedNs > ordered[j].CreatedNs
+		if ti, tj := retentionRank(ordered[i]), retentionRank(ordered[j]); ti != tj {
+			return ti > tj
 		}
 		return ordered[i].Name < ordered[j].Name
 	})
@@ -296,6 +299,15 @@ func planRetention(p RetentionPolicy, snaps []SnapshotInfo, now time.Time) []Ret
 		out[i] = d
 	}
 	return out
+}
+
+// retentionRank is the time s ranks by: a scheduled snapshot's slot, else
+// its creation time.
+func retentionRank(s SnapshotInfo) int64 {
+	if t, ok := ScheduledSlot(s); ok {
+		return t.UnixNano()
+	}
+	return s.CreatedNs
 }
 
 // scheduleKeepOf is the count a scheduled snapshot's schedule keeps.

@@ -345,7 +345,7 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 // startChunkLoop starts the periodic cuts of an attached layer, if configured
 // and not already running. The caller holds h.attachMu and p.mu.
 func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer storage.ChunkLayer) {
-	snapshotsOn := p.cfg.ChunkSnapshotPeriod > 0 && p.cfg.ChunkScheduledSnapshot != nil
+	snapshotsOn := p.cfg.ChunkSnapshotPeriod > 0 && p.cfg.ChunkScheduledSnapshot != nil && p.cfg.ChunkScheduledNewest != nil
 	if (p.cfg.ChunkCaptureInterval <= 0 && (p.cfg.ChunkMaintenanceInterval <= 0 || p.cfg.ChunkMaintenance == nil) && !snapshotsOn) || h.chunkStop != nil {
 		return
 	}

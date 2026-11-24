@@ -6,6 +6,7 @@ package durable
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -22,17 +23,31 @@ func (snapStubLayer) Fenced() bool                   { return false }
 func (snapStubLayer) Stats() storage.ChunkLayerStats { return storage.ChunkLayerStats{} }
 
 // snapLoop sets up volume v1's scheduled-snapshot loop (period one day) in
-// the current bubble; take runs each attempt. start arms the loop; stop
-// stops it and reports whether it was joined within an hour of virtual
-// time.
+// the current bubble; take runs each attempt, and a successful attempt's
+// slot becomes the newest published scheduled snapshot. start arms the
+// loop; stop stops it and reports whether it was joined within an hour of
+// virtual time.
 func snapLoop(take func(context.Context) error) (h *volHandle, start func(), stop func() bool) {
 	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}
 	layer := &snapStubLayer{}
 	h = &volHandle{chunk: layer, chunkLineage: chunkLineage{"v1", "r1", 3, 1}}
+	var mu sync.Mutex
+	var newest time.Time
 	p := &DurableProvider{volumes: map[string]*volHandle{"v1": h}, view: precopyQueueView{id},
 		cfg: ProviderConfig{ChunkSnapshotPeriod: 24 * time.Hour,
-			ChunkScheduledSnapshot: func(ctx context.Context, _ string, _ time.Time, _ func(context.Context) (storage.ChunkHead, error)) error {
-				return take(ctx)
+			ChunkScheduledNewest: func(context.Context, string) (time.Time, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				return newest, nil
+			},
+			ChunkScheduledSnapshot: func(ctx context.Context, _ string, at time.Time, _ func(context.Context) (storage.ChunkHead, error)) error {
+				err := take(ctx)
+				if err == nil {
+					mu.Lock()
+					newest = at
+					mu.Unlock()
+				}
+				return err
 			}}}
 	start = func() {
 		p.mu.Lock()
@@ -62,40 +77,35 @@ func recv(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-// The first attempt is at the start plus the volume's offset and the next
-// one a period later, both on the monotonic clock.
-func TestScheduledSnapshotLoop_TakesEachSlotOnMonotonicTime(t *testing.T) {
+// The first attempt is at once, for the slot holding the start; each later
+// one at the start of the next slot, one period apart.
+func TestScheduledSnapshotLoop_TakesEachSlot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var calls atomic.Int64
 		h, start, stop := snapLoop(func(context.Context) error { calls.Add(1); return nil })
-		begin := time.Now()
 		start()
 		defer func() {
 			if !stop() {
 				t.Error("the loop was not joined")
 			}
 		}()
-		first := h.snapshots.due()
-		if off := first.Sub(begin); off < 0 || off >= 24*time.Hour {
-			t.Fatalf("first slot %v after the start; want within one period", off)
-		}
-		time.Sleep(time.Until(first) - time.Second)
 		synctest.Wait()
-		if calls.Load() != 0 {
-			t.Fatal("an attempt ran before its slot")
+		if calls.Load() != 1 {
+			t.Fatalf("%d attempts at the start; want 1 at once", calls.Load())
+		}
+		next := h.snapshots.due()
+		if st := h.snapshots.status(time.Now()); next.Sub(time.Unix(0, st.NewestNs)) != 24*time.Hour {
+			t.Fatalf("next decision %v after the first slot; want one period", next.Sub(time.Unix(0, st.NewestNs)))
+		}
+		time.Sleep(time.Until(next) - time.Second)
+		synctest.Wait()
+		if calls.Load() != 1 {
+			t.Fatal("an attempt ran before the next slot")
 		}
 		time.Sleep(2 * time.Second)
 		synctest.Wait()
-		if calls.Load() != 1 {
-			t.Fatalf("%d attempts at the first slot; want 1", calls.Load())
-		}
-		if next := h.snapshots.due(); next.Sub(first) != 24*time.Hour {
-			t.Fatalf("next slot %v after the first; want one period", next.Sub(first))
-		}
-		time.Sleep(24 * time.Hour)
-		synctest.Wait()
 		if calls.Load() != 2 {
-			t.Fatalf("%d attempts after one period; want 2", calls.Load())
+			t.Fatalf("%d attempts after the next slot began; want 2", calls.Load())
 		}
 	})
 }
