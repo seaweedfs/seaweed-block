@@ -5,6 +5,7 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -154,8 +155,17 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 			t.Fatalf("w1 chunk %s after GC: %v; want intact", kept, err)
 		}
 	}
-	if _, err := w1.Get(ctx, a.Key); err == nil {
-		t.Fatalf("w1 chunk %s still readable after GC reclaimed it", a.Key)
+	// w1 still holds the fid it uploaded; the filer deletes the dropped
+	// needle from its queue after the reclaim's update: poll, bounded.
+	for deadline := time.Now().Add(60 * time.Second); ; {
+		_, err := w1.Get(ctx, a.Key)
+		if errors.Is(err, ErrBlobNotFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("w1 chunk %s not deleted by the filer within 60 s after GC reclaimed it: %v", a.Key, err)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	if s, err := cat.readSnap(ctx, "w1", "S2"); err != nil || s.State != SnapActive {
 		t.Fatalf("S2 after GC: %+v %v", s, err)

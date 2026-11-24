@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -223,8 +224,17 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	if applied.Reclaimed != 1 || applied.ExpiredIntents != 0 || !applied.MarkSaved {
 		t.Fatalf("apply: %+v", applied)
 	}
-	if _, err := s.Get(ctx, preview.WouldDelete[0].FID); err == nil {
-		t.Fatal("raw orphan needle still readable after DELETE")
+	// The filer deletes the dropped needle from its queue, after the
+	// reclaim's update: poll, bounded.
+	for deadline := time.Now().Add(60 * time.Second); ; {
+		_, err := s.Get(ctx, preview.WouldDelete[0].FID)
+		if errors.Is(err, chunkstore.ErrBlobNotFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("raw orphan needle not deleted by the filer within 60 s: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	if _, err = remote.Get(ctx, "orphan"); err == nil {
 		t.Fatal("orphan still readable")
