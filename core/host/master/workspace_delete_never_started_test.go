@@ -83,6 +83,18 @@ func TestDeleteAdmitsANeverStartedLine(t *testing.T) {
 	if err != nil || res.GetState() != lifecycle.ReservationAdmitted {
 		t.Fatalf("delete of a never-started line: %+v %v; want admitted without an ACK", res, err)
 	}
+	// The delete stopped before it marked HEAD, and the holder then claimed
+	// HEAD (its lease was still valid): a rerun of the same delete (its token
+	// holds the reservation) is admitted without a new verdict, so it reaches
+	// the catalog step, whose HEAD fence refuses the live HEAD and gives the
+	// reservation back. A different delete is still decided, and refused.
+	headEpoch.Store(int64(line.Epoch))
+	res, err = lc.MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-never-started"})
+	if err != nil || res.GetState() != lifecycle.ReservationAdmitted {
+		t.Fatalf("rerun of an admitted delete after the holder claimed HEAD: %+v %v; want admitted (the catalog step decides)", res, err)
+	}
+	refusedLive("a new delete while the holder holds HEAD", mark("v", "del-other"))
+	headEpoch.Store(0)
 	// The delete marked HEAD deleting, then its commit timed out: the re-run
 	// is admitted again (HEAD past the fence), not stranded as volume_in_use.
 	headDeleting.Store(true)
