@@ -548,6 +548,13 @@ func main() {
 		fmt.Println(buildinfo.Version("blockvolume"))
 		return
 	}
+	if refusal := chunkCollectionRefusal(f); refusal != "" {
+		fmt.Fprintln(os.Stderr, refusal)
+		os.Exit(exitGeometryRefused) // 78: not restarted; the flag must change
+	}
+	if f.durableImpl == "walstore-chunk" {
+		fmt.Fprintf(os.Stderr, "blockvolume: chunk collection %q\n", f.chunk.collection)
+	}
 	if f.memoryLimitMiB > 0 {
 		debug.SetMemoryLimit(f.memoryLimitMiB << 20)
 	}

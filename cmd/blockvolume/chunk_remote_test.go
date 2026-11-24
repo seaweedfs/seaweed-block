@@ -306,3 +306,28 @@ func TestChunkSnapshotScheduleFlag(t *testing.T) {
 		t.Fatal("--chunk-snapshot-schedule accepted without walstore-chunk")
 	}
 }
+
+func TestChunkVolumeNeedsAnExplicitCollection(t *testing.T) {
+	base := append(phase150RequiredBlockvolumeArgs(), "--durable-root=/tmp/sw-block", "--chunk-filer=x:1")
+	for _, tc := range []struct {
+		args   []string
+		refuse bool
+	}{
+		{[]string{"--durable-impl=walstore-chunk"}, true},
+		{[]string{"--durable-impl=walstore-chunk", "--chunk-collection="}, true},
+		{[]string{"--durable-impl=walstore-chunk", "--chunk-collection=swblock"}, false},
+	} {
+		f, err := parseFlags(append(append([]string{}, base...), tc.args...))
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		got := chunkCollectionRefusal(f)
+		if (got != "") != tc.refuse || (tc.refuse && !strings.Contains(got, "--chunk-collection")) {
+			t.Fatalf("%v: refusal %q", tc.args, got)
+		}
+	}
+	f, err := parseFlags(append(phase150RequiredBlockvolumeArgs(), "--durable-root=/tmp/sw-block", "--durable-impl=walstore"))
+	if err != nil || chunkCollectionRefusal(f) != "" {
+		t.Fatalf("a walstore volume needs no collection: %v %q", err, chunkCollectionRefusal(f))
+	}
+}

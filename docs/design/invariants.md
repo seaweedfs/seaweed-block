@@ -497,7 +497,7 @@ Tests: `TestSnapshotSchedule_SlotsAreOffsetPerVolume`, `_FailureIsTypedAndBacksO
 
 ## Part B. Invariant ledger
 
-320 rows: 249 ACTIVE, 68 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 303 new.
+321 rows: 250 ACTIVE, 68 STUB, 3 ARCHIVED; 15 kept from the internal ledger, 304 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -888,6 +888,7 @@ Notes:
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |
 |---|---|---|---|---|---|---|
 | `INV-CHUNK-WRITE-ONCE-001` | Chunk and segment keys are write-once: a key that exists or once existed is refused, and a volume writes only its own keys. | M6 key: Bound | `core/frontend/chunkstore/chunk_remote.go` `putObject` | `TestChunkRemote_KeysAreWriteOnce` (`core/frontend/chunkstore/chunk_remote_test.go`); `TestChunkLayer_C5_ChunksAreImmutable` (`core/storage/chunk_layer_contract_test.go`) | — | ACTIVE |
+| `INV-CHUNK-DEDICATED-COLLECTION-001` | A walstore-chunk blockvolume and `sw-block ops chunk gc` run only with an explicit `--chunk-collection`; without it blockvolume exits 78 before it creates anything and gc fails before it dials the filer. A filer default or storage rule does not count. | Startup; GC admission | `cmd/blockvolume/chunk_remote.go` `chunkCollectionRefusal`; `cmd/sw-block/chunk_gc.go` `chunkGC` | `TestChunkVolumeNeedsAnExplicitCollection` (`cmd/blockvolume/chunk_remote_test.go`); `TestOpsChunkGC_InvalidAdmissionHasNoStoreEffects` (`cmd/sw-block/chunk_gc_test.go`) | — | ACTIVE |
 | `INV-MAINT-ONE-OWNER` | Only the current attached handle with matching replica/epoch/endpoint admits maintenance; one attached volume admits at most one pass; elapsed ticks coalesce and never enqueue catch-up work. | M8 Armed → Running | `provider_chunk.go` `chunkMaintenanceLoop` | `TestMaintenanceCoalescesWhileOnePassIsHeld`, `TestMaintenancePassHasOneDeadline`, `TestMaintenanceRejectsForeignLineageBeforeAdmission`, `TestMaintenanceSameHandleRearmsAfterJoinedStop` | `MaintenanceOwner` `OneOwner`, `CurrentHandleAtAdmission` | ACTIVE |
 | `INV-MAINT-SCOPE` | Per-volume GC traces foreign roots while restricting candidate reclamation, intent expiry and copy settlement to its volume; namespace coverage is not imported. | M8 scoped GC | `gc.go` `Collector.run`; `gc_copy.go` `SweepCopies`; `gc_execution.go` `ExecuteVolumeGC` | `TestVolumeGC_ForeignIntentRootsAndLocalCandidates`, `TestVolumeGC_DoesNotImportGlobalMark`, `TestVolumeGC_ForeignEligibleCaptureIntentStaysProtected`, `TestVolumeGC_ForeignEligibleCopyIsNotSettled` | `ScopedMaintenanceGC` `ForeignRootSurvives`, `ForeignCandidatesUntouched`, `OwnCoverageOnly` | ACTIVE |
 | `INV-MAINT-JOIN` | Detach/fence/Close cancels maintenance and the scheduled-snapshot worker and joins admitted workers before releasing its catalog/storage lifetime. | M8 Running → Draining → Closed | `provider_chunk.go` `chunkBackground`, `stopChunkLoop` | `TestMaintenanceStopJoinsBeforeRelease`, `TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock`, `TestMaintenanceAuthorityLossCancelsHeldPass`, `TestMaintenanceHealthyLineageChangeCancelsHeldPass`, `TestScheduledSnapshotLoop_StopJoinsTheAttempt` | `MaintenanceOwner` `JoinedBeforeRelease` | ACTIVE |

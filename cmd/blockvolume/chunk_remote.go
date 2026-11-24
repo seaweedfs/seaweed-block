@@ -250,6 +250,20 @@ func geometryFlagsRefusal(ctx context.Context, cat *chunkstore.Catalog, volumeID
 		numBlocks, blockSize, volumeID, v.NumBlocks, v.BlockSize), exitGeometryRefused
 }
 
+// chunkCollectionRefusal requires chunk needles to live in a collection used
+// only by sw-block (INV-CHUNK-DEDICATED-COLLECTION-001): it is the only fence
+// between SeaweedFS's own fsck and vacuum and the chunk data. Only an
+// explicit --chunk-collection counts; a filer default or storage rule may be
+// shared and is not visible in the unit. It returns the refusal line, or ""
+// when the flag is set or the volume is not a chunk volume. Checked before
+// anything is created.
+func chunkCollectionRefusal(f flags) string {
+	if f.durableImpl != "walstore-chunk" || f.chunk.collection != "" {
+		return ""
+	}
+	return "blockvolume: chunk volumes need a collection used only by sw-block: set --chunk-collection <name> (SWB_CHUNK_COLLECTION in the unit's env file); nothing was created"
+}
+
 // chunkHolder is how this host names itself in HEAD: <server-id>/<replica-id>
 // (B9 W2 appendix). The replica id alone is not enough:
 // two hosts that both serve replica r1 would look like the same holder

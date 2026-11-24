@@ -20,6 +20,10 @@ lease requests require the assigned server id. A new volume against an older
 pre-release master stays not serving until the master is upgraded; an older
 volume must also be upgraded to gain the assignment guard. Do not use endpoint
 matching as a compatibility fallback. See [holder identity and upgrades](releases/holder-identity.md).
+
+Chunk volumes now refuse to start without `--chunk-collection`: set
+`SWB_CHUNK_COLLECTION` before you upgrade blockvolume. See
+[chunk volumes need their own collection](releases/chunk-collection-required.md).
 ## Get the matching files
 
 The unit and settings files must come from the same commit as your
@@ -225,7 +229,8 @@ with `move target node "s2" is not registered`.
 | `SWB_DEGRADED_PROBE_COOLDOWN_BASE` / `_CAP` | `--degraded-probe-cooldown-base` / `-cap` | `5s` / `60s` | Per-peer probe backoff |
 | `SWB_CHUNK_FILER` | `--chunk-filer` | empty | SeaweedFS filer gRPC address; required with `walstore-chunk` |
 | `SWB_CHUNK_PATH` | `--chunk-path` | `/swblock/chunks` | Filer directory, one directory per volume |
-| `SWB_CHUNK_COLLECTION`, `SWB_CHUNK_REPLICATION` | `--chunk-collection`, `--chunk-replication` | empty (filer default) | Placement of chunk needles |
+| `SWB_CHUNK_COLLECTION` | `--chunk-collection` | empty; **required** with `walstore-chunk` | Collection used only by sw-block for chunk needles; without it blockvolume exits 78 |
+| `SWB_CHUNK_REPLICATION` | `--chunk-replication` | empty (filer default) | Replication of chunk needles |
 | `SWB_CHUNK_CAPTURE_INTERVAL` | `--chunk-capture-interval` | `0` (no timer) | Automatic cut interval, e.g. `15m` |
 | `SWB_CHUNK_SNAPSHOT_SCHEDULE` | `--chunk-snapshot-schedule` | `daily:7` | Scheduled named snapshots: `daily:N` or `weekly:N` (one per period at a per-volume offset, the newest N kept), or `off` |
 | `SWB_CHUNK_UPLOAD_CONCURRENCY` | `--chunk-upload-concurrency` | `8` | Parallel chunk uploads (1..64) |
@@ -512,7 +517,7 @@ Space comes back in two steps. Neither is immediate.
    ```bash
    sw-block ops chunk snapshot-delete --volume v1 --name sched-20261120T031204Z --chunk-filer FILER
    # one hour or more later, and again one hour or more after that:
-   sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
+   sw-block ops chunk gc --chunk-filer FILER --chunk-collection COLLECTION --master MASTER --apply
    ```
 
    - Each pass prints its `Candidates`, `Reclaimed` and `failed_deletes`.
@@ -556,8 +561,8 @@ therefore see every chunk of every volume and snapshot as unreferenced.
   `-reallyDeleteFromVolume`** on such a cluster either.
 - `volume.fsck` **without** those flags only reports. Its orphan list will contain the chunk needles; that is
   expected and is not a fault.
-- **Give chunk data its own collection** (`--chunk-collection`, `SWB_CHUNK_COLLECTION`) so it is easy to keep
-  cluster maintenance away from it. Do not put a TTL on that collection and do not delete it: both remove needles
+- **Chunk data has its own collection** (`--chunk-collection`, `SWB_CHUNK_COLLECTION`, required) so cluster
+  maintenance can be kept away from it. Use it for nothing else. Do not put a TTL on that collection and do not delete it: both remove needles
   without regard to what refers to them.
 - `filer.sync`, `filer.backup` and `filer.replicate` copy file chunk lists. They do **not** copy a walstore-chunk
   volume: the copied records would point at needles that do not exist on the target.

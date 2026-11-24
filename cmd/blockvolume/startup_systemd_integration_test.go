@@ -93,7 +93,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	args := []string{"--master", masterAddr, "--server-id", "s1", "--volume-id", volume, "--replica-id", "r1",
 		"--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--heartbeat-interval", "200ms", "--t1-readiness", "--status-addr", statusAddr,
 		"--durable-root", filepath.Join(root, "store"), "--durable-impl", "walstore-chunk", "--durable-blocks", "64",
-		"--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease",
+		"--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-collection", "swblock", "--chunk-control-endpoint", "--workspace-lease",
 		"--nvme-listen", nvmeAddr, "--nvme-subsysnqn", "nqn.2026-11.test:" + stem}
 	// Bootstrap is a different, non-restarting unit. Kill only this exact unit.
 	bootstrap := stem + "-bootstrap"
