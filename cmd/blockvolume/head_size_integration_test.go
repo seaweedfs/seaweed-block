@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -159,14 +160,11 @@ func TestHeadSizeAgainstVolumeSize(t *testing.T) {
 		}
 		cfg.attempts = n
 	}
-	h := newPlannedHandoffHarness(t)
-	clusterDir := filepath.Join(h.dir, "weed")
-	if err := os.MkdirAll(clusterDir, 0o700); err != nil {
-		t.Fatal(err)
+	var vols []headSzVol
+	for _, s := range sizes {
+		vols = append(vols, headSzVol{id: "h" + strings.ToLower(strings.TrimSpace(s)), bytes: headSzParse(t, s)})
 	}
-	headSzAmbientFilerToml(t, clusterDir)
-	env := &handoffEnv{h: h, cluster: startWorkspaceWeedWith(t, clusterDir, w4WeedOpts{VolumeSizeLimitMB: 1024, VolumeMax: 64}),
-		chunkPath: fmt.Sprintf("/headsz-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
+	env, clusterDir := headSzStartCluster(t, "headsz", vols)
 	rep := &headSzReport{StartedAt: time.Now().UTC(), ChunkPath: env.chunkPath,
 		FilerStore: "leveldb2 (weed filer default store), -defaultStoreDir=" + filepath.Join(clusterDir, "f") + ", no filer.toml"}
 	defer func() {
@@ -178,36 +176,126 @@ func TestHeadSizeAgainstVolumeSize(t *testing.T) {
 		}
 	}()
 
-	// one cluster spec with every size's volume; one replica each on s1
-	var vols strings.Builder
-	for i, s := range sizes {
-		b := headSzParse(t, s)
-		id := "h" + strings.ToLower(strings.TrimSpace(s))
-		env.hosts[id] = bvHost{id: id, server: "s1", replica: fmt.Sprintf("r%d", i+1), volume: id, root: filepath.Join(h.dir, "vol-"+id),
-			data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t)}
-		fmt.Fprintf(&vols, "  - id: %s\n    size_bytes: %d\n    replication_factor: 1\n    placements:\n      - server_id: s1\n        replica_id: r%d\n", id, b, i+1)
-	}
-	spec := filepath.Join(h.dir, "cluster-spec.yaml")
-	if err := os.WriteFile(spec, []byte(fmt.Sprintf("nodes:\n  - server_id: s1\n    data_addr: %s\n    ctrl_addr: %s\nvolumes:\n%s", h.dataAddr, h.ctrlAddr, vols.String())), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	mstate := filepath.Join(h.dir, "master")
-	master := h.start(t, "blockmaster", h.master, "--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
-		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://"+env.cluster.filerHTTP+env.chunkPath)
-	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
-
 	for _, s := range sizes {
 		rep.Sizes = append(rep.Sizes, headSzOne(t, env, cfg, s, changeCuts))
 	}
 }
 
+// headSzVol is one volume of the test cluster spec. server "" places it on
+// s1 (replica rN); any other server gets its own node in the spec and the
+// volume's one replica r1 on it (a restore or fork target, as
+// startHandoffEnvWith places its targets).
+type headSzVol struct {
+	id     string
+	bytes  uint64
+	server string
+	// host, when set, is another machine that runs this volume's blockvolume:
+	// its spec data and ctrl addresses are host:<port> (ports picked here, not
+	// probed there), and the test running on that host uses the same ones.
+	host string
+}
+
+// headSzStartCluster starts one weed cluster (the filer's default store, no
+// filer.toml) and a blockmaster whose spec holds vols. It returns the env,
+// with one bvHost per volume, and the cluster dir. The chunk path is
+// /<prefix>-<unix ns>.
+func headSzStartCluster(t *testing.T, prefix string, vols []headSzVol) (*handoffEnv, string) {
+	t.Helper()
+	h := newPlannedHandoffHarness(t)
+	clusterDir := filepath.Join(h.dir, "weed")
+	if err := os.MkdirAll(clusterDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	headSzAmbientFilerToml(t, clusterDir)
+	env := &handoffEnv{h: h, cluster: startWorkspaceWeedWith(t, clusterDir, w4WeedOpts{VolumeSizeLimitMB: 1024, VolumeMax: 64}),
+		chunkPath: fmt.Sprintf("/%s-%d", prefix, time.Now().UnixNano()), hosts: map[string]bvHost{}}
+	var spec strings.Builder
+	nodes := fmt.Sprintf("  - server_id: s1\n    data_addr: %s\n    ctrl_addr: %s\n", h.dataAddr, h.ctrlAddr)
+	for i, v := range vols {
+		server, replica := "s1", fmt.Sprintf("r%d", i+1)
+		if v.server != "" {
+			server, replica = v.server, "r1"
+		}
+		b := bvHost{id: v.id, server: server, replica: replica, volume: v.id, root: filepath.Join(h.dir, "vol-"+v.id),
+			data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t)}
+		if v.host != "" {
+			b.data, b.ctrl = headSzRemoteAddr(t, v.host), headSzRemoteAddr(t, v.host)
+		}
+		env.hosts[v.id] = b
+		if v.server != "" {
+			nodes += fmt.Sprintf("  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", server, b.data, b.ctrl)
+		}
+		fmt.Fprintf(&spec, "  - id: %s\n    size_bytes: %d\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: %s\n", v.id, v.bytes, server, replica)
+	}
+	specPath := filepath.Join(h.dir, "cluster-spec.yaml")
+	if err := os.WriteFile(specPath, []byte("nodes:\n"+nodes+"volumes:\n"+spec.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mstate := filepath.Join(h.dir, "master")
+	master := h.start(t, "blockmaster", h.master, "--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
+		"--cluster-spec", specPath, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
+		"--workspace-rpc", "--workspace-head-base-url", "http://"+env.cluster.filerHTTP+env.chunkPath)
+	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
+	return env, clusterDir
+}
+
+// headSzRemoteAddr picks host:<port> for a process on another machine from
+// the same port range handoffAddress uses, never handing out a port twice.
+func headSzRemoteAddr(t *testing.T, host string) string {
+	t.Helper()
+	handoffPorts.Lock()
+	defer handoffPorts.Unlock()
+	if handoffPorts.used == nil {
+		handoffPorts.used = map[int]bool{}
+	}
+	for i := 0; i < 500; i++ {
+		p := 10000 + rand.Intn(10000)
+		if !handoffPorts.used[p] {
+			handoffPorts.used[p] = true
+			return fmt.Sprintf("%s:%d", host, p)
+		}
+	}
+	t.Fatal("no port left for " + host)
+	return ""
+}
+
 // headSzConfig: HEADSZ_SNAPSHOT_TIMEOUT is the snapshot command's --timeout
 // (the server caps it at its own operation deadline); HEADSZ_ATTEMPTS is how
-// many times one cut is tried before it is recorded as not completed.
+// many times one cut is tried before it is recorded as not completed. name
+// is the snapshot name prefix ("headsz" when empty): cut N is "<name>-N".
 type headSzConfig struct {
 	snapshotTimeout string
 	attempts        int
+	name            string
+}
+
+// headSzStartVolume starts b's blockvolume for a volume of bytes (no capture
+// interval, no snapshot schedule: cuts happen only when the test asks), waits
+// until it adopted the volume as PRIMARY and its frontend is ready, and
+// returns it. When the volume refuses for headroom it returns nil and the
+// refusal line; any other early exit or timeout fails the test. The caller
+// stops the daemon.
+func headSzStartVolume(t *testing.T, env *handoffEnv, b bvHost, bytes uint64, extra ...string) (*daemon, string) {
+	t.Helper()
+	env.volExtra = append([]string{"--durable-blocks", strconv.FormatUint(bytes/4096, 10), "--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}, extra...)
+	d := env.h.start(t, "blockvolume-"+b.id, env.h.volume, env.volArgsFor(b)...)
+	primary := fmt.Sprintf("blockvolume: volume %s adopted as PRIMARY at %s@", b.volume, b.replica)
+	end := time.Now().Add(120 * time.Second)
+	for !d.has(primary) {
+		select {
+		case <-d.done:
+			if l := d.line("bytes free"); l != "" {
+				return nil, strings.TrimSpace(l)
+			}
+			t.Fatalf("blockvolume %s exited before it adopted its volume: %v", b.id, d.err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		if time.Now().After(end) {
+			t.Fatalf("blockvolume %s did not adopt its volume in 120 s", b.id)
+		}
+	}
+	poll(t, 60*time.Second, b.id+" never reported its frontend ready", func() bool { return volumeFrontendReady(b.status, b.volume) })
+	return d, ""
 }
 
 // headSzOne measures one size; its blockvolume is stopped at the end.
@@ -217,26 +305,12 @@ func headSzOne(t *testing.T, env *handoffEnv, cfg headSzConfig, size string, cha
 	id := "h" + strings.ToLower(strings.TrimSpace(size))
 	b := env.hosts[id]
 	row := headSzSize{Size: strings.TrimSpace(size), Bytes: bytes, Segments: int((bytes + headSegmentBytes - 1) / headSegmentBytes)}
-	env.volExtra = []string{"--durable-blocks", strconv.FormatUint(bytes/4096, 10), "--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
-	d := env.h.start(t, "blockvolume-"+id, env.h.volume, env.volArgsFor(b)...)
-	primary := fmt.Sprintf("blockvolume: volume %s adopted as PRIMARY at %s@", b.volume, b.replica)
-	end := time.Now().Add(120 * time.Second)
-	for !d.has(primary) {
-		select {
-		case <-d.done:
-			if l := d.line("bytes free"); l != "" {
-				row.Result, row.Refusal = "refused_headroom", strings.TrimSpace(l)
-				return row
-			}
-			t.Fatalf("blockvolume %s exited before it adopted its volume: %v", id, d.err)
-		case <-time.After(200 * time.Millisecond):
-		}
-		if time.Now().After(end) {
-			t.Fatalf("blockvolume %s did not adopt its volume in 120 s", id)
-		}
+	d, refusal := headSzStartVolume(t, env, b, bytes)
+	if d == nil {
+		row.Result, row.Refusal = "refused_headroom", refusal
+		return row
 	}
 	defer d.term(t, 60*time.Second)
-	poll(t, 60*time.Second, id+" never reported its frontend ready", func() bool { return volumeFrontendReady(b.status, b.volume) })
 
 	c := dialNVMe(t, b.nvme, plannedHandoffNQN)
 	write := func(lba uint64, tag string) {
@@ -281,11 +355,15 @@ func headSzOne(t *testing.T, env *handoffEnv, cfg headSzConfig, size string, cha
 func headSzCutOnce(t *testing.T, env *handoffEnv, cfg headSzConfig, b bvHost, cut, changed int) headSzCut {
 	t.Helper()
 	r := headSzCut{Cut: cut, ChangedBlocks: changed}
+	name := cfg.name
+	if name == "" {
+		name = "headsz"
+	}
 	start := time.Now()
 	for a := 1; a <= cfg.attempts; a++ {
 		as := time.Now()
 		out, code := headSzRun(t, env, cfg.snapshotTimeout, "ops", "chunk", "snapshot", "--volume", b.volume, "--status-addr", b.status, "--timeout", cfg.snapshotTimeout,
-			"--name", fmt.Sprintf("headsz-%d", cut), "--request-id", fmt.Sprintf("headsz-%s-%d", b.volume, cut))
+			"--name", fmt.Sprintf("%s-%d", name, cut), "--request-id", fmt.Sprintf("%s-%s-%d", name, b.volume, cut))
 		at := headSzAttempt{Attempt: a, ExitCode: code, WallMs: ms(time.Since(as)), KeysAfter: headSzCountDir(t, env, env.chunkPath+"/"+b.volume+"/keys")}
 		if code != 0 {
 			var e struct{ Code, Message string }
