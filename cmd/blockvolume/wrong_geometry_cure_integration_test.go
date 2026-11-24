@@ -51,10 +51,14 @@ func TestWrongGeometryCureAsWritten(t *testing.T) {
 	stuck := env.h.start(t, "blockvolume-v2-right-flags-on-the-1.0-store", env.h.volume, env.volArgsFor(env.hosts["n-v2"])...)
 	err := stuck.wait(90 * time.Second) // stopped (under systemd: systemctl stop)
 	t.Logf("right flags on the 1.0 store: exit %v; %q; %q", err, stuck.line("geometry_mismatch"), stuck.line("exiting status="))
-	// The attach check refuses it (the store has its own geometry); the
-	// pre-store flag check (exit 78) does not apply to an existing store.
-	if err == nil || exitCode(err) == 78 || !stuck.has("VOLUME geometry") || stuck.has("adopted as PRIMARY") && volumeFrontendReady(env.hosts["n-v2"].status, "v2") {
-		t.Fatalf("setup: the right flags on the 1.0 store must fail geometry_mismatch without serving; exit %v, mismatch %v", err, stuck.has("geometry_mismatch"))
+	// The attach check refuses it (the store has its own geometry) and the
+	// process exits 75 after its retries; the pre-store flag check (exit
+	// 78) does not apply to an existing store. Over its whole life it never
+	// started a frontend (no *-listening or ublk-ready phase line).
+	mismatch := stuck.line("chunk attach check")
+	served := stuck.has(`"phase":"nvme-listening"`) || stuck.has(`"phase":"iscsi-listening"`) || stuck.has(`"phase":"ublk-ready"`)
+	if exitCode(err) != 75 || !strings.Contains(mismatch, "geometry_mismatch") || !strings.Contains(mismatch, "VOLUME geometry") || served {
+		t.Fatalf("setup: the right flags on the 1.0 store must fail the attach check with geometry_mismatch, exit 75, and never serve; exit %v, attach line %q, served %v", err, mismatch, served)
 	}
 	b := env.hosts["n-v2"]
 	guard := env.headOf(t, "v2")
