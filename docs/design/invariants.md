@@ -883,6 +883,8 @@ Notes:
 
 - `INV-WS-FREEZE-ACCOUNTING-001` details retained: A frozen detach validates a positive, non-future origin before admission, converts it once to a local monotonic origin, and subtracts elapsed time from the five-second freeze budget at forecast and barrier. Only explicit final override may exceed the forecast budget, and its report records that override and actual elapsed time. New F2 wire fields are durations, not a changed clock-origin request. Existing Unix-nanosecond origin validation/conversion remains; new advice is same-host only. Estimate growth and request delay may cause a bounded refusal, not a promise every advised cycle admits. No new margin.
 
+- `INV-CUT-PAYLOAD-BOUNDED-001`: failed COW windows log their first abort reason, saver capacity/occupancy, candidate count and payload/spill quantities before joined operations release resources. The bare cleanup sentinel emits no failure event. Logging runs outside window/entry/store locks; it does not add retries or alter capacity.
+
 ### B.6 Workspace: chunk lifecycle, GC and delete
 
 | ID | Statement | Machine / transition | Enforced in | Test | TLA+ property | Status |

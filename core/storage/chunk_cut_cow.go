@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -234,13 +235,23 @@ func (l *chunkLayerImpl) installCOWWindow(candidates, staged map[uint64]bool, he
 }
 
 func (w *cutCOWWindow) abort(err error) {
+	var diagnostic string
 	w.mu.Lock()
 	if !w.terminal {
 		w.terminal, w.err = true, fmt.Errorf("%w: %w", errCutCOWAborted, err)
+		// INV-CUT-PAYLOAD-BOUNDED-001: retain pressure at the abort point,
+		// before joined savers release slots. The bare sentinel is normal
+		// window cleanup, not a failed cut.
+		if err != errCutCOWAborted {
+			diagnostic = fmt.Sprintf("storage: cut_aborted file=%q reason=%q saver_capacity=%d saver_used=%d window_chunks=%d payload_bytes=%d payload_limit=%d spill_bytes=%d spill_limit=%d saved_chunks=%d wal_reads=%d local_read_ns=%d save_ns=%d wait_ns=%d", w.layer.s.path, err, cap(w.saverSlots), len(w.saverSlots), len(w.entries), w.memory, w.memoryLimit, w.spillBytes, w.spillLimit, w.saved.Load(), w.walReads.Load(), w.localReadNs.Load(), w.saveNs.Load(), w.waitNs.Load())
+		}
 		close(w.ended)
 		w.cancel()
 	}
 	w.mu.Unlock()
+	if diagnostic != "" {
+		log.Print(diagnostic) // no window/entry/store lock spans the logger
+	}
 }
 func (w *cutCOWWindow) join() error {
 	w.refs.Wait()
