@@ -3,6 +3,10 @@ package volume
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -188,5 +192,83 @@ func TestStatusShowsTheMasterWait(t *testing.T) {
 	view.workspaceRequired = false
 	if got := s.statusProjection(); got.MasterWait != nil {
 		t.Fatalf("MasterWait %+v shown without a lease wait", got.MasterWait)
+	}
+}
+
+// Refused credentials for an hour: no bound, reason credentials, and the log
+// line at the start and every 10 min, driven by the heartbeat cadence alone
+// (no /status read) (F1).
+func TestCredentialsRefusedForAnHourWaitsAndLogs(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var lines []string
+	w := newMasterWait(func() time.Time { return now }, func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) })
+	denied := status.Error(codes.PermissionDenied, "node certificate revoked")
+	for i := 0; i < 1800; i++ { // one heartbeat every 2 s for 60 min
+		w.call(denied)
+		_ = w.snapshot(true)
+		now = now.Add(2 * time.Second)
+	}
+	if d, final := w.state(); !d.IsZero() || final != "" {
+		t.Fatalf("after an hour of refused credentials: bound %v final %q; want none", d, final)
+	}
+	if len(lines) != 6 {
+		t.Fatalf("%d log lines in 60 min; want 6 (at 0 and every 10 min): %q", len(lines), lines)
+	}
+	for _, l := range lines {
+		if !strings.Contains(l, "waiting for the master: credentials since") || !strings.Contains(l, "(no bound)") {
+			t.Fatalf("log line %q; want the credentials reason without a bound", l)
+		}
+	}
+}
+
+// The heartbeat loop itself logs the wait's reason: a workspace host whose
+// master is unreachable states it with no /status read (F1 wiring).
+func TestHeartbeatLogsTheMasterWait(t *testing.T) {
+	var buf safeBuffer
+	h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "s1", VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "127.0.0.1:19303", CtrlAddr: "127.0.0.1:19304", WorkspaceLease: true,
+		HeartbeatInterval: 20 * time.Millisecond, Logger: log.New(&buf, "", 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Start()
+	t.Cleanup(func() { _ = h.Close() })
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(buf.String(), "waiting for the master: unreachable since") {
+		if time.Now().After(deadline) {
+			t.Fatalf("no wait reason logged from the heartbeat loop; log:\n%s", buf.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+type safeBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
+func (s *safeBuffer) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+// A flapping master (an answer, then no reply, every 10 s for 10 min) never
+// ends the wait early: each answer starts a new streak, so the bound is never
+// before the latest contact + 30 s. It postpones the bound for as long as the
+// flapping lasts, also for an obsolete unit (documented: F7).
+func TestFlappingMasterNeverExpiresEarly(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	w := newMasterWait(func() time.Time { return now }, func(string, ...any) {})
+	var lastContact time.Time
+	for i := 0; i < 60; i++ {
+		if i%2 == 0 {
+			w.call(nil)
+			lastContact = now
+		} else {
+			w.call(status.Error(codes.Unavailable, "flap"))
+		}
+		d, _ := w.state()
+		if !d.IsZero() && (d.Before(lastContact.Add(MasterWaitLimit)) || !now.Before(d)) {
+			t.Fatalf("step %d: bound %v ends the wait early (latest contact %v, now %v)", i, d, lastContact, now)
+		}
+		now = now.Add(10 * time.Second)
 	}
 }

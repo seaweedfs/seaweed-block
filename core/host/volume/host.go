@@ -626,6 +626,9 @@ func (h *Host) runHeartbeat(ctx context.Context) {
 		_, err := h.obsCli.ReportHeartbeat(rpcCtx, h.buildReport())
 		if ctx.Err() == nil {
 			h.mw.call(err)
+			// The wait's reason reaches the journal on a change and every
+			// 10 min from here, whether or not anyone reads /status.
+			_ = h.MasterWaitStatus()
 		}
 		if err != nil {
 			h.log.Printf("blockvolume: heartbeat: %v", err)
