@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// Single-volume coverage gap 2 (cells P5.4, P6.4, P8.7, P9.4, P10.4, P11.3;
-// V1-SPEC r2.55): the holder dies (kill -9) in the middle of a cut, at each
+// Cut-stage crash recovery (cells P5.4, P6.4, P8.7, P9.4, P10.4, P11.3):
+// the holder dies (kill -9) in the middle of a cut, at each
 // stage, and restarts. Expected: HEAD is the old image (or, once the CAS
 // applied, the new one), never a mix; every synced local write reads back
 // after the restart; the next cut succeeds and publishes the volume as it

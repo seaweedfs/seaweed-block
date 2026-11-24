@@ -12,7 +12,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// INV-FE-ERROR-RETRY-CLASS-001 / V1-SPEC r2.55 side (d), coverage A9.1.
+// Permanent recovery-fault classification: INV-FE-ERROR-RETRY-CLASS-001, coverage A9.1.
 // A real strict-W WAL integrity failure must survive recovery readiness gating
 // as a permanent cause. Ordinary awaiting-recovery readiness stays retryable.
 func TestRecoveryStoreFaultRemainsPermanentAtGuestIO(t *testing.T) {

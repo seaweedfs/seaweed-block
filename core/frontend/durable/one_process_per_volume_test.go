@@ -27,7 +27,7 @@ func lockedProvider(t *testing.T, root, lockDir string, remote storage.ChunkRemo
 	return p
 }
 
-// V1-SPEC r2.45 (1): one live process per volume per host. A second
+// Host-lock rule: one live process per volume per host. A second
 // provider for the same volume id on the same host (another storage root,
 // the same host lock directory) is refused before its store opens; once the
 // first closes, the volume can be opened again.
@@ -67,7 +67,7 @@ func TestOneLiveProcessPerVolumePerHost(t *testing.T) {
 	}
 }
 
-// V1-SPEC r2.45 (1): the provider creates a missing lock directory (0700)
+// Host-lock rule: the provider creates a missing lock directory (0700)
 // and refuses, with the operator's cure, only when it cannot create it.
 func TestHostVolumeLockDirectoryCreatedOrRefused(t *testing.T) {
 	newProvider := func(dir string) (*durable.DurableProvider, error) {

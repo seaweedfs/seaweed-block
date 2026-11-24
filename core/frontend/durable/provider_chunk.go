@@ -515,7 +515,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
 				return err
 			}
-			// V1-SPEC r2.45: HEAD names this holder, but a root whose local
+			// The durable-reopen rule: HEAD names this holder, but a root whose local
 			// durable LSN is below HEAD's remote_lsn is a rolled-back copy
 			// (a backup taken before a later cut). Restarting cannot cure it.
 			// A crash cannot cause it: a cut syncs its LSN locally before the

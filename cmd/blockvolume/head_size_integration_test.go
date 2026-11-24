@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// HEAD size against volume size (V1-SPEC r2.94), informative: it measures,
+// HEAD size against volume size, informative: it measures,
 // it does not judge. Runs only with HEADSZ_RUN=1, on a host booked for it.
 //
 // For each size in HEADSZ_SIZES (default 10G,100G,1T): one volume of that

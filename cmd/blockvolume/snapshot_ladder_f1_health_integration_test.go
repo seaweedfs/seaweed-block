@@ -14,7 +14,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
-// Rung F1's heartbeat-ordering watch (V1-SPEC r2.53): with N processes under
+// Rung F1's heartbeat-ordering watch: with N processes under
 // one server id, a volume's slot at the master can expire when its
 // heartbeats are dropped. The watch polls the master's view of every source
 // volume's replica each second and records each span where the master does
