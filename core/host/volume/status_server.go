@@ -221,9 +221,10 @@ type StatusProjection struct {
 	Warnings []string `json:",omitempty"`
 	// MasterWait is why a workspace primary holds no granted lease, present
 	// only while NotReadyReason is lease_not_held: Reason (unreachable,
-	// credentials, barrier, no_assignment, refused, moved, deleted), since
-	// when, and the wait's bound or the master's barrier time (UntilMs,
-	// absent while there is no bound).
+	// credentials, "identity refused: <kind>" with kind unregistered or
+	// wrong_host, barrier, no_assignment, refused, moved, deleted), since
+	// when, and the startup wait's one bound or the master's barrier time
+	// (UntilMs, absent while there is no bound).
 	MasterWait *MasterWaitStatus `json:",omitempty"`
 }
 

@@ -182,38 +182,15 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		waitCtx, endWait = context.WithCancel(p.closeCtx)
 	}
 	defer endWait()
-	// gaveUp: a permanent refusal, or limit has passed since the window
-	// opened. The window opens at the first reply from the master received
-	// after this wait started (local open and recovery count toward
-	// nothing), or at a later streak's start, and runs from the master's
-	// barrier time when that is later. No reply: no bound.
-	var window time.Time
+	// gaveUp: a permanent refusal, or the host's one bound for this wait has
+	// passed (the window opens at the first reply after this wait started;
+	// none while the master gives no reply or refuses the node).
 	gaveUp := func() bool {
 		if p.cfg.ChunkMasterWait == nil {
 			return false
 		}
-		c := p.cfg.ChunkMasterWait()
-		if c.Final {
-			return true
-		}
-		if c.StreakStart.IsZero() {
-			return false
-		}
-		if window.IsZero() || c.StreakStart.After(window) {
-			switch {
-			case !c.StreakStart.Before(start):
-				window = c.StreakStart
-			case !c.LastReply.Before(start):
-				window = c.LastReply
-			default:
-				return false // no reply since this wait started
-			}
-		}
-		from := window
-		if c.Barrier.After(from) {
-			from = c.Barrier
-		}
-		return !time.Now().Before(from.Add(limit))
+		deadline, final := p.cfg.ChunkMasterWait(start)
+		return final || (!deadline.IsZero() && !time.Now().Before(deadline))
 	}
 	defer func() {
 		if retained || !(expired || errors.Is(waitCtx.Err(), context.DeadlineExceeded)) {
@@ -318,6 +295,12 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			continue
 		}
 		log.Printf("durable: chunk layer attach for volume=%s: %v (retrying)", volumeID, err)
+		// A granted attach that keeps failing stays inside the bound: it
+		// must not hold the lease while never serving.
+		if gaveUp() {
+			expired, ended = true, "master wait ended while the attach kept failing"
+			return
+		}
 		select {
 		case <-waitCtx.Done():
 			ended = "provider closed during the retry backoff"

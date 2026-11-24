@@ -158,6 +158,8 @@ measured up to 15 s at 32 volumes with the default 3 slots.
    - If it comes back after the move, its blockvolume gets no assignment, does not serve, and exits with status 75.
    - The example unit starts it again about every 35 s (30 s of waiting, then `RestartSec=5s`), until its start
      limit (10 starts in 600 s), and then shows it as failed (`start-limit-hit`).
+   - A process that was already waiting on its old assignment when the move was issued exits with status 78
+     (`reason=moved`) instead, and the unit does not start it again.
    - Stop and disable that unit on the old host. Run `systemctl reset-failed` only after you have dealt with its
      local root ([do not](volume-lifecycle.md#do-not)).
 2. Run the forced move to another registered node: `--dry-run` first, then the move. See
@@ -167,6 +169,20 @@ measured up to 15 s at 32 volumes with the default 3 slots.
    - Read it again later with `sw-block ops workspace lost-range`.
 4. Start `blockvolume` on the new node, then reconnect the guest.
 5. Optionally restore an older snapshot into a new volume and verify it with `ops chunk verify --depth data`.
+
+## A volume waiting for blockmaster
+
+A `blockvolume` that cannot get its lease from blockmaster waits inside its process: the unit stays **active**
+and the volume does not serve. A monitor that only watches for failed units does not see it.
+- `/status` shows `NotReadyReason=lease_not_held` and `MasterWait` with `Reason`, `SinceMs` and, when the wait has a
+  bound, `UntilMs`; the process logs `blockvolume: waiting for the master: <reason> ...` when the reason changes and
+  every 10 minutes.
+- Alert when the reason is `unreachable`, `credentials` or `identity refused: ...` for more than 60 s, and on any
+  reason for more than 5 minutes.
+- `identity refused: unregistered` or `wrong_host`: blockmaster does not know the unit's `--server-id`, or the
+  node calls from another address than the one registered for it in the cluster spec. The check compares the
+  address exactly: an address change, another outgoing interface, IPv4 against IPv6, or a host name in the cluster
+  spec all refuse the right host. Fix the cluster spec or the unit; the next call passes without a restart.
 
 ## Limits
 

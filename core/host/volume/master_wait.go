@@ -42,7 +42,10 @@ type masterWait struct {
 	down     time.Time // first failure without a reply since the last contact
 	creds    time.Time // first credentials refusal since the last accepted call
 	ident    time.Time // first identity refusal since the last accepted call
+	identAt  time.Time // the latest identity refusal
 	identOf  string    // its kind: unregistered or wrong_host
+	start    time.Time // when the startup wait began (after the local open); zero before
+	window   time.Time // the first reply at or after start in the current run of replies
 	barrier  time.Time // T: request start + retry_after of the latest BARRIER refusal
 	final    string    // "moved" or "deleted": a permanent refusal
 	logged   string    // the reason last logged
@@ -84,8 +87,11 @@ func masterCallClass(err error) (contact, credentials bool) {
 // IDENTITY detail: this server id is not registered, or calls from another
 // host) is not contact: like refused credentials it has no bound, because a
 // restart cannot fix a registration. It lasts until an identity-checked call
-// (a lease renewal, an assignment delivered) is accepted: the heartbeat does
-// not check identity, so its answers do not end it.
+// (a lease renewal, an assignment delivered) is accepted, or until
+// identityDecay passes with replies and no new identity refusal (the
+// refused stream retries within seconds; a fixed registration may bring no
+// assignment to accept). The heartbeat does not check identity, so its
+// answers alone do not end it sooner.
 func (w *masterWait) call(err error) {
 	contact, credentials := masterCallClass(err)
 	identity := ""
@@ -96,40 +102,75 @@ func (w *masterWait) call(err error) {
 		}
 	}
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	now := w.now()
 	switch {
 	case identity != "":
+		w.endStreakLocked()
 		w.down, w.creds = time.Time{}, time.Time{}
 		if w.ident.IsZero() {
 			w.ident = now
 		}
-		w.identOf = identity
+		w.identAt, w.identOf = now, identity
 	case contact:
-		if w.contact.IsZero() {
-			w.contact = now
+		if !w.ident.IsZero() {
+			if now.Sub(w.identAt) < identityDecay {
+				return // still refused: a heartbeat answer does not end it
+			}
+			w.ident, w.identOf = time.Time{}, ""
 		}
-		w.last = now
+		w.replyLocked(now)
 		w.down, w.creds = time.Time{}, time.Time{}
 	case credentials:
-		w.contact, w.down, w.ident = time.Time{}, time.Time{}, time.Time{}
+		w.endStreakLocked()
+		w.down, w.ident = time.Time{}, time.Time{}
 		if w.creds.IsZero() {
 			w.creds = now
 		}
 	default:
-		w.contact, w.creds, w.ident = time.Time{}, time.Time{}, time.Time{}
+		w.endStreakLocked()
+		w.creds, w.ident = time.Time{}, time.Time{}
 		if w.down.IsZero() {
 			w.down = now
 		}
 	}
-	w.mu.Unlock()
+}
+
+// identityDecay ends an identity refusal that is not repeated: replies keep
+// coming and no call was refused on identity for this long.
+const identityDecay = 30 * time.Second
+
+// replyLocked records an accepted reply at now: it starts a run of replies
+// when none is running, and opens the wait's window at the first reply at
+// or after the wait's start. Caller holds mu.
+func (w *masterWait) replyLocked(now time.Time) {
+	if w.contact.IsZero() {
+		w.contact = now
+	}
+	w.last = now
+	if w.window.IsZero() && !w.start.IsZero() && !now.Before(w.start) {
+		w.window = now
+	}
+}
+
+// endStreakLocked ends the run of replies: the window closes with it, and the
+// next reply opens a new one. Caller holds mu.
+func (w *masterWait) endStreakLocked() {
+	w.contact, w.window = time.Time{}, time.Time{}
 }
 
 // identityAccepted ends an identity refusal: an identity-checked call (a
-// lease renewal, an assignment delivered) was accepted.
+// lease renewal, an assignment delivered) was accepted. The run of replies
+// starts again there, as after any refusal that had no bound.
 func (w *masterWait) identityAccepted() {
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ident.IsZero() {
+		return
+	}
 	w.ident, w.identOf = time.Time{}, ""
-	w.mu.Unlock()
+	w.endStreakLocked()
+	w.replyLocked(w.now())
 }
 
 // renewal records a lease renewal started at start: the call itself, and
@@ -172,17 +213,35 @@ func leaseRefusalDetail(err error) *control.WorkspaceLeaseRefusal {
 	return nil
 }
 
-// deadlineLocked is max(contact streak start, barrier T) + MasterWaitLimit,
-// or zero while there is no contact (no bound). Caller holds mu.
+// deadlineLocked is the one bound of the startup wait: max(the window, the
+// master's barrier time) + MasterWaitLimit, where the window is the first
+// reply at or after the wait's start (local open and recovery count toward
+// nothing). Zero (no bound) before the wait starts, while there is no window
+// yet (no reply since the start, or the master gives no reply), and while
+// the node's credentials or identity are refused. Caller holds mu.
 func (w *masterWait) deadlineLocked() time.Time {
-	if w.contact.IsZero() || !w.ident.IsZero() {
+	if w.window.IsZero() || !w.ident.IsZero() || !w.creds.IsZero() {
 		return time.Time{}
 	}
-	from := w.contact
+	from := w.window
 	if w.barrier.After(from) {
 		from = w.barrier
 	}
 	return from.Add(MasterWaitLimit)
+}
+
+// begin records the startup wait's start (the latest wait's, for a later
+// recovery): the window opens at the first reply at or after it.
+func (w *masterWait) begin(start time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if start.Equal(w.start) {
+		return
+	}
+	w.start, w.window = start, time.Time{}
+	if !w.contact.IsZero() && !w.contact.Before(start) {
+		w.window = w.contact
+	}
 }
 
 // state returns the startup wait's bound (zero: none) and a permanent
@@ -213,6 +272,11 @@ func (w *masterWait) snapshot(assigned bool) MasterWait {
 		}
 	case w.barrier.After(now):
 		out = MasterWait{Reason: "barrier", Since: w.contact, Until: w.barrier}
+	case w.window.IsZero():
+		out = MasterWait{Reason: "no_assignment", Since: w.contact}
+		if assigned {
+			out.Reason = "refused"
+		}
 	case !assigned:
 		out = MasterWait{Reason: "no_assignment", Since: w.contact, Until: w.deadlineLocked()}
 	default:
@@ -260,16 +324,10 @@ func (w *masterWait) barrierTime() time.Time {
 	return w.barrier
 }
 
-// MasterWaitContact is the startup wait's input: the first reply of the
-// current run of replies (zero while the master gives no reply or refuses
-// the node's credentials or identity), the latest reply, the master's
-// barrier time, and a permanent refusal ("moved" or "deleted"; "" if none).
-func (h *Host) MasterWaitContact() (streakStart, lastReply, barrier time.Time, final string) {
-	w := h.mw
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.ident.IsZero() {
-		return time.Time{}, w.last, w.barrier, w.final // no bound while identity is refused
-	}
-	return w.contact, w.last, w.barrier, w.final
+// MasterWaitBound is the startup wait's one bound for a wait that started at
+// start (zero: no bound) and a permanent refusal of the lease ("moved" or
+// "deleted"; "" when none). /status shows the same bound.
+func (h *Host) MasterWaitBound(start time.Time) (time.Time, string) {
+	h.mw.begin(start)
+	return h.mw.state()
 }

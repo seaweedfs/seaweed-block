@@ -35,6 +35,7 @@ func refusalWith(t *testing.T, text string, kind control.WorkspaceLeaseRefusal_K
 func TestChunkAuthorityWaitStartsAtFirstContact(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	w := newMasterWait(func() time.Time { return now }, func(string, ...any) {})
+	w.begin(now) // the wait starts (after the local open and recovery)
 	unreachable := status.Error(codes.Unavailable, "connection refused")
 
 	w.call(unreachable)
@@ -315,5 +316,76 @@ func TestIdentityRefusalWaitsVisibly(t *testing.T) {
 	w.renewal(now, nil) // registered now: the renewal passes
 	if s := w.snapshot(true); s.Reason == "identity refused: unregistered" {
 		t.Fatalf("status %+v after an accepted call; want the identity wait over", s)
+	}
+}
+
+// The window opens at the first reply received at or after the wait's start:
+// a run of replies that began during a slow local open and recovery does not
+// spend it (claude's red case: recovery slower than 30 s after first contact).
+func TestChunkAuthorityWaitAfterASlowOpenGetsItsFullLimit(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	w := newMasterWait(func() time.Time { return now }, func(string, ...any) {})
+	for i := 0; i < 30; i++ { // heartbeats answered for 60 s while the store opens
+		w.call(nil)
+		now = now.Add(2 * time.Second)
+	}
+	start := now // open and recovery done: the wait starts
+	w.begin(start)
+	if d, _ := w.state(); !d.IsZero() {
+		t.Fatalf("bound %v before any reply since the wait started; want none", d)
+	}
+	now = now.Add(1500 * time.Millisecond)
+	first := now
+	w.call(nil)
+	if d, _ := w.state(); !d.Equal(first.Add(MasterWaitLimit)) {
+		t.Fatalf("bound %v; want the first reply after the start + 30 s (%v)", d, first.Add(MasterWaitLimit))
+	}
+	w.renewal(now, refusalWith(t, "barrier", control.WorkspaceLeaseRefusal_BARRIER, 45*time.Second))
+	if d, _ := w.state(); !d.Equal(now.Add(45*time.Second + MasterWaitLimit)) {
+		t.Fatalf("bound %v; want T + 30 s", d)
+	}
+}
+
+// An identity refusal ends the run of replies (no bound, no window kept); an
+// accepted identity-checked call starts a new one there (the window opens
+// again), so a corrected registration gets a full 30 s (L1, a). A refusal
+// that is not repeated for identityDecay while replies continue ends by
+// itself, so a fixed registration with no assignment still reaches the
+// bound (b).
+func TestIdentityRefusalEndsAndDecays(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	refused, err := status.New(codes.FailedPrecondition, "assignment stream: server id is not registered").
+		WithDetails(&control.WorkspaceLeaseRefusal{Kind: control.WorkspaceLeaseRefusal_IDENTITY, Identity: "unregistered"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newMasterWait(func() time.Time { return now }, func(string, ...any) {})
+	w.begin(now)
+	w.call(nil) // window opens
+	now = now.Add(10 * time.Second)
+	w.call(refused.Err())
+	if d, _ := w.state(); !d.IsZero() {
+		t.Fatalf("bound %v under an identity refusal; want none", d)
+	}
+	now = now.Add(10 * time.Minute)
+	w.identityAccepted() // a delivered assignment: registered now
+	if d, _ := w.state(); !d.Equal(now.Add(MasterWaitLimit)) {
+		t.Fatalf("bound %v after the identity was accepted; want a new window there + 30 s (%v)", d, now.Add(MasterWaitLimit))
+	}
+
+	w2 := newMasterWait(func() time.Time { return now }, func(string, ...any) {})
+	w2.begin(now)
+	w2.call(refused.Err())
+	for i := 0; i < 14; i++ { // 28 s of heartbeat answers: still refused
+		now = now.Add(2 * time.Second)
+		w2.call(nil)
+	}
+	if s := w2.snapshot(false); s.Reason != "identity refused: unregistered" {
+		t.Fatalf("status %+v at 28 s; want the identity refusal", s)
+	}
+	now = now.Add(4 * time.Second)
+	w2.call(nil) // 32 s without a new identity refusal: it decays
+	if s := w2.snapshot(false); s.Reason != "no_assignment" || s.Until.IsZero() {
+		t.Fatalf("status %+v after the decay; want no_assignment with the 30 s bound", s)
 	}
 }

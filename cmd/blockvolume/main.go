@@ -701,9 +701,9 @@ func runVolume(f flags, exits *processExit) int {
 				// reply; it ends 30 s after the first reply received after the
 				// local open and recovery (or the master's barrier time), or at
 				// once on a moved/deleted refusal.
-				cfg.ChunkMasterWait = func() durable.MasterContact {
-					streak, last, barrier, final := h.MasterWaitContact()
-					return durable.MasterContact{StreakStart: streak, LastReply: last, Barrier: barrier, Final: final != ""}
+				cfg.ChunkMasterWait = func(start time.Time) (time.Time, bool) {
+					deadline, final := h.MasterWaitBound(start)
+					return deadline, final != ""
 				}
 			}
 			if chunk.catalog != nil && f.chunk.snapshotSchedule.period > 0 {

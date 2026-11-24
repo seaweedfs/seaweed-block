@@ -117,9 +117,11 @@ type ProviderConfig struct {
 	ChunkAssignmentTimeout time.Duration
 
 	// ChunkMasterWait, when set, replaces ChunkAssignmentTimeout's fixed
-	// deadline (a workspace primary) with the host's observed contact with
-	// the master. It is read on the wait's poll and must not block.
-	ChunkMasterWait func() MasterContact
+	// deadline (a workspace primary): given the wait's start, the host
+	// returns the wait's one bound (zero: none, the master gives no reply or
+	// refuses the node) and whether a permanent refusal (moved or deleted)
+	// ends it now. It is read on the wait's poll and must not block.
+	ChunkMasterWait func(start time.Time) (deadline time.Time, final bool)
 
 	// WALRetentionLSNs is the operator-tunable retention window past
 	// the substrate's checkpoint LSN (G6 §1.A α). Zero = pre-G6
@@ -1205,13 +1207,3 @@ func chunkSidecars(path string) ([]string, error) {
 // Compile-time check.
 var _ frontend.Provider = (*DurableProvider)(nil)
 
-// MasterContact is the volume host's view of its calls to blockmaster, for
-// the startup authority wait. StreakStart is the first reply of the current
-// run of replies (zero while the master gives no reply, or refuses the
-// node's credentials or identity: the wait then has no bound); LastReply is
-// the latest reply; Barrier is the master's barrier time from its latest
-// BARRIER refusal; Final is a permanent refusal (moved or deleted).
-type MasterContact struct {
-	StreakStart, LastReply, Barrier time.Time
-	Final                           bool
-}
