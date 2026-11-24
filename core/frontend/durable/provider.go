@@ -116,6 +116,13 @@ type ProviderConfig struct {
 	// the host can apply its assignment. Zero defaults to 30s.
 	ChunkAssignmentTimeout time.Duration
 
+	// ChunkMasterWait, when set, replaces ChunkAssignmentTimeout's fixed
+	// deadline (a workspace primary): given the wait's start, the host
+	// returns the wait's one bound (zero: none, the master gives no reply or
+	// refuses the node) and whether a permanent refusal (moved or deleted)
+	// ends it now. It is read on the wait's poll and must not block.
+	ChunkMasterWait func(start time.Time) (deadline time.Time, final bool)
+
 	// WALRetentionLSNs is the operator-tunable retention window past
 	// the substrate's checkpoint LSN (G6 §1.A α). Zero = pre-G6
 	// strict checkpoint-driven recycle. Non-zero relaxes the recycle
@@ -162,7 +169,7 @@ type ProviderConfig struct {
 	// HostVolumeLock makes the provider hold an exclusive, nonblocking lock
 	// on HostVolumeLockDir/<volume id>.lock from before the volume's store
 	// opens until Close: one host runs at most one live process per volume
-	// (V1-SPEC r2.45). NewDurableProvider creates the directory (0700) when
+	// under the host-lock rule. NewDurableProvider creates the directory (0700) when
 	// missing and refuses when it cannot create or use it; the tmpfiles.d
 	// entry in deploy/systemd creates it for the unit's user. blockvolume
 	// sets this.
@@ -528,7 +535,7 @@ func (p *DurableProvider) ensureHandle(volumeID string) (*volHandle, error) {
 	}
 	p.mu.Unlock()
 
-	// V1-SPEC r2.45: the host lock is taken before the store opens.
+	// Host-lock rule: the host lock is taken before the store opens.
 	hostLock, err := p.lockVolumeOnHost(volumeID)
 	if err != nil {
 		return nil, err
@@ -1199,3 +1206,4 @@ func chunkSidecars(path string) ([]string, error) {
 
 // Compile-time check.
 var _ frontend.Provider = (*DurableProvider)(nil)
+

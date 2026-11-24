@@ -134,6 +134,17 @@ func (s *DeletionReservationStore) ReservedSnapshot(vol string) bool {
 	return ok
 }
 
+// CommittedSnapshot is ReservedSnapshot for a committed (permanent)
+// deletion only: an admitted reservation can still be aborted.
+func (s *DeletionReservationStore) CommittedSnapshot(vol string) bool {
+	m := s.snap.Load()
+	if m == nil {
+		return false
+	}
+	r, ok := (*m)[vol]
+	return ok && r.State == ReservationCommitted
+}
+
 // Get returns vol's reservation.
 func (s *DeletionReservationStore) Get(vol string) (DeletionReservation, bool) {
 	s.mu.Lock()

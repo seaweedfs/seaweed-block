@@ -29,7 +29,7 @@ func closedWithin(ch <-chan struct{}, d time.Duration) bool {
 	}
 }
 
-// V1-SPEC r2.37/r2.39: a workspace chunk primary's targets start only once
+// The frontend start-signal rule: a workspace chunk primary's targets start only once
 // AdmitsIO passes after the backend first admitted I/O; the stop ends the
 // wait without starting them.
 func TestFrontendStartSignal_WorkspacePrimaryWaitsForAdmitsIO(t *testing.T) {
@@ -88,7 +88,7 @@ func TestFirstAdmittedStopEndsTheWorker(t *testing.T) {
 	}
 }
 
-// INV-WS-SERVE-LEASE-HELD-001 scope (V1-SPEC r2.39): a non-chunk volume or a supporting
+// INV-WS-SERVE-LEASE-HELD-001 scope: a non-chunk volume or a supporting
 // replica starts its frontends right after open, as before: its start
 // signal is the backend's first-serving channel itself, not AdmitsIO.
 func TestFrontendStartSignal_OtherVolumesStartAfterOpenAsBefore(t *testing.T) {

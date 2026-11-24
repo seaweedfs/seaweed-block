@@ -113,6 +113,7 @@ type replicaSetUpdater interface {
 type Host struct {
 	// incarnation is new on every process start and reported in every
 	// heartbeat, so the master can tell a restart from a long silence.
+	mw          *masterWait // observed blockmaster call results (workspace startup wait)
 	incarnation string
 	// wd is the recovery watchdog (#128 rule 6).
 	wd *recoveryWatchdog
@@ -267,7 +268,7 @@ func New(cfg Config) (*Host, error) {
 		lg = log.Default()
 	}
 
-	conn, err := link.Dial(cfg.MasterAddr)
+	conn, err := link.Dial(cfg.MasterAddr, link.MasterReconnect())
 	if err != nil {
 		return nil, fmt.Errorf("volume.New: dial master %q: %w", cfg.MasterAddr, err)
 	}
@@ -301,6 +302,7 @@ func New(cfg Config) (*Host, error) {
 		asnCli:   control.NewAssignmentServiceClient(conn),
 	}
 	h.incarnation = newIncarnation()
+	h.mw = newMasterWait(nil, lg.Printf)
 	h.wd = newRecoveryWatchdog(cfg.RecoverTimeout)
 	h.log.Printf("blockvolume: volume %s recovery watchdog: a primary assignment must become promotion-ready within %s", cfg.VolumeID, h.wd.timeout)
 	if cfg.ReplicationVolume != nil {
@@ -622,6 +624,12 @@ func (h *Host) runHeartbeat(ctx context.Context) {
 		rpcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		_, err := h.obsCli.ReportHeartbeat(rpcCtx, h.buildReport())
+		if ctx.Err() == nil {
+			h.mw.call(err)
+			// The wait's reason reaches the journal on a change and every
+			// 10 min from here, whether or not anyone reads /status.
+			_ = h.MasterWaitStatus()
+		}
 		if err != nil {
 			h.log.Printf("blockvolume: heartbeat: %v", err)
 		}
@@ -765,10 +773,19 @@ func (h *Host) streamOnce(ctx context.Context) error {
 		ServerId:  h.cfg.ServerID, // INV-AUTH-HOLDER-IDENTITY-001: the master checks it against the stream's host
 	})
 	if err != nil {
+		if ctx.Err() == nil {
+			h.mw.call(err)
+		}
 		return err
 	}
 	for {
 		fact, err := stream.Recv()
+		if ctx.Err() == nil && err != io.EOF {
+			h.mw.call(err) // a delivered fact or a handler's status is contact
+			if err == nil {
+				h.mw.identityAccepted() // the stream checks the holder's identity
+			}
+		}
 		if err == io.EOF {
 			return nil
 		}

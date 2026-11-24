@@ -630,6 +630,7 @@ func runVolume(f flags, exits *processExit) int {
 	var status *volume.StatusServer
 	if f.statusAddr != "" {
 		status = volume.NewStatusServer(h.ProjectionView())
+		status.SetMasterWait(h.MasterWaitStatus)
 		if f.nvmeListen != "" {
 			status.SetNVMeListenerReady(false)
 		}
@@ -679,7 +680,7 @@ func runVolume(f flags, exits *processExit) int {
 			WALRetentionLSNs:              f.walRetentionLSNs,
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
-			// V1-SPEC r2.45: one live process per volume per host.
+			// Host-lock rule: one live process per volume per host.
 			HostVolumeLock:        true,
 			VolumeLockDirTestOnly: f.volumeLockDirTestOnly,
 		}
@@ -695,6 +696,16 @@ func runVolume(f flags, exits *processExit) int {
 			cfg.ChunkMaintenanceInterval = f.chunk.maintenanceInterval
 			cfg.ChunkMaintenanceTimeout = defaultChunkMaintenanceTimeout
 			cfg.ChunkMaintenance = chunk.maintenance
+			if f.workspaceLease {
+				// The startup wait does not run out while the master gives no
+				// reply; it ends 30 s after the first reply received after the
+				// local open and recovery (or the master's barrier time), or at
+				// once on a moved/deleted refusal.
+				cfg.ChunkMasterWait = func(start time.Time) (time.Time, bool) {
+					deadline, final := h.MasterWaitBound(start)
+					return deadline, final != ""
+				}
+			}
 			if chunk.catalog != nil && f.chunk.snapshotSchedule.period > 0 {
 				cfg.ChunkSnapshotPeriod = f.chunk.snapshotSchedule.period
 				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(chunk.catalog, f.chunk.snapshotSchedule.keep)
@@ -754,6 +765,9 @@ func runVolume(f flags, exits *processExit) int {
 		err := geometryErr
 		if err == nil {
 			dp, err = durable.NewDurableProvider(cfg, h.ProjectionView())
+			if err == nil {
+				applyBuildTagHold(dp) // a no-op except in a kzhold (test-only) build
+			}
 		}
 		if chunkErr != nil {
 			err = chunkErr

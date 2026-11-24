@@ -24,7 +24,7 @@ const (
 
 var unclassifiedBackendErrorTypes sync.Map // reflect.Type -> struct{}
 
-// ClassifyBackendError implements INV-FE-ERROR-RETRY-CLASS-001 and V1-SPEC r2.42.
+// ClassifyBackendError implements the shared backend-error classification rule (INV-FE-ERROR-RETRY-CLASS-001).
 // Call only for a non-nil backend error. Known permanent causes win across the
 // entire wrapped/joined tree. Deliberate frontend markers decide otherwise;
 // a marker-free unknown error stays permanent and is logged once per leaf type.
@@ -43,7 +43,7 @@ func ClassifyBackendError(ctx context.Context, err error) BackendErrorClass {
 	case errors.Is(err, ErrNotReady), IsWriteDeadline(ctx, err):
 		return BackendErrorNotReady
 	default:
-		// M1 marker-free completion: amended V1-SPEC r2.42 retains the
+		// M1 marker-free completion: the error-classification rule retains the
 		// permanent default. Backend owners must classify types seen in gates.
 		logUnclassifiedBackendError(err)
 		return BackendErrorPermanent

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Power loss with real binaries (V1-SPEC r2.55 gap 3, INV-FE-FLUSH-SYNC-001):
+// Power loss with real binaries (INV-FE-FLUSH-SYNC-001):
 // blockvolume keeps its durable root on a dm-log-writes device. The guest
 // writes over iSCSI and issues SYNCHRONIZE CACHE; once the last sync returns,
 // the harness marks the log "acknowledged". Later writes and their sync must

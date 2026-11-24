@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// The SeaweedFS side down during a cut, then back (V1-SPEC r2.61 addendum,
-// round 2), with real binaries: image B is written and a cut starts; once
+// The SeaweedFS side down during a cut, then back,
+// with real binaries: image B is written and a cut starts; once
 // its uploads have begun, the filer (or the volume server) is killed. For a
 // minute the guest keeps writing and flushing over NVMe/TCP while the test
 // records how the cut answers and how much copy-on-write side data the

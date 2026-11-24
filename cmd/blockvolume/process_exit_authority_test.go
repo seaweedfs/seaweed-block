@@ -10,6 +10,8 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -21,12 +23,19 @@ type exitAssignmentStream struct {
 	control.UnimplementedObservationServiceServer
 	control.UnimplementedWorkspaceServiceServer
 	revoke   bool
+	refuse   error // when set, every renewal is refused with it
+	// identityRefusals: the first this many stream calls are refused with
+	// the typed IDENTITY detail.
+	identityRefusals atomic.Int32
 	ackError error
 	acks     atomic.Int32
 	facts    chan *control.AssignmentFact
 }
 
 func (s *exitAssignmentStream) RenewWorkspaceLease(_ context.Context, id *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
+	if s.refuse != nil {
+		return nil, s.refuse
+	}
 	return &control.WorkspaceLeaseFact{VolumeId: id.VolumeId, ReplicaId: id.ReplicaId, Epoch: id.Epoch, ValidForNs: int64(30 * time.Second), Revoking: s.revoke}, nil
 }
 func (s *exitAssignmentStream) AckWorkspaceRevoked(_ context.Context, a *control.WorkspaceRevocationAck) (*control.WorkspaceEmpty, error) {
@@ -40,6 +49,11 @@ func (s *exitAssignmentStream) ReportHeartbeat(context.Context, *control.Heartbe
 	return &control.HeartbeatAck{}, nil
 }
 func (s *exitAssignmentStream) SubscribeAssignments(_ *control.SubscribeRequest, stream control.AssignmentService_SubscribeAssignmentsServer) error {
+	if s.identityRefusals.Add(-1) >= 0 {
+		st, _ := status.New(codes.FailedPrecondition, `assignment stream: server id "s" is not registered`).
+			WithDetails(&control.WorkspaceLeaseRefusal{Kind: control.WorkspaceLeaseRefusal_IDENTITY, Identity: "unregistered"})
+		return st.Err()
+	}
 	for {
 		select {
 		case <-stream.Context().Done():
@@ -488,5 +502,102 @@ func TestWorkspaceDisplacedClaimUsesAssignedEpoch(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A typed MOVED or DELETED renewal refusal, seen by the real host's guard,
+// turns the startup outcome into 78 with that reason; a refusal without the
+// detail stays 75 assignment_timeout.
+func TestChunkStartupExitFinalGives78(t *testing.T) {
+	refusal := func(kind control.WorkspaceLeaseRefusal_Kind) error {
+		st, err := status.New(codes.FailedPrecondition, "workspace lease: server identity does not match the current holder").
+			WithDetails(&control.WorkspaceLeaseRefusal{Kind: kind})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Err()
+	}
+	for _, tc := range []struct {
+		name    string
+		refuse  error
+		foreign bool // the stream also delivered a newer line naming another replica
+		code    int
+		reason  string
+	}{
+		{"moved", refusal(control.WorkspaceLeaseRefusal_MOVED), false, exitWorkspaceSuperseded, "moved"},
+		{"moved, newer foreign line also seen", refusal(control.WorkspaceLeaseRefusal_MOVED), true, exitWorkspaceSuperseded, "moved"},
+		{"deleted", refusal(control.WorkspaceLeaseRefusal_DELETED), false, exitWorkspaceSuperseded, "deleted"},
+		{"no detail", status.Error(codes.FailedPrecondition, "workspace lease: server identity does not match the current holder"), false, exitWorkspaceRetry, "assignment_timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			h, assign := exitAuthorityHost(t, func(s *exitAssignmentStream) { s.refuse = tc.refuse })
+			assign("r", 1)
+			leaseCtx, stopLease := context.WithCancel(ctx)
+			done := make(chan error, 1)
+			go func() {
+				done <- h.RunWorkspaceLease(leaseCtx, func(context.Context, *control.WorkspaceIdentity) (uint64, error) { return 1, nil })
+			}()
+			t.Cleanup(func() { stopLease(); <-done })
+			if tc.reason == "assignment_timeout" {
+				time.Sleep(2 * time.Second) // a renewal or two, refused without a detail
+				if _, final := h.MasterWaitState(); final != "" {
+					t.Fatalf("a refusal without a detail was taken as final %q", final)
+				}
+			}
+			for tc.reason != "assignment_timeout" {
+				if _, final := h.MasterWaitState(); final != "" {
+					if tc.foreign {
+						assign("r2", 2)
+						if !h.IsCurrentReplicaSuperseded() {
+							t.Fatal("fixture: the newer foreign line does not supersede")
+						}
+					}
+					break
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatal("the guard's refusal never reached the host")
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+			e := newProcessExit(ctx)
+			if !chooseChunkStartupExit(e, flags{workspaceLease: true, durableImpl: "walstore-chunk", volumeID: "v"}, h, &exitStartupOutcome{expired: true}) {
+				t.Fatal("the startup outcome selected no exit")
+			}
+			out := <-e.decision
+			if out.code != tc.code || out.reason != tc.reason {
+				t.Fatalf("exit %+v; want %d %s", out, tc.code, tc.reason)
+			}
+		})
+	}
+}
+
+// An identity refusal on the assignment stream ends when the stream (which
+// checks the holder's identity) delivers an assignment after the
+// registration is fixed, not 30 s later by decay.
+func TestIdentityRefusalEndsOnADeliveredAssignment(t *testing.T) {
+	h, assign := exitAuthorityHost(t, func(s *exitAssignmentStream) { s.identityRefusals.Store(1) })
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if w := h.MasterWaitStatus(); w != nil && w.Reason == "identity refused: unregistered" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stream's identity refusal never showed: %+v", h.MasterWaitStatus())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assign("r", 1) // the next stream is accepted and delivers
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if w := h.MasterWaitStatus(); w == nil || w.Reason != "identity refused: unregistered" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a delivered assignment did not end the identity refusal")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

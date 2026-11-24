@@ -9,7 +9,7 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
-// INV-WS-LEASE-001 / V1-SPEC r2.55 gap 9: invalid-reply fencing from a held,
+// INV-WS-LEASE-001: invalid renewal replies fence a held,
 // unexpired lease, rather than passing because a synthetic deadline expired.
 func TestWorkspaceGuardFencesOnInvalidReply(t *testing.T) {
 	for _, tc := range []struct {

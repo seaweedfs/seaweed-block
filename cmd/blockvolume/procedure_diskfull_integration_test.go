@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// Local disk full (V1-SPEC r2.55 round 2), with real binaries: blockmaster, a
+// Local disk full, with real binaries: blockmaster, a
 // real filer (weed, its data elsewhere) and walstore-chunk blockvolumes whose
 // durable roots and --host-limit-dir are on small filesystems the harness
 // mounts (cmd/blockvolume/testdata/diskfull.sh). A filler file takes the free

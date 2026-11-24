@@ -157,7 +157,7 @@ type otherUnknownCompletionError struct{}
 
 func (otherUnknownCompletionError) Error() string { return "unknown completion B" }
 
-// INV-FE-ERROR-RETRY-CLASS-001 / amended V1-SPEC r2.42: no marker means
+// INV-FE-ERROR-RETRY-CLASS-001: no marker means
 // permanent. Unknown leaf types are logged once across wrappers and protocols.
 func TestUnclassifiedBackendErrorIsPermanentAndLoggedOncePerType(t *testing.T) {
 	// The log-once cache is process-wide; give each test repetition a fresh

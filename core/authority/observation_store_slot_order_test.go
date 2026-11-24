@@ -69,7 +69,7 @@ func TestObservationStore_SupersededSlotLogsAfterUnlock(t *testing.T) {
 	}
 }
 
-// INV-OBS-SLOT-ORDER-001 / V1-SPEC r2.53: processes on one server order only their
+// INV-OBS-SLOT-ORDER-001: processes on one server order only their
 // own (volume, replica) reports; another slot's later timestamp is irrelevant.
 func TestObservationStore_InterleavedSendersOrderPerSlot(t *testing.T) {
 	for _, n := range []int{10, 100} {

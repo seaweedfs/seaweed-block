@@ -483,7 +483,7 @@ type lineOwnerReader interface {
 }
 
 // expectOwnerForLine binds the expected slot of the line's replica to the line's owner (PublishedLine.Owner) when a
-// move minted the line (#425, V1-SPEC r2.40, INV-AUTH-HOLDER-IDENTITY-001): a line carries its owner and that owner's
+// move minted the line (#425, INV-AUTH-HOLDER-IDENTITY-001): a line carries its owner and that owner's
 // endpoints, so its replica's facts (health, endpoints, and any endpoint refresh) come only from that server, never
 // from the placement or topology server it was moved away from. A move-minted line whose owner is unknown is bound to
 // NO server (no fact from anyone, so no refresh) until the owner is known. Only a line no move minted keeps the
