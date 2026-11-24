@@ -463,6 +463,14 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 		return 0, err
 	}
 	if expected.Gen == 0 {
+		// Under a VOLUME the initial HEAD is the catalog's (attach,
+		// fork, restore); an absent HEAD there is unknown, never a new
+		// lineage, and a CAS never creates one (INV-GC-HEAD-ABSENT-001).
+		if _, verr := r.f.LookupEntry(ctx, r.root, volumeName); verr == nil {
+			return 0, fmt.Errorf("%w: %w", storage.ErrChunkHeadPrecondition, errHeadMissingUnderVolume)
+		} else if !errors.Is(verr, ErrNotFound) {
+			return 0, verr
+		}
 		err = r.f.CreateEntry(ctx, r.root, e, true)
 	} else {
 		err = r.f.UpdateEntry(ctx, r.root, e, map[string][]byte{
@@ -479,6 +487,9 @@ func (r *ChunkRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVer
 		return 0, err // outcome unknown: the caller re-reads HEAD
 	}
 }
+
+// errHeadMissingUnderVolume: a CAS from generation 0 under a VOLUME entry.
+var errHeadMissingUnderVolume = errors.New("chunkstore: HEAD absent under a VOLUME entry: unknown, never recreated by a CAS (head_missing)")
 
 func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 	doc := headDoc{Format: headFormat, Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN,

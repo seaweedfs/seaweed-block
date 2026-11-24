@@ -559,8 +559,9 @@ an earlier release (volume format 1) is refused at start; it is not converted.
 - `volume.fsck` **without** delete flags only reports. Its orphan list holds only needles no file names: uploads
   whose write was never committed (a crash or a lost race) and deletions the filer lost. Those are true orphans.
 - **Do not run `volume.fsck` with `-reallyDeleteFromVolume`** on such a cluster until this release's notes say it
-  is supported; if you do, never with a `-cutoffTimeAgo` below 1 hour (the default is 5 hours). Every needle is
-  named by its file within 30 seconds of its upload or never.
+  is supported; if you do, never with a `-cutoffTimeAgo` below 1 hour (the default is 5 hours). The product sends
+  the write naming each needle within 30 seconds of its upload or not at all; how late the filer may still apply
+  such a write is not bounded by the product.
 - **Never run `volume.fsck -findMissingChunksInFiler` with `-reallyDeleteFilerEntries` or
   `-reallyDeleteFromVolume`, or `fs.verify -pruneEntries`,** on such a cluster: they delete files whose needle is
   missing, which loses chunk keys, HEAD, snapshots or GC tombstones.

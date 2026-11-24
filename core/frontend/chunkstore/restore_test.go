@@ -254,8 +254,12 @@ func TestRestore_WithoutLiveHeadNeverAttaches(t *testing.T) {
 	if _, err := c.EnsureVolume(ctx, "v9", catGeo); CodeOf(err) != CodeForkIncomplete {
 		t.Fatalf("restore without a HEAD attached: %v, want %s", err, CodeForkIncomplete)
 	}
-	if _, err := c.AbortFork(ctx, "v9"); err != nil {
-		t.Fatalf("abort the unpublished restore (sweep): %v", err)
+	aborted, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadAborted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CreateEntry(ctx, catBase+"/v9", aborted, true); err != nil {
+		t.Fatal(err) // an aborted HEAD tombstone at the target
 	}
 	if _, err := c.EnsureVolume(ctx, "v9", catGeo); CodeOf(err) != CodeForkIncomplete {
 		t.Fatalf("restore with an aborted HEAD attached: %v, want %s", err, CodeForkIncomplete)

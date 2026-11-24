@@ -115,9 +115,21 @@ func (c *Catalog) DeleteVolume(ctx context.Context, vol string, admit Admission)
 	if !ok {
 		return res, catErr(CodeNotChunkVolume, false, nil, "volume %s has no VOLUME entry", vol)
 	}
-	h, _, err := c.ReadHead(ctx, vol)
+	h, hasHead, err := c.ReadHead(ctx, vol)
 	if err != nil {
 		return res, err
+	}
+	if !hasHead {
+		// The delete would write the first HEAD (deleting); a refused delete
+		// must not leave one behind (its revert would make it an active,
+		// empty HEAD over the volume's keys). Decide the refusal first.
+		live, err := c.snapshotsBlock(ctx, vol, root)
+		if err != nil {
+			return res, err
+		}
+		if live != nil {
+			return res, live
+		}
 	}
 	res.Replayed = v.State == VolumeDeleted && h.State == storage.ChunkHeadDeleted
 	// (a) Every call takes its own admission (a rerun too: it settles a

@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"path"
 	"strings"
 	"testing"
 )
@@ -81,5 +82,57 @@ func TestVolumeFormat_PreF4StoreWithoutVolumeRefused(t *testing.T) {
 		if n := len(f.allWritten()) - written; n != 0 {
 			t.Fatalf("segmented=%t: %d entries written", segmented, n)
 		}
+	}
+}
+
+// A legacy store with HEAD and keys but no VOLUME is refused by every record
+// operation, and nothing is written to it.
+func TestVolumeFormat_VolumelessLegacyRefusedByRecordOperations(t *testing.T) {
+	f, b := loadPreF4(t, false)
+	for p := range f.entries {
+		if strings.HasSuffix(p, "/"+volumeName) {
+			delete(f.entries, p)
+		}
+	}
+	bindPreF4Objects(t, f, b)
+	c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	written := len(f.allWritten())
+	for name, run := range map[string]func() error{
+		"snapshot delete": func() error { _, err := c.DeleteSnapshot(ctx, "v1", "s1"); return err },
+		"snapshot list":   func() error { _, _, err := c.ListSnapshots(ctx, "v1", ListOptions{}); return err },
+		"abort snapshot":  func() error { _, err := c.AbortSnapshot(ctx, "v1", "s1", "1-0000000000000001"); return err },
+		"snapshot replay": func() error {
+			_, _, err := c.SnapshotReplay(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"})
+			return err
+		},
+		"fork source": func() error {
+			_, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v7", RequestID: "f"})
+			return err
+		},
+		"independence": func() error { _, _, err := c.ReadIndependence(ctx, "v1"); return err },
+	} {
+		if err := run(); CodeOf(err) != CodeNotChunkVolume {
+			t.Errorf("%s on a volume-less legacy store: %v; want not_chunk_volume", name, err)
+		}
+	}
+	if n := len(f.allWritten()) - written; n != 0 {
+		t.Fatalf("%d entries written to a volume-less legacy store", n)
+	}
+}
+
+// bindPreF4Objects binds the frozen store's objects as keys (as bindPreF4
+// does), so the store holds keys as well as HEAD.
+func bindPreF4Objects(t *testing.T, f *fakeFiler, b *fakeBlobs) {
+	t.Helper()
+	r, err := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Put(context.Background(), "legacy-data", bytes.Repeat([]byte{0x41}, 4096)); err != nil {
+		t.Fatal(err)
 	}
 }

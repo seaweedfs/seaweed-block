@@ -221,8 +221,9 @@ stateDiagram-v2
   deleting --> purging: commit point (same incarnation)
   purging --> deleted: chunks dropped, VOLUME marked deleted
   deleted --> [*]
-  [*] --> aborted: GC tombstones a dead fork's HEAD
 ```
+
+No path creates a HEAD where none is read over a volume's keys: attach and a fork or restore replay refuse `head_missing`, a CAS from generation 0 is refused under a VOLUME, and the GC copy sweep never tombstones a fork's HEAD (an absent HEAD stops every GC pass). Only an explicit `volume-delete` writes its `deleting` HEAD. No product path produces `aborted` any more; readers still refuse it.
 
 Snapshot name lifecycle:
 
@@ -248,7 +249,7 @@ Restore (target volume):
 stateDiagram-v2
   [*] --> Forking: read the parent snapshot, write VOLUME (origin restore)
   Forking --> Restoring: first HEAD (parent's refs, owner-qualified) before read time + deadline
-  Forking --> Aborted: GC tombstones the HEAD
+  Forking --> Forking: HEAD absent past the deadline: GC stops until the restore is retried (no keys yet) or deleted
   Restoring --> Hydrating: driver starts the paced walker
   Hydrating --> Owning: batch cuts start (the walker may still run)
   Owning --> Owning: one bounded batch cut replaces up to N foreign refs with own keys

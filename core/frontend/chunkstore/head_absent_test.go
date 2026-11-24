@@ -161,6 +161,12 @@ func TestVolumeFormat_EveryPathRefusesFormat1(t *testing.T) {
 		"retain":           func() error { _, err := c.Retain(ctx, "v1", true); return err },
 		"snapshot list":    func() error { _, _, err := c.ListSnapshots(ctx, "v1", ListOptions{}); return err },
 		"snapshot delete":  func() error { _, err := c.DeleteSnapshot(ctx, "v1", "s1"); return err },
+		"abort snapshot":   func() error { _, err := c.AbortSnapshot(ctx, "v1", "s1", "1-0000000000000001"); return err },
+		"snapshot replay": func() error {
+			_, _, err := c.SnapshotReplay(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"})
+			return err
+		},
+		"independence": func() error { _, _, err := c.ReadIndependence(ctx, "v1"); return err },
 		"fork source": func() error {
 			_, err := c.Fork(ctx, ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f"})
 			return err
@@ -402,5 +408,79 @@ func TestGC_HeadPrunedDuringThePassRefuses(t *testing.T) {
 	res, err := g.Run(ctx)
 	if err == nil || res.Candidates != 0 || len(res.RefusedVolumes) != 1 {
 		t.Fatalf("HEAD pruned mid-pass: %+v %v; want a refusal, no candidate", res, err)
+	}
+}
+
+// A first-HEAD CAS (expected gen 0) under a VOLUME entry whose HEAD was
+// pruned (between attach and the layer's first HEAD read) is refused: under
+// a VOLUME the initial HEAD is the catalog's, and a CAS never creates one.
+func TestChunkRemote_FirstHeadRefusedUnderVolume(t *testing.T) {
+	f, b, _, _, _ := gcFixture(t) // VOLUME and the initial HEAD of v1
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, catBase+"/v1")
+	if err := r.Put(ctx, "chunks/e1/c0/old", chunkBytes(0x10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	next := storage.ChunkHead{Epoch: 2, Holder: "h2", RemoteLSN: 50, Chunks: map[uint64]storage.ChunkRef{}}
+	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, next); !errors.Is(err, storage.ErrChunkHeadPrecondition) || !strings.Contains(err.Error(), "head_missing") {
+		t.Fatalf("first HEAD under a VOLUME: %v; want a head_missing refusal", err)
+	}
+	if _, err := f.LookupEntry(ctx, catBase+"/v1", headName); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a HEAD was created: %v", err)
+	}
+}
+
+// A volume-delete over a pruned HEAD that a snapshot refuses writes no HEAD:
+// it decides the refusal before any write (a reverted deleting HEAD would
+// otherwise stay as an active, empty one over the volume's keys).
+func TestVolumeDelete_RefusedOverAbsentHeadWritesNothing(t *testing.T) {
+	f, _, c, h := catalogFixture(t)
+	ctx := context.Background()
+	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "r"}, h); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	written := len(f.allWritten())
+	if _, err := c.DeleteVolume(ctx, "v1", nil); CodeOf(err) != CodeVolumeHasSnapshots {
+		t.Fatalf("delete with a snapshot over an absent HEAD: %v", err)
+	}
+	if n := len(f.allWritten()) - written; n != 0 {
+		t.Fatalf("%d entries written by a refused delete", n)
+	}
+	if _, err := f.LookupEntry(ctx, catBase+"/v1", headName); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the refused delete left a HEAD: %v", err)
+	}
+	if _, err := c.EnsureVolume(ctx, "v1", catGeo); CodeOf(err) != CodeHeadMissing {
+		t.Fatalf("attach after the refused delete: %v; want head_missing", err)
+	}
+}
+
+// Usage of a live volume without HEAD is unknown, not an empty image; and a
+// missing HEAD of another live volume makes the exclusive bytes unknown.
+func TestUsage_RefusesAbsentHead(t *testing.T) {
+	f, b, c, _ := catalogFixture(t)
+	ctx := context.Background()
+	for _, v := range []string{"v1", "v2"} {
+		if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: v, IsDirectory: true}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.EnsureVolume(ctx, "v2", catGeo); err != nil {
+		t.Fatal(err)
+	}
+	_ = b
+	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Usage(ctx, "v1"); CodeOf(err) != CodeHeadMissing {
+		t.Fatalf("usage with its HEAD absent: %v; want head_missing", err)
+	}
+	if _, err := c.Usage(ctx, "v2"); CodeOf(err) != CodeHeadMissing {
+		t.Fatalf("usage with another live volume's HEAD absent: %v; want head_missing", err)
 	}
 }

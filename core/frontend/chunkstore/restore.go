@@ -127,6 +127,9 @@ func (c *Catalog) ReadIndependence(ctx context.Context, vol string) (RestoreInde
 	if err != nil {
 		return RestoreIndependence{}, false, err
 	}
+	if err := c.checkFormat(ctx, vol); err != nil {
+		return RestoreIndependence{}, false, err
+	}
 	e, body, err := lookupRecord(ctx, c.f, c.blobs, root, restoreIndependentName)
 	if errors.Is(err, ErrNotFound) {
 		return RestoreIndependence{}, false, nil

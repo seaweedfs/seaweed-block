@@ -94,9 +94,13 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 		return VolumeUsage{}, err
 	}
 
-	head, _, err := c.ReadHead(ctx, vol)
+	head, hasHead, err := c.ReadHead(ctx, vol)
 	if err != nil {
 		return VolumeUsage{}, err
+	}
+	if !hasHead && v.State == "" {
+		// An absent HEAD is unknown, never an empty image: no number.
+		return VolumeUsage{}, catErr(CodeHeadMissing, false, nil, "volume %s is live but has no HEAD: its usage is unknown", vol)
 	}
 	snaps, err := c.allSnapshots(ctx, vol)
 	if err != nil {
@@ -150,6 +154,15 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 		oh, has, err := c.ReadHead(ctx, other)
 		if err != nil {
 			return VolumeUsage{}, err
+		}
+		if !has {
+			if ov, ok, err := c.ReadVolume(ctx, other); err != nil {
+				return VolumeUsage{}, err
+			} else if ok && ov.State == "" {
+				// Its missing HEAD may hold this volume's chunks: the
+				// exclusive bytes would be wrong.
+				return VolumeUsage{}, catErr(CodeHeadMissing, false, nil, "volume %s is live but has no HEAD: usage of %s is unknown", other, vol)
+			}
 		}
 		if has {
 			oh, err = c.usageHead(ctx, other, oh)

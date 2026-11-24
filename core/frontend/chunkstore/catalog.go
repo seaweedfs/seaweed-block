@@ -459,11 +459,20 @@ func (c *Catalog) refuseVolumelessData(ctx context.Context, vol, root string) er
 	return nil
 }
 
-// checkFormat is the format gate of an operation on vol's records: a VOLUME
-// of another format is refused; an absent VOLUME is left to the operation.
+// checkFormat is the format gate of every operation on vol's records: a
+// VOLUME of another format is refused, and so is a store without VOLUME that
+// holds a HEAD or chunk keys (a legacy, pre-VOLUME store). An absent volume
+// (no VOLUME, HEAD or keys) is left to the operation.
 func (c *Catalog) checkFormat(ctx context.Context, vol string) error {
-	_, _, err := c.ReadVolume(ctx, vol)
-	return err
+	_, ok, err := c.ReadVolume(ctx, vol)
+	if err != nil || ok {
+		return err
+	}
+	root, err := c.volRoot(vol)
+	if err != nil {
+		return err
+	}
+	return c.refuseVolumelessData(ctx, vol, root)
 }
 
 func (c *Catalog) headExists(ctx context.Context, root string) (bool, error) {
@@ -778,6 +787,9 @@ func (c *Catalog) AbortSnapshot(ctx context.Context, vol, name, attempt string) 
 	if err := CheckSnapshotName(name); err != nil {
 		return false, err
 	}
+	if err := c.checkFormat(ctx, vol); err != nil {
+		return false, err
+	}
 	if !storage.ValidChunkIntentID(attempt) {
 		return false, catErr(CodeInvalidName, false, nil, "attempt %q", attempt)
 	}
@@ -1087,6 +1099,9 @@ func (c *Catalog) SnapshotReplay(ctx context.Context, vol string, req SnapshotRe
 		return SnapshotInfo{}, false, err
 	}
 	if err := CheckSnapshotName(req.Name); err != nil {
+		return SnapshotInfo{}, false, err
+	}
+	if err := c.checkFormat(ctx, vol); err != nil {
 		return SnapshotInfo{}, false, err
 	}
 	if req.RequestID == "" {
@@ -1524,36 +1539,6 @@ func (c *Catalog) readForkParent(ctx context.Context, req ForkRequest) (Snapshot
 		return SnapshotInfo{}, catErr(CodeGeometryMismatch, false, nil, "fork size exceeds maximum %d bytes (16 TiB - 4 KiB; uint32 LBA)", geometry.MaxVolumeBytes)
 	}
 	return ref.info, nil
-}
-
-// AbortFork settles a dead fork for a GC sweep (W5): it claims the
-// target's HEAD, the fork's publishing entry, with
-// an exclusive create of an aborted HEAD tombstone. claimed is true when
-// HEAD is a tombstone (this one or an earlier one): the fork can never
-// publish, and the target never attaches. false: the fork published, and
-// its keys are reachable through that HEAD. Either way the fork's copy
-// intent can then be deleted. Volume ids are never reused, so the
-// tombstone stays.
-func (c *Catalog) AbortFork(ctx context.Context, target string) (claimed bool, err error) {
-	root, err := c.volRoot(target)
-	if err != nil {
-		return false, err
-	}
-	he, err := headEntry(storage.ChunkHead{Gen: 1, Chunks: map[uint64]storage.ChunkRef{}, State: storage.ChunkHeadAborted})
-	if err != nil {
-		return false, err
-	}
-	switch err := c.f.CreateEntry(ctx, root, he, true); {
-	case err == nil:
-		return true, nil
-	case !errors.Is(err, ErrExists):
-		return false, remoteErr(err, "aborted HEAD of %s", target)
-	}
-	h, _, err := c.ReadHead(ctx, target)
-	if err != nil {
-		return false, err
-	}
-	return h.State == storage.ChunkHeadAborted, nil
 }
 
 // checkForkRecord refuses a target VOLUME that is not this fork request's.
