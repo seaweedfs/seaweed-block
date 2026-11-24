@@ -16,7 +16,10 @@ type WorkspaceHead struct {
 	Gen, Epoch, RemoteLSN uint64
 	Holder                string
 	Detached              bool
-	FilerMtimeNS          int64
+	// Deleting: HEAD is deleting, purging or deleted (returned with
+	// ErrWorkspaceHeadDeleting): no claim can move it again.
+	Deleting     bool
+	FilerMtimeNS int64
 }
 
 // ErrWorkspaceHeadUnclaimed is a HEAD reader's answer for a volume's initial
@@ -25,6 +28,13 @@ type WorkspaceHead struct {
 // so a caller that needs one treats it as any read error; the delete
 // admission reads it as never started (TERM-LIVE-HOLDER-001).
 var ErrWorkspaceHeadUnclaimed = errors.New("HEAD never claimed: epoch 0, no holder")
+
+// ErrWorkspaceHeadDeleting is a HEAD reader's answer for a HEAD that is
+// deleting, purging or deleted: the head returned with it has Deleting set.
+// A caller that needs an active or detached identity treats it as any read
+// error; the delete admission reads it as past the fence (a re-run of a
+// delete that stopped midway).
+var ErrWorkspaceHeadDeleting = errors.New("HEAD is deleting, purging or deleted")
 
 // ErrWorkspaceOutcomeUncertain marks a move whose outcome is unknown: its
 // issuing write failed after it may have reached the store, or the volume's
@@ -168,7 +178,7 @@ func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, 
 		if pendingPlacement {
 			return fmt.Errorf("workspace delete: placement may have queued authority")
 		}
-	case HolderDrained, HolderNeverStarted:
+	case HolderDrained, HolderNeverStarted, HolderDeleting:
 	default:
 		return fmt.Errorf("workspace delete: live authority requires clean revocation ACK: revoke the line with its sealed generation (sw-block ops workspace revoke --epoch E --sealed-gen G) and wait for the recorded ACK, then delete (holder: %s)", v)
 	}

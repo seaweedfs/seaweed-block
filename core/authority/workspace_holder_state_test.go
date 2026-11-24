@@ -29,6 +29,8 @@ func TestWorkspaceHolderState(t *testing.T) {
 		{"another holder at the line's epoch", true, nil, head(2, "node-b/r1", false), owner, HolderUnknown},
 		{"HEAD at a higher epoch", true, nil, head(3, owner, false), owner, HolderUnknown},
 		{"owner unknown at the line's epoch", true, nil, head(2, owner, false), "", HolderUnknown},
+		{"HEAD deleting (a delete that stopped midway)", true, nil, &WorkspaceHead{Gen: 4, Epoch: 0, Deleting: true}, owner, HolderDeleting},
+		{"HEAD deleting at the line's epoch", true, nil, &WorkspaceHead{Gen: 4, Epoch: 2, Holder: owner, Deleting: true}, owner, HolderDeleting},
 	} {
 		if got := WorkspaceHolderState(c.line, 2, "r1", c.owner, c.ack, c.head); got != c.want {
 			t.Errorf("%s: %s; want %s", c.name, got, c.want)

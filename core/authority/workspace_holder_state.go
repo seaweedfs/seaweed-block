@@ -23,6 +23,11 @@ const (
 	HolderNeverStarted
 	// HolderLive: HEAD names the line's holder at its epoch, active.
 	HolderLive
+	// HolderDeleting: HEAD is deleting, purging or deleted. No claim can
+	// move it again, so it is past the delete's fence: a delete that stopped
+	// midway (its commit timed out, its mark's outcome was unknown) is
+	// admitted again and can finish.
+	HolderDeleting
 )
 
 func (v WorkspaceHolderVerdict) String() string {
@@ -37,6 +42,8 @@ func (v WorkspaceHolderVerdict) String() string {
 		return "never started"
 	case HolderLive:
 		return "live"
+	case HolderDeleting:
+		return "deleting"
 	}
 	return "unknown"
 }
@@ -53,6 +60,8 @@ func WorkspaceHolderState(linePresent bool, lineEpoch uint64, lineReplica, owner
 		return HolderNoLine
 	case ack != nil && ack.Epoch == lineEpoch && ack.ReplicaID == lineReplica:
 		return HolderDrained
+	case head != nil && head.Deleting:
+		return HolderDeleting
 	case head == nil:
 		return HolderUnknown
 	case head.Epoch < lineEpoch:

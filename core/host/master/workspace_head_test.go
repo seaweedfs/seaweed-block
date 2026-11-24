@@ -82,3 +82,24 @@ func TestWorkspaceHEADUnclaimed(t *testing.T) {
 		})
 	}
 }
+
+// A HEAD the delete has marked (deleting, purging, deleted) reads as
+// ErrWorkspaceHeadDeleting with Deleting set: the delete's re-run sees it as
+// past the fence; every other caller still gets an error.
+func TestWorkspaceHEADDeleting(t *testing.T) {
+	for _, state := range []string{"deleting", "purging", "deleted"} {
+		t.Run(state, func(t *testing.T) {
+			doc := `{"format":1,"gen":5,"epoch":0,"holder":"","remote_lsn":0,"state":"` + state + `"}`
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(doc)) }))
+			defer s.Close()
+			read, err := NewWorkspaceHEADReader(s.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h, err := read(context.Background(), "v")
+			if !errors.Is(err, authority.ErrWorkspaceHeadDeleting) || !h.Deleting || h.Gen != 5 {
+				t.Fatalf("HEAD %s: %+v, %v; want ErrWorkspaceHeadDeleting with Deleting and its generation", state, h, err)
+			}
+		})
+	}
+}

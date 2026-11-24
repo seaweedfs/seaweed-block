@@ -999,8 +999,8 @@ func (s *services) deleteHolderEvidence(ctx context.Context, vol string) (*autho
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	head, err := s.host.cfg.WorkspaceHeadReader(readCtx, vol)
-	if errors.Is(err, authority.ErrWorkspaceHeadUnclaimed) {
-		return &head, owner // the initial HEAD: epoch 0, never claimed
+	if errors.Is(err, authority.ErrWorkspaceHeadUnclaimed) || errors.Is(err, authority.ErrWorkspaceHeadDeleting) {
+		return &head, owner // the initial HEAD (never claimed), or one past the delete's fence
 	}
 	if err != nil {
 		s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q: HEAD unreadable (%v); a line without an ACK is refused", vol, err)

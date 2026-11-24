@@ -21,10 +21,13 @@ import (
 // DeleteVolume RPC (which reads no HEAD) refuses even the never-started line.
 func TestDeleteAdmitsANeverStartedLine(t *testing.T) {
 	var headEpoch atomic.Int64
-	var headFails atomic.Bool
+	var headFails, headDeleting atomic.Bool
 	h, conn, _ := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
 		if headFails.Load() {
 			return authority.WorkspaceHead{}, errors.New("filer unreachable")
+		}
+		if headDeleting.Load() { // marked by the delete
+			return authority.WorkspaceHead{Gen: 3, Deleting: true}, authority.ErrWorkspaceHeadDeleting
 		}
 		e := uint64(headEpoch.Load())
 		if e == 0 { // the initial HEAD, as the filer reader returns it
@@ -79,5 +82,12 @@ func TestDeleteAdmitsANeverStartedLine(t *testing.T) {
 	res, err := lc.MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-never-started"})
 	if err != nil || res.GetState() != lifecycle.ReservationAdmitted {
 		t.Fatalf("delete of a never-started line: %+v %v; want admitted without an ACK", res, err)
+	}
+	// The delete marked HEAD deleting, then its commit timed out: the re-run
+	// is admitted again (HEAD past the fence), not stranded as volume_in_use.
+	headDeleting.Store(true)
+	res, err = lc.MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-never-started"})
+	if err != nil || res.GetState() != lifecycle.ReservationAdmitted {
+		t.Fatalf("re-run after a commit that timed out: %+v %v; want admitted again", res, err)
 	}
 }

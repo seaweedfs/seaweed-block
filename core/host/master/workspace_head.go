@@ -86,6 +86,11 @@ func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authori
 		// The initial HEAD of a volume no holder ever claimed: epoch 0, no
 		// holder, active. It names no identity, so callers that need one get
 		// an error as before; the delete reads it as "never started".
+		// A HEAD the delete has marked (deleting, purging, deleted): no claim
+		// can move it again; the delete's re-run reads it as past the fence.
+		if doc.Gen > 0 && doc.LegacyDetached == nil && (doc.State == "deleting" || doc.State == "purging" || doc.State == "deleted") {
+			return authority.WorkspaceHead{Gen: doc.Gen, Epoch: doc.Epoch, Holder: doc.Holder, Deleting: true, FilerMtimeNS: headFilerMtimeNS(res.Header)}, authority.ErrWorkspaceHeadDeleting
+		}
 		if doc.Gen > 0 && doc.Epoch == 0 && doc.Holder == "" && doc.LegacyDetached == nil && doc.DetachedBy == nil && (doc.State == "" || doc.State == "active") {
 			return authority.WorkspaceHead{Gen: doc.Gen, FilerMtimeNS: headFilerMtimeNS(res.Header)}, authority.ErrWorkspaceHeadUnclaimed
 		}
