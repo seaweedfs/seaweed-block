@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -159,6 +160,20 @@ func (s *services) MarkVolumeDeleting(ctx context.Context, req *control.MarkVolu
 	_, placed := stores.Placements.GetPlacement(vol)
 	var res lifecycle.DeletionReservation
 	var persistErr error
+	// A rerun of a delete whose token already holds the reservation (or a
+	// committed one) was decided by its first admission: it is not decided
+	// again. It goes on to the catalog step, whose HEAD compare-and-swap is
+	// the fence: a HEAD a holder claimed in between is refused there and the
+	// reservation given back, so neither the volume nor its id is stranded.
+	if r, held := stores.Deletions.Get(vol); held && (r.State == lifecycle.ReservationCommitted || slices.Contains(r.Tokens, req.GetToken())) {
+		res, persistErr = stores.Deletions.Admit(vol, req.GetToken())
+		if persistErr != nil {
+			return nil, status.Errorf(codes.Unavailable, "mark volume deleting: %v", persistErr)
+		}
+		_, known := stores.Volumes.GetVolume(vol)
+		s.host.log.Printf("blockmaster: MarkVolumeDeleting volume=%q known=%t state=%s (rerun of a held delete)", vol, known, res.State)
+		return &control.MarkVolumeDeletingResponse{Known: known, State: res.State}, nil
+	}
 	err = s.host.Publisher().RecordWorkspaceDeletion(ctx, vol, bound && placed, head, owner, func() error {
 		res, persistErr = stores.Deletions.Admit(vol, req.GetToken())
 		return persistErr
