@@ -131,31 +131,69 @@ func TestLeaseRefusalKinds(t *testing.T) {
 		t.Fatalf("moved to another host: %q detail %v; want MOVED with the unchanged text", text, r)
 	}
 
-	// An admitted deletion is OTHER; a committed one is DELETED.
+	// Move back to node-a: the stale node-a process at e2 is the same owner at
+	// a newer epoch, so OTHER (no detail), never a false MOVED.
 	if _, err := ws.RenewWorkspaceLease(ctx, e3); err != nil {
-		t.Fatal("grant to the moved replica:", err)
+		t.Fatal("grant to the moved host:", err)
 	}
-	if _, err := ws.RevokeWorkspace(ctx, e3); err != nil {
+	e4 := id("node-a", cleanMove("move-back", e3, b))
+	text, r = refusalOf(t, "moved and moved back", func() error { _, err := ws.RenewWorkspaceLease(ctx, e2); return err }())
+	if r != nil || text != "workspace lease: server identity does not match the current holder" {
+		t.Fatalf("moved and moved back: %q detail %v; want the unchanged text, no detail", text, r)
+	}
+
+	// An admitted deletion is OTHER; a committed one is DELETED.
+	if _, err := ws.RenewWorkspaceLease(ctx, e4); err != nil {
+		t.Fatal("grant after the move back:", err)
+	}
+	if _, err := ws.RevokeWorkspace(ctx, e4); err != nil {
 		t.Fatal(err)
 	}
-	headEpoch.Store(int64(e3.GetEpoch()))
+	headEpoch.Store(int64(e4.GetEpoch()))
 	headGen.Add(1)
-	if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: e3, HeadGen: uint64(headGen.Load())}); err != nil {
+	if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: e4, HeadGen: uint64(headGen.Load())}); err != nil {
 		t.Fatal(err)
 	}
 	res, err := control.NewLifecycleServiceClient(conn).MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-1"})
 	if err != nil || res.GetState() != lifecycle.ReservationAdmitted {
 		t.Fatalf("admit the delete: %+v %v", res, err)
 	}
-	text, r = refusalOf(t, "admitted deletion", func() error { _, err := ws.RenewWorkspaceLease(ctx, e3); return err }())
+	text, r = refusalOf(t, "admitted deletion", func() error { _, err := ws.RenewWorkspaceLease(ctx, e4); return err }())
 	if r != nil || text != "workspace: volume is being deleted" {
 		t.Fatalf("admitted deletion: %q detail %v; want the unchanged text, no detail", text, r)
 	}
 	if _, err := h.lifecycle.Deletions.Commit("v", "del-1"); err != nil {
 		t.Fatal(err)
 	}
-	text, r = refusalOf(t, "committed deletion", func() error { _, err := ws.RenewWorkspaceLease(ctx, e3); return err }())
+	text, r = refusalOf(t, "committed deletion", func() error { _, err := ws.RenewWorkspaceLease(ctx, e4); return err }())
 	if r == nil || r.GetKind() != control.WorkspaceLeaseRefusal_DELETED || text != "workspace: volume is being deleted" {
 		t.Fatalf("committed deletion: %q detail %v; want DELETED with the unchanged text", text, r)
+	}
+}
+
+// MOVED needs a line at a newer epoch than the caller's: another replica or
+// another known owner. A line at or below the caller's epoch, the same owner,
+// an unknown owner or a caller without a server id is OTHER (F6).
+func TestRenewalReplicaMismatchAtOlderLineEpochIsOther(t *testing.T) {
+	owner := func(s string) func() string { return func() string { return s } }
+	for _, c := range []struct {
+		name                  string
+		lineEpoch             uint64
+		lineReplica, lineHost string
+		server                string
+		epoch                 uint64
+		want                  bool
+	}{
+		{"another replica at an older line epoch", 2, "r2", "node-b", "node-a", 3, false},
+		{"another replica at the same epoch", 3, "r2", "node-b", "node-a", 3, false},
+		{"another replica at a newer epoch", 4, "r2", "node-b", "node-a", 3, true},
+		{"another known owner at a newer epoch", 4, "r1", "node-b", "node-a", 3, true},
+		{"the same owner at a newer epoch (move and move back)", 4, "r1", "node-a", "node-a", 3, false},
+		{"an unknown owner at a newer epoch", 4, "r1", "", "node-a", 3, false},
+		{"no server id on the call", 4, "r1", "node-b", "", 3, false},
+	} {
+		if got := lineMovedFrom(c.lineEpoch, c.lineReplica, owner(c.lineHost), "r1", c.server, c.epoch); got != c.want {
+			t.Errorf("%s: MOVED=%v; want %v", c.name, got, c.want)
+		}
 	}
 }

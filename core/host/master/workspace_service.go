@@ -69,22 +69,32 @@ func leaseRefusal(text string, kind control.WorkspaceLeaseRefusal_Kind, retryAft
 }
 
 // renewalMoved reports whether a holder mismatch is a permanent, known move:
-// the published line names another replica, or a newer epoch of this replica
-// owned by another known server. An unknown owner, the same owner at a newer
-// epoch, or no line is not (OTHER: a bounded wait, then exit 75).
+// the published line is at a newer epoch than the caller's and names another
+// replica, or is owned by another known server. An unknown owner, the same
+// owner at a newer epoch, a line at or below the caller's epoch, or no line is
+// not (OTHER: a bounded wait, then exit 75): a false MOVED is exit 78, which
+// the shipped unit does not restart.
 func (s *services) renewalMoved(volume, replica, server string, epoch uint64) bool {
 	line, ok := s.host.Publisher().PublishedAuthorityLine(volume)
-	if !ok || server == "" {
+	if !ok {
 		return false
 	}
-	if line.ReplicaID != replica {
+	return lineMovedFrom(line.Epoch, line.ReplicaID, func() string {
+		return s.host.workspaceLineOwner(line, volume, line.ReplicaID, line.Epoch)
+	}, replica, server, epoch)
+}
+
+// lineMovedFrom is renewalMoved's decision on the published line (epoch,
+// replica, owner) against the caller (replica, server, epoch).
+func lineMovedFrom(lineEpoch uint64, lineReplica string, owner func() string, replica, server string, epoch uint64) bool {
+	if server == "" || lineEpoch <= epoch {
+		return false
+	}
+	if lineReplica != replica {
 		return true
 	}
-	if line.Epoch <= epoch {
-		return false
-	}
-	owner := s.host.workspaceLineOwner(line, volume, line.ReplicaID, line.Epoch)
-	return owner != "" && owner != server
+	o := owner()
+	return o != "" && o != server
 }
 
 // isWorkspaceVolume reports whether volume is a workspace volume (workspace RPC on, an existing RF1 volume), from the
