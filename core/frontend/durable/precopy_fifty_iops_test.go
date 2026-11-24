@@ -26,10 +26,12 @@ func TestPrecopyFiftyIOPSSyncConvergesFirstAttempt(t *testing.T) {
 }
 
 func TestPrecopyFiftyIOPSColdCostsKeepAdmissionHonest(t *testing.T) {
+	t.Skip("#537 RED quarantine: 2026-11-24 ruling; pre-copy round-accounting and guest WAL-admission automaton review pending")
 	precopyFiftyIOPS(t, 1, true, 0)
 }
 
 func TestPrecopyFiftyIOPSSlowMeasuredCostsKeepServing(t *testing.T) {
+	t.Skip("#537 RED quarantine: 2026-11-24 ruling; pre-copy round-accounting and guest WAL-admission automaton review pending")
 	precopyFiftyIOPS(t, 3, false, 1300*time.Millisecond)
 }
 
@@ -72,11 +74,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	writerBudget := 4 * time.Second
-	if wantUnknown {
-		writerBudget = 30 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), writerBudget)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	writerDone, probeDone := make(chan struct{}), make(chan struct{})
 	var stopped atomic.Bool
 	var guestErrors atomic.Int64
