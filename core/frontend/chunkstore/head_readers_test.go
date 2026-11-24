@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -38,6 +40,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/share_guard.go beginShare -> ReadHead":           "refuses outcome_unknown: the HEAD to share is no longer current",
 	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                      "GAP: reports an empty image, no error (probe Usage)",
 	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":               "finding ROOT_INVALID (probe Verify)",
+	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":        "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                    "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":       "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
 	"core/frontend/chunkstore/volume_delete.go markHeadDeleting -> ReadHead":   "zero HEAD: creates the deleting HEAD (probe DeleteVolume)",
@@ -252,6 +255,15 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatalf("AbortFork over an absent HEAD: %t %v; today it creates an aborted HEAD", claimed, err)
 		}
 	})
+	t.Run("LayoutTransition", func(t *testing.T) {
+		st := &absentLayoutHead{}
+		if _, err := layout.RunBegin(ctx, st, layout.HolderID{Epoch: 1, Holder: "h"}, "s"); !errors.Is(err, layout.ErrHeadAbsent) {
+			t.Fatalf("layout transition over an absent HEAD: %v; want ErrHeadAbsent", err)
+		}
+		if st.updates != 0 {
+			t.Fatalf("layout transition over an absent HEAD wrote %d times", st.updates)
+		}
+	})
 	t.Run("ForkReplay", func(t *testing.T) {
 		f, b := headReaderForkFixture(t)
 		c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
@@ -272,4 +284,16 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatalf("target HEAD after the replay: %+v %t; today the fork-time HEAD again", h, ok)
 		}
 	})
+}
+
+// absentLayoutHead is a layout HEAD store whose HEAD is absent.
+type absentLayoutHead struct{ updates int }
+
+func (a *absentLayoutHead) ReadHead(context.Context) (layout.Head, bool, error) {
+	return layout.Head{}, false, nil
+}
+
+func (a *absentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) error {
+	a.updates++
+	return nil
 }
