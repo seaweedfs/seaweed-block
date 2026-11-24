@@ -16,7 +16,7 @@ re-run by the operator.
 Status: **EXHAUSTIVE** (TLC, every configuration finished). Depth and distinct
 state counts are as reported by TLC.
 
-**Must not violate** (the head's behaviour: FixDeleting + FixToken). Invariants
+**Must not violate** (the code at 72efeb3a, unchanged since: FixDeleting + FixToken). Invariants
 checked: TypeOK, NoTwoHolders, NoValidityBehindLine, NoServedWriteLost,
 DeleteNeverStrandsALiveHolder, NoRefusalContradiction,
 NoLiveHolderWhileDeleting, RerunCanFinish, RerunCanSettle,
@@ -24,8 +24,8 @@ SkipOnlyReplaysADecision.
 
 | Configuration | Distinct states | Depth | Result |
 |---|---|---|---|
-| `safe_head_nosnap` | 25,831,776 | 50 | No error |
-| `safe_head` (snapshot revert on) | 48,737,939 | 50 | No error |
+| `safe_head_72efeb3a_nosnap` | 25,831,776 | 50 | No error |
+| `safe_head_72efeb3a` (snapshot revert on) | 48,737,939 | 50 | No error |
 
 **Must violate** (each fires as expected):
 
