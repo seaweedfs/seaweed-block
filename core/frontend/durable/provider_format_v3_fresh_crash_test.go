@@ -71,7 +71,8 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 	defer cancel()
 	if root := os.Getenv("SWBLOCK_V3_FRESH_CRASH_ROOT"); root != "" {
 		remote := freshCrashRemote(t, filepath.Join(root, "remote.json"))
-		p := mappedProviderV3(t, root, remote)
+		// This is a successor's root, not the source's missing own-epoch root.
+		p := mappedProviderV3(t, root, remote, 4)
 		if os.Getenv("SWBLOCK_V3_FRESH_CRASH_MODE") == "capture" {
 			p.cfg.ChunkCaptureInterval = time.Hour
 		}
@@ -233,7 +234,7 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 	if !bytes.Contains(out, []byte("FRESH_CRASH_READY presence_saved=true marker_present=true ack=9 no_Close=true")) {
 		t.Fatal("child missed crash boundary")
 	}
-	p := mappedProviderV3(t, root, freshCrashRemote(t, filepath.Join(root, "remote.json")))
+	p := mappedProviderV3(t, root, freshCrashRemote(t, filepath.Join(root, "remote.json")), 4)
 	if _, err = os.Stat(chunkFreshMarker(p.volumePath("v1"))); err != nil {
 		t.Fatal("crash marker missing", err)
 	}
