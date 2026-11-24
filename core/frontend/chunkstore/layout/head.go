@@ -65,7 +65,8 @@ type snapDoc struct {
 }
 
 // validName refuses a string the JSON encoding would not keep byte for
-// byte (invalid UTF-8 becomes U+FFFD).
+// byte: invalid UTF-8 is written as an escaped U+FFFD, which DecodeHead's
+// canonical check then refuses.
 func validName(field, v string) error {
 	if !utf8.ValidString(v) {
 		return fmt.Errorf("%w: %s %q is not valid UTF-8", ErrMalformed, field, v)

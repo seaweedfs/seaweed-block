@@ -330,9 +330,10 @@ func TestRunAbort_InterruptAtEveryStep(t *testing.T) {
 	})
 }
 
-// A name that is not valid UTF-8 would be stored as U+FFFD by the JSON
-// encoding (and still re-encode the same), so HEAD would hold another name
-// than the caller gave: refused on every string field.
+// A name that is not valid UTF-8 is written by the JSON encoding as an
+// escaped U+FFFD, and DecodeHead's canonical check then refuses those
+// bytes: Encode would succeed with a HEAD its own decoder cannot read.
+// Refused at Encode on every string field.
 func TestHead_RefusesInvalidUTF8(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("r"))}
 	bad := "a\xff"
