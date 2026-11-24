@@ -29,7 +29,7 @@ type servingBackend interface {
 }
 
 // frontendStartSignal is what the frontends wait for. A workspace chunk
-// primary (V1-SPEC r2.37/r2.39) starts its targets only once the one "may
+// primary starts its targets only once the one "may
 // serve" function (AdmitsIO) passes after the backend first admitted I/O;
 // any other volume (non-chunk, or a supporting replica) starts right after
 // open, as before: it never makes the claim a workspace primary waits for.

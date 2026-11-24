@@ -680,7 +680,7 @@ func runVolume(f flags, exits *processExit) int {
 			WALRetentionLSNs:              f.walRetentionLSNs,
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
-			// V1-SPEC r2.45: one live process per volume per host.
+			// Host-lock rule: one live process per volume per host.
 			HostVolumeLock:        true,
 			VolumeLockDirTestOnly: f.volumeLockDirTestOnly,
 		}

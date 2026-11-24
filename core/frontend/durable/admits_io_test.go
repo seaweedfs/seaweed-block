@@ -7,7 +7,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
-// V1-SPEC r2.39: AdmitsIO is the one "may serve" function, the I/O gate
+// The shared readiness rule: AdmitsIO is the one "may serve" function, the I/O gate
 // itself: an operational backend whose guarded projection is not this
 // lineage's healthy primary does not admit, nor does a backend that is not
 // operational; both together admit.

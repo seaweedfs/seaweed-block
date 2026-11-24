@@ -16,7 +16,7 @@ func (r ownerReader) PublishedAuthorityLine(volume string) (PublishedLine, bool)
 	return pl, ok
 }
 
-// #425 (V1-SPEC r2.40, INV-AUTH-HOLDER-IDENTITY-001): after a forced move s1 -> s2 the accepted topology still names
+// #425 (INV-AUTH-HOLDER-IDENTITY-001): after a forced move s1 -> s2 the accepted topology still names
 // s1 for r1. When s1 returns and reports r1 at its own endpoints, the controller's input for the line's replica must
 // come from the line's owner s2, never s1: otherwise an endpoint refresh republishes the line with s1's endpoints.
 func TestBuildSnapshotTakesTheMovedLinesReplicaFromItsOwner(t *testing.T) {

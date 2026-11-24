@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// V1-SPEC r2.45: the test lock directory override is refused under systemd
+// The test lock directory override is refused under systemd
 // (INVOCATION_ID set), so it cannot reach a shipped unit.
 func TestVolumeLockDirTestOnlyRefusedUnderSystemd(t *testing.T) {
 	args := append(phase150RequiredBlockvolumeArgs(), "--durable-root="+t.TempDir(), "--durable-impl=walstore", "--volume-lock-dir-test-only="+t.TempDir())

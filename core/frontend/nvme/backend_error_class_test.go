@@ -66,7 +66,7 @@ func (b *durabilityClassBackend) Sync(context.Context) error {
 	return b.err
 }
 
-// INV-FE-ERROR-RETRY-CLASS-001 / amended V1-SPEC r2.42: a failed durability
+// INV-FE-ERROR-RETRY-CLASS-001: a failed durability
 // operation's latched permanent cause wins even beneath a deliberate busy marker.
 func TestSyncAndFUALatchedFaultOverridesBusy(t *testing.T) {
 	for _, fua := range []bool{false, true} {

@@ -36,7 +36,7 @@ func (r *casObservedRemote) CASHead(ctx context.Context, expected storage.ChunkH
 	return gen, err
 }
 
-// V1-SPEC r2.45 (2) rests on this: a cut publishes only an LSN its root has
+// The durable-reopen rule rests on this: a cut publishes only an LSN its root has
 // already made durable (the barrier sync before the HEAD CAS), so a crash
 // right after the CAS leaves a root at or above HEAD's remote_lsn. The
 // root's crash image taken at the CAS reattaches under that HEAD and serves
