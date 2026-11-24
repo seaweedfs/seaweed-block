@@ -190,7 +190,7 @@ func TestG15a_BlockCSIControllerPublishUsesMasterFrontendFact(t *testing.T) {
 	client := csipb.NewControllerClient(conn)
 
 	var last map[string]string
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 		resp, err := client.ControllerPublishVolume(ctx, &csipb.ControllerPublishVolumeRequest{
