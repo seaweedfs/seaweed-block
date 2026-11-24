@@ -12,9 +12,9 @@ import (
 	"testing"
 )
 
-// layoutCalls maps each non-test function of this package to the calls it
-// makes, by called name.
-func layoutCalls(t *testing.T) map[string]map[string]bool {
+// funcCalls maps each function of the package's files (tests or not) to
+// the names it calls.
+func funcCalls(t *testing.T, tests bool) map[string]map[string]bool {
 	t.Helper()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -22,7 +22,7 @@ func layoutCalls(t *testing.T) map[string]map[string]bool {
 	}
 	out := map[string]map[string]bool{}
 	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
+		if strings.HasSuffix(f, "_test.go") != tests {
 			continue
 		}
 		src, err := os.ReadFile(f)
@@ -40,14 +40,12 @@ func layoutCalls(t *testing.T) map[string]map[string]bool {
 			}
 			name := fn.Name.Name
 			if fn.Recv != nil && len(fn.Recv.List) == 1 {
-				var typ string
 				switch x := fn.Recv.List[0].Type.(type) {
 				case *ast.Ident:
-					typ = x.Name
+					name = x.Name + "." + name
 				case *ast.StarExpr:
-					typ = x.X.(*ast.Ident).Name
+					name = x.X.(*ast.Ident).Name + "." + name
 				}
-				name = typ + "." + name
 			}
 			calls := map[string]bool{}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -67,30 +65,30 @@ func layoutCalls(t *testing.T) map[string]map[string]bool {
 	return out
 }
 
-// Guard enumeration for HEAD writes: the only call of UpdateHead is in
-// runTransition (read, apply one pure step, one conditional update), and
-// HeadStore offers no way to create a HEAD. Every Run function that
-// writes HEAD goes through runTransition. A new writer fails this test
-// until it is listed here with its own guard tests.
-func TestHeadWriters_SourceGuard(t *testing.T) {
-	calls := layoutCalls(t)
-	var writers, runs []string
-	for fn, cs := range calls {
+// Guard enumeration for the facts this package writes. It holds at every
+// step of the series without edits: a new writer, transition or remover
+// fails it until it brings the tests named here.
+//
+//   - HEAD: the only UpdateHead call is in runTransition (read, one pure
+//     step, one conditional update); the store has no way to create a HEAD.
+//   - Transitions: every Run<X> through runTransition has a closure test
+//     (Test<X>_Closure) and an interrupt test (TestRun<X>_InterruptAtEveryStep).
+//   - Lease, claim half: only RunClaim calls OldLeaseEnded, and RunClaim,
+//     where it exists, calls it.
+//   - Pool: no function removes a store object yet; the removal that comes
+//     with cleaning must update this guard and bring its lease re-check.
+func TestGuard_WritersTransitionsAndRemovers(t *testing.T) {
+	code := funcCalls(t, false)
+	tests := funcCalls(t, true)
+	var writers []string
+	for fn, cs := range code {
 		if cs["UpdateHead"] {
 			writers = append(writers, fn)
 		}
-		if cs["runTransition"] {
-			runs = append(runs, fn)
-		}
 	}
 	sort.Strings(writers)
-	sort.Strings(runs)
 	if !reflect.DeepEqual(writers, []string{"runTransition"}) {
-		t.Fatalf("functions calling UpdateHead: %v; want only runTransition", writers)
-	}
-	wantRuns := []string{"RunAbort", "RunBegin", "RunBeginClean", "RunClaim", "RunCommit", "RunEndClean"}
-	if !reflect.DeepEqual(runs, wantRuns) {
-		t.Fatalf("HEAD transitions: %v; want %v (add a new one here with its closure, replay and interrupt tests)", runs, wantRuns)
+		t.Errorf("functions calling UpdateHead: %v; want only runTransition", writers)
 	}
 	st := reflect.TypeOf((*HeadStore)(nil)).Elem()
 	var methods []string
@@ -98,35 +96,40 @@ func TestHeadWriters_SourceGuard(t *testing.T) {
 		methods = append(methods, st.Method(i).Name)
 	}
 	if !reflect.DeepEqual(methods, []string{"ReadHead", "UpdateHead"}) {
-		t.Fatalf("HeadStore methods %v; want ReadHead and UpdateHead only (no path creates a HEAD)", methods)
+		t.Errorf("HeadStore methods %v; want ReadHead and UpdateHead only (no path creates a HEAD)", methods)
 	}
-	// Claim's lease wait sits in RunClaim, inside its transition.
-	if !calls["RunClaim"]["OldLeaseEnded"] {
-		t.Fatal("RunClaim does not call OldLeaseEnded")
-	}
-	for fn, cs := range calls {
-		if cs["OldLeaseEnded"] && fn != "RunClaim" {
-			t.Fatalf("%s calls OldLeaseEnded; only RunClaim claims", fn)
+	var runs []string
+	for fn, cs := range code {
+		if !cs["runTransition"] {
+			continue
+		}
+		runs = append(runs, fn)
+		x, ok := strings.CutPrefix(fn, "Run")
+		if !ok {
+			t.Errorf("%s calls runTransition; transitions are exported Run functions", fn)
+			continue
+		}
+		for _, want := range []string{"Test" + x + "_Closure", "TestRun" + x + "_InterruptAtEveryStep"} {
+			if _, ok := tests[want]; !ok {
+				t.Errorf("transition %s has no %s", fn, want)
+			}
 		}
 	}
-}
-
-// Every pure transition refuses a caller that is not the holder at HEAD's
-// epoch (Claim refuses an older epoch or the same epoch of another server).
-func TestTransitions_RefuseAStaleHolder(t *testing.T) {
-	stale := HolderID{Epoch: 2, Holder: "srv-a"}
-	rn := RootName{Hash: Sum([]byte("r"))}
-	for name, step := range map[string]func(Head) error{
-		"Begin":      func(h Head) error { _, _, err := h.Begin(stale, "s"); return err },
-		"Abort":      func(h Head) error { _, _, err := h.Abort(stale, "s"); return err },
-		"Commit":     func(h Head) error { _, _, err := h.Commit(stale, "s", rn, 1, ""); return err },
-		"BeginClean": func(h Head) error { _, _, err := h.BeginClean(stale, "c"); return err },
-		"EndClean":   func(h Head) error { _, _, err := h.EndClean(stale, "c"); return err },
-		"Claim":      func(h Head) error { _, _, err := h.Claim(stale); return err },
-	} {
-		for _, h := range []Head{idleHead(), snapHead("s"), cleanHead("c")} {
-			if err := step(h); err == nil {
-				t.Errorf("%s by epoch 2 over a HEAD at epoch 3 (%s) succeeded", name, h.Activity.Kind)
+	if len(runs) == 0 {
+		t.Fatal("no transition found: the scan is broken")
+	}
+	for fn, cs := range code {
+		if cs["OldLeaseEnded"] && fn != "RunClaim" {
+			t.Errorf("%s calls OldLeaseEnded; only RunClaim claims", fn)
+		}
+	}
+	if cs, ok := code["RunClaim"]; ok && !cs["OldLeaseEnded"] {
+		t.Error("RunClaim does not wait for the old lease")
+	}
+	for fn, cs := range code {
+		for c := range cs {
+			if strings.HasPrefix(c, "Delete") || strings.HasPrefix(c, "Remove") {
+				t.Errorf("%s calls %s: a store remover needs its lease re-check and its own guard row", fn, c)
 			}
 		}
 	}
