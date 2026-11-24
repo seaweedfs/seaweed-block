@@ -182,26 +182,38 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		waitCtx, endWait = context.WithCancel(p.closeCtx)
 	}
 	defer endWait()
-	// gaveUp: a permanent refusal, or the host's bound passed. The bound
-	// counts from max(contact, the barrier time) on the host, but never
-	// ends before limit from this wait's own start: the lease guard, the
-	// only source of the barrier time, starts after the local open and
-	// recovery, so a slow open must not find the bound already spent.
+	// gaveUp: a permanent refusal, or limit has passed since the window
+	// opened. The window opens at the first reply from the master received
+	// after this wait started (local open and recovery count toward
+	// nothing), or at a later streak's start, and runs from the master's
+	// barrier time when that is later. No reply: no bound.
+	var window time.Time
 	gaveUp := func() bool {
 		if p.cfg.ChunkMasterWait == nil {
 			return false
 		}
-		deadline, final := p.cfg.ChunkMasterWait()
-		if final {
+		c := p.cfg.ChunkMasterWait()
+		if c.Final {
 			return true
 		}
-		if deadline.IsZero() {
+		if c.StreakStart.IsZero() {
 			return false
 		}
-		if floor := start.Add(limit); deadline.Before(floor) {
-			deadline = floor
+		if window.IsZero() || c.StreakStart.After(window) {
+			switch {
+			case !c.StreakStart.Before(start):
+				window = c.StreakStart
+			case !c.LastReply.Before(start):
+				window = c.LastReply
+			default:
+				return false // no reply since this wait started
+			}
 		}
-		return !time.Now().Before(deadline)
+		from := window
+		if c.Barrier.After(from) {
+			from = c.Barrier
+		}
+		return !time.Now().Before(from.Add(limit))
 	}
 	defer func() {
 		if retained || !(expired || errors.Is(waitCtx.Err(), context.DeadlineExceeded)) {

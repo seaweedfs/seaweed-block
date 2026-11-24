@@ -28,11 +28,11 @@ func TestChunkAuthorityWaitFollowsTheMasterWait(t *testing.T) {
 			p, err := durable.NewDurableProvider(durable.ProviderConfig{
 				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 				BlockSize: 4096, ChunkBlocks: 4, ChunkAssignmentTimeout: time.Millisecond,
-				ChunkMasterWait: func() (time.Time, bool) {
+				ChunkMasterWait: func() durable.MasterContact {
 					if b := bound.Load(); b != 0 {
-						return time.Unix(0, b), final.Load()
+						return durable.MasterContact{StreakStart: time.Unix(0, b), LastReply: time.Unix(0, b), Final: final.Load()}
 					}
-					return time.Time{}, final.Load()
+					return durable.MasterContact{Final: final.Load()}
 				},
 				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
 					t.Error("remote reached without authority")
@@ -58,7 +58,7 @@ func TestChunkAuthorityWaitFollowsTheMasterWait(t *testing.T) {
 			if tc.final {
 				final.Store(true)
 			} else {
-				bound.Store(time.Now().Add(200 * time.Millisecond).UnixNano())
+				bound.Store(time.Now().UnixNano()) // the master answers now: the window opens
 			}
 			waitLog(t, logs, "assignment unavailable, not serving")
 			if gen, failed := outcomes.ChunkStartupOutcome("v1"); !failed || gen != 1 {
@@ -78,11 +78,16 @@ func TestChunkAuthorityWaitAfterASlowOpenGetsItsFullLimit(t *testing.T) {
 	captureWriteLogs(t, logs)
 	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
 	const limit = 400 * time.Millisecond
-	past := time.Now().Add(-time.Hour) // contact + 30 s, long gone
+	// The first reply came an hour before the wait started (a slow open and
+	// recovery); the master keeps answering. The window opens at the first
+	// reply received after the wait started, so the wait gets its full limit.
+	streak := time.Now().Add(-time.Hour)
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 		BlockSize: 4096, ChunkBlocks: 4, ChunkAssignmentTimeout: limit,
-		ChunkMasterWait: func() (time.Time, bool) { return past, false },
+		ChunkMasterWait: func() durable.MasterContact {
+			return durable.MasterContact{StreakStart: streak, LastReply: time.Now()}
+		},
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
 			t.Error("remote reached without authority")
 			return storage.NewMemChunkRemote(), nil

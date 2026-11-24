@@ -698,11 +698,12 @@ func runVolume(f flags, exits *processExit) int {
 			cfg.ChunkMaintenance = chunk.maintenance
 			if f.workspaceLease {
 				// The startup wait does not run out while the master gives no
-				// reply; it ends 30 s after answered contact (or the master's
-				// barrier), or at once on a moved/deleted refusal.
-				cfg.ChunkMasterWait = func() (time.Time, bool) {
-					deadline, final := h.MasterWaitState()
-					return deadline, final != ""
+				// reply; it ends 30 s after the first reply received after the
+				// local open and recovery (or the master's barrier time), or at
+				// once on a moved/deleted refusal.
+				cfg.ChunkMasterWait = func() durable.MasterContact {
+					streak, last, barrier, final := h.MasterWaitContact()
+					return durable.MasterContact{StreakStart: streak, LastReply: last, Barrier: barrier, Final: final != ""}
 				}
 			}
 			if chunk.catalog != nil && f.chunk.snapshotSchedule.period > 0 {

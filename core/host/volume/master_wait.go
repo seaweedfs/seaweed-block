@@ -38,6 +38,7 @@ type masterWait struct {
 	mu       sync.Mutex
 	now      func() time.Time
 	contact  time.Time // start of the current contact streak; zero while none
+	last     time.Time // the latest reply
 	down     time.Time // first failure without a reply since the last contact
 	creds    time.Time // first credentials refusal since the last accepted call
 	barrier  time.Time // T: request start + retry_after of the latest BARRIER refusal
@@ -87,6 +88,7 @@ func (w *masterWait) call(err error) {
 		if w.contact.IsZero() {
 			w.contact = now
 		}
+		w.last = now
 		w.down, w.creds = time.Time{}, time.Time{}
 	case credentials:
 		w.contact, w.down = time.Time{}, time.Time{}
@@ -223,4 +225,15 @@ func (w *masterWait) barrierTime() time.Time {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.barrier
+}
+
+// MasterWaitContact is the startup wait's input: the first reply of the
+// current run of replies (zero while the master gives no reply or refuses
+// the node's credentials or identity), the latest reply, the master's
+// barrier time, and a permanent refusal ("moved" or "deleted"; "" if none).
+func (h *Host) MasterWaitContact() (streakStart, lastReply, barrier time.Time, final string) {
+	w := h.mw
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.contact, w.last, w.barrier, w.final
 }
