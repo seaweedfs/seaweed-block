@@ -232,9 +232,14 @@ func headSzStartCluster(t *testing.T, prefix string, vols []headSzVol) (*handoff
 		t.Fatal(err)
 	}
 	mstate := filepath.Join(h.dir, "master")
-	master := h.start(t, "blockmaster", h.master, "--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
+	margs := []string{"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", specPath, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://"+env.cluster.filerHTTP+env.chunkPath)
+		"--workspace-rpc", "--workspace-head-base-url", "http://" + env.cluster.filerHTTP + env.chunkPath}
+	if testListenHost() != "127.0.0.1" {
+		// a lab run spanning two hosts: blockmaster refuses a non-loopback listen without this
+		margs = append(margs, "--insecure-external-bind")
+	}
+	master := h.start(t, "blockmaster", h.master, margs...)
 	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
 	return env, clusterDir
 }
