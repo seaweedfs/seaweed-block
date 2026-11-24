@@ -27,6 +27,9 @@ import (
 type Config struct {
 	// MasterAddr is the gRPC address of the block master daemon.
 	MasterAddr string
+	// MasterTLS is the mutual-TLS dial option of the master link
+	// (link.ClientCredentials); nil dials plaintext (development mode).
+	MasterTLS grpc.DialOption
 
 	// ServerID identifies this volume process to the master.
 	// Used as the HeartbeatReport.ServerID field.
@@ -267,7 +270,7 @@ func New(cfg Config) (*Host, error) {
 		lg = log.Default()
 	}
 
-	conn, err := link.Dial(cfg.MasterAddr)
+	conn, err := link.DialMaster(cfg.MasterAddr, cfg.MasterTLS)
 	if err != nil {
 		return nil, fmt.Errorf("volume.New: dial master %q: %w", cfg.MasterAddr, err)
 	}

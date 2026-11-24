@@ -9,6 +9,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
+	"google.golang.org/grpc"
 )
 
 // Automatic GC stays default-off until restart-safe unknown-CAS settlement and
@@ -16,7 +17,7 @@ import (
 // The CLI fixes the maximum cut/copy lifetime at five minutes and the HEAD
 // hydration reader at thirty seconds. A one-minute mark fits strictly inside
 // the one-hour grace. No elapsed TTL alone authorizes capture-intent expiry.
-func newChunkMaintenance(cat *chunkstore.Catalog, blobs chunkstore.BlobDeleter, collect bool, master string) (func(context.Context, string) error, func() error, error) {
+func newChunkMaintenance(cat *chunkstore.Catalog, blobs chunkstore.BlobDeleter, collect bool, master string, masterTLS grpc.DialOption) (func(context.Context, string) error, func() error, error) {
 	closeFn := func() error { return nil }
 	cfg := chunkstore.GCConfig{Grace: defaultChunkGCGrace, IntentTTL: defaultChunkIntentTTL}
 	if collect {
@@ -26,7 +27,7 @@ func newChunkMaintenance(cat *chunkstore.Catalog, blobs chunkstore.BlobDeleter, 
 		if defaultChunkGCGrace <= max(defaultChunkCutTimeout, chunkstore.DefaultOpDeadline)+defaultChunkMaintenanceTimeout {
 			return nil, closeFn, errors.New("automatic GC grace does not cover cut/copy and mark bounds")
 		}
-		conn, err := link.Dial(master)
+		conn, err := link.DialMaster(master, masterTLS)
 		if err != nil {
 			return nil, closeFn, err
 		}
