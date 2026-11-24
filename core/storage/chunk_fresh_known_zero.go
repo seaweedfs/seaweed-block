@@ -73,6 +73,6 @@ func (l *chunkLayerImpl) ApplyFreshKnownZero() {
 	if certified == len(tokens) {
 		log.Printf("storage: fresh attach: %d chunks HEAD does not name start known-zero", certified)
 	} else {
-		log.Printf("storage: fresh attach: %d of %d chunks HEAD does not name start known-zero; the rest stay unknown (map publication failed or a write raced) and the first cut scans them", certified, len(tokens))
+		log.Printf("storage: WARNING: fresh attach: %d of %d chunks HEAD does not name start known-zero; the rest stay unknown (map publication failed or a write raced) and the first cut scans them", certified, len(tokens))
 	}
 }

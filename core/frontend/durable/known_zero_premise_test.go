@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,5 +209,85 @@ func kzWriteAndPublish(t *testing.T, ctx context.Context, p *DurableProvider, re
 	}
 	if got := kzCandidates(t, p); got != 0 {
 		t.Fatalf("after the cut: %d candidate chunks; want 0", got)
+	}
+}
+
+// kzCountingRemote counts chunk reads (Get) of the remote it wraps.
+type kzCountingRemote struct {
+	storage.ChunkRemote
+	gets atomic.Int64
+}
+
+func (r *kzCountingRemote) Get(ctx context.Context, key string) ([]byte, error) {
+	r.gets.Add(1)
+	return r.ChunkRemote.Get(ctx, key)
+}
+
+// The premise again, for fills (test #12): until the attach commit retires
+// the fresh marker, no fetch and no extent write reaches the store. A restore
+// target whose HEAD names two chunks is held at the commit boundary; a
+// frontend read of a HEAD-named block there is not served (it may wait;
+// here it is bounded), the remote serves no chunk read, and after the
+// commit both named chunks are still absent with no fetch started: no fill
+// wrote the extent. After that the read returns HEAD's data.
+func TestNoFetchOrFillReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	mem := storage.NewMemChunkRemote()
+	src := kzProvider(t, t.TempDir(), mem)
+	if _, err := src.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Repeat([]byte{0x3c}, 4096)
+	for _, chunk := range []int64{3, 7} {
+		if _, err := src.Backend("v1").Write(ctx, chunk*16*4096, want); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := src.Backend("v1").Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := &kzCountingRemote{ChunkRemote: mem}
+	p := kzProvider(t, t.TempDir(), remote)
+	if _, err := p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	var readErr error
+	var getsAtBoundary int64 = -1
+	p.testBeforeChunkFreshRetire = func() error {
+		before := remote.gets.Load()
+		rctx, rcancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		defer rcancel()
+		_, readErr = p.Backend("v1").Read(rctx, 3*16*4096, make([]byte, 4096))
+		getsAtBoundary = remote.gets.Load() - before
+		return nil
+	}
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	p.testBeforeChunkFreshRetire = nil
+	if readErr == nil || getsAtBoundary != 0 {
+		t.Fatalf("at the commit boundary a frontend read of a HEAD-named block returned %v and the remote served %d chunk reads; want refused, 0", readErr, getsAtBoundary)
+	}
+	for _, st := range p.DurableStatuses() {
+		if st.VolumeID == "v1" && st.Chunk != nil {
+			if h := st.Chunk.Stats.Hydration; st.Chunk.Stats.AbsentChunks != 2 || h.Fetches != 0 || h.Completed != 0 {
+				t.Fatalf("after the commit: %d absent chunks, %d fetches, %d completed; want 2 absent and no fetch (no fill before the commit)", st.Chunk.Stats.AbsentChunks, h.Fetches, h.Completed)
+			}
+		}
+	}
+	got := make([]byte, 4096)
+	if n, err := p.Backend("v1").Read(ctx, 3*16*4096, got); err != nil || n != len(got) || !bytes.Equal(got, want) {
+		t.Fatalf("read after the commit: %d %v, data equal %v; want HEAD's data", n, err, bytes.Equal(got, want))
 	}
 }
