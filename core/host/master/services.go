@@ -395,7 +395,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 	// from its registered host, so a second host with a copied --server-id never receives (never adopts) it.
 	if s.isWorkspaceVolume(req.VolumeId) {
 		if err := s.host.refuseWorkspaceHolderHost(ctx, "assignment stream", req.GetServerId()); err != nil {
-			return status.Error(codes.FailedPrecondition, err.Error())
+			return identityRefusal(err)
 		}
 	}
 

@@ -6,7 +6,10 @@
 package link
 
 import (
+	"time"
+
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -44,4 +47,19 @@ func NewServer(cfg ServerConfig, opts ...grpc.ServerOption) *grpc.Server {
 	}
 	all = append(all, opts...)
 	return grpc.NewServer(all...)
+}
+
+// MasterReconnect caps the reconnect back-off of a long-lived link to
+// blockmaster. A volume process waits for an unreachable master instead of
+// exiting, so one channel can live through a long outage; with gRPC's default
+// back-off (base 1 s, x1.6, jitter 0.2, max 120 s: grpc@v1.80.0
+// backoff/backoff.go:48-51) the first call after the master returns could lag
+// by up to two minutes. Capped at 2 s, the lag stays about 2 s. The connect
+// timeout must be set: WithConnectParams otherwise makes it equal to the
+// back-off step (dialoptions.go:313-314), too short for a TLS handshake.
+func MasterReconnect() grpc.DialOption {
+	return grpc.WithConnectParams(grpc.ConnectParams{
+		Backoff:           backoff.Config{BaseDelay: time.Second, Multiplier: 1.6, Jitter: 0.2, MaxDelay: 2 * time.Second},
+		MinConnectTimeout: 5 * time.Second,
+	})
 }
