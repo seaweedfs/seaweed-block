@@ -235,10 +235,12 @@ func f1StartEnv(t *testing.T, cfg f1Config) (*handoffEnv, *daemon) {
 	spec := filepath.Join(h.dir, "cluster-spec.yaml")
 	must(os.WriteFile(spec, []byte(fmt.Sprintf("nodes:\n  - server_id: s1\n    data_addr: %s\n    ctrl_addr: %s\nvolumes:\n%s", h.dataAddr, h.ctrlAddr, vols.String())), 0o644))
 	mstate := filepath.Join(h.dir, "master")
-	master := h.start(t, "blockmaster", h.master, "--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
+	env.masterArgs = []string{"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://"+env.cluster.filerHTTP+env.chunkPath)
+		"--workspace-rpc", "--workspace-head-base-url", "http://" + env.cluster.filerHTTP + env.chunkPath}
+	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
 	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
+	env.masterProcess = master
 	return env, master
 }
 
