@@ -48,6 +48,47 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 - Without it, blockvolume exits at start with `host volume lock directory unavailable`. Install the entry, or chown
   the directory to the unit's user.
 
+## Authenticate the control API
+
+`blockmaster` authenticates every gRPC call with mutual TLS when it starts with all four of `--tls-cert`,
+`--tls-key`, `--tls-client-ca` and `--role-file`. Without them it is in development mode: plaintext, loopback only,
+and it logs `UNAUTHENTICATED CONTROL API on <addr> (development mode)` once a minute. `--insecure-external-bind`
+cannot be combined with mutual TLS.
+
+**Who may call.** The role file has one line per certificate: `sha256:<hex fingerprint> <role> <id>`. The role is
+`viewer`, `operator`, `admin` (people and tools; each includes the one before it) or `node` (a volume host; its id is
+its `--server-id`). A certificate's CN must equal its line's id. A node may act only for its own server id. A forced
+move needs `admin`. `kill -HUP` reloads the file. A removed line is refused from the next call, and its open streams
+end at the reload. A malformed file keeps the previous table and says so in the log. `--audit-log <path>` appends
+one JSON line per person's call, per role-file reload and per refused node call (at most once a minute per
+certificate and method).
+
+**Issue the certificates** (one CA, one key per host or person; a node key gives control of that host's volumes, so
+never copy it into a host image):
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+  -subj "/CN=sw-block CA" -keyout ca.key -out ca.crt
+# blockmaster: the name volume hosts dial must be in subjectAltName
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=blockmaster" \
+  -keyout master.key -out master.csr
+openssl x509 -req -in master.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 825 \
+  -extfile <(printf "subjectAltName=DNS:master.example,IP:10.0.0.10") -out master.crt
+# a volume host: CN = its --server-id
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=node-a" \
+  -keyout node-a.key -out node-a.csr
+openssl x509 -req -in node-a.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 825 -out node-a.crt
+# its role-file line
+echo "sha256:$(openssl x509 -in node-a.crt -outform DER | sha256sum | cut -d' ' -f1) node node-a" >> roles
+```
+
+**Volume hosts** dial with `--master-tls-cert`, `--master-tls-key` and `--master-ca`. A volume refuses to start
+when its certificate's CN differs from `--server-id`. **sw-block** reads `SW_BLOCK_TLS_CERT`, `SW_BLOCK_TLS_KEY` and
+`SW_BLOCK_TLS_CA`. **blockcsi** takes `--master-tls-cert`, `--master-tls-key` and `--master-ca`. Certificate and key
+files are read at every new connection, so a rotated file takes effect without a restart. blockmaster closes each
+client connection after 24 hours, so a rotated or removed certificate is seen within a day even on an idle link.
+The volume's own HTTP routes (`/status`, chunk routes) are not authenticated and stay on loopback.
+
 ## Size a host
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal
