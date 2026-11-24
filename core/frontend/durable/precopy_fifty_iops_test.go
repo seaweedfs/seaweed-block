@@ -31,7 +31,6 @@ func TestPrecopyFiftyIOPSColdCostsKeepAdmissionHonest(t *testing.T) {
 }
 
 func TestPrecopyFiftyIOPSSlowMeasuredCostsKeepServing(t *testing.T) {
-	t.Skip("#537 RED quarantine: 2026-11-24 ruling; pre-copy round-accounting and guest WAL-admission automaton review pending")
 	precopyFiftyIOPS(t, 3, false, 1300*time.Millisecond)
 }
 
@@ -77,7 +76,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	writerDone, probeDone := make(chan struct{}), make(chan struct{})
 	var stopped atomic.Bool
-	var guestErrors atomic.Int64
+	var guestErrors, guestBudgetBusy atomic.Int64
 	var detachStart atomic.Pointer[time.Time]
 	t.Cleanup(func() {
 		stopped.Store(true)
@@ -97,7 +96,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 		defer ticker.Stop()
 		for {
 			op := "Write"
-			_, err := backend.Write(ctx, 4096, block(0x5b))
+			n, err := backend.Write(ctx, 4096, block(0x5b))
 			if err == nil {
 				op = "Sync"
 				err = backend.Sync(ctx)
@@ -113,9 +112,20 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 					if freeze := backend.(*durable.StorageBackend).StopFlipAt(); !freeze.IsZero() {
 						sinceFreeze = at.Sub(freeze).String()
 					}
+					deadline, _ := ctx.Deadline()
+					class := frontend.ClassifyBackendError(ctx, err)
+					// The caller's 4s allowance is not a product availability promise.
+					// Permanent causes still win over retry markers in the classifier.
+					budgetBusy := fixedDelay > 0 && !at.Before(deadline) &&
+						(op != "Write" || n == 0) &&
+						(class == frontend.BackendErrorBusy || class == frontend.BackendErrorNotReady)
 					// Sync covers the preceding Write at this offset.
-					t.Logf("guest error op=%s write_offset=4096 at=%s detach_elapsed=%s freeze_elapsed=%s caller_error=%v error=%v", op, at.UTC().Format(time.RFC3339Nano), sinceDetach, sinceFreeze, callerErr, err)
-					guestErrors.Add(1)
+					t.Logf("guest error op=%s write_offset=4096 at=%s detach_elapsed=%s freeze_elapsed=%s caller_error=%v class=%d budget_busy=%t error=%v", op, at.UTC().Format(time.RFC3339Nano), sinceDetach, sinceFreeze, callerErr, class, budgetBusy, err)
+					if budgetBusy {
+						guestBudgetBusy.Add(1)
+					} else {
+						guestErrors.Add(1)
+					}
 				}
 				return
 			}
@@ -161,7 +171,19 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	detachStart.Store(&started)
 	result, _, err := p.DetachVolume(ctx, "v1")
 	stopped.Store(true)
-	t.Logf("attempts=%d measurement_rounds=%d samples_at_start=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.MeasurementRounds, result.Precopy.SamplesAtStart, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
+	if fixedDelay > 0 {
+		// Settle the counted guest outcome before inspecting it or its data.
+		releasePeer()
+		cancel()
+		for _, done := range []chan struct{}{writerDone, probeDone} {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("guest worker did not settle after detach")
+			}
+		}
+	}
+	t.Logf("attempts=%d measurement_rounds=%d samples_at_start=%d drain=%s estimate=%s frozen=%t guest_errors=%d guest_budget_busy=%d", result.Precopy.Attempts, result.Precopy.MeasurementRounds, result.Precopy.SamplesAtStart, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load(), guestBudgetBusy.Load())
 	if accountingErr := precopyFiftyRoundAccounting(result.Precopy); accountingErr != nil {
 		t.Fatal(accountingErr)
 	}
