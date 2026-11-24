@@ -300,11 +300,11 @@ type volHandle struct {
 	// volume file, written before the file is created and removed only
 	// after the first attach succeeded, so an interrupted initialization
 	// is still fresh after a restart.
-	fresh    bool
+	fresh bool
 	// createdThisStart: this process start created the store (in memory,
 	// never persisted); RULE-FRESH-KNOWN-ZERO needs it with fresh.
 	createdThisStart bool
-	attachMu sync.Mutex // serializes recovery and attach of this volume
+	attachMu         sync.Mutex // serializes recovery and attach of this volume
 	// recoverGen numbers this volume's RecoverVolume calls (written under
 	// attachMu and p.mu). waitGen is the generation of the live authority
 	// wait, 0 if none: a recovered volume whose layer waits for master
