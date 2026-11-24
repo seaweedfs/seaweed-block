@@ -336,7 +336,9 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 				break
 			}
 		}
-		if enabledCandidate && (!result.CurrentKnown || !result.Current.Ready) {
+		// Only a positive not-ready report from the current primary moves the
+		// line. A primary that did not answer is unknown, never failed.
+		if enabledCandidate && result.CurrentKnown && !result.Current.Ready {
 			// Unsupported does not mean the current primary is unhealthy:
 			// a different slot may be stale. Judge the current primary
 			// from its own fresh heartbeat slot, never from placement.
