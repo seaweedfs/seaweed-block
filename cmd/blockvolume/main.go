@@ -697,6 +697,7 @@ func runVolume(f flags, exits *processExit) int {
 			cfg.ChunkMaintenance = chunk.maintenance
 			if chunk.catalog != nil && f.chunk.snapshotSchedule.period > 0 {
 				cfg.ChunkSnapshotPeriod = f.chunk.snapshotSchedule.period
+				cfg.ChunkScheduledNewest = volume.ScheduledNewest(chunk.catalog)
 				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(chunk.catalog, f.chunk.snapshotSchedule.keep)
 			}
 			cfg.ChunkDetachPrecopy = f.chunk.detachPrecopy

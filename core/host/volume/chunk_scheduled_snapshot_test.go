@@ -12,9 +12,9 @@ import (
 )
 
 // A scheduled snapshot is one named snapshot of class "scheduled", named
-// for its attempt time and labelled with the schedule's keep, recording
-// exactly the HEAD its own cut installed. A retry of the same attempt
-// replays without cutting again.
+// for its slot and labelled with the schedule's keep, recording exactly the
+// HEAD its own cut installed. A retry for the same slot replays without
+// cutting again, and the slot is then the newest scheduled one.
 func TestScheduledSnapshot_SealsTheCutHeadAsScheduled(t *testing.T) {
 	ctx := context.Background()
 	fp, cat := adapterCatalog(t)
@@ -31,6 +31,9 @@ func TestScheduledSnapshot_SealsTheCutHeadAsScheduled(t *testing.T) {
 	}
 	if err := take(ctx, "v1", at, cut); err != nil || cuts != 1 {
 		t.Fatalf("retry of the same attempt: %v, %d cuts; want a replay without a second cut", err, cuts)
+	}
+	if newest, err := ScheduledNewest(cat)(ctx, "v1"); err != nil || !newest.Equal(at) {
+		t.Fatalf("newest scheduled slot %v %v; want %v", newest, err, at)
 	}
 	list, _, err := cat.ListSnapshots(ctx, "v1", chunkstore.ListOptions{})
 	if err != nil || len(list) != 1 {

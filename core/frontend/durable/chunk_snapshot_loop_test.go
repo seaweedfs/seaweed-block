@@ -6,6 +6,7 @@ package durable
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -22,17 +23,40 @@ func (snapStubLayer) Fenced() bool                   { return false }
 func (snapStubLayer) Stats() storage.ChunkLayerStats { return storage.ChunkLayerStats{} }
 
 // snapLoop sets up volume v1's scheduled-snapshot loop (period one day) in
-// the current bubble; take runs each attempt. start arms the loop; stop
-// stops it and reports whether it was joined within an hour of virtual
-// time.
+// the current bubble; take runs each attempt, and a successful attempt's
+// slot becomes the newest published scheduled snapshot. start arms the
+// loop; stop stops it and reports whether it was joined within an hour of
+// virtual time.
 func snapLoop(take func(context.Context) error) (h *volHandle, start func(), stop func() bool) {
+	return snapLoopReading(nil, take)
+}
+
+// snapLoopReading is snapLoop whose read of the newest scheduled snapshot
+// is read (nil: the slot of the newest successful attempt).
+func snapLoopReading(read func(context.Context) (time.Time, error), take func(context.Context) error) (h *volHandle, start func(), stop func() bool) {
 	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}
 	layer := &snapStubLayer{}
 	h = &volHandle{chunk: layer, chunkLineage: chunkLineage{"v1", "r1", 3, 1}}
+	var mu sync.Mutex
+	var newest time.Time
 	p := &DurableProvider{volumes: map[string]*volHandle{"v1": h}, view: precopyQueueView{id},
 		cfg: ProviderConfig{ChunkSnapshotPeriod: 24 * time.Hour,
-			ChunkScheduledSnapshot: func(ctx context.Context, _ string, _ time.Time, _ func(context.Context) (storage.ChunkHead, error)) error {
-				return take(ctx)
+			ChunkScheduledNewest: func(ctx context.Context, _ string) (time.Time, error) {
+				if read != nil {
+					return read(ctx)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				return newest, nil
+			},
+			ChunkScheduledSnapshot: func(ctx context.Context, _ string, at time.Time, _ func(context.Context) (storage.ChunkHead, error)) error {
+				err := take(ctx)
+				if err == nil {
+					mu.Lock()
+					newest = at
+					mu.Unlock()
+				}
+				return err
 			}}}
 	start = func() {
 		p.mu.Lock()
@@ -62,40 +86,35 @@ func recv(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-// The first attempt is at the start plus the volume's offset and the next
-// one a period later, both on the monotonic clock.
-func TestScheduledSnapshotLoop_TakesEachSlotOnMonotonicTime(t *testing.T) {
+// The first attempt is at once, for the slot holding the start; each later
+// one at the start of the next slot, one period apart.
+func TestScheduledSnapshotLoop_TakesEachSlot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var calls atomic.Int64
 		h, start, stop := snapLoop(func(context.Context) error { calls.Add(1); return nil })
-		begin := time.Now()
 		start()
 		defer func() {
 			if !stop() {
 				t.Error("the loop was not joined")
 			}
 		}()
-		first := h.snapshots.due()
-		if off := first.Sub(begin); off < 0 || off >= 24*time.Hour {
-			t.Fatalf("first slot %v after the start; want within one period", off)
-		}
-		time.Sleep(time.Until(first) - time.Second)
 		synctest.Wait()
-		if calls.Load() != 0 {
-			t.Fatal("an attempt ran before its slot")
+		if calls.Load() != 1 {
+			t.Fatalf("%d attempts at the start; want 1 at once", calls.Load())
+		}
+		next := h.snapshots.due()
+		if st := h.snapshots.status(time.Now()); next.Sub(time.Unix(0, st.NewestNs)) != 24*time.Hour {
+			t.Fatalf("next decision %v after the first slot; want one period", next.Sub(time.Unix(0, st.NewestNs)))
+		}
+		time.Sleep(time.Until(next) - time.Second)
+		synctest.Wait()
+		if calls.Load() != 1 {
+			t.Fatal("an attempt ran before the next slot")
 		}
 		time.Sleep(2 * time.Second)
 		synctest.Wait()
-		if calls.Load() != 1 {
-			t.Fatalf("%d attempts at the first slot; want 1", calls.Load())
-		}
-		if next := h.snapshots.due(); next.Sub(first) != 24*time.Hour {
-			t.Fatalf("next slot %v after the first; want one period", next.Sub(first))
-		}
-		time.Sleep(24 * time.Hour)
-		synctest.Wait()
 		if calls.Load() != 2 {
-			t.Fatalf("%d attempts after one period; want 2", calls.Load())
+			t.Fatalf("%d attempts after the next slot began; want 2", calls.Load())
 		}
 	})
 }
@@ -218,5 +237,93 @@ func TestScheduledSnapshotLoop_OverdueWithNoSuccess(t *testing.T) {
 		if st := h.snapshots.status(time.Now()); !st.Overdue || st.LastFailure == nil {
 			t.Fatalf("past one period plus the retry cap with only failures: %+v; want overdue with the failure", st)
 		}
+	})
+}
+
+// The read of the newest scheduled snapshot is part of the bounded pass: a
+// read that never answers is cancelled at the pass deadline (10 min with no
+// cut timeout configured) and recorded as a failure, and no snapshot is
+// attempted; the schedule decides again after its backoff.
+func TestScheduledSnapshotLoop_HungNewestReadTimesOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var reads, takes atomic.Int64
+		h, start, stop := snapLoopReading(func(ctx context.Context) (time.Time, error) {
+			reads.Add(1)
+			<-ctx.Done()
+			return time.Time{}, ctx.Err()
+		}, func(context.Context) error { takes.Add(1); return nil })
+		start()
+		defer func() {
+			if !stop() {
+				t.Error("the loop was not joined")
+			}
+		}()
+		time.Sleep(10*time.Minute + time.Second)
+		synctest.Wait()
+		st := h.snapshots.status(time.Now())
+		if reads.Load() != 1 || takes.Load() != 0 || st.Attempts != 1 || st.LastFailure == nil {
+			t.Fatalf("after the pass deadline: %d reads, %d attempts taken, status %+v; want the hung read cancelled and recorded as one failure", reads.Load(), takes.Load(), st)
+		}
+	})
+}
+
+// Stopping the loop (detach, fence, Close) cancels a read of the newest
+// scheduled snapshot in flight at once (well inside the pass's 10-minute
+// deadline, so the cancellation is the stop's, not the deadline's), and
+// returns only after the read has returned: the read is held after it sees
+// the cancellation, and stop stays blocked until it is released.
+func TestScheduledSnapshotLoop_StopJoinsAHungNewestRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		_, start, stop := snapLoopReading(func(ctx context.Context) (time.Time, error) {
+			close(entered)
+			<-ctx.Done()
+			close(cancelled)
+			<-release // returns only when the test allows it
+			return time.Time{}, ctx.Err()
+		}, func(context.Context) error { return nil })
+		start()
+		joined := make(chan bool, 1)
+		var released atomic.Bool
+		free := func() {
+			if released.CompareAndSwap(false, true) {
+				close(release)
+			}
+		}
+		stopStarted := false
+		defer func() {
+			free()
+			if !stopStarted {
+				joined <- stop()
+			}
+			select {
+			case ok := <-joined:
+				if !ok {
+					t.Error("stop was not joined after the read returned")
+				}
+			case <-time.After(2 * time.Hour):
+				t.Error("stop did not return")
+			}
+		}()
+		recv(t, entered, "the read")
+		stopStarted = true
+		begin := time.Now()
+		go func() { joined <- stop() }()
+		select {
+		case <-cancelled:
+		case <-time.After(time.Minute):
+			t.Fatal("the read did not see the stop's cancellation within a minute")
+		}
+		if waited := time.Since(begin); waited >= time.Minute {
+			t.Fatalf("cancellation took %v; want it at once, not at the pass deadline", waited)
+		}
+		synctest.Wait()
+		select {
+		case ok := <-joined:
+			joined <- ok
+			t.Fatal("stop returned while the read was still running")
+		default:
+		}
+		free()
 	})
 }

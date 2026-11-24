@@ -192,12 +192,16 @@ type ProviderConfig struct {
 	ChunkMaintenanceTimeout  time.Duration
 	ChunkMaintenance         func(context.Context, string) error
 	// ChunkSnapshotPeriod schedules a named snapshot of each attached
-	// healthy volume once per period, at a per-volume offset (zero
-	// disables it). ChunkScheduledSnapshot takes one: it cuts through cut
-	// (one urgent cut) and records the snapshot of the HEAD cut returns. A
+	// healthy volume once per slot of a per-volume grid of this period
+	// (zero disables it). ChunkScheduledNewest reads the slot of the
+	// volume's newest published scheduled snapshot (zero: none); a run is
+	// due when it is older than the current slot. ChunkScheduledSnapshot
+	// takes one for the slot starting at at: it cuts through cut (one
+	// urgent cut) and records the snapshot of the HEAD cut returns. A
 	// *SnapshotSkip skips the attempt, counted by reason; a
 	// *SnapshotFailure carries the failure's code.
 	ChunkSnapshotPeriod    time.Duration
+	ChunkScheduledNewest   func(ctx context.Context, volumeID string) (time.Time, error)
 	ChunkScheduledSnapshot func(ctx context.Context, volumeID string, at time.Time, cut func(context.Context) (storage.ChunkHead, error)) error
 	// DetachFreezeTimeout bounds how long a failing DetachVolume keeps guest
 	// I/O stopped before it resumes or settles: the drain and final cut get
@@ -398,8 +402,11 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 	if cfg.ChunkMaintenanceInterval > 0 && cfg.ChunkMaintenance == nil {
 		return nil, fmt.Errorf("durable: chunk maintenance interval requires its callback")
 	}
-	if cfg.ChunkSnapshotPeriod < 0 || (cfg.ChunkSnapshotPeriod > 0 && cfg.ChunkScheduledSnapshot == nil) {
-		return nil, fmt.Errorf("durable: a chunk snapshot period must not be negative and requires its callback")
+	if cfg.ChunkSnapshotPeriod < 0 || (cfg.ChunkSnapshotPeriod > 0 && (cfg.ChunkScheduledSnapshot == nil || cfg.ChunkScheduledNewest == nil)) {
+		return nil, fmt.Errorf("durable: a chunk snapshot period must not be negative and requires its callbacks")
+	}
+	if cfg.ChunkSnapshotPeriod > 0 && cfg.ChunkSnapshotPeriod < time.Second {
+		return nil, fmt.Errorf("durable: a chunk snapshot period must be at least one second")
 	}
 	if cfg.HostVolumeLock {
 		if cfg.VolumeLockDirTestOnly == "" {

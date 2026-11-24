@@ -14,12 +14,21 @@ import (
 )
 
 type snapCalls struct {
-	mu    sync.Mutex
-	heads []storage.ChunkHead
-	fail  error
+	mu     sync.Mutex
+	heads  []storage.ChunkHead
+	fail   error
+	newest time.Time // the slot of the newest successful attempt
 }
 
-func (c *snapCalls) take(ctx context.Context, _ string, _ time.Time, cut func(context.Context) (storage.ChunkHead, error)) error {
+// newestSlot is the schedule's fact: the newest published scheduled
+// snapshot's slot.
+func (c *snapCalls) newestSlot(context.Context, string) (time.Time, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.newest, nil
+}
+
+func (c *snapCalls) take(ctx context.Context, _ string, at time.Time, cut func(context.Context) (storage.ChunkHead, error)) error {
 	c.mu.Lock()
 	fail := c.fail
 	c.mu.Unlock()
@@ -32,6 +41,9 @@ func (c *snapCalls) take(ctx context.Context, _ string, _ time.Time, cut func(co
 	}
 	c.mu.Lock()
 	c.heads = append(c.heads, h)
+	if at.After(c.newest) {
+		c.newest = at
+	}
 	c.mu.Unlock()
 	return nil
 }
@@ -48,6 +60,7 @@ func snapScheduleProvider(t *testing.T, remote storage.ChunkRemote, period time.
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkSnapshotPeriod:    period,
+		ChunkScheduledNewest:   calls.newestSlot,
 		ChunkScheduledSnapshot: calls.take,
 		ChunkRemoteFor:         func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, v1View())
@@ -79,7 +92,7 @@ func waitFor(t *testing.T, d time.Duration, what string, ok func() bool) {
 	}
 }
 
-// With a schedule, the attached volume's snapshot is taken at its slot by
+// With a schedule, the attached volume's snapshot is taken for its slot by
 // one cut that publishes the dirty data, the snapshot callback gets that
 // cut's HEAD, and the status shows the success and the next slot. A failure
 // is visible in the status with its code.
@@ -138,15 +151,30 @@ func TestWALStoreChunk_ScheduledSnapshotOffTakesNone(t *testing.T) {
 	}
 }
 
-// A snapshot period without its callback is refused.
-func TestWALStoreChunk_ScheduledSnapshotNeedsItsCallback(t *testing.T) {
-	_, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
-		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkSnapshotPeriod: time.Hour,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
-	}, v1View())
-	if err == nil {
-		t.Fatal("a snapshot period without its callback was accepted")
+// A snapshot period without either of its callbacks (the attempt, the
+// newest scheduled snapshot), or shorter than a second, is refused.
+func TestWALStoreChunk_ScheduledSnapshotNeedsItsCallbacks(t *testing.T) {
+	calls := &snapCalls{}
+	for _, c := range []struct {
+		what   string
+		period time.Duration
+		newest func(context.Context, string) (time.Time, error)
+		take   func(context.Context, string, time.Time, func(context.Context) (storage.ChunkHead, error)) error
+	}{
+		{"no callbacks", time.Hour, nil, nil},
+		{"no newest", time.Hour, nil, calls.take},
+		{"no attempt", time.Hour, calls.newestSlot, nil},
+		{"a sub-second period", 500 * time.Millisecond, calls.newestSlot, calls.take},
+	} {
+		_, err := durable.NewDurableProvider(durable.ProviderConfig{
+			Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+			NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkSnapshotPeriod: c.period,
+			ChunkScheduledNewest: c.newest, ChunkScheduledSnapshot: c.take,
+			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
+		}, v1View())
+		if err == nil {
+			t.Fatalf("%s: accepted", c.what)
+		}
 	}
 }
 
@@ -170,7 +198,7 @@ func TestWALStoreChunk_ScheduledSnapshotSkipsARestoringVolume(t *testing.T) {
 	fresh, err := durable.NewDurableProvider(durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-		ChunkSnapshotPeriod: period, ChunkScheduledSnapshot: calls.take,
+		ChunkSnapshotPeriod: period, ChunkScheduledNewest: calls.newestSlot, ChunkScheduledSnapshot: calls.take,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
 	}, view)
 	if err != nil {

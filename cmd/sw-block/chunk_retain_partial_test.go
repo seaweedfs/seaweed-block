@@ -59,7 +59,9 @@ func TestOpsChunk_RetainReportsPartialProgress(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		at := base.Add(time.Duration(i) * time.Minute)
 		cat.SetClock(func() time.Time { return at })
-		if _, err := cat.CreateSnapshot(ctx, "v1", chunkstore.SnapshotRequest{Name: fmt.Sprintf("s%d", i), RequestID: fmt.Sprintf("r%d", i)}, head); err != nil {
+		hi := head
+		hi.Gen = head.Gen + uint64(i) // each snapshot copies a later cut: s3 is the newest
+		if _, err := cat.CreateSnapshot(ctx, "v1", chunkstore.SnapshotRequest{Name: fmt.Sprintf("s%d", i), RequestID: fmt.Sprintf("r%d", i)}, hi); err != nil {
 			t.Fatal(err)
 		}
 	}
