@@ -1,0 +1,159 @@
+package master
+
+import (
+	"context"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// refusalOf returns the FailedPrecondition refusal's text and its typed
+// detail (nil when the refusal carries none, which a client reads as OTHER).
+func refusalOf(t *testing.T, stage string, err error) (string, *control.WorkspaceLeaseRefusal) {
+	t.Helper()
+	st, ok := status.FromError(err)
+	if err == nil || !ok || st.Code() != codes.FailedPrecondition {
+		t.Fatalf("%s: %v; want a FailedPrecondition refusal", stage, err)
+	}
+	for _, d := range st.Details() {
+		if r, ok := d.(*control.WorkspaceLeaseRefusal); ok {
+			return st.Message(), r
+		}
+	}
+	return st.Message(), nil
+}
+
+// Each renewal refusal carries its typed kind as a status detail with the
+// code and text unchanged: BARRIER (with the time left until the barrier
+// passes) for an expired re-grant before the barrier; MOVED only when the
+// line names another replica; DELETED only for a committed deletion. The
+// same owner at a newer epoch and an admitted (abortable) deletion carry no
+// detail (OTHER): a bounded wait, never an early 78.
+func TestLeaseRefusalKinds(t *testing.T) {
+	var nowNS, headEpoch, headGen atomic.Int64
+	nowNS.Store(time.Now().UnixNano())
+	headEpoch.Store(1)
+	headGen.Store(9)
+	const ttl = 30 * time.Second
+	h, conn, _ := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
+		return authority.WorkspaceHead{Gen: uint64(headGen.Load()), Epoch: uint64(headEpoch.Load()), Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
+	}, func(h *Host) {
+		authority.WithWorkspaceLeaseConfig(ttl, func() time.Time { return time.Unix(0, nowNS.Load()) })(h.Publisher())
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	reviewCreate(t, conn, ctx, "v")
+	ws := control.NewWorkspaceServiceClient(conn)
+	b := &control.WorkspaceBinding{VolumeId: "v", ServerId: "node-a", DataAddr: "127.0.0.1:10000", CtrlAddr: "127.0.0.1:10001"}
+	if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.PlaceWorkspace(ctx, &control.WorkspacePlacement{VolumeId: "v", ServerId: "node-a", ReplicaId: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	reviewHeartbeat(t, conn, ctx, "v", "node-a", b.DataAddr, b.CtrlAddr)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	line := waitAuthorityLine(t, h.Publisher(), "v")
+	id := func(replica string, epoch uint64) *control.WorkspaceIdentity {
+		return &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: replica, Epoch: epoch, ServerId: "node-a"}
+	}
+	e1 := id("r1", line.Epoch)
+	if _, err := ws.RenewWorkspaceLease(ctx, e1); err != nil {
+		t.Fatal("first grant:", err)
+	}
+
+	// BARRIER: past the grant (TTL) but before the horizon (1.5 TTL) plus
+	// the default skew (2/3 TTL), i.e. 65 s after the grant.
+	nowNS.Add(int64(40 * time.Second))
+	text, r := refusalOf(t, "expired re-grant before the barrier", func() error { _, err := ws.RenewWorkspaceLease(ctx, e1); return err }())
+	if r == nil || r.GetKind() != control.WorkspaceLeaseRefusal_BARRIER {
+		t.Fatalf("re-grant before the barrier: detail %v; want BARRIER", r)
+	}
+	if left := time.Duration(r.GetRetryAfterNs()); left < 24*time.Second || left > 26*time.Second {
+		t.Fatalf("BARRIER retry_after %v; want 25 s (the barrier 65 s after the grant, now +40 s)", left)
+	}
+	if !strings.HasPrefix(text, "workspace forced move lease expiry plus clock-skew margin has not elapsed") || !strings.Contains(text, "re-grant refused until") {
+		t.Fatalf("BARRIER text %q: want the barrier text with its time", text)
+	}
+	nowNS.Add(int64(2 * time.Minute))
+	if _, err := ws.RenewWorkspaceLease(ctx, e1); err != nil {
+		t.Fatal("re-grant after the barrier:", err)
+	}
+
+	// cleanMove revokes and ACKs the current holder, then moves the line on
+	// the same host to replica.
+	cleanMove := func(req string, from *control.WorkspaceIdentity, replica string) uint64 {
+		t.Helper()
+		if _, err := ws.RevokeWorkspace(ctx, from); err != nil {
+			t.Fatal(err)
+		}
+		headEpoch.Store(int64(from.GetEpoch()))
+		headGen.Add(1)
+		if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: from, HeadGen: uint64(headGen.Load())}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		g, err := ws.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: req, VolumeId: "v", ExpectedReplicaId: from.GetReplicaId(), ExpectedEpoch: from.GetEpoch(),
+			TargetReplicaId: replica, TargetServerId: "node-a", TargetDataAddr: b.DataAddr, TargetCtrlAddr: b.CtrlAddr, Kind: "clean"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g.GetNewEpoch()
+	}
+
+	// OTHER: the same owner at a newer epoch (a clean move back to this host).
+	e2 := id("r1", cleanMove("same-replica", e1, "r1"))
+	text, r = refusalOf(t, "same owner, newer epoch", func() error { _, err := ws.RenewWorkspaceLease(ctx, e1); return err }())
+	if r != nil || text != "workspace lease: server identity does not match the current holder" {
+		t.Fatalf("same owner at a newer epoch: %q detail %v; want the unchanged text, no detail", text, r)
+	}
+	if _, err := ws.RenewWorkspaceLease(ctx, e2); err != nil {
+		t.Fatal("grant at the newer epoch:", err)
+	}
+
+	// MOVED: the line names another replica.
+	e3 := id("r2", cleanMove("other-replica", e2, "r2"))
+	text, r = refusalOf(t, "line names another replica", func() error { _, err := ws.RenewWorkspaceLease(ctx, e2); return err }())
+	if r == nil || r.GetKind() != control.WorkspaceLeaseRefusal_MOVED || text != "workspace lease: server identity does not match the current holder" {
+		t.Fatalf("line names another replica: %q detail %v; want MOVED with the unchanged text", text, r)
+	}
+
+	// An admitted deletion is OTHER; a committed one is DELETED.
+	if _, err := ws.RenewWorkspaceLease(ctx, e3); err != nil {
+		t.Fatal("grant to the moved replica:", err)
+	}
+	if _, err := ws.RevokeWorkspace(ctx, e3); err != nil {
+		t.Fatal(err)
+	}
+	headEpoch.Store(int64(e3.GetEpoch()))
+	headGen.Add(1)
+	if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: e3, HeadGen: uint64(headGen.Load())}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := control.NewLifecycleServiceClient(conn).MarkVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-1"})
+	if err != nil || res.GetState() != lifecycle.ReservationAdmitted {
+		t.Fatalf("admit the delete: %+v %v", res, err)
+	}
+	text, r = refusalOf(t, "admitted deletion", func() error { _, err := ws.RenewWorkspaceLease(ctx, e3); return err }())
+	if r != nil || text != "workspace: volume is being deleted" {
+		t.Fatalf("admitted deletion: %q detail %v; want the unchanged text, no detail", text, r)
+	}
+	if _, err := h.lifecycle.Deletions.Commit("v", "del-1"); err != nil {
+		t.Fatal(err)
+	}
+	text, r = refusalOf(t, "committed deletion", func() error { _, err := ws.RenewWorkspaceLease(ctx, e3); return err }())
+	if r == nil || r.GetKind() != control.WorkspaceLeaseRefusal_DELETED || text != "workspace: volume is being deleted" {
+		t.Fatalf("committed deletion: %q detail %v; want DELETED with the unchanged text", text, r)
+	}
+}

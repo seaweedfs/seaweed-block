@@ -374,9 +374,10 @@ func (p *Publisher) regrantWorkspaceLease(ctx context.Context, volume, holder st
 	if p.store == nil || p.workspaceUncertain[volume] {
 		return WorkspaceLease{}, fmt.Errorf("workspace durable store unavailable or uncertain")
 	}
-	_, now, err := p.forcedMoveBarrierLocked(volume, s.Lease)
+	lostUntil, now, err := p.forcedMoveBarrierLocked(volume, s.Lease)
 	if err != nil {
-		return WorkspaceLease{}, err
+		until := time.Unix(0, lostUntil)
+		return WorkspaceLease{}, &LeaseBarrierError{Until: until, RetryAfter: max(until.Sub(now), 0), err: err}
 	}
 	lease, grant := p.newWorkspaceLease(holder, epoch, now)
 	lease.ExpiresAtNS = max(lease.ExpiresAtNS, s.Lease.ExpiresAtNS)
@@ -472,3 +473,19 @@ func (p *Publisher) CloseWorkspaceExtenders() {
 	p.mu.Unlock()
 	p.extWG.Wait()
 }
+
+// LeaseBarrierError is an expired re-grant refused because the forced-move
+// barrier has not passed. Until is when it passes (master wall time) and
+// RetryAfter is Until minus the master's time at the refusal, so a client
+// can anchor it to its own request start. The text keeps the barrier's.
+type LeaseBarrierError struct {
+	Until      time.Time
+	RetryAfter time.Duration
+	err        error
+}
+
+func (e *LeaseBarrierError) Error() string {
+	return fmt.Sprintf("%v (re-grant refused until %s, in %s)", e.err, e.Until.UTC().Format(time.RFC3339Nano), e.RetryAfter.Round(time.Millisecond))
+}
+
+func (e *LeaseBarrierError) Unwrap() error { return e.err }

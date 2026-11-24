@@ -49,9 +49,42 @@ func (s *services) workspaceVolumeForRenewal(volume string) error {
 		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
 	}
 	if s.host.lifecycle.Deletions.ReservedSnapshot(volume) {
+		if s.host.lifecycle.Deletions.CommittedSnapshot(volume) {
+			return leaseRefusal("workspace: volume is being deleted", control.WorkspaceLeaseRefusal_DELETED, 0)
+		}
 		return status.Error(codes.FailedPrecondition, "workspace: volume is being deleted")
 	}
 	return nil
+}
+
+// leaseRefusal is a renewal refusal with its typed kind as a status detail
+// (code FailedPrecondition and text as before). Only BARRIER, MOVED and
+// DELETED are sent; a refusal without a detail is OTHER.
+func leaseRefusal(text string, kind control.WorkspaceLeaseRefusal_Kind, retryAfter time.Duration) error {
+	st := status.New(codes.FailedPrecondition, text)
+	if d, err := st.WithDetails(&control.WorkspaceLeaseRefusal{Kind: kind, RetryAfterNs: int64(retryAfter)}); err == nil {
+		st = d
+	}
+	return st.Err()
+}
+
+// renewalMoved reports whether a holder mismatch is a permanent, known move:
+// the published line names another replica, or a newer epoch of this replica
+// owned by another known server. An unknown owner, the same owner at a newer
+// epoch, or no line is not (OTHER: a bounded wait, then exit 75).
+func (s *services) renewalMoved(volume, replica, server string, epoch uint64) bool {
+	line, ok := s.host.Publisher().PublishedAuthorityLine(volume)
+	if !ok || server == "" {
+		return false
+	}
+	if line.ReplicaID != replica {
+		return true
+	}
+	if line.Epoch <= epoch {
+		return false
+	}
+	owner := s.host.workspaceLineOwner(line, volume, line.ReplicaID, line.Epoch)
+	return owner != "" && owner != server
 }
 
 // isWorkspaceVolume reports whether volume is a workspace volume (workspace RPC on, an existing RF1 volume), from the
@@ -105,9 +138,17 @@ func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.Workspace
 	if ok, err := s.holderMatches(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetServerId(), q.GetEpoch()); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	} else if !ok {
-		return nil, status.Error(codes.FailedPrecondition, "workspace lease: server identity does not match the current holder")
+		const text = "workspace lease: server identity does not match the current holder"
+		if s.renewalMoved(q.GetVolumeId(), q.GetReplicaId(), q.GetServerId(), q.GetEpoch()) {
+			return nil, leaseRefusal(text, control.WorkspaceLeaseRefusal_MOVED, 0)
+		}
+		return nil, status.Error(codes.FailedPrecondition, text)
 	}
 	l, err := s.host.Publisher().RenewWorkspaceLease(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetEpoch())
+	var barrier *authority.LeaseBarrierError
+	if errors.As(err, &barrier) {
+		return nil, leaseRefusal(err.Error(), control.WorkspaceLeaseRefusal_BARRIER, barrier.RetryAfter)
+	}
 	if err != nil {
 		return nil, workspaceError(err)
 	}
