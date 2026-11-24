@@ -216,3 +216,11 @@ func (h *Host) MasterWaitStatus() *MasterWait {
 	w := h.mw.snapshot(h.realAdpt.Projection().Epoch > 0)
 	return &w
 }
+
+// barrierTime is the master's barrier time T from the latest BARRIER refusal
+// (zero when none): the lease guard sleeps until just past it.
+func (w *masterWait) barrierTime() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.barrier
+}

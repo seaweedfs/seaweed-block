@@ -374,10 +374,15 @@ func (p *Publisher) regrantWorkspaceLease(ctx context.Context, volume, holder st
 	if p.store == nil || p.workspaceUncertain[volume] {
 		return WorkspaceLease{}, fmt.Errorf("workspace durable store unavailable or uncertain")
 	}
-	lostUntil, now, err := p.forcedMoveBarrierLocked(volume, s.Lease)
+	_, now, err := p.forcedMoveBarrierLocked(volume, s.Lease)
 	if err != nil {
-		until := time.Unix(0, lostUntil)
-		return WorkspaceLease{}, &LeaseBarrierError{Until: until, RetryAfter: max(until.Sub(now), 0), err: err}
+		// The same two predicates as admission: lease expiry plus skew (wall
+		// time, persisted) and the grant deadline plus skew (this process's
+		// monotonic clock), each measured from now. A client adds the result
+		// to its own request start; it never compares clocks.
+		skew := p.workspaceSkew(s.Lease)
+		retry := max(time.Unix(0, s.Lease.ExpiresAtNS).Add(skew).Sub(now), p.leaseDeadlineLocked(volume).Add(skew).Sub(now), 0)
+		return WorkspaceLease{}, &LeaseBarrierError{Until: now.Add(retry), RetryAfter: retry, err: err}
 	}
 	lease, grant := p.newWorkspaceLease(holder, epoch, now)
 	lease.ExpiresAtNS = max(lease.ExpiresAtNS, s.Lease.ExpiresAtNS)

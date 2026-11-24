@@ -120,27 +120,33 @@ func TestLeaseGuardSleepsUntilTheBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	w := newMasterWait(func() time.Time { return now }, func(string, ...any) {})
 	var observed int
-	g.observe = func(time.Time, error) { observed++ }
+	g.observe = func(start time.Time, err error) { observed++; w.renewal(start, err) }
+	g.barrierAt = w.barrierTime
+	in := func(what string, d, lo, hi time.Duration) {
+		t.Helper()
+		if d < lo || d > hi {
+			t.Fatalf("%s: delay %v; want within [%v, %v]", what, d, lo, hi)
+		}
+	}
 
 	reply = status.Error(codes.FailedPrecondition, "workspace forced move lease expiry plus clock-skew margin has not elapsed")
 	_ = g.Refresh(context.Background())
-	if d := g.renewDelay(); d != time.Second {
-		t.Fatalf("delay after a detail-less refusal %v; want the 1 s poll, as today", d)
+	for i := 0; i < 20; i++ {
+		in("detail-less refusal: the 1 s poll, jittered", g.renewDelay(), 800*time.Millisecond, 1200*time.Millisecond)
 	}
 	reply = refusalWith(t, "barrier", control.WorkspaceLeaseRefusal_BARRIER, 40*time.Second)
 	_ = g.Refresh(context.Background())
-	if d := g.renewDelay(); d != 40*time.Second {
-		t.Fatalf("delay after BARRIER %v; want until T (40 s)", d)
+	for i := 0; i < 20; i++ {
+		in("after BARRIER: until just past T", g.renewDelay(), 40*time.Second+100*time.Millisecond, 40*time.Second+600*time.Millisecond)
 	}
 	now = now.Add(39 * time.Second)
-	if d := g.renewDelay(); d != time.Second {
-		t.Fatalf("delay 1 s before T: %v", d)
-	}
+	in("1 s before T", g.renewDelay(), 1100*time.Millisecond, 1600*time.Millisecond)
 	now = now.Add(2 * time.Second)
-	if d := g.renewDelay(); d != time.Second {
-		t.Fatalf("delay past T %v; want the 1 s poll", d)
-	}
+	in("past T: the 1 s poll", g.renewDelay(), 800*time.Millisecond, 1200*time.Millisecond)
+	w.renewal(now, refusalWith(t, "barrier", control.WorkspaceLeaseRefusal_BARRIER, time.Hour))
+	in("a far barrier: capped", g.renewDelay(), 2*time.Minute, 2*time.Minute)
 	if observed != 2 {
 		t.Fatalf("renewals observed %d; want 2", observed)
 	}
