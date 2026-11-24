@@ -249,9 +249,11 @@ func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p chunkStar
 	// INV-WS-STARTUP-RETRY-001: one exit decision consumes both proof
 	// sources; the provider rechecks the claim generation below.
 	out := workspaceRetryOutcome("assignment_timeout", h, p.ChunkStartupSuperseded(f.volumeID, gen))
-	if out.code == exitWorkspaceRetry && h != nil {
+	if h != nil {
 		// A typed MOVED or DELETED renewal refusal is permanent: 78 at once,
-		// never a restart loop to the unit's start limit.
+		// never a restart loop to the unit's start limit. It is the reason
+		// that ended the wait, so it names the exit even when a newer
+		// foreign line was also observed (superseded).
 		if _, final := h.MasterWaitState(); final != "" {
 			out = workspaceExit{code: exitWorkspaceSuperseded, reason: final}
 		}
