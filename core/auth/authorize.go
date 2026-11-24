@@ -96,17 +96,27 @@ func RequireRole(ctx context.Context, min Role) error {
 	return nil
 }
 
-func (a *Authenticator) admit(ctx context.Context, method string, rules map[string]Rule) (context.Context, Principal, error) {
+// decide is the one decision for a call to method: the caller's current
+// identity (PeerIdentity) and the method's rule for its current role.
+func (a *Authenticator) decide(ctx context.Context, method string, rules map[string]Rule) (Principal, error) {
 	p, err := a.PeerIdentity(ctx)
 	if err != nil {
-		return nil, Principal{}, err
+		return Principal{}, err
 	}
 	r, ok := rules[method]
 	if !ok {
-		return nil, p, forbidden("method %s has no authorization rule", method)
+		return p, forbidden("method %s has no authorization rule", method)
 	}
 	if !r.Allows(p) {
-		return nil, p, forbidden("%s %s may not call %s", p.Role, p.ID, method)
+		return p, forbidden("%s %s may not call %s", p.Role, p.ID, method)
+	}
+	return p, nil
+}
+
+func (a *Authenticator) admit(ctx context.Context, method string, rules map[string]Rule) (context.Context, Principal, error) {
+	p, err := a.decide(ctx, method, rules)
+	if err != nil {
+		return nil, p, err
 	}
 	return context.WithValue(ctx, ctxKey{}, callAuth{p: p}), p, nil
 }
@@ -136,10 +146,12 @@ func (a *Authenticator) UnaryInterceptor(rules map[string]Rule) grpc.UnaryServer
 	}
 }
 
-// StreamInterceptor authenticates a stream when it opens, again before every
-// message it sends, and again at every role-file reload: a caller removed
-// from the file loses its open stream at the reload (UNAUTHENTICATED), not at
-// the next message.
+// StreamInterceptor decides a stream when it opens, again before every
+// message it sends, and again at every role-file reload, each time with the
+// caller's current identity AND the method's rule for its current role: a
+// caller removed from the file loses its open stream at the reload
+// (UNAUTHENTICATED), one whose role no longer admits the method loses it too
+// (PERMISSION_DENIED), not at the next message.
 func (a *Authenticator) StreamInterceptor(rules map[string]Rule) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		changed := a.Changed()
@@ -157,15 +169,15 @@ func (a *Authenticator) StreamInterceptor(rules map[string]Rule) grpc.StreamServ
 					return
 				case <-changed:
 					changed = a.Changed()
-					if _, err := a.PeerIdentity(ss.Context()); err != nil {
+					if _, err := a.decide(ss.Context(), info.FullMethod, rules); err != nil {
 						cancel(err)
 						return
 					}
 				}
 			}
 		}()
-		err = handler(srv, &authStream{ServerStream: ss, ctx: ctx, a: a})
-		if cause := context.Cause(ctx); cause != nil && status.Code(cause) == codes.Unauthenticated {
+		err = handler(srv, &authStream{ServerStream: ss, ctx: ctx, a: a, method: info.FullMethod, rules: rules})
+		if cause := context.Cause(ctx); authzRefusal(cause) != nil {
 			err = cause
 		}
 		a.audit.call(info.FullMethod, p, authzRefusal(err))
@@ -175,14 +187,16 @@ func (a *Authenticator) StreamInterceptor(rules map[string]Rule) grpc.StreamServ
 
 type authStream struct {
 	grpc.ServerStream
-	ctx context.Context
-	a   *Authenticator
+	ctx    context.Context
+	a      *Authenticator
+	method string
+	rules  map[string]Rule
 }
 
 func (s *authStream) Context() context.Context { return s.ctx }
 
 func (s *authStream) SendMsg(m any) error {
-	if _, err := s.a.PeerIdentity(s.ServerStream.Context()); err != nil {
+	if _, err := s.a.decide(s.ServerStream.Context(), s.method, s.rules); err != nil {
 		return err
 	}
 	return s.ServerStream.SendMsg(m)

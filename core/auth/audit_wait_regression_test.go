@@ -77,3 +77,33 @@ func TestCodexValidatedRoleReloadPublishesBeforeAuditWait(t *testing.T) {
 		t.Error("revocation did not publish after writer released")
 	}
 }
+
+// A stalled audit writer never blocks a caller: past the bounded queue the
+// lines are dropped and counted, and every call returns.
+func TestAuditQueueFullDropsAndCountsInsteadOfBlocking(t *testing.T) {
+	ca := authtest.NewCA(t, "ca")
+	op := ca.Issue(t, "alice", time.Now().Add(time.Hour))
+	a := auth.NewAuthenticator(table(t, op.Fingerprint+" operator alice"), nil)
+	w := newCodexBlockedAudit()
+	log := auth.NewAuditLog(w, nil)
+	a.SetAudit(log)
+	rules := map[string]auth.Rule{"/observe": {Min: auth.RoleViewer}}
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1100; i++ { // more than the queue holds
+			_, _ = a.UnaryInterceptor(rules)(peerCtx(op, ca), nil, &grpc.UnaryServerInfo{FullMethod: "/observe"}, func(context.Context, any) (any, error) { return nil, nil })
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(w.release)
+		t.Fatal("audited calls blocked on a stalled writer")
+	}
+	if log.WriteErrors() == 0 {
+		t.Error("lines past the bounded queue were not counted as dropped")
+	}
+	close(w.release)
+	log.Flush()
+}

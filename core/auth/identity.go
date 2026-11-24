@@ -152,14 +152,15 @@ func (a *Authenticator) Changed() <-chan struct{} {
 }
 
 // Reload parses path and installs it; on any error the current table stays.
+// The validated table is published before the reload is logged: a revocation
+// never waits on the audit writer.
 func (a *Authenticator) Reload(path string) error {
 	t, err := LoadRoleFile(path)
-	a.audit.Reload(path, err)
-	if err != nil {
-		return err
+	if err == nil {
+		a.Swap(t)
 	}
-	a.Swap(t)
-	return nil
+	a.audit.Reload(path, err)
+	return err
 }
 
 // Fingerprint is the role-file form of a DER certificate's fingerprint.

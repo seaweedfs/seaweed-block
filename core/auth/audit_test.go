@@ -25,12 +25,14 @@ func TestAuditLog(t *testing.T) {
 	a := auth.NewAuthenticator(table(t, node.Fingerprint+" node s1", op.Fingerprint+" operator alice"), nil)
 	now := time.Unix(2000, 0)
 	var buf bytes.Buffer
-	a.SetAudit(auth.NewAuditLog(&buf, func() time.Time { return now }))
+	log := auth.NewAuditLog(&buf, func() time.Time { return now })
+	a.SetAudit(log)
 	rules := map[string]auth.Rule{"/renew": {Node: true}, "/move": {Min: auth.RoleOperator}, "/delete": {Min: auth.RoleAdmin}}
 	call := func(leaf *authtest.Leaf, method string) {
 		_, _ = a.UnaryInterceptor(rules)(peerCtx(leaf, ca), nil, &grpc.UnaryServerInfo{FullMethod: method}, func(context.Context, any) (any, error) { return nil, nil })
 	}
 	lines := func() []auth.AuditEvent {
+		log.Flush() // the writer is asynchronous
 		var out []auth.AuditEvent
 		for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
 			if l == "" {
