@@ -778,9 +778,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if !guestFrozen {
 		staged, intents, err = l.stage(ctx, &st, spill.bytes)
 	}
-	if st.UploadedBytes > 0 {
-		st.PayloadNs += time.Since(stageStart).Nanoseconds()
-	}
+	st.PayloadNs += time.Since(stageStart).Nanoseconds()
 	if err != nil {
 		dropCapturedIntents(ctx, intents)
 		return chunkCutResult{}, err
