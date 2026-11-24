@@ -121,7 +121,8 @@ func owners(m map[string]bool) []string {
 //   - Transitions: runTransition is used only by exported Run functions,
 //     each with Test<X>_Closure and TestRun<X>_InterruptAtEveryStep.
 //   - Lease, claim half: OldLeaseEnded is used only in RunClaim, and
-//     RunClaim, where it exists, uses it.
+//     RunClaim, when it is declared, uses it.
+//   - Every declared exported Run function goes through runTransition.
 //   - Pool: no name starting with Delete or Remove is used yet; the
 //     removal that comes with cleaning must bring its lease re-check and
 //     its own row here.
@@ -129,7 +130,7 @@ func owners(m map[string]bool) []string {
 // These are syntactic checks of this package's own files: they see any
 // use of these names, but not a store effect reached through a name they
 // do not list (for example reflection or another package's helper).
-func guardFindings(code map[string]map[string]bool, tests map[string]bool) []string {
+func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool) []string {
 	var bad []string
 	if got := owners(code["UpdateHead"]); !reflect.DeepEqual(got, []string{"runTransition"}) {
 		bad = append(bad, "UpdateHead used by "+strings.Join(got, ", ")+"; want only runTransition")
@@ -156,8 +157,13 @@ func guardFindings(code map[string]map[string]bool, tests map[string]bool) []str
 			bad = append(bad, fn+" uses OldLeaseEnded; only RunClaim claims")
 		}
 	}
-	if _, ok := code["RunClaim"]; ok && !code["OldLeaseEnded"]["RunClaim"] {
-		bad = append(bad, "RunClaim does not wait for the old lease")
+	if decl["RunClaim"] && !code["OldLeaseEnded"]["RunClaim"] {
+		bad = append(bad, "RunClaim is declared and does not wait for the old lease")
+	}
+	for fn := range decl {
+		if strings.HasPrefix(fn, "Run") && !code["runTransition"][fn] {
+			bad = append(bad, fn+" is declared and does not go through runTransition")
+		}
 	}
 	for name, by := range code {
 		if strings.HasPrefix(name, "Delete") || strings.HasPrefix(name, "Remove") {
@@ -187,9 +193,10 @@ func declared(t *testing.T, srcs map[string]string) map[string]bool {
 }
 
 func TestGuard_WritersTransitionsAndRemovers(t *testing.T) {
-	code := refs(t, packageSources(t, false))
+	src := packageSources(t, false)
+	code := refs(t, src)
 	tests := declared(t, packageSources(t, true))
-	if bad := guardFindings(code, tests); len(bad) != 0 {
+	if bad := guardFindings(code, declared(t, src), tests); len(bad) != 0 {
 		t.Fatalf("guard: %s", strings.Join(bad, "\n"))
 	}
 	st := reflect.TypeOf((*HeadStore)(nil)).Elem()
@@ -207,28 +214,35 @@ func TestGuard_WritersTransitionsAndRemovers(t *testing.T) {
 // sources alone pass (the test above).
 func TestGuard_Controls(t *testing.T) {
 	tests := declared(t, packageSources(t, true))
-	for name, src := range map[string]string{
-		"direct call": `func w(ctx context.Context, st HeadStore, h Head) error { return st.UpdateHead(ctx, h.Gen, h) }`,
-		"method value alias": `func w(ctx context.Context, st HeadStore, h Head) error {
+	for name, c := range map[string]struct{ src, want string }{
+		"direct call": {`func w(ctx context.Context, st HeadStore, h Head) error { return st.UpdateHead(ctx, h.Gen, h) }`, "UpdateHead used by"},
+		"method value alias": {`func w(ctx context.Context, st HeadStore, h Head) error {
 	update := st.UpdateHead
 	return update(ctx, h.Gen, h)
-}`,
-		"method expression":        `func w(ctx context.Context, st HeadStore, h Head) error { return HeadStore.UpdateHead(st, ctx, h.Gen, h) }`,
-		"package-level var":        `var w = HeadStore.UpdateHead`,
-		"package-level func lit":   `var w = func(ctx context.Context, st HeadStore, h Head) error { return st.UpdateHead(ctx, h.Gen, h) }`,
-		"inline interface":         `func w(st HeadStore) { var u interface{ UpdateHead(context.Context, uint64, Head) error } = st; _ = u }`,
-		"runTransition alias":      `func w(ctx context.Context, st HeadStore) { f := runTransition; _, _ = f(ctx, st, nil) }`,
-		"untested transition":      `func RunZz(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }`,
-		"lease wait outside claim": `func w(ctx context.Context, l LeaseWait) error { return l.OldLeaseEnded(ctx, 1) }`,
-		"remover": `type p interface{ DeleteObject(context.Context, string) error }
-func w(ctx context.Context, x p) error { return x.DeleteObject(ctx, "o") }`,
-		"remover method value": `type p interface{ RemoveName(string) }
-func w(x p) { f := x.RemoveName; f("o") }`,
+}`, "UpdateHead used by"},
+		"method expression":        {`func w(ctx context.Context, st HeadStore, h Head) error { return HeadStore.UpdateHead(st, ctx, h.Gen, h) }`, "UpdateHead used by"},
+		"package-level var":        {`var w = HeadStore.UpdateHead`, "UpdateHead used by"},
+		"package-level func lit":   {`var w = func(ctx context.Context, st HeadStore, h Head) error { return st.UpdateHead(ctx, h.Gen, h) }`, "UpdateHead used by"},
+		"inline interface":         {`func w(st HeadStore) { var u interface{ UpdateHead(context.Context, uint64, Head) error } = st; _ = u }`, "UpdateHead used by"},
+		"runTransition alias":      {`func w(ctx context.Context, st HeadStore) { f := runTransition; _, _ = f(ctx, st, nil) }`, "uses runTransition; transitions are exported"},
+		"untested transition":      {`func RunZz(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }`, "has no TestZz_Closure"},
+		"lease wait outside claim": {`func w(ctx context.Context, l LeaseWait) error { return l.OldLeaseEnded(ctx, 1) }`, "only RunClaim claims"},
+		"remover": {`type p interface{ DeleteObject(context.Context, string) error }
+func w(ctx context.Context, x p) error { return x.DeleteObject(ctx, "o") }`, "a store remover"},
+		"claim without lease wait": {`func RunClaim(ctx context.Context, st HeadStore, lease LeaseWait, me HolderID) (Head, error) {
+	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h, false, nil })
+}
+func TestClaim_Closure()                   {}
+func TestRunClaim_InterruptAtEveryStep() {}`, "does not wait for the old lease"},
+		"transition not through runTransition": {`func RunZz(ctx context.Context, st HeadStore) (Head, error) { h, _, err := st.ReadHead(ctx); return h, err }`, "does not go through runTransition"},
+		"remover method value": {`type p interface{ RemoveName(string) }
+func w(x p) { f := x.RemoveName; f("o") }`, "a store remover"},
 	} {
 		srcs := packageSources(t, false)
-		srcs["zz_control.go"] = "package layout\n\nimport \"context\"\n\nvar _ context.Context\n\n" + src + "\n"
-		if bad := guardFindings(refs(t, srcs), tests); len(bad) == 0 {
-			t.Errorf("control %q passed the guard", name)
+		srcs["zz_control.go"] = "package layout\n\nimport \"context\"\n\nvar _ context.Context\n\n" + c.src + "\n"
+		bad := guardFindings(refs(t, srcs), declared(t, srcs), tests)
+		if !strings.Contains(strings.Join(bad, "\n"), c.want) {
+			t.Errorf("control %q: findings %q; want one containing %q", name, bad, c.want)
 		}
 	}
 }
