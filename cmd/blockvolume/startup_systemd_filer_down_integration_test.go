@@ -16,8 +16,9 @@ import (
 // The operator guide's procedure for a first start during a long filer
 // outage, run as written under real systemd (root): the blockvolume unit,
 // with the shipped restart policy and a short start limit, starts while the
-// filer is down; each start fails before any store exists until systemd
-// stops retrying (start-limit-hit). The filer comes back; `systemctl
+// filer is down; each start fails at the startup filer check (exit 1, no
+// store) until systemd stops retrying (its start limit). The filer comes
+// back; `systemctl
 // reset-failed <unit>` and `systemctl start <unit>` then serve the volume.
 //
 // A runtime unit file (/run/systemd/system) stands for the installed unit:
@@ -37,9 +38,23 @@ func TestSystemdFirstStartDuringAFilerOutageThenResetFailedServes(t *testing.T) 
 	shipped := gap1ShippedPolicy(t)
 	unit := fmt.Sprintf("swb-c04-filer-outage-%d.service", os.Getpid())
 	unitPath := filepath.Join("/run/systemd/system", unit)
+	// Under systemd blockvolume refuses the test-only lock directory: the
+	// unit uses the real one, as an installed unit does.
 	quoted := []string{fmt.Sprintf("%q", env.h.volume)}
-	for _, a := range env.volArgsFor(b) {
-		quoted = append(quoted, fmt.Sprintf("%q", a))
+	args := env.volArgsFor(b)
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--volume-lock-dir-test-only" {
+			i++
+			continue
+		}
+		quoted = append(quoted, fmt.Sprintf("%q", args[i]))
+	}
+	const lockDir = "/run/sw-block/locks"
+	if _, err := os.Stat(lockDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(lockDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(lockDir); _ = os.Remove(filepath.Dir(lockDir)) })
 	}
 	spec := strings.Join([]string{
 		"[Unit]",
@@ -77,15 +92,24 @@ func TestSystemdFirstStartDuringAFilerOutageThenResetFailedServes(t *testing.T) 
 	if out, err := systemctl("start", "--no-block", unit); err != nil {
 		t.Fatalf("start %s: %v %s", unit, err, out)
 	}
+	// systemd gives up when the start limit is hit: the unit stays failed
+	// after StartLimitBurst restarts, and the journal says "Start request
+	// repeated too quickly" (systemd 249 keeps Result=exit-code).
 	var state map[string]string
-	poll(t, 8*time.Minute, unit+" never reached start-limit-hit with the filer down", func() bool {
+	poll(t, 8*time.Minute, unit+" never stopped retrying with the filer down", func() bool {
 		s, err := gap1ReadUnit(unit)
 		state = s
-		return err == nil && s["Result"] == "start-limit-hit"
+		return err == nil && s["ActiveState"] == "failed" && s["NRestarts"] == "2"
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	journal, _ := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager").CombinedOutput()
+	cancel()
 	entries, _ := os.ReadDir(b.root)
 	t.Logf("filer down: %s gave up: Result %s, NRestarts %s, ExecMainStatus %s, ActiveState %s; files under --durable-root %d",
 		unit, state["Result"], state["NRestarts"], state["ExecMainStatus"], state["ActiveState"], len(entries))
+	if !strings.Contains(string(journal), "Start request repeated too quickly") || state["ExecMainStatus"] != "1" {
+		t.Fatalf("the unit did not stop on its start limit after failing at the startup filer check (status %s):\n%s", state["ExecMainStatus"], journal)
+	}
 	if len(entries) != 0 {
 		t.Fatalf("the failed starts created %d files under --durable-root", len(entries))
 	}
