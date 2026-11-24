@@ -51,8 +51,8 @@ var (
 // (a workspace that moved away and back), so serving or cutting it would
 // lose the other holder's acknowledged writes. It wraps
 // storage.ErrChunkLayerFenced: the volume is not served and the attach is
-// not retried. Removing the local volume lets the next attach start fresh
-// from HEAD.
+// not retried. A fresh root may restore HEAD at a higher granted epoch;
+// an own-epoch HEAD instead requires the original root or a forced successor.
 var ErrChunkStaleLocalRoot = errors.New("durable: local volume predates a HEAD published by another holder")
 
 // ErrChunkMissingLocalRoot means HEAD already names this holder at its assigned
