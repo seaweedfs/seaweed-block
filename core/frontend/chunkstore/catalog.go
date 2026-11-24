@@ -63,7 +63,9 @@ const (
 	extSnapState     = "swb.snap.state"
 	extSnapDeletedNs = "swb.snap.deleted_ns"
 
-	volumeFormat = 1
+	// volumeFormat 2: key bindings and control records are standard filer
+	// files (binding.go, record.go). Format 1 stores are refused, not read.
+	volumeFormat = 2
 	snapFormat   = 1
 
 	// SnapActive and SnapDeleting are a snapshot's states.
@@ -402,7 +404,7 @@ func decodeVolume(p string, e *filerpb.Entry, body []byte) (VolumeInfo, error) {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: decode: %v", p, err)
 	}
 	if v.Format != volumeFormat {
-		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: format %d not supported", p, v.Format)
+		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: format %d not supported (this binary reads volume format %d only; a store of another format is not converted, recreate it)", p, v.Format, volumeFormat)
 	}
 	if v.Origin != OriginCreate && v.Origin != OriginFork && v.Origin != OriginRestore {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: origin %q", p, v.Origin)

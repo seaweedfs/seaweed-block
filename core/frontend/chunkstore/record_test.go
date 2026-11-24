@@ -282,3 +282,25 @@ type rewritingFiler struct {
 func (r *rewritingFiler) LookupEntry(context.Context, string, string) (*filerpb.Entry, error) {
 	return r.next(), nil
 }
+
+// A root record whose payload is lost fails the whole GC pass before any
+// reclaim: its keys are never taken for unrooted.
+func TestRecord_GCFailsOnALostRootPayload(t *testing.T) {
+	chunkedRecords(t)
+	f, b, _, g, now := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err := r.Put(ctx, "orphan", []byte("exact orphan")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(2*time.Hour + g.cfg.ClockSkew)
+	head := recordEntry(t, f, catBase+"/v1/HEAD")
+	b.deleteChunk(head.GetChunks()[0].GetFileId())
+	res, err := g.Run(ctx)
+	if err == nil || res.Reclaimed != 0 || len(f.dropped) != 0 {
+		t.Fatalf("pass over a lost HEAD payload: %+v %v dropped=%v; want an error and no reclaim", res, err, f.dropped)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path"
 	"strings"
@@ -17,7 +18,23 @@ import (
 )
 
 // Frozen output of the pre-format-3 CreateSnapshot/Fork producers at 3401cc60.
+// preF4ForkFixture is a frozen pre-F4 store whose HEAD and snapshot use the
+// legacy HEAD forms, which the code still upgrades. Its VOLUME entries are
+// stamped with the current volume format (a format 1 VOLUME is refused:
+// TestVolumeFormat_PreF4StoreRefused); its objects are bound in the current
+// binding form.
 func preF4ForkFixture(t *testing.T, segmented bool) (*fakeFiler, *Catalog, *ChunkRemote) {
+	t.Helper()
+	f, b := loadPreF4(t, segmented)
+	for p, e := range f.entries {
+		if path.Base(p) == volumeName {
+			e.Content = bytes.Replace(e.Content, []byte(`"format":1`), []byte(fmt.Sprintf(`"format":%d`, volumeFormat)), 1)
+		}
+	}
+	return bindPreF4(t, f, b, segmented)
+}
+
+func loadPreF4(t *testing.T, segmented bool) (*fakeFiler, *fakeBlobs) {
 	t.Helper()
 	suffix := "false"
 	if segmented {
@@ -36,6 +53,14 @@ func preF4ForkFixture(t *testing.T, segmented bool) (*fakeFiler, *Catalog, *Chun
 	}
 	f, b := newFakeFiler(), newFakeBlobs()
 	f.entries = frozen.Entries
+	frozenObjects[f] = frozen.Objects
+	return f, b
+}
+
+var frozenObjects = map[*fakeFiler]map[string][]byte{}
+
+func bindPreF4(t *testing.T, f *fakeFiler, b *fakeBlobs, segmented bool) (*fakeFiler, *Catalog, *ChunkRemote) {
+	t.Helper()
 	c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +73,7 @@ func preF4ForkFixture(t *testing.T, segmented bool) (*fakeFiler, *Catalog, *Chun
 	if err := r.Put(context.Background(), "legacy-data", bytes.Repeat([]byte{0x41}, 8*4096)); err != nil {
 		t.Fatal(err)
 	}
-	for key, body := range frozen.Objects {
+	for key, body := range frozenObjects[f] {
 		if err := r.Put(context.Background(), key, body); err != nil {
 			t.Fatal(err)
 		}

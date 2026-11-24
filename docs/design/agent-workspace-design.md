@@ -84,13 +84,15 @@ A workspace runs one replica (RF=1). It does not use the replication engine of t
 
 Per volume, under the chunk base directory in the filer (`core/frontend/chunkstore/catalog.go` header, `chunk_remote.go` header):
 
+Every entry is a standard filer file (volume format 2). A record's payload is inline below 64 KiB and otherwise filer chunks only that record names (`record.go`); its tokens stay extended attributes, so one conditional update replaces token and payload together and the filer deletes the needles it drops.
+
 | Entry | Content | Written |
 |---|---|---|
 | `HEAD` | the published state as JSON; `{gen, epoch, holder}` mirrored in extended attributes (`swb.gen`, `swb.epoch`, `swb.holder`) | conditional update on `{gen, epoch}`; the first HEAD is an exclusive create |
-| `keys/<key>` | one entry per chunk key, naming the needle (fid) that holds the bytes | exclusive create; never rebound |
-| `intents/<id>` | the keys a holder is about to publish (GC roots); id `<gen>-<16 hex>` | created before the first upload, removed after the outcome is known |
+| `keys/<key>` | one file per chunk key whose one chunk is the needle holding the bytes (`binding.go`); after GC, the `done` tombstone with no chunk | exclusive create; never rebound |
+| `intents/<id>` | the keys a holder is about to publish (GC roots); id `<gen>-<16 hex>` | created before the first upload, removed with its data after the outcome is known |
 | `VOLUME` | identity, geometry (`NumBlocks`, `BlockSize`, `ChunkBlocks`), origin (create or fork) and parent | write-once |
-| `snapnames/<name>`, `snaps/<name>/<attempt>` | snapshot name records and snapshots | exclusive create |
+| `snapnames/<name>`, `snaps/<name>/<attempt>` | snapshot name records and snapshots (each attempt its own copy of one HEAD root, with its own needles when chunked) | exclusive create |
 
 **HEAD** (`core/storage/chunk_seam.go` `chunkHead`): `Gen`, `Epoch`, `Holder`, `RemoteLSN`, `Segments` (or a flat `Chunks` map in format 1), `ChunkBytes`, `ManifestChunkCount`, `State` (`active`, `detached`, `deleting`, `purging`, `deleted`, `aborted`), `DetachedBy`. A chunk index missing from the manifest reads as zeros.
 
