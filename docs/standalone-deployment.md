@@ -515,7 +515,10 @@ Space comes back in two steps. Neither is immediate.
    sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
    ```
 
-   - Each pass prints its `Candidates` and `Reclaimed`.
+   - Each pass prints its `Candidates` and `Reclaimed`, and `refused_volumes`: volumes whose HEAD (or VOLUME and
+     HEAD) is missing while live keys remain. GC keeps every key of such a volume and goes on with the others; the
+     reason names the remedy (restore HEAD or `sw-block ops chunk volume-delete`; for a directory without VOLUME,
+     remove it with the filer once you decide its data is lost).
    - A chunk shows as a candidate in the first pass that sees it and is reclaimed in a later pass.
    - Without `--apply`, a pass is read-only.
 2. **SeaweedFS vacuum compacts the volume files.** Reclaimed chunks are deleted needles.

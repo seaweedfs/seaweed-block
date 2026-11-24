@@ -14,10 +14,10 @@ import (
 )
 
 // T3(b): a live volume whose HEAD entry is removed (a stock tool pruning an
-// entry whose needle is missing) must not have its keys reclaimed: the pass
-// fails closed and nothing is marked or reclaimed.
+// entry whose needle is missing) keeps every key: GC reports it refused,
+// marks none of its keys, and goes on with the other volumes.
 func TestGC_HeadAbsentFailsClosed(t *testing.T) {
-	f, b, _, g, now := gcFixture(t)
+	f, b, c, g, now := gcFixture(t)
 	ctx := context.Background()
 	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
 	if err := r.Put(ctx, "chunks/e1/c0/k", []byte("published data")); err != nil {
@@ -26,15 +26,78 @@ func TestGC_HeadAbsentFailsClosed(t *testing.T) {
 	if err := f.DeleteEntry(ctx, path.Join(catBase, "v1"), headName, nil); err != nil {
 		t.Fatal(err)
 	}
+	other := otherVolumeOrphan(t, f, b, c)
+	reclaimed := 0
 	for i := 0; i < 3; i++ {
 		res, err := g.Run(ctx)
-		if err == nil || !strings.Contains(err.Error(), "no HEAD") || res.Reclaimed != 0 || res.Candidates != 0 {
-			t.Fatalf("pass %d with HEAD pruned: %+v %v; want a refusal, nothing marked", i, res, err)
+		if err != nil || len(res.RefusedVolumes) != 1 || res.RefusedVolumes[0].Volume != "v1" || !strings.Contains(res.RefusedVolumes[0].Reason, "volume-delete") {
+			t.Fatalf("pass %d with HEAD pruned: %+v %v; want v1 refused with its remedy", i, res, err)
 		}
+		for _, w := range res.WouldDelete {
+			if w.Volume == "v1" {
+				t.Fatalf("pass %d: v1 key %s is a candidate", i, w.Key)
+			}
+		}
+		reclaimed += res.Reclaimed
 		*now = now.Add(2*time.Hour + g.cfg.ClockSkew)
 	}
-	if len(f.dropped) != 0 {
-		t.Fatalf("dropped %v", f.dropped)
+	if reclaimed != 1 || len(f.dropped) != 1 || f.dropped[0] != other {
+		t.Fatalf("reclaimed %d, dropped %v; want only the other volume's orphan %s", reclaimed, f.dropped, other)
+	}
+}
+
+// otherVolumeOrphan makes volume v2 with an unrooted key and returns its fid.
+func otherVolumeOrphan(t *testing.T, f *fakeFiler, b gcBlobs, c *Catalog) string {
+	t.Helper()
+	ctx := context.Background()
+	if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v2", IsDirectory: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.EnsureVolume(ctx, "v2", catGeo); err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := NewChunkRemote(f, b, path.Join(catBase, "v2"))
+	if err := r2.Put(ctx, "orphan", []byte("unrooted in v2")); err != nil {
+		t.Fatal(err)
+	}
+	name, _ := r2.ownKeyName("orphan")
+	e, err := f.LookupEntry(ctx, r2.keyDir(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := decodeBinding(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return live.fid
+}
+
+// The remedy the refusal names works: deleting the volume clears the
+// refusal, and its keys are then reclaimed.
+func TestGC_HeadAbsentRemedyDeleteVolume(t *testing.T) {
+	f, b, c, g, now := gcFixture(t)
+	ctx := context.Background()
+	r, _ := NewChunkRemote(f, b, path.Join(catBase, "v1"))
+	if err := r.Put(ctx, "chunks/e1/c0/k", []byte("published data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.DeleteEntry(ctx, path.Join(catBase, "v1"), headName, nil); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := c.DeleteVolume(ctx, "v1", nil); err != nil || !res.Completed {
+		t.Fatalf("volume-delete of a volume without HEAD: %+v %v", res, err)
+	}
+	reclaimed := 0
+	for i := 0; i < 3; i++ {
+		res, err := g.Run(ctx)
+		if err != nil || len(res.RefusedVolumes) != 0 {
+			t.Fatalf("pass %d after delete: %+v %v", i, res, err)
+		}
+		reclaimed += res.Reclaimed
+		*now = now.Add(2*time.Hour + g.cfg.ClockSkew)
+	}
+	if reclaimed != 1 {
+		t.Fatalf("reclaimed %d after delete; want the volume's key", reclaimed)
 	}
 }
 
@@ -112,8 +175,9 @@ func TestGC_VolumeAndHeadAbsentFailsClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if res, err := g.Run(ctx); err == nil || !strings.Contains(err.Error(), "no HEAD") || res.Candidates != 0 {
-		t.Fatalf("VOLUME and HEAD pruned: %+v %v; want a refusal", res, err)
+	res, err := g.Run(ctx)
+	if err != nil || len(res.RefusedVolumes) != 1 || !strings.Contains(res.RefusedVolumes[0].Reason, "fs.rm") || res.Candidates != 0 {
+		t.Fatalf("VOLUME and HEAD pruned: %+v %v; want v1 refused with its remedy", res, err)
 	}
 }
 

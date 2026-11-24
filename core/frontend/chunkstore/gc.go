@@ -73,10 +73,27 @@ type GCObject struct {
 // filer's deletion queue (it does not prove a needle gone). A needle that was
 // uploaded but never bound, or whose deletion the filer lost, is referenced
 // by no entry: stock volume.fsck lists it as an orphan.
+// GCRefusal is a volume none of whose keys GC reclaims in a pass, and why.
+type GCRefusal struct {
+	Volume string `json:"volume"`
+	Reason string `json:"reason"`
+}
+
+// refusalReason names what is missing and the remedy that works for it.
+func refusalReason(vol string, hasVolume bool, binding string) string {
+	if hasVolume {
+		return fmt.Sprintf("volume %s is live but has no HEAD while %s is a live binding no intent names; its keys are kept: restore HEAD (an attach of the volume never recreates it over keys), or delete the volume with sw-block ops chunk volume-delete", vol, binding)
+	}
+	return fmt.Sprintf("directory %s has neither VOLUME nor HEAD while %s is a live binding no intent names; its keys are kept: its image cannot be read, so once you decide it is lost, remove the directory with the filer (fs.rm -r deletes its needles)", vol, binding)
+}
+
 type GCResult struct {
-	Roots                                                   []GCRoot   `json:"roots"`
-	WouldDelete                                             []GCObject `json:"would_delete"`
-	WouldExpireIntents                                      []string   `json:"would_expire_intents"`
+	// RefusedVolumes are volumes whose HEAD (or VOLUME and HEAD) is missing
+	// while live keys remain: none of their keys is reclaimed.
+	RefusedVolumes                                          []GCRefusal `json:"refused_volumes"`
+	Roots                                                   []GCRoot    `json:"roots"`
+	WouldDelete                                             []GCObject  `json:"would_delete"`
+	WouldExpireIntents                                      []string    `json:"would_expire_intents"`
 	Volumes, Intents, ExpiredIntents, Candidates, Reclaimed int
 }
 
@@ -149,6 +166,7 @@ func (g *Collector) Preview(ctx context.Context) (GCResult, error) { return g.ru
 func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	result.RefusedVolumes = []GCRefusal{}
 	result.Roots = []GCRoot{}
 	result.WouldDelete = []GCObject{}
 	result.WouldExpireIntents = []string{}
@@ -323,6 +341,8 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			continue
 		}
 		pageAfter := ""
+		volBindings := len(bindings)
+	keys:
 		for {
 			page, e := g.cat.f.ListEntries(ctx, r.keyDir(), "", pageAfter, listPage)
 			if e != nil {
@@ -339,9 +359,11 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				if (!hasVolume || (v.State == "" && !headPresent)) && !bound.done && !intentNamed[path.Join(r.keyDir(), entry.GetName())] {
 					// HEAD (or VOLUME and HEAD) was removed (a stock tool
 					// pruning an entry whose needle is missing, or by hand):
-					// its keys would all look unrooted. Refuse the pass rather
-					// than reclaim the volume.
-					return result, fmt.Errorf("chunkstore: volume %s has no HEAD (VOLUME present: %t) while %s/%s is a live binding no intent names; GC refuses (restore HEAD, or delete the volume)", vol, hasVolume, r.keyDir(), entry.GetName())
+					// its keys would all look unrooted. None of this volume's
+					// keys is a candidate in this pass; the other volumes go on.
+					bindings = bindings[:volBindings]
+					result.RefusedVolumes = append(result.RefusedVolumes, GCRefusal{Volume: vol, Reason: refusalReason(vol, hasVolume, path.Join(r.keyDir(), entry.GetName()))})
+					break keys
 				}
 				key, e := url.PathUnescape(entry.GetName())
 				if e != nil {
