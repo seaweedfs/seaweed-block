@@ -216,6 +216,40 @@ func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, dur
 	}
 }
 
+// exitGeometryRefused ends the process with no restart (the shipped units'
+// RestartPreventExitStatus=78): a geometry flag that disagrees with the
+// volume record stays wrong until the operator changes the flag.
+const exitGeometryRefused = 78
+
+// geometryFlagsRefusal compares the geometry flags with the volume record
+// before any local store is created, so a wrong flag never leaves a store of
+// the wrong size behind. It returns the refusal line and its exit status:
+// exitGeometryRefused (78) when the record disagrees or is there but does not
+// decode; exitWorkspaceRetry (75) when the filer could not be read (an
+// unknown, never taken as "absent"); ("", 0) when the record agrees, does
+// not exist yet (the attach
+// check creates it from the flags), or no store is being created (numBlocks
+// 0: an existing store opens with its own geometry).
+func geometryFlagsRefusal(ctx context.Context, cat *chunkstore.Catalog, volumeID string, numBlocks uint64, blockSize uint32) (string, int) {
+	if numBlocks == 0 {
+		return "", 0 // an existing store: the flags are not used
+	}
+	v, ok, err := cat.ReadVolume(ctx, volumeID)
+	if err != nil && chunkstore.CodeOf(err) == chunkstore.CodeRemoteUnavailable {
+		return fmt.Sprintf("blockvolume: the volume record of %s could not be read (%v); no local store was created; retrying", volumeID, err), exitWorkspaceRetry
+	}
+	if err != nil {
+		// A record that is there but does not decode stays that way: a
+		// permanent refusal, not a retry loop.
+		return fmt.Sprintf("blockvolume: the volume record of %s is unreadable (corrupt: %v); no local store was created; restore or recreate the record", volumeID, err), exitGeometryRefused
+	}
+	if !ok || (v.NumBlocks == numBlocks && v.BlockSize == blockSize) {
+		return "", 0
+	}
+	return fmt.Sprintf("blockvolume: geometry_mismatch: --durable-blocks %d --durable-blocksize %d disagree with the volume record of %s (%d blocks of %d bytes); no local store was created; start it with the record's geometry",
+		numBlocks, blockSize, volumeID, v.NumBlocks, v.BlockSize), exitGeometryRefused
+}
+
 // chunkHolder is how this host names itself in HEAD: <server-id>/<replica-id>
 // (B9 W2 appendix). The replica id alone is not enough:
 // two hosts that both serve replica r1 would look like the same holder

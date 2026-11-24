@@ -1,0 +1,505 @@
+//go:build subprocess && chunkstore_integration
+
+package main_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// HEAD size against volume size (V1-SPEC r2.94), informative: it measures,
+// it does not judge. Runs only with HEADSZ_RUN=1, on a host booked for it.
+//
+// For each size in HEADSZ_SIZES (default 10G,100G,1T): one volume of that
+// size; one 4 KiB block written in every 1 GiB segment; a snapshot (cut 1);
+// then HEADSZ_CHANGE_CUTS snapshots (default 3), each after changing one
+// block. Per cut it records the HEAD entry's byte size as the filer returns
+// it, the number of segments HEAD lists, the cut's total and barrier time,
+// and the chunks and bytes the cut uploaded. A size the durable root has no
+// room for is recorded as refused by the blockvolume's headroom check, never
+// shrunk or bypassed. The JSON report goes to HEADSZ_REPORT.
+//
+// HEADSZ_SNAPSHOT_TIMEOUT is the snapshot command's --timeout (default 60s;
+// the server caps it at its own operation deadline). HEADSZ_ATTEMPTS (default
+// 1) retries a failed cut with the same request id; every attempt is
+// recorded with the volume's chunk-key count in the filer after it, so a
+// retry shows whether an earlier attempt's uploads were kept. A cut that never
+// completes is recorded as cut_not_completed, not failed.
+//
+// The filer runs on its default store (leveldb2) under the test's directory;
+// a filer.toml anywhere weed would read one fails the test before any start,
+// so the store measured is the one named in the report.
+
+const headSegmentBytes = 1 << 30
+
+// headSzAttempt is one snapshot command for one cut: a failed attempt is
+// resent with the same request id, as the command's refusal says.
+type headSzAttempt struct {
+	Attempt        int     `json:"attempt"`
+	ExitCode       int     `json:"exit_code"`
+	Code           string  `json:"code,omitempty"`
+	Message        string  `json:"message,omitempty"`
+	WallMs         float64 `json:"wall_ms"`
+	KeysAfter      int     `json:"chunk_keys_after"`
+	LastCutTotalMs float64 `json:"last_cut_total_ms"`
+	LastCutChunks  int     `json:"last_cut_uploaded_chunks"`
+	// DirtyAfter is the volume's DirtyChunks (capture candidates) after the
+	// attempt: on a failed attempt it shows whether the work done was kept.
+	DirtyAfter int `json:"dirty_chunks_after"`
+	// ChunkStatusAfter is the volume's whole chunk section of its durable
+	// status after the attempt, as served (every counter and the full
+	// LastCut), so a term no named field covers can still be read.
+	ChunkStatusAfter json.RawMessage `json:"chunk_status_after,omitempty"`
+	// the volume's last SUCCESSFUL cut's candidates, unchanged chunks and
+	// payload (streaming, copy, upload) wall time, as its durable status
+	// reports them (a failed attempt does not change them)
+	LastCutCandidates int     `json:"last_cut_candidate_chunks"`
+	LastCutUnchanged  int     `json:"last_cut_unchanged_chunks"`
+	LastCutPayloadMs  float64 `json:"last_cut_payload_ms"`
+}
+
+type headSzCut struct {
+	Cut            int             `json:"cut"`
+	Completed      bool            `json:"completed"`
+	Attempts       []headSzAttempt `json:"attempts"`
+	ChangedBlocks  int             `json:"changed_blocks"`
+	HeadBytes      int             `json:"head_bytes"`
+	HeadSegments   int             `json:"head_segments"`
+	CutTotalMs     float64         `json:"cut_total_ms"`
+	BarrierPauseMs float64         `json:"cut_barrier_pause_ms"`
+	UploadedChunks int             `json:"uploaded_chunks"`
+	UploadedBytes  int64           `json:"uploaded_bytes"`
+	SnapshotMs     float64         `json:"snapshot_command_ms"`
+}
+
+type headSzSize struct {
+	Size     string  `json:"size"`
+	Bytes    uint64  `json:"bytes"`
+	Segments int     `json:"segments"`
+	Result   string  `json:"result"` // measured | refused_headroom | cut_not_completed
+	Refusal  string  `json:"refusal,omitempty"`
+	WriteMs  float64 `json:"write_ms,omitempty"`
+	// DirtyBeforeCut1 is the volume's DirtyChunks (its capture candidates)
+	// from the durable status right before the first cut.
+	DirtyBeforeCut1 int         `json:"dirty_chunks_before_cut1"`
+	Cuts            []headSzCut `json:"cuts,omitempty"`
+	HeadPerGiB      float64     `json:"head_bytes_per_gib,omitempty"`
+}
+
+type headSzReport struct {
+	StartedAt  time.Time    `json:"started_at"`
+	FilerStore string       `json:"filer_store"`
+	ChunkPath  string       `json:"chunk_path"`
+	Sizes      []headSzSize `json:"sizes"`
+}
+
+func headSzParse(t *testing.T, s string) uint64 {
+	t.Helper()
+	s = strings.ToUpper(strings.TrimSpace(s))
+	mul := map[byte]uint64{'G': 1 << 30, 'T': 1 << 40}[s[len(s)-1]]
+	n, err := strconv.ParseUint(s[:len(s)-1], 10, 64)
+	if mul == 0 || err != nil || n == 0 {
+		t.Fatalf("HEADSZ_SIZES: %q is not <n>G or <n>T", s)
+	}
+	return n * mul
+}
+
+// headSzAmbientFilerToml fails the test when weed could read a filer.toml
+// other than none: its working directory (the cluster dir) and the standard
+// configuration directories.
+func headSzAmbientFilerToml(t *testing.T, clusterDir string) {
+	t.Helper()
+	home, _ := os.UserHomeDir()
+	for _, d := range []string{clusterDir, filepath.Join(home, ".seaweedfs"), "/usr/local/etc/seaweedfs", "/etc/seaweedfs"} {
+		if _, err := os.Stat(filepath.Join(d, "filer.toml")); err == nil {
+			t.Fatalf("a filer.toml in %s would replace the default filer store: remove it or run elsewhere", d)
+		}
+	}
+}
+
+func TestHeadSizeAgainstVolumeSize(t *testing.T) {
+	if os.Getenv("HEADSZ_RUN") != "1" {
+		t.Skip("HEADSZ_RUN=1 not set")
+	}
+	sizes := strings.Split(os.Getenv("HEADSZ_SIZES"), ",")
+	if os.Getenv("HEADSZ_SIZES") == "" {
+		sizes = []string{"10G", "100G", "1T"}
+	}
+	changeCuts := 3
+	if v := os.Getenv("HEADSZ_CHANGE_CUTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			t.Fatalf("HEADSZ_CHANGE_CUTS=%q", v)
+		}
+		changeCuts = n
+	}
+	cfg := headSzConfig{snapshotTimeout: "60s", attempts: 1}
+	if v := os.Getenv("HEADSZ_SNAPSHOT_TIMEOUT"); v != "" {
+		if _, err := time.ParseDuration(v); err != nil {
+			t.Fatalf("HEADSZ_SNAPSHOT_TIMEOUT=%q: %v", v, err)
+		}
+		cfg.snapshotTimeout = v
+	}
+	if v := os.Getenv("HEADSZ_ATTEMPTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			t.Fatalf("HEADSZ_ATTEMPTS=%q", v)
+		}
+		cfg.attempts = n
+	}
+	h := newPlannedHandoffHarness(t)
+	clusterDir := filepath.Join(h.dir, "weed")
+	if err := os.MkdirAll(clusterDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	headSzAmbientFilerToml(t, clusterDir)
+	env := &handoffEnv{h: h, cluster: startWorkspaceWeedWith(t, clusterDir, w4WeedOpts{VolumeSizeLimitMB: 1024, VolumeMax: 64}),
+		chunkPath: fmt.Sprintf("/headsz-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
+	rep := &headSzReport{StartedAt: time.Now().UTC(), ChunkPath: env.chunkPath,
+		FilerStore: "leveldb2 (weed filer default store), -defaultStoreDir=" + filepath.Join(clusterDir, "f") + ", no filer.toml"}
+	defer func() {
+		if p := os.Getenv("HEADSZ_REPORT"); p != "" {
+			b, _ := json.MarshalIndent(rep, "", " ")
+			if err := os.WriteFile(p, append(b, '\n'), 0o644); err != nil {
+				t.Errorf("HEADSZ_REPORT: %v", err)
+			}
+		}
+	}()
+
+	// one cluster spec with every size's volume; one replica each on s1
+	var vols strings.Builder
+	for i, s := range sizes {
+		b := headSzParse(t, s)
+		id := "h" + strings.ToLower(strings.TrimSpace(s))
+		env.hosts[id] = bvHost{id: id, server: "s1", replica: fmt.Sprintf("r%d", i+1), volume: id, root: filepath.Join(h.dir, "vol-"+id),
+			data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t)}
+		fmt.Fprintf(&vols, "  - id: %s\n    size_bytes: %d\n    replication_factor: 1\n    placements:\n      - server_id: s1\n        replica_id: r%d\n", id, b, i+1)
+	}
+	spec := filepath.Join(h.dir, "cluster-spec.yaml")
+	if err := os.WriteFile(spec, []byte(fmt.Sprintf("nodes:\n  - server_id: s1\n    data_addr: %s\n    ctrl_addr: %s\nvolumes:\n%s", h.dataAddr, h.ctrlAddr, vols.String())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mstate := filepath.Join(h.dir, "master")
+	master := h.start(t, "blockmaster", h.master, "--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
+		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
+		"--workspace-rpc", "--workspace-head-base-url", "http://"+env.cluster.filerHTTP+env.chunkPath)
+	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
+
+	for _, s := range sizes {
+		rep.Sizes = append(rep.Sizes, headSzOne(t, env, cfg, s, changeCuts))
+	}
+}
+
+// headSzConfig: HEADSZ_SNAPSHOT_TIMEOUT is the snapshot command's --timeout
+// (the server caps it at its own operation deadline); HEADSZ_ATTEMPTS is how
+// many times one cut is tried before it is recorded as not completed.
+type headSzConfig struct {
+	snapshotTimeout string
+	attempts        int
+}
+
+// headSzOne measures one size; its blockvolume is stopped at the end.
+func headSzOne(t *testing.T, env *handoffEnv, cfg headSzConfig, size string, changeCuts int) headSzSize {
+	t.Helper()
+	bytes := headSzParse(t, size)
+	id := "h" + strings.ToLower(strings.TrimSpace(size))
+	b := env.hosts[id]
+	row := headSzSize{Size: strings.TrimSpace(size), Bytes: bytes, Segments: int((bytes + headSegmentBytes - 1) / headSegmentBytes)}
+	env.volExtra = []string{"--durable-blocks", strconv.FormatUint(bytes/4096, 10), "--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
+	d := env.h.start(t, "blockvolume-"+id, env.h.volume, env.volArgsFor(b)...)
+	primary := fmt.Sprintf("blockvolume: volume %s adopted as PRIMARY at %s@", b.volume, b.replica)
+	end := time.Now().Add(120 * time.Second)
+	for !d.has(primary) {
+		select {
+		case <-d.done:
+			if l := d.line("bytes free"); l != "" {
+				row.Result, row.Refusal = "refused_headroom", strings.TrimSpace(l)
+				return row
+			}
+			t.Fatalf("blockvolume %s exited before it adopted its volume: %v", id, d.err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		if time.Now().After(end) {
+			t.Fatalf("blockvolume %s did not adopt its volume in 120 s", id)
+		}
+	}
+	defer d.term(t, 60*time.Second)
+	poll(t, 60*time.Second, id+" never reported its frontend ready", func() bool { return volumeFrontendReady(b.status, b.volume) })
+
+	c := dialNVMe(t, b.nvme, plannedHandoffNQN)
+	write := func(lba uint64, tag string) {
+		_ = c.io.SetDeadline(time.Now().Add(60 * time.Second))
+		c.write(t, lba, f1Block(id, 0, tag, lba))
+	}
+	start := time.Now()
+	for seg := 0; seg < row.Segments; seg++ {
+		write(uint64(seg)*headSegmentBytes/4096, "seg")
+	}
+	_ = c.io.SetDeadline(time.Now().Add(60 * time.Second))
+	c.flush(t)
+	row.WriteMs = ms(time.Since(start))
+	row.DirtyBeforeCut1 = headSzDirty(t, b)
+	for cut := 1; cut <= 1+changeCuts; cut++ {
+		changed := 0
+		if cut > 1 {
+			write(uint64(cut), fmt.Sprintf("change%d", cut))
+			_ = c.io.SetDeadline(time.Now().Add(60 * time.Second))
+			c.flush(t)
+			changed = 1
+		}
+		r := headSzCutOnce(t, env, cfg, b, cut, changed)
+		row.Cuts = append(row.Cuts, r)
+		if !r.Completed {
+			row.Result = "cut_not_completed"
+			return row
+		}
+	}
+	row.Result = "measured"
+	if row.Segments > 0 && len(row.Cuts) > 0 {
+		row.HeadPerGiB = float64(row.Cuts[0].HeadBytes) / float64(row.Segments)
+	}
+	return row
+}
+
+// headSzCutOnce takes one snapshot, retried with the same request id up to
+// cfg.attempts times, and reads what it wrote: HEAD from the filer, the cut
+// from the volume's durable status. After every attempt it counts the
+// volume's chunk keys in the filer, so a retry shows whether the chunks an
+// earlier attempt uploaded are still there.
+func headSzCutOnce(t *testing.T, env *handoffEnv, cfg headSzConfig, b bvHost, cut, changed int) headSzCut {
+	t.Helper()
+	r := headSzCut{Cut: cut, ChangedBlocks: changed}
+	start := time.Now()
+	for a := 1; a <= cfg.attempts; a++ {
+		as := time.Now()
+		out, code := headSzRun(t, env, cfg.snapshotTimeout, "ops", "chunk", "snapshot", "--volume", b.volume, "--status-addr", b.status, "--timeout", cfg.snapshotTimeout,
+			"--name", fmt.Sprintf("headsz-%d", cut), "--request-id", fmt.Sprintf("headsz-%s-%d", b.volume, cut))
+		at := headSzAttempt{Attempt: a, ExitCode: code, WallMs: ms(time.Since(as)), KeysAfter: headSzCountDir(t, env, env.chunkPath+"/"+b.volume+"/keys")}
+		if code != 0 {
+			var e struct{ Code, Message string }
+			if json.Unmarshal([]byte(strings.TrimSpace(out)), &e) == nil {
+				at.Code, at.Message = e.Code, e.Message
+			} else {
+				at.Message = strings.TrimSpace(out)
+			}
+		}
+		at.DirtyAfter = headSzDirty(t, b)
+		at.ChunkStatusAfter = headSzChunkStatus(t, b)
+		lc := headSzLastCut(t, b)
+		at.LastCutTotalMs, at.LastCutChunks = float64(lc.TotalNs)/1e6, lc.UploadedChunks
+		at.LastCutCandidates, at.LastCutUnchanged, at.LastCutPayloadMs = lc.CandidateChunks, lc.UnchangedChunks, float64(lc.PayloadNs)/1e6
+		r.Attempts = append(r.Attempts, at)
+		if code == 0 {
+			r.Completed = true
+			break
+		}
+	}
+	r.SnapshotMs = ms(time.Since(start))
+	if !r.Completed {
+		return r
+	}
+	var st struct {
+		Volumes []struct {
+			VolumeID string
+			Chunk    *struct {
+				Stats struct {
+					LastCut *struct {
+						TotalNs, BarrierPauseNs int64
+						UploadedChunks          int
+						UploadedBytes           int64
+					}
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal(headSzGet(t, "http://"+b.status+"/status/durable?volume="+b.volume, 4<<20), &st); err != nil {
+		t.Fatalf("durable status of %s: %v", b.volume, err)
+	}
+	for _, s := range st.Volumes {
+		if s.VolumeID == b.volume && s.Chunk != nil && s.Chunk.Stats.LastCut != nil {
+			l := s.Chunk.Stats.LastCut
+			r.CutTotalMs, r.BarrierPauseMs = float64(l.TotalNs)/1e6, float64(l.BarrierPauseNs)/1e6
+			r.UploadedChunks, r.UploadedBytes = l.UploadedChunks, l.UploadedBytes
+		}
+	}
+	head := headSzGet(t, "http://"+env.cluster.filerHTTP+env.chunkPath+"/"+b.volume+"/HEAD", 256<<20)
+	r.HeadBytes = len(head)
+	var doc struct {
+		Segments map[string]json.RawMessage `json:"segments"`
+	}
+	if err := json.Unmarshal(head, &doc); err != nil {
+		t.Fatalf("HEAD of %s is not JSON (%d bytes): %v", b.volume, len(head), err)
+	}
+	r.HeadSegments = len(doc.Segments)
+	return r
+}
+
+// headSzLastCutStats is the part of the volume's last cut an attempt records.
+type headSzLastCutStats struct {
+	TotalNs, PayloadNs                               int64
+	UploadedChunks, CandidateChunks, UnchangedChunks int
+}
+
+// headSzLastCut reads the volume's last cut from its durable status; zeros
+// when there is no last cut yet.
+func headSzLastCut(t *testing.T, b bvHost) headSzLastCutStats {
+	t.Helper()
+	var st struct {
+		Volumes []struct {
+			VolumeID string
+			Chunk    *struct {
+				Stats struct {
+					LastCut *headSzLastCutStats
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal(headSzGet(t, "http://"+b.status+"/status/durable?volume="+b.volume, 4<<20), &st); err != nil {
+		t.Fatalf("durable status of %s: %v", b.volume, err)
+	}
+	for _, s := range st.Volumes {
+		if s.VolumeID == b.volume && s.Chunk != nil && s.Chunk.Stats.LastCut != nil {
+			return *s.Chunk.Stats.LastCut
+		}
+	}
+	return headSzLastCutStats{}
+}
+
+// headSzCountDir counts the entries of one filer directory by its JSON
+// listing; a directory that does not exist yet counts 0.
+func headSzCountDir(t *testing.T, env *handoffEnv, dir string) int {
+	t.Helper()
+	c := &http.Client{Timeout: 30 * time.Second}
+	n, last := 0, ""
+	for {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+env.cluster.filerHTTP+dir+"/?limit=1000&lastFileName="+url.QueryEscape(last), nil)
+		req.Header.Set("Accept", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatalf("filer list %s: %v", dir, err)
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			return n
+		}
+		var page struct {
+			Entries               []struct{ FullPath string }
+			ShouldDisplayLoadMore bool
+			LastFileName          string
+		}
+		err = json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("filer list %s: %v", dir, err)
+		}
+		n += len(page.Entries)
+		if !page.ShouldDisplayLoadMore || page.LastFileName == "" {
+			return n
+		}
+		last = page.LastFileName
+	}
+}
+
+// headSzRun runs sw-block with its own bound, the snapshot command's
+// --timeout plus a minute, so the server's operation deadline answers first
+// (the shared runner's fixed 150 s would kill a longer cut). A command that
+// still has to be killed returns exit code -1 and its output, a recorded
+// attempt, never a test failure.
+func headSzRun(t *testing.T, env *handoffEnv, timeout string, args ...string) (string, int) {
+	t.Helper()
+	d, err := time.ParseDuration(timeout)
+	if err != nil {
+		t.Fatalf("timeout %q: %v", timeout, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d+time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, env.h.cli, args...)
+	cmd.Dir = env.h.dir
+	cmd.WaitDelay = 5 * time.Second
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err = cmd.Run()
+	env.h.logCommand(args, stdout.String(), stderr.String(), err)
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return stdout.String(), 0
+	case errors.As(err, &exit) && ctx.Err() == nil:
+		return stdout.String(), exit.ExitCode()
+	case ctx.Err() != nil:
+		return "killed after " + (d + time.Minute).String() + ": " + strings.TrimSpace(stdout.String()+" "+stderr.String()), -1
+	}
+	t.Fatalf("sw-block %q: %v\nstdout: %s\nstderr: %s", args, err, stdout.String(), stderr.String())
+	return "", -1
+}
+
+// headSzChunkStatus returns the volume's chunk section of its durable status
+// as served, unparsed; nil when there is none.
+func headSzChunkStatus(t *testing.T, b bvHost) json.RawMessage {
+	t.Helper()
+	var st struct {
+		Volumes []struct {
+			VolumeID string
+			Chunk    json.RawMessage
+		}
+	}
+	if err := json.Unmarshal(headSzGet(t, "http://"+b.status+"/status/durable?volume="+b.volume, 4<<20), &st); err != nil {
+		t.Fatalf("durable status of %s: %v", b.volume, err)
+	}
+	for _, s := range st.Volumes {
+		if s.VolumeID == b.volume && len(s.Chunk) > 0 && string(s.Chunk) != "null" {
+			return s.Chunk
+		}
+	}
+	return nil
+}
+
+// headSzDirty reads the volume's DirtyChunks (its capture candidates) from
+// its durable status; -1 when the status has no chunk section.
+func headSzDirty(t *testing.T, b bvHost) int {
+	t.Helper()
+	var st struct {
+		Volumes []struct {
+			VolumeID string
+			Chunk    *struct {
+				Stats struct{ DirtyChunks int }
+			}
+		}
+	}
+	if err := json.Unmarshal(headSzGet(t, "http://"+b.status+"/status/durable?volume="+b.volume, 4<<20), &st); err != nil {
+		t.Fatalf("durable status of %s: %v", b.volume, err)
+	}
+	for _, s := range st.Volumes {
+		if s.VolumeID == b.volume && s.Chunk != nil {
+			return s.Chunk.Stats.DirtyChunks
+		}
+	}
+	return -1
+}
+
+func headSzGet(t *testing.T, u string, limit int64) []byte {
+	t.Helper()
+	c := &http.Client{Timeout: 30 * time.Second}
+	resp, err := c.Get(u)
+	if err != nil {
+		t.Fatalf("GET %s: %v", u, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d err %v", u, resp.StatusCode, err)
+	}
+	return body
+}
