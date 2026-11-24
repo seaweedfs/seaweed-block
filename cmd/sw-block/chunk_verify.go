@@ -31,6 +31,7 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.StringVar(&snapshot, "snapshot", "", "also check this snapshot")
 	fs.BoolVar(&allSnapshots, "all-snapshots", false, "also check every snapshot")
 	fs.StringVar(&depth, "depth", string(chunkstore.VerifyBindings), "meta, bindings or data (data reads every chunk once)")
@@ -70,7 +71,7 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 	// report false findings.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cat, closeFn, exit := chunkCatalog("verify", filer, base, true, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("verify", filer, base, place, true, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}

@@ -15,7 +15,7 @@ func TestOpsChunk_Show(t *testing.T) {
 	ctx := context.Background()
 	mem := newManifestFixtureFiler(chunkstore.NewMemFiler())
 	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	t.Cleanup(func() { dialChunkFiler = prev })
 	cat, err := chunkstore.NewCatalog(mem, defaultChunkPathCLI)
 	if err != nil {

@@ -23,7 +23,7 @@ func verifyCLIFixture(t *testing.T) (*manifestFixtureFiler, storage.ChunkHead) {
 	ctx := context.Background()
 	mem := newManifestFixtureFiler(chunkstore.NewMemFiler())
 	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
+	dialChunkFiler = func(chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) {
 		return mem, func() error { return nil }, nil
 	}
 	t.Cleanup(func() { dialChunkFiler = prev })
@@ -160,7 +160,7 @@ func TestOpsChunk_VerifyReadErrorExits3(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := unreadableStore{mem, e.GetChunks()[0].GetFileId()}
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
+	dialChunkFiler = func(chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) {
 		return store, func() error { return nil }, nil
 	}
 	code, out, errs := runChunk("verify", "--volume", "v1", "--chunk-filer", "filer:18888", "--depth", "data", "--timeout", "10s")
@@ -178,7 +178,7 @@ func TestOpsChunk_VerifyRunsTheSingleFilerCheck(t *testing.T) {
 	mem := chunkstore.NewMemFiler()
 	prevDial, prevCheck := dialChunkFiler, checkSingleFiler
 	t.Cleanup(func() { dialChunkFiler, checkSingleFiler = prevDial, prevCheck })
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	checks := 0
 	checkSingleFiler = func(context.Context, chunkstore.Filer) error {
 		checks++
@@ -208,7 +208,7 @@ func TestOpsChunk_VerifyStartCheckIsBoundedByTheTimeout(t *testing.T) {
 	mem := chunkstore.NewMemFiler()
 	prevDial, prevCheck := dialChunkFiler, checkSingleFiler
 	t.Cleanup(func() { dialChunkFiler, checkSingleFiler = prevDial, prevCheck })
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	checkSingleFiler = func(ctx context.Context, _ chunkstore.Filer) error {
 		<-ctx.Done()
 		return ctx.Err()

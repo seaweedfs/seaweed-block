@@ -24,6 +24,7 @@ func chunkUsage(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.DurationVar(&timeout, "timeout", 60*time.Second, "filer timeout")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
@@ -31,7 +32,7 @@ func chunkUsage(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("usage", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("usage", filer, base, false, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("usage", filer, base, place, false, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -57,6 +58,7 @@ func chunkRetain(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.DurationVar(&timeout, "timeout", 5*time.Minute, "bound for this pass")
 	fs.BoolVar(&dryRun, "dry-run", false, "list what would be deleted; write nothing")
 	fs.BoolVar(&setPolicy, "set-policy", false, "store the --keep-* policy on the volume instead of applying it")
@@ -74,7 +76,7 @@ func chunkRetain(args []string, stdout, stderr io.Writer) int {
 	if setPolicy && dryRun {
 		return chunkFail("retain", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--set-policy and --dry-run do not combine", false)
 	}
-	cat, closeFn, exit := chunkCatalog("retain", filer, base, !dryRun, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("retain", filer, base, place, !dryRun, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}

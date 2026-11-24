@@ -38,6 +38,7 @@ func chunkRestore(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&requestID, "request-id", "", "idempotency id for the create; generated and printed when empty (reuse it to retry)")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port (create a restore)")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.DurationVar(&timeout, "timeout", 6*time.Minute, "filer timeout for the create")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
@@ -62,7 +63,7 @@ func chunkRestore(args []string, stdout, stderr io.Writer) int {
 		requestID = newRequestID()
 		fmt.Fprintf(stderr, "sw-block ops chunk restore: request id %s (reuse it to retry)\n", requestID)
 	}
-	cat, closeFn, exit := chunkCatalog("restore", filer, base, true, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("restore", filer, base, place, true, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}

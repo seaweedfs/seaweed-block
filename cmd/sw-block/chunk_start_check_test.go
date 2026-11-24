@@ -18,7 +18,7 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 	mem := chunkstore.NewMemFiler()
 	prevDial, prevCheck := dialChunkFiler, checkSingleFiler
 	t.Cleanup(func() { dialChunkFiler, checkSingleFiler = prevDial, prevCheck })
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	checks := 0
 	checkSingleFiler = func(context.Context, chunkstore.Filer) error {
 		checks++
@@ -67,7 +67,7 @@ func TestOpsChunk_StartCheckIsBoundedByTheTimeout(t *testing.T) {
 	mem := chunkstore.NewMemFiler()
 	prevDial, prevCheck := dialChunkFiler, checkSingleFiler
 	t.Cleanup(func() { dialChunkFiler, checkSingleFiler = prevDial, prevCheck })
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
+	dialChunkFiler = func(chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	checkSingleFiler = func(ctx context.Context, _ chunkstore.Filer) error {
 		<-ctx.Done()
 		return ctx.Err()

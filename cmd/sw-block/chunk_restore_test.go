@@ -51,7 +51,7 @@ func restoreSource(t *testing.T, base string) (*gcCLIStore, *chunkstore.Catalog)
 	store := newGCCLIStore()
 	old := dialChunkFiler
 	t.Cleanup(func() { dialChunkFiler = old })
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
+	dialChunkFiler = func(chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
 	cat, err := chunkstore.NewCatalog(store, base)
 	if err != nil {
 		t.Fatal(err)

@@ -32,6 +32,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id (or the first argument)")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address (admits the delete)")
 	fs.DurationVar(&timeout, "timeout", time.Minute, "bound for this delete")
 	if err := fs.Parse(args); err != nil {
@@ -45,7 +46,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" || master == "" || requestID == "" || timeout <= 0 {
 		return chunkFail("volume-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "a volume, --master and --request-id are required; --timeout must be positive", false)
 	}
-	cat, closeFn, exit := chunkCatalog("volume-delete", filer, base, true, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("volume-delete", filer, base, place, true, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}

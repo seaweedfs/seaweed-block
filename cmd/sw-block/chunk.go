@@ -36,12 +36,31 @@ const (
 )
 
 // dialChunkFiler opens the filer for the direct commands; tests replace it.
-var dialChunkFiler = func(addr string) (chunkstore.Filer, func() error, error) {
-	c, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{FilerGRPC: addr})
+var dialChunkFiler = func(cfg chunkstore.SWFSConfig) (chunkstore.Filer, func() error, error) {
+	c, err := chunkstore.DialSWFS(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 	return c, c.Close, nil
+}
+
+// chunkPlacement is where a command's uploads (record payloads over the
+// inline threshold) go: the same assign path, collection and replication as
+// blockvolume's, so the operator's filer path rule (fsync, collection)
+// applies to them as to the volume's own.
+type chunkPlacement struct{ collection, replication string }
+
+func chunkPlacementFlags(fs *flag.FlagSet) *chunkPlacement {
+	p := &chunkPlacement{}
+	fs.StringVar(&p.collection, "chunk-collection", "", "collection for needles this command uploads (as blockvolume's --chunk-collection)")
+	fs.StringVar(&p.replication, "chunk-replication", "", "replication for needles this command uploads (as blockvolume's --chunk-replication)")
+	return p
+}
+
+// swfsConfig is the client of filer for chunk base base; the assign path is
+// the base, as blockvolume's.
+func (p *chunkPlacement) swfsConfig(filer, base string) chunkstore.SWFSConfig {
+	return chunkstore.SWFSConfig{FilerGRPC: filer, Collection: p.collection, Replication: p.replication, AssignPath: base}
 }
 
 // checkSingleFiler is the start check of a command that writes chunk
@@ -304,11 +323,11 @@ func chunkDetach(args []string, stdout, stderr io.Writer) int {
 // It returns exit -1 on success, else the exit code after reporting.
 // chunkCatalog dials the filer and opens the catalog; a command that writes
 // (writes) first passes the single-filer start check.
-func chunkCatalog(name, filer, base string, writes bool, timeout time.Duration, stdout, stderr io.Writer) (*chunkstore.Catalog, func() error, int) {
+func chunkCatalog(name, filer, base string, place *chunkPlacement, writes bool, timeout time.Duration, stdout, stderr io.Writer) (*chunkstore.Catalog, func() error, int) {
 	if filer == "" {
 		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer is required", false)
 	}
-	f, closeFn, err := dialChunkFiler(filer)
+	f, closeFn, err := dialChunkFiler(place.swfsConfig(filer, base))
 	if err != nil {
 		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 	}
@@ -404,6 +423,7 @@ func chunkSnapshots(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.StringVar(&prefix, "prefix", "", "only names with this prefix")
 	fs.StringVar(&startAfter, "start-after", "", "list after this name (the previous page's next)")
 	fs.IntVar(&limit, "limit", 0, "page size (0: the default)")
@@ -415,7 +435,7 @@ func chunkSnapshots(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("snapshots", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("snapshots", filer, base, false, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("snapshots", filer, base, place, false, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -436,6 +456,7 @@ func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&name, "name", "", "snapshot name")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "filer timeout")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
@@ -443,7 +464,7 @@ func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" || name == "" {
 		return chunkFail("snapshot-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume and --name are required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("snapshot-delete", filer, base, true, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("snapshot-delete", filer, base, place, true, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -463,6 +484,7 @@ func chunkFork(args []string, stdout, stderr io.Writer) int {
 	labels := labelFlags{}
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.StringVar(&source, "source", "", "source volume id")
 	fs.StringVar(&snapshot, "snapshot", "", "source snapshot name")
 	fs.StringVar(&target, "target", "", "new volume id")
@@ -479,7 +501,7 @@ func chunkFork(args []string, stdout, stderr io.Writer) int {
 		requestID = newRequestID()
 		fmt.Fprintf(stderr, "sw-block ops chunk fork: request id %s (reuse it to retry)\n", requestID)
 	}
-	cat, closeFn, exit := chunkCatalog("fork", filer, base, true, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("fork", filer, base, place, true, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
@@ -500,6 +522,7 @@ func chunkShow(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
+	place := chunkPlacementFlags(fs)
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "filer timeout")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
@@ -507,7 +530,7 @@ func chunkShow(args []string, stdout, stderr io.Writer) int {
 	if volumeID == "" {
 		return chunkFail("show", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
 	}
-	cat, closeFn, exit := chunkCatalog("show", filer, base, false, timeout, stdout, stderr)
+	cat, closeFn, exit := chunkCatalog("show", filer, base, place, false, timeout, stdout, stderr)
 	if exit >= 0 {
 		return exit
 	}
