@@ -132,7 +132,16 @@ func (p *Publisher) RecordWorkspacePlacement(ctx context.Context, volume string,
 
 // RecordWorkspaceDeletion protects reservation release against live or pending
 // authority. A current clean ACK is proof of drain; a lease alone is not.
-func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, pendingPlacement bool, persist func() error) error {
+// RecordWorkspaceDeletion admits a delete of volume (INV-WS-DELETE-NO-LIVE-HOLDER-001)
+// when it has no live holder (TERM-LIVE-HOLDER-001): no line (and no
+// placement that may have queued one), a clean revocation ACK for the line,
+// or a HEAD below the line's epoch (never started). head is HEAD as the
+// caller read it before taking any lock (nil: not read, which refuses a line
+// without an ACK, as before); owner is the line's owner "<server>/<replica>"
+// ("" when unknown), used only to name the refusal. A Sealed HEAD without an
+// ACK keeps the ACK rule. The delete's HEAD compare-and-swap to deleting is
+// the fence against a claim that lands after the read.
+func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, pendingPlacement bool, head *WorkspaceHead, owner string, persist func() error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -142,12 +151,19 @@ func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, 
 	if s != nil && len(s.Moves) > 0 && !s.Moves[len(s.Moves)-1].Issued {
 		return fmt.Errorf("workspace delete: move pending")
 	}
-	if _, line, ok := p.workspaceLineLocked(volume); ok {
-		if s == nil || s.Ack == nil || s.Ack.Epoch != line.info.Epoch || s.Ack.ReplicaID != line.info.ReplicaID {
-			return fmt.Errorf("workspace delete: live authority requires clean revocation ACK: revoke the line with its sealed generation (sw-block ops workspace revoke --epoch E --sealed-gen G) and wait for the recorded ACK, then delete")
+	_, line, ok := p.workspaceLineLocked(volume)
+	var ack *WorkspaceRevokeAck
+	if s != nil {
+		ack = s.Ack
+	}
+	switch v := WorkspaceHolderState(ok, line.info.Epoch, line.info.ReplicaID, owner, ack, head); v {
+	case HolderNoLine:
+		if pendingPlacement {
+			return fmt.Errorf("workspace delete: placement may have queued authority")
 		}
-	} else if pendingPlacement {
-		return fmt.Errorf("workspace delete: placement may have queued authority")
+	case HolderDrained, HolderNeverStarted:
+	default:
+		return fmt.Errorf("workspace delete: live authority requires clean revocation ACK: revoke the line with its sealed generation (sw-block ops workspace revoke --epoch E --sealed-gen G) and wait for the recorded ACK, then delete (holder: %s)", v)
 	}
 	return persist()
 }
