@@ -5,6 +5,7 @@ package main_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"syscall"
@@ -166,4 +167,90 @@ func TestProcedureTLSPlaintextClientIsRefusedWithTheCure(t *testing.T) {
 	if _, _, code := env.h.run(t, env.show...); code != 0 {
 		t.Fatalf("admin show: exit %d", code)
 	}
+}
+
+// fencedHolderThenForcedMove is T6/T7's flow: s1 serves, publishes block 0
+// (seal), writes block 8 after it (unpublished), then lose() takes its
+// certificate away. s1 fences and exits; when operatorFirst, an operator's
+// forced move is refused as not authorized; the admin's forced move is
+// admitted, s2 serves block 0, block 8 is the recorded lost range.
+func fencedHolderThenForcedMove(t *testing.T, env *handoffEnv, lose func(), operatorFirst bool) {
+	t.Helper()
+	must, mustU := fatalOn(t)
+	d := env.start(t, "blockvolume-s1", "s1")
+	e := env.adopt(t, d, "s1")
+	kept := pattern("published-block!")
+	env.writeBlock(t, "s1", 0, kept)
+	g := env.seal(t, "s1", e)
+	l := env.sealedLSN(t, e, g)
+	env.writeBlock(t, "s1", 8, pattern("after-the-seal!!"))
+
+	lose()
+	if err := d.wait(150 * time.Second); err == nil {
+		t.Fatal("s1 exited 0 after losing its certificate; want the fence exit")
+	}
+	if !d.has("workspace lease: fenced volume=v1") {
+		t.Fatalf("s1 exited without a lease fence line (log %s)", d.log)
+	}
+
+	if operatorFirst {
+		admin := env.h.cliEnv
+		env.h.cliEnv = env.tls.cliEnv("operator")
+		b := env.hosts["s2"]
+		args := []string{"ops", "workspace", "force-move", "--master", env.h.masterAddr, "--volume", "v1",
+			"--target-host", b.id, "--target-data", b.data, "--target-ctrl", b.ctrl,
+			"--request-id", "force-by-operator", "--confirm-forced", fmt.Sprintf("v1@%d", e)}
+		poll(t, 120*time.Second, "the forced move preview never admitted (operator)", func() bool {
+			out, _, _ := env.h.run(t, append(args, "--dry-run")...)
+			return previewAdmitted(out)
+		})
+		_, stderr, code := env.h.run(t, args...)
+		if code != 5 || !strings.Contains(stderr, "admin") {
+			t.Fatalf("operator forced move: exit %d, stderr %q; want 5 (not authorized) naming admin", code, stderr)
+		}
+		env.h.cliEnv = admin
+	}
+
+	out := env.forceMove(t, e, "s2", "force-v1-tls")
+	e2 := mustU(forcedEpoch(out, e, "s1", "s2"))
+	if got := mustU(forcedKeptLSN(out)); got != l {
+		t.Fatalf("the forced move kept LSN %d; want the sealed HEAD's %d", got, l)
+	}
+	ranges, _ := env.h.command(t, "ops", "workspace", "lost-range", "--master", env.h.masterAddr, "--volume", "v1")
+	if !strings.Contains(ranges, "range 1 of 1: request force-v1-tls, r1@") {
+		t.Fatalf("lost-range does not show the forced move:\n%s", ranges)
+	}
+	nw := env.start(t, "blockvolume-s2", "s2")
+	if got := env.adopt(t, nw, "s2"); got != e2 {
+		t.Fatalf("s2 adopted at epoch %d; want %d", got, e2)
+	}
+	if !bytes.Equal(env.readBlock(t, "s2", 0), kept) {
+		t.Fatal("the published block does not read back on s2")
+	}
+	must(func() error {
+		if got := env.readBlock(t, "s2", 8); !bytes.Equal(got, make([]byte, 4096)) {
+			return fmt.Errorf("the block written after the seal reads back on s2; it is in the lost range")
+		}
+		return nil
+	}())
+}
+
+// T6: the holder's certificate expires on the master clock while it serves
+// (NotAfter set close in the test CA; no clock is stepped).
+func TestProcedureTLSExpiredHolderCertificate(t *testing.T) {
+	env := startTLSEnv(t, 2, nil, map[string]time.Time{"s1": time.Now().Add(75 * time.Second)})
+	fencedHolderThenForcedMove(t, env, func() {}, false) // the expiry comes by itself
+}
+
+// T7: the holder's line is removed from the role file and blockmaster
+// reloads it (SIGHUP) while the holder serves.
+func TestProcedureTLSRevokedHolderCertificate(t *testing.T) {
+	env := startTLSEnv(t, 2, nil, nil)
+	fencedHolderThenForcedMove(t, env, func() {
+		env.tls.removeRole(t, "s1")
+		if err := env.masterProcess.proc.Signal(syscall.SIGHUP); err != nil {
+			t.Fatal(err)
+		}
+		env.masterProcess.waitLog(t, 10*time.Second, "tls/roles reloaded")
+	}, true)
 }
