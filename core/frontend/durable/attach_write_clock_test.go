@@ -16,7 +16,7 @@ import (
 // Virtual time releases the real provider's held CAS/outcome-resolution hook;
 // the production 3s timer, chunk claim and public Write/Read paths are unchanged.
 func TestAttachWriteBeforeReadinessBudgetSucceeds(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) { attachWriteSchedule(t, 2*time.Second, false) })
+	synctest.Test(t, func(t *testing.T) { attachWriteSchedule(t, time.Second, false) })
 }
 
 func TestAttachWriteAfterReadinessBudgetRefusesWithoutIO(t *testing.T) {
@@ -25,7 +25,7 @@ func TestAttachWriteAfterReadinessBudgetRefusesWithoutIO(t *testing.T) {
 
 func attachWriteSchedule(t *testing.T, readyAt time.Duration, refuse bool) {
 	t.Helper()
-	_, b, _, publishReady := pendingTakeoverReadWithRelease(t, 0)
+	_, b, _, publishReady := pendingTakeoverReadWithRelease(t, -1)
 	old, next := block(0x33), block(0x74)
 	waiting := make(chan struct{}, 1)
 	durable.SetTestBeforeAttachWait(b, func() {

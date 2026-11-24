@@ -32,7 +32,7 @@ func (r *heldTakeoverClaim) GetHead(ctx context.Context) (storage.ChunkHead, err
 	// The permanent-outage case must hold outcome resolution as well as the
 	// CAS reply: a committed CAS with readable HEAD can now settle after the
 	// per-operation deadline. Unbounded diagnostic reads still see the root.
-	if _, bounded := ctx.Deadline(); bounded && r.holdFor == 0 {
+	if _, bounded := ctx.Deadline(); bounded && r.holdFor <= 0 {
 		select {
 		case <-r.claimed:
 			r.resolutionOnce.Do(func() { close(r.resolutionBlocked) })
