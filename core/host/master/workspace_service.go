@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/auth"
 	"strings"
 	"time"
 
@@ -99,6 +100,10 @@ func (s *services) holderMatches(ctx context.Context, volume, replica, server st
 }
 
 func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
+	// Phase 0: the holder's server id is the caller's certificate's id.
+	if err := auth.RequireNode(ctx, q.GetServerId()); err != nil {
+		return nil, err
+	}
 	if err := s.workspaceVolumeForRenewal(q.GetVolumeId()); err != nil {
 		return nil, err
 	}
@@ -130,6 +135,9 @@ func (s *services) RevokeWorkspace(ctx context.Context, q *control.WorkspaceIden
 }
 
 func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.WorkspaceRevocationAck) (*control.WorkspaceEmpty, error) {
+	if err := auth.RequireNode(ctx, q.GetIdentity().GetServerId()); err != nil {
+		return nil, err
+	}
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
 	id := q.GetIdentity()
@@ -203,6 +211,13 @@ func (s *services) logForcedGrant(g *control.WorkspaceGrant, replay bool, postIs
 }
 
 func (s *services) MoveWorkspace(ctx context.Context, q *control.WorkspaceMove) (_ *control.WorkspaceGrant, resultErr error) {
+	// Phase 0: a forced move (it may lose acknowledged writes) needs an
+	// admin; a clean move an operator (the method's rule).
+	if q.GetKind() == "forced" || q.GetForce() {
+		if err := auth.RequireRole(ctx, auth.RoleAdmin); err != nil {
+			return nil, err
+		}
+	}
 	// Remote reads never hold the workspace mutation lock. Re-read every
 	// local precondition below; Publisher checks the expected epoch atomically.
 	// A refusal is logged after the lock is released (deferred first, so it

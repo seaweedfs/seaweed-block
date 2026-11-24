@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/auth"
 	"sync/atomic"
 	"time"
 
@@ -286,6 +287,10 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 	if err := validateHeartbeat(r); err != nil {
 		return nil, err
 	}
+	// Phase 0: a node reports only for its own server id (TERM-CALLER-001).
+	if err := auth.RequireNode(ctx, r.ServerId); err != nil {
+		return nil, err
+	}
 	// Journal isolation: alarm on a durable root sharing the authority
 	// store's file system; under strict isolation refuse it unless the node
 	// already serves volumes (refusing a serving node stops its renewals).
@@ -379,6 +384,10 @@ func lifecycleError(op string, err error) error {
 func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream control.AssignmentService_SubscribeAssignmentsServer) error {
 	if req.VolumeId == "" {
 		return fmt.Errorf("subscribe: volume_id required")
+	}
+	// Phase 0: a node subscribes only as its own server id, for every volume.
+	if err := auth.RequireNode(stream.Context(), req.GetServerId()); err != nil {
+		return err
 	}
 	pub := s.host.boot.Publisher
 	ctx := stream.Context()
@@ -486,6 +495,9 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusRequest) (*control.StatusResponse, error) {
 	if req.VolumeId == "" {
 		return nil, fmt.Errorf("status: volume_id required")
+	}
+	if err := s.requireLineHolderNode(ctx, req.VolumeId); err != nil {
+		return nil, err
 	}
 	pub := s.host.boot.Publisher
 	ctrl := s.host.ctrl

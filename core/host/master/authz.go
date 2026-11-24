@@ -1,10 +1,13 @@
 package master
 
 import (
+	"context"
 	"github.com/seaweedfs/seaweed-block/core/auth"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // masterRules is the authorization table of every blockmaster gRPC method
@@ -59,4 +62,19 @@ func serverAuth(a *auth.Authenticator) link.ServerConfig {
 		Unary:  []grpc.UnaryServerInterceptor{a.UnaryInterceptor(masterRules)},
 		Stream: []grpc.StreamServerInterceptor{a.StreamInterceptor(masterRules)},
 	}
+}
+
+// requireLineHolderNode admits a person (the method's rule already did) or a
+// node whose server id owns vol's published line (the GC epoch pull); any
+// other node is refused.
+func (s *services) requireLineHolderNode(ctx context.Context, vol string) error {
+	p, ok := auth.FromContext(ctx)
+	if !ok || p.Role != auth.RoleNode {
+		return nil
+	}
+	line, published := s.host.Publisher().PublishedAuthorityLine(vol)
+	if published && s.host.workspaceLineOwner(line, vol, line.ReplicaID, line.Epoch) == p.ID {
+		return nil
+	}
+	return status.Errorf(codes.PermissionDenied, "node %s does not hold volume %s's line", p.ID, vol)
 }

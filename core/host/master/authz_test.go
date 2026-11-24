@@ -13,6 +13,7 @@ func TestMasterAuthorizationTableCoversEveryMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.Start()
 	t.Cleanup(func() { closeTestMaster(t, h) })
 	registered := map[string]bool{}
 	for svc, info := range h.grpc.GetServiceInfo() {
