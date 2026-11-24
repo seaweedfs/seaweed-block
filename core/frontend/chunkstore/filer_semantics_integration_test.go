@@ -145,18 +145,28 @@ func TestIntegration_FsckReportsOnlyTrueOrphans(t *testing.T) {
 	time.Sleep(2 * time.Second) // every needle older than the 1 s cutoff
 	cmd := exec.CommandContext(ctx, c.weed, "shell", "-master="+c.master, "-filer="+c.filerHTTP)
 	cmd.Dir = c.dir
-	cmd.Stdin = strings.NewReader("volume.fsck -v -cutoffTimeAgo=1s\n")
+	cmd.Stdin = strings.NewReader("lock\nvolume.fsck -v -cutoffTimeAgo=1s\nunlock\n")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("volume.fsck: %v\n%s", err, out)
 	}
 	report := string(out)
+	// fsck prints an orphan as <collection>:<vid>,<key> with the cookie
+	// zeroed (it reads needle keys from the volume index, not cookies).
+	asFsck := func(fid string) string {
+		_, id, err := canonicalFid(fid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, _, _ := canonicalFid(fmt.Sprintf("%d,%x%08x", id.GetVolumeId(), id.GetFileKey(), 0))
+		return ":" + s + "\n"
+	}
 	for _, fid := range live {
-		if strings.Contains(report, ":"+fid+"\n") {
+		if strings.Contains(report, asFsck(fid)) {
 			t.Errorf("fsck lists live needle %s as an orphan", fid)
 		}
 	}
-	if !strings.Contains(report, ":"+unbound+"\n") {
+	if !strings.Contains(report, asFsck(unbound)) {
 		t.Fatalf("fsck did not list the unbound upload %s (control):\n%s", unbound, report)
 	}
 	t.Logf("fsck report:\n%s", report)
