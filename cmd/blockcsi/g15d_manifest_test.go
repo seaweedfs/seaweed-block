@@ -821,3 +821,25 @@ func g15dReadFile(t *testing.T, parts ...string) string {
 	}
 	return string(raw)
 }
+
+// The node-loss gate checks what this release claims: no automatic promotion
+// while the primary's node is lost, then the same primary serves again.
+func TestNodeLossGateExpectsNoAutomaticPromotion(t *testing.T) {
+	gate := g15dReadFile(t, "testops", "scenarios", "node-loss-survival-rf3-reattach-chain.yaml")
+	demo := g15dReadFile(t, "scripts", "run-alpha-app-demo.sh")
+	for _, want := range []string{"SW_BLOCK_DEMO_EXPECT_NO_AUTO_PROMOTION=1", "failover_status: recovered_same_primary", "auto_promotion_while_node_lost=none"} {
+		if !strings.Contains(gate, want) {
+			t.Fatalf("node-loss gate missing %q", want)
+		}
+	}
+	for _, gone := range []string{"failover_status: promoted\"", "SW_BLOCK_LAUNCHER_EXTERNAL_STATUS", "result=promoted"} {
+		if strings.Contains(gate, gone) {
+			t.Fatalf("node-loss gate still expects %q", gone)
+		}
+	}
+	for _, want := range []string{"SW_BLOCK_DEMO_EXPECT_NO_AUTO_PROMOTION", "failover_status: unexpected_auto_promotion", "failover_status: recovered_same_primary", "kubectl uncordon"} {
+		if !strings.Contains(demo, want) {
+			t.Fatalf("run-alpha-app-demo.sh missing %q", want)
+		}
+	}
+}
