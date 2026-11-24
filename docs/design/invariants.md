@@ -543,7 +543,7 @@ stateDiagram-v2
 
 ## Part B. Invariant ledger
 
-336 rows: 265 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 321 new.
+337 rows: 266 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 322 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -1091,6 +1091,7 @@ Notes:
 | `INV-SNAPK-TXN-INTERRUPT-001` | A snapshot transaction killed at any of its writes (Begin, each object, Commit), before the write or after it applied with its reply lost, never leaves HEAD reaching a missing object, and the restarted holder (roll back, new session, base recomputed from HEAD) ends at the committed image. | M9 idle → snap → idle | `core/frontend/chunkstore/layout` `head.go`, `commit.go` (the transitions above) | `TestSnapshotSession_InterruptAtEveryStep`, `TestReachableMissing_Controls`, `TestAbort_AfterCommitLeavesTheCommit` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-CLAIM-LEASE-001` | A claim takes HEAD only at a newer epoch and only after every older holder's lease has ended (checked after the read, before the update); it voids any open session or cleaning, so the old holder's commit, abort and begin are refused. | M9 any → idle (Claim) | `core/frontend/chunkstore/layout` `claim.go` `RunClaim`, `Head.Claim` | `TestClaim_Closure`, `TestRunClaim_WaitsForTheOldLease`, `TestRunClaim_VoidsTheOldSession`, `TestRunClaim_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-CLEAN-EXCL-001` | A cleaning and a snapshot exclude each other through HEAD's one activity field, so no name is removed while a snapshot is open; a claim voids an open cleaning. | M9 idle → clean → idle | `core/frontend/chunkstore/layout` `clean.go` `Head.BeginClean`, `Head.EndClean` | `TestBeginClean_Closure`, `TestEndClean_Closure`, `TestEndClean_IdleMeansNoActivityRemains`, `TestClean_ExcludesSnapshot`, `TestRunBeginClean_InterruptAtEveryStep`, `TestRunEndClean_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-STALE-HOLDER-001` | Every transition refuses an older epoch of the same server and the same epoch held by another server, in idle, snap and clean; a new transition must be added to the table. | M9 every transition | `core/frontend/chunkstore/layout` `Head.heldBy` and each transition | `TestTransitions_RefuseAStaleHolder` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 
 Notes:
 
