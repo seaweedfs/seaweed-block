@@ -8,11 +8,13 @@ import (
 	"context"
 	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"io"
 	"math/rand"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -126,6 +128,8 @@ func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedClust
 	run("volume", "volume", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+c.master, fmt.Sprintf("-max=%d", o.VolumeMax))
 	run("filer", "filer", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", fp), "-master="+c.master, "-defaultStoreDir="+filepath.Join(dir, "f"))
 	w4WaitTCP(t, c.filerGRPC, 30*time.Second)
+	// blockvolume refuses a chunk path whose storage rule does not set fsync.
+	c.configureFsync(t)
 
 	// Wait until an assign succeeds (volume registered, volumes growable).
 	cl := c.client(t, "/swblock/vols/probe")
@@ -221,4 +225,34 @@ func (c *w4WeedCluster) remote(t *testing.T, root string) *chunkstore.ChunkRemot
 		t.Fatal(err)
 	}
 	return r
+}
+
+// configureFsync sets the filer storage rule every chunk path needs (fsync)
+// on "/", so it covers any --chunk-path a test uses.
+func (c *w4WeedCluster) configureFsync(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		cmd := exec.CommandContext(ctx, c.weed, "shell", "-master="+c.master, "-filer="+c.filerHTTP)
+		cmd.Dir = c.dir
+		cmd.Stdin = strings.NewReader("fs.configure -locationPrefix=/ -fsync -apply\n")
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		cmd.WaitDelay = 2 * time.Second
+		err := cmd.Run()
+		cancel()
+		if err == nil {
+			cl := c.client(t, "/")
+			lctx, lcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err = chunkstore.CheckPathRule(lctx, cl, cl, "/swblock", "")
+			lcancel()
+			if err == nil {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("configure the filer fsync rule: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }

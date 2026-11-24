@@ -1521,10 +1521,11 @@ func (*GetFilerConfigurationRequest) Descriptor() ([]byte, []int) {
 	return file_filer_subset_proto_rawDescGZIP(), []int{20}
 }
 
-// Only the fields the single-filer startup check reads.
+// Only the fields the startup checks read (single filer, chunk path rule).
 type GetFilerConfigurationResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Masters       []string               `protobuf:"bytes,1,rep,name=masters,proto3" json:"masters,omitempty"`
+	DirBuckets    string                 `protobuf:"bytes,5,opt,name=dir_buckets,json=dirBuckets,proto3" json:"dir_buckets,omitempty"`
 	FilerGroup    string                 `protobuf:"bytes,13,opt,name=filer_group,json=filerGroup,proto3" json:"filer_group,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1565,6 +1566,13 @@ func (x *GetFilerConfigurationResponse) GetMasters() []string {
 		return x.Masters
 	}
 	return nil
+}
+
+func (x *GetFilerConfigurationResponse) GetDirBuckets() string {
+	if x != nil {
+		return x.DirBuckets
+	}
+	return ""
 }
 
 func (x *GetFilerConfigurationResponse) GetFilerGroup() string {
@@ -1715,9 +1723,11 @@ const file_filer_subset_proto_rawDesc = "" +
 	"\x11LocationsMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
 	"\x05value\x18\x02 \x01(\v2\x13.filer_pb.LocationsR\x05value:\x028\x01\"\x1e\n" +
-	"\x1cGetFilerConfigurationRequest\"Z\n" +
+	"\x1cGetFilerConfigurationRequest\"{\n" +
 	"\x1dGetFilerConfigurationResponse\x12\x18\n" +
 	"\amasters\x18\x01 \x03(\tR\amasters\x12\x1f\n" +
+	"\vdir_buckets\x18\x05 \x01(\tR\n" +
+	"dirBuckets\x12\x1f\n" +
 	"\vfiler_group\x18\r \x01(\tR\n" +
 	"filerGroup*\xb4\x01\n" +
 	"\n" +

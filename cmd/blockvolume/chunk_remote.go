@@ -177,6 +177,15 @@ func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
 		_ = client.Close()
 		return chunkWiring{}, err
 	}
+	// The chunk path's storage rule: fsync set; no ttl, readOnly or worm;
+	// not under the buckets directory.
+	ruleCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = client.CheckPathRule(ruleCtx, c.path)
+	cancel()
+	if err != nil {
+		_ = client.Close()
+		return chunkWiring{}, err
+	}
 	cat, err := chunkstore.NewCatalog(client, c.path)
 	if err != nil {
 		_ = client.Close()

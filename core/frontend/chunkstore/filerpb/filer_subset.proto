@@ -187,8 +187,9 @@ message LookupVolumeResponse {
 message GetFilerConfigurationRequest {
 }
 
-// Only the fields the single-filer startup check reads.
+// Only the fields the startup checks read (single filer, chunk path rule).
 message GetFilerConfigurationResponse {
     repeated string masters = 1;
+    string dir_buckets = 5;
     string filer_group = 13;
 }

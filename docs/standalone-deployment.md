@@ -224,7 +224,7 @@ with `move target node "s2" is not registered`.
 | `SWB_DEGRADED_PROBE_INTERVAL` | `--degraded-probe-interval` | `0` (off) | Degraded-peer probe interval |
 | `SWB_DEGRADED_PROBE_COOLDOWN_BASE` / `_CAP` | `--degraded-probe-cooldown-base` / `-cap` | `5s` / `60s` | Per-peer probe backoff |
 | `SWB_CHUNK_FILER` | `--chunk-filer` | empty | SeaweedFS filer gRPC address; required with `walstore-chunk` |
-| `SWB_CHUNK_PATH` | `--chunk-path` | `/swblock/chunks` | Filer directory, one directory per volume |
+| `SWB_CHUNK_PATH` | `--chunk-path` | `/swblock/chunks` | Filer directory, one directory per volume. Its filer storage rule must set fsync (e.g. `fs.configure -locationPrefix=/swblock/ -fsync -apply`) and must not set ttl, readOnly or worm, and the path must not be under the filer's buckets directory: blockvolume refuses to start otherwise |
 | `SWB_CHUNK_COLLECTION`, `SWB_CHUNK_REPLICATION` | `--chunk-collection`, `--chunk-replication` | empty (filer default) | Placement of chunk needles; give `sw-block ops chunk` commands the same values (their uploads also use `--chunk-path` as the assign path) |
 | `SWB_CHUNK_CAPTURE_INTERVAL` | `--chunk-capture-interval` | `0` (no timer) | Automatic cut interval, e.g. `15m` |
 | `SWB_CHUNK_SNAPSHOT_SCHEDULE` | `--chunk-snapshot-schedule` | `daily:7` | Scheduled named snapshots: `daily:N` or `weekly:N` (one per period at a per-volume offset, the newest N kept), or `off` |

@@ -16,6 +16,18 @@ import (
 type groupFiler struct {
 	filerpb.UnimplementedSeaweedFilerServer
 	master string
+	conf   string // /etc/seaweedfs/filer.conf
+}
+
+// fsyncConf is the rule the filer writes for fs.configure -locationPrefix=/swblock/ -fsync.
+const fsyncConf = `{"version":1,"locations":[{"locationPrefix":"/swblock/","fsync":true}]}`
+
+func (f *groupFiler) LookupDirectoryEntry(_ context.Context, r *filerpb.LookupDirectoryEntryRequest) (*filerpb.LookupDirectoryEntryResponse, error) {
+	if r.GetDirectory() != "/etc/seaweedfs" || r.GetName() != "filer.conf" {
+		return nil, errors.New("unexpected lookup " + r.GetDirectory() + "/" + r.GetName())
+	}
+	return &filerpb.LookupDirectoryEntryResponse{Entry: &filerpb.Entry{Name: "filer.conf", Content: []byte(f.conf),
+		Attributes: &filerpb.FuseAttributes{FileSize: uint64(len(f.conf))}}}, nil
 }
 
 func (f *groupFiler) GetFilerConfiguration(context.Context, *filerpb.GetFilerConfigurationRequest) (*filerpb.GetFilerConfigurationResponse, error) {
@@ -48,17 +60,20 @@ func serve(t *testing.T, register func(*grpc.Server)) string {
 	return lis.Addr().String()
 }
 
-// blockvolume's chunk wiring runs the single-filer check at startup: the
-// configured filer listed as the one filer passes; a group with a second
-// filer is refused.
+// blockvolume's chunk wiring runs the single-filer check and the chunk path
+// rule check at startup: the configured filer listed as the one filer, with
+// an fsync rule on the chunk path, passes; a group with a second filer is
+// refused, and so is a chunk path whose rule does not set fsync.
 func TestChunkWiringRefusesAMultiFilerGroup(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		other []string
-		ok    bool
+		conf  string
+		want  error // nil passes
 	}{
-		{"one filer", nil, true},
-		{"two filers", []string{"10.0.0.2:8888"}, false},
+		{"one filer", nil, fsyncConf, nil},
+		{"two filers", []string{"10.0.0.2:8888"}, fsyncConf, chunkstore.ErrNotSingleFiler},
+		{"no fsync rule", nil, `{"version":1,"locations":[{"locationPrefix":"/swblock/","collection":"c"}]}`, chunkstore.ErrPathRule},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -73,19 +88,19 @@ func TestChunkWiringRefusesAMultiFilerGroup(t *testing.T) {
 			})
 			_, mport, _ := net.SplitHostPort(m)
 			srv := grpc.NewServer()
-			filerpb.RegisterSeaweedFilerServer(srv, &groupFiler{master: "127.0.0.1:9333." + mport})
+			filerpb.RegisterSeaweedFilerServer(srv, &groupFiler{master: "127.0.0.1:9333." + mport, conf: c.conf})
 			go func() { _ = srv.Serve(lis) }()
 			t.Cleanup(srv.Stop)
 			w, err := newChunkWiring(chunkFlags{filer: filer, path: defaultChunkPath})
-			if c.ok {
+			if c.want == nil {
 				if err != nil {
-					t.Fatalf("one filer refused: %v", err)
+					t.Fatalf("refused: %v", err)
 				}
 				_ = w.close()
 				return
 			}
-			if !errors.Is(err, chunkstore.ErrNotSingleFiler) {
-				t.Fatalf("two filers: %v; want chunkstore.ErrNotSingleFiler", err)
+			if !errors.Is(err, c.want) {
+				t.Fatalf("got %v; want %v", err, c.want)
 			}
 		})
 	}
