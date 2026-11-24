@@ -23,8 +23,9 @@ var (
 
 // CommitRequest is what a snapshot session commits: the image at
 // Position, as a manifest, and optionally a snapshot name for it. Prev is
-// the manifest of HEAD's current root (empty if none) that the session
-// computed what is new against.
+// the manifest of HEAD's current root that the session computed what is
+// new against: empty when HEAD has no current root, and empty also when
+// the current root is that of an empty image.
 type CommitRequest struct {
 	Session  string
 	Prev     map[uint64]Ref
@@ -113,16 +114,22 @@ func RunCommit(ctx context.Context, st HeadStore, look Lookup, volRoot, vol stri
 		if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot); err != nil || !changed {
 			return next, changed, err // refused, or already applied: no lookups
 		}
-		var base *RootName
-		if len(req.Prev) > 0 {
-			rn, _, err := rootOf(req.Prev)
+		// The base is HEAD's current root. Before any commit there is none
+		// and the previous manifest must be empty; after one (even of an
+		// empty image, which is a real root) the previous manifest must
+		// build to it.
+		if h.Current == nil {
+			if len(req.Prev) > 0 {
+				return Head{}, false, ErrStaleBase
+			}
+		} else {
+			base, _, err := rootOf(req.Prev)
 			if err != nil {
 				return Head{}, false, err
 			}
-			base = &rn
-		}
-		if (base == nil) != (h.Current == nil) || base != nil && *base != *h.Current {
-			return Head{}, false, ErrStaleBase
+			if base != *h.Current {
+				return Head{}, false, ErrStaleBase
+			}
 		}
 		missing, err := MissingOwn(ctx, look, volRoot, vol, newOwn(vol, req.Prev, req.Next))
 		if err != nil {

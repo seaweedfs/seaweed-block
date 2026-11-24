@@ -200,3 +200,69 @@ func TestRunCommit_InterruptAtEveryStep(t *testing.T) {
 		}
 	})
 }
+
+// An empty image is a real root: after it is published, a commit whose
+// previous manifest is empty builds on it (empty -> written, and empty ->
+// empty); a previous manifest that is not HEAD's current root is still
+// refused.
+func TestRunCommit_AfterAnEmptyPublishedRoot(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeStore{have: map[string]bool{}}
+	prepared(t, f, nil)
+	h := idleHead()
+	st := &memHead{h: &h}
+	if _, err := RunBegin(ctx, st, me, "s0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommit(st, f, CommitRequest{Session: "s0", Snapshot: "empty"}); err != nil {
+		t.Fatal(err)
+	}
+	if st.h.Current == nil {
+		t.Fatal("the empty snapshot did not publish its root")
+	}
+	if _, err := RunBegin(ctx, st, me, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommit(st, f, CommitRequest{Session: "s1", Prev: map[uint64]Ref{}, Position: 1}); err != nil {
+		t.Fatalf("empty -> empty: %v", err)
+	}
+	next := manifest(ref("v1", 1, "x"))
+	prepared(t, f, next)
+	if _, err := RunBegin(ctx, st, me, "s2"); err != nil {
+		t.Fatal(err)
+	}
+	stale := manifest(ref("v1", 9, "z"))
+	if _, err := runCommit(st, f, CommitRequest{Session: "s2", Prev: stale, Next: next, Position: 2}); !errors.Is(err, ErrStaleBase) {
+		t.Fatalf("a non-empty previous manifest over the empty root: %v; want ErrStaleBase", err)
+	}
+	if _, err := runCommit(st, f, CommitRequest{Session: "s2", Next: next, Position: 2, Snapshot: "written"}); err != nil {
+		t.Fatalf("empty -> written: %v", err)
+	}
+	if want, _, _ := rootOf(next); *st.h.Current != want {
+		t.Fatalf("HEAD current %s; want %s", st.h.Current, want)
+	}
+	// Before any commit there is no current root: a non-empty previous
+	// manifest is stale there too.
+	h0 := Head{Gen: 1, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActSnap, Session: "s9"}}
+	if _, err := runCommit(&memHead{h: &h0}, f, CommitRequest{Session: "s9", Prev: next, Next: next, Position: 3}); !errors.Is(err, ErrStaleBase) {
+		t.Fatalf("a previous manifest before any commit: %v; want ErrStaleBase", err)
+	}
+}
+
+// Abort after the session committed succeeds without a write and leaves
+// the commit in place: its success says only that no activity remains.
+func TestAbort_AfterCommitLeavesTheCommit(t *testing.T) {
+	f, h, req := commitFixture(t)
+	st := &memHead{h: &h}
+	if _, err := runCommit(st, f, req); err != nil {
+		t.Fatal(err)
+	}
+	committed := *st.h.Current
+	before := st.updates
+	if _, err := RunAbort(context.Background(), st, me, "s1"); err != nil {
+		t.Fatalf("Abort after the commit: %v", err)
+	}
+	if st.updates != before || *st.h.Current != committed || st.h.Snapshots["hourly"].Root != committed {
+		t.Fatalf("Abort after the commit wrote or changed HEAD: %+v", st.h)
+	}
+}
