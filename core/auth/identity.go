@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -113,6 +114,9 @@ func LoadRoleFile(path string) (*Table, error) {
 type Authenticator struct {
 	table atomic.Pointer[Table]
 	now   func() time.Time
+
+	mu      sync.Mutex
+	changed chan struct{} // closed (and replaced) by every Swap
 }
 
 // NewAuthenticator starts with t; now nil is time.Now.
@@ -120,13 +124,27 @@ func NewAuthenticator(t *Table, now func() time.Time) *Authenticator {
 	if now == nil {
 		now = time.Now
 	}
-	a := &Authenticator{now: now}
+	a := &Authenticator{now: now, changed: make(chan struct{})}
 	a.table.Store(t)
 	return a
 }
 
-// Swap installs t for every later call.
-func (a *Authenticator) Swap(t *Table) { a.table.Store(t) }
+// Swap installs t for every later call, and wakes every open stream to
+// check its caller against it.
+func (a *Authenticator) Swap(t *Table) {
+	a.table.Store(t)
+	a.mu.Lock()
+	close(a.changed)
+	a.changed = make(chan struct{})
+	a.mu.Unlock()
+}
+
+// Changed is closed by the next Swap.
+func (a *Authenticator) Changed() <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.changed
+}
 
 // Reload parses path and installs it; on any error the current table stays.
 func (a *Authenticator) Reload(path string) error {
