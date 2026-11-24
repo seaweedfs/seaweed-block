@@ -55,6 +55,11 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
   A first start whose `--durable-blocks` or `--durable-blocksize` disagrees with the volume record is refused before
   any local store is created: it exits 78 (the unit does not restart it) with a line `geometry_mismatch: --durable-blocks
   ... disagree with the volume record`; correct the flag and start it again.
+  If that first start cannot read the volume record because the filer failed the read, it exits 75 with `the volume
+  record of <vol> could not be read ... no local store was created; retrying` and the unit starts it again. During a long
+  outage the unit can reach its start limit; once the filer answers, run `systemctl reset-failed <unit>` and start it.
+  If the record is there but corrupt, it exits 78 with `the volume record of <vol> is unreadable (corrupt: ...)`: restore
+  or recreate the record, then start it.
   A wrong-size local store left by an earlier release's first start is different: its log repeats `chunk attach check:
   chunkstore: geometry_mismatch` and it exits; waiting or restarting with the right flags does not help. In one sitting: stop the unit first; then check that the volume never served:
   `sw-block ops chunk show --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
@@ -205,6 +210,7 @@ Every command on the pages above, and the test that runs it.
 | A snapshot refused with `host_slot_busy` / `no background slot` while every host slot is held, retried with the same request id | `TestSnapshotLadderF1VolumesOneHost` (`cmd/blockvolume`, `F1_RUN=1`, `F1_HOST_LIMIT_DIR` set, 3 slots; `F1_SLOT_RETRY_SECONDS=0` is its negative control) | binary |
 | Full local disk; full `--host-limit-dir` | `TestProcedureLocalDiskFull` (`cmd/blockvolume`, root, `testdata/diskfull.sh`); what a Linux guest sees: `TestProcedureLocalDiskFullKernelInitiator` (kernel NVMe/TCP host) | binary |
 | A first start with the wrong `--durable-blocks`: refused before any local store is created (exit 78) | `TestWrongGeometryFlagIsRefusedBeforeTheStoreIsCreated` (`cmd/blockvolume`) | binary |
+| A first start over a corrupt volume record: exit 78 before any local store is created; a start once the record is restored | `TestCorruptRecordIsRefusedBeforeTheStoreIsCreated` (`cmd/blockvolume`) | binary |
 | A wrong-size local store left by an earlier release (`geometry_mismatch` at attach): the guard (`sw-block ops chunk show`), removing the local files, a start with the right flags | `TestWrongGeometryCureAsWritten` (`cmd/blockvolume`; the store is planted from a capture of such a run) | binary |
 | SeaweedFS (filer or volume server) down during a cut | `TestProcedureStoreDownDuringACut` (`cmd/blockvolume`) | binary |
 | `blockmaster` refuses a `--workspace-max-clock-skew` whose half does not exceed its fence-exit budget (at or below 10.1 s) | `TestBlockmasterRefusesASkewBoundAtOrBelowTheFenceExit` (`cmd/blockvolume`, tag `subprocess`) | binary |
