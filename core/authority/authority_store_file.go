@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -225,25 +226,28 @@ func (s *FileAuthorityStore) Put(record DurableRecord) error {
 		}
 	}
 
-	// Best-effort fsync the directory so the rename is durable.
-	// On Windows, opening directories as files for fsync is not
-	// supported; skip silently.
-	if d, derr := os.Open(s.dir); derr == nil {
-		syncErr := d.Sync()
-		if f := dirSyncFault.Load(); f != nil {
-			syncErr = (*f)()
-		}
-		closeErr := d.Close()
-		if record.Workspace != nil {
-			if syncErr != nil {
-				return fmt.Errorf("authority_store: workspace directory fsync: %w", syncErr)
-			}
-			if closeErr != nil {
-				return fmt.Errorf("authority_store: workspace directory close: %w", closeErr)
-			}
-		}
-	} else if record.Workspace != nil {
-		return fmt.Errorf("authority_store: workspace directory open: %w", derr)
+	// Fsync the directory so the rename is durable. Every record fails
+	// closed: a write whose rename a crash can undo is not reported as
+	// written (an authority record, like a workspace lease, is believed
+	// by its caller). Windows cannot fsync a directory (NTFS journals the
+	// rename itself); the product runs on Linux.
+	if runtime.GOOS == "windows" && dirSyncFault.Load() == nil {
+		return nil
+	}
+	d, derr := os.Open(s.dir)
+	if derr != nil {
+		return fmt.Errorf("authority_store: directory open: %w", derr)
+	}
+	syncErr := d.Sync()
+	if f := dirSyncFault.Load(); f != nil {
+		syncErr = (*f)()
+	}
+	closeErr := d.Close()
+	if syncErr != nil {
+		return fmt.Errorf("authority_store: directory fsync: %w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("authority_store: directory close: %w", closeErr)
 	}
 	return nil
 }
