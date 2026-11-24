@@ -621,7 +621,7 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, rec
 		}
 	}
 	order := hotChunkKeys(indices, recent)
-	out, intents, err := l.streamCutPayloads(ctx, order, head, func(ctx context.Context, idx uint64) (capturedChunk, error) {
+	out, intents, err := l.streamCutPayloads(ctx, order, head, false, func(ctx context.Context, idx uint64) (capturedChunk, error) {
 		c, ok, err := l.copyCOWEntry(w, idx)
 		if err != nil {
 			return capturedChunk{}, err

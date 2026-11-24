@@ -493,9 +493,13 @@ type chunkCutStats struct {
 //     progress (it does not fall while a cut runs or across failed
 //     attempts); the cut scheduler's threshold reads it. Chunks still
 //     awaiting reconciliation are not counted.
-//   - StagedChunks counts the chunks every cut attempt of this layer
-//     staged, failed attempts included (in-process): the progress a cut
-//     retried after its deadline has made.
+//   - StagedChunks counts the chunks staging finished (read, hashed,
+//     uploaded when not zero, and remembered for reuse) in every cut
+//     attempt of this layer: a failed attempt and an interrupted round
+//     count what they finished. It only grows: a chunk staged again (after
+//     a guest write re-dirtied it, or in a later cut) counts again; it is
+//     in-process (a restart starts at 0). The progress a cut retried after
+//     its deadline has made.
 //   - Reconciling: the dirty set is being reconciled against HEAD; no cut
 //     publishes until it is done. ReconcileDone of ReconcileTotal chunks
 //     are compared.

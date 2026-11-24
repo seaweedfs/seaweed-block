@@ -1629,9 +1629,6 @@ func (l *chunkLayerImpl) stage(ctx context.Context, st *chunkCutStats, spillCap 
 			staged[idx] = sc
 		}
 		st.StagedChunks += len(batch)
-		l.stMu.Lock()
-		l.stats.StagedChunks += uint64(len(batch))
-		l.stMu.Unlock()
 		if hook := l.testAfterStageHook; hook != nil {
 			hook(round)
 		}
