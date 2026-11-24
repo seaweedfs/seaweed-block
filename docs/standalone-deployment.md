@@ -574,6 +574,44 @@ sw-block ops chunk fork --source v1 --snapshot before-upgrade --target v2 --chun
 
 Keep the request id to retry an uncertain result. The new HEAD contains a complete image map; reads do not walk back through parent volumes or snapshots. A fork of a fork preserves the original object owners without adding a backing chain. Deleting the source snapshot does not delete objects still referenced by the fork. Use restore when the target must eventually own its data independently.
 
+### Retiring the source of a template
+
+A template is an ordinary immutable snapshot, not a separate volume kind. Keep the volume holding an offered template snapshot: volume deletion refuses while any snapshot name exists. To retire the original source instead, first move the template image into a dedicated holder using existing fork and snapshot operations.
+
+Prerequisites: `v1` is serving, its only snapshot is `seed`, and the standalone cluster spec has new volume placements for `template-holder` and `consumer`. Neither target blockvolume has started yet. Use the same filer and chunk namespace throughout.
+
+1. Create the holder:
+
+   ```bash
+   sw-block ops chunk fork --source v1 --snapshot seed --target template-holder --chunk-filer FILER --request-id fork-template-holder
+   ```
+
+2. Start `template-holder` with the normal standalone blockvolume command and its own volume id, endpoints and local root. Wait for its frontend readiness; read back the seed's known data before proceeding. Take the template snapshot:
+
+   ```bash
+   sw-block ops chunk snapshot --volume template-holder --status-addr HOLDER_STATUS --name template-v1
+   ```
+
+3. Create a consumer, start its blockvolume on its own placement and root, and verify its known data:
+
+   ```bash
+   sw-block ops chunk fork --source template-holder --snapshot template-v1 --target consumer --chunk-filer FILER --request-id fork-consumer
+   ```
+
+4. Stop the source writer. Follow [Delete a volume](volume-lifecycle.md#delete-a-volume) for `v1`: plain detach, revoke its exact replica/epoch/sealed generation, wait for its recorded ACK and natural exit, delete `seed`, then delete `v1`. Do not signal the process in place of waiting for its ACK. Require the completed delete answer and `show` state `deleted` before continuing.
+
+5. Verify both surviving images, including the holder's template snapshot:
+
+   ```bash
+   sw-block ops chunk verify --volume template-holder --all-snapshots --depth data --chunk-filer FILER
+   sw-block ops chunk verify --volume consumer --all-snapshots --depth data --chunk-filer FILER
+   sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
+   ```
+
+   Read back the known data again and repeat both verify commands after the pass. This immediate pass is not a reclamation measurement: its default grace has not elapsed. Continue namespace-wide GC as described above for unused objects; attached-volume maintenance alone does not collect a deleted source's namespace.
+
+Keep `template-holder/template-v1` while it is offered for new consumers. Retiring that snapshot later does not delete objects still referenced by existing consumers. Deleting the holder volume itself still requires the ordinary seal/revoke/ACK and snapshot-deletion procedure; do not remove its backing filer directory or object bindings by hand.
+
 ### Restoring a snapshot into a new volume
 
 A restore makes a new, independent volume from a snapshot. The source volume and its snapshot can be deleted afterwards.
