@@ -314,19 +314,28 @@ blockmaster grants the lease again only after a barrier: the stored lease horizo
 (up to 45 s after the last renewal) and the last grant, each plus
 `--workspace-max-clock-skew` (default `20s`). With the defaults that is at most
 **65 seconds after the process stopped**; if blockmaster restarted meanwhile, also at
-least 50 seconds (30 s plus the skew) after that restart, whichever is later. Until
-then the process logs, every second, `workspace lease: renewal failed after ...: ...
-workspace forced move lease expiry plus clock-skew margin has not elapsed`, and does
-not serve. After the grant it reclaims HEAD and serves its local WAL: nothing
-acknowledged is lost.
+least 50 seconds (30 s plus the skew) after that restart, whichever is later. The
+refusal says when: `workspace lease: renewal failed after ...: workspace forced move
+lease expiry plus clock-skew margin has not elapsed (re-grant refused until <time>, in
+<duration>)`. The process sleeps until just after that time (then polls every 200 ms
+for 5 s), does not serve meanwhile, and `/status` shows `MasterWait` with reason
+`barrier` and that time. After the grant it reclaims HEAD and serves its local WAL:
+nothing acknowledged is lost.
 
-**A start waits 30 seconds for its lease** (fixed, no flag). If the barrier passes
-inside that wait, the process is granted and serves. If it does not, the process logs
+**A start waits for its lease.** While blockmaster gives no reply, or refuses the
+node's credentials or identity, the wait has no bound: the process serves nothing, holds no lease,
+and logs `blockvolume: waiting for the master: <reason> since <time> (no bound)` when
+the reason changes and every 10 minutes (`/status` shows the same as `MasterWait`).
+The wait ends 30 seconds after the first answer received once the local store is
+open and recovered, or 30 seconds after the master's barrier time when that is later
+(fixed, no flag): a slow open does not use up the wait. If the
+grant comes inside the wait, the process serves. If it does not, the process logs
 `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable,
-not serving (...)`, and exits with `blockvolume: exiting status=75
-reason=assignment_timeout`; the unit starts it again, and a start whose wait reaches
-past the barrier serves. With the default flags the second start is enough. The unit
-stops trying after 10 starts in 10 minutes.
+not serving (...)` and exits with `blockvolume: exiting status=75
+reason=assignment_timeout`; the unit starts it again. A master outage therefore costs
+at most one restart (the holder's lease fence), not the unit's start limit (10 starts
+in 10 minutes). A master that answers and drops in turn postpones the 30 seconds for
+as long as it flaps.
 
 No re-grant happens after a revoke, a recorded ACK or a move of the volume.
 
@@ -448,8 +457,13 @@ follow from that order:
 | old holder logs `blockvolume: workspace lease closeout: workspace lease expired before clean ACK` | Revoked, but no ACK | Only a forced move to another node remains (HEAD is sealed: if step 3 succeeded, nothing is lost) |
 | renewal fails with `workspace lease: revocation or move pending` | The volume was revoked or moved | The process cannot serve again; continue the hand-over |
 | renewal fails with `workspace lease: stale authority` | A move gave the volume a newer epoch | This process is the old holder: stop it, do not restart it |
-| renewal fails with `... clock-skew margin has not elapsed` | Waiting for the re-grant barrier | Wait (at most 65 s after the stop, with defaults) |
-| `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable, not serving` | Started before its lease was granted; the process then exits 75 (`reason=assignment_timeout`) | Nothing under the example unit: it is started again and a later start serves. Without a supervisor, start it again after the barrier |
+| renewal fails with `... clock-skew margin has not elapsed (re-grant refused until <time>, ...)` | Waiting for the re-grant barrier | Wait: the process sleeps until that time (at most 65 s after the stop, with defaults) |
+| `blockvolume: waiting for the master: unreachable since <time> (no bound)` | blockmaster gives no reply; the process waits without exiting | Bring blockmaster back; the process continues by itself |
+| `blockvolume: waiting for the master: credentials since <time> (no bound)` | blockmaster refuses this node's credentials; the process waits without exiting | Fix the node's certificate or role; the next call passes without a restart |
+| `blockvolume: waiting for the master: identity refused: unregistered` (or `wrong_host`) `since <time> (no bound)` | blockmaster does not know this `--server-id`, or the node calls from another host than its registered one; the process waits, never serves | Fix the cluster spec (the node's id and the address it connects from) or the unit's `--server-id`; the next call passes without a restart |
+| `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable, not serving` | blockmaster answered for 30 s (past its barrier) and granted no lease; the process then exits 75 (`reason=assignment_timeout`) | Nothing under the example unit: it is started again. A unit for a volume this host no longer serves stops at its start limit: disable it |
+| `blockvolume: exiting status=78 reason=moved` | blockmaster refused the lease: the volume moved to another host at a newer epoch. Not restarted | The volume serves elsewhere. If it is later moved back to this host, start the unit again (`systemctl start`); otherwise disable it |
+| `blockvolume: exiting status=78 reason=deleted` | blockmaster refused the lease: the volume's delete is committed. Not restarted | Disable the unit and remove its settings |
 | `durable: refusing to attach volume=v1 root=...: HEAD holder=... is not this holder ... (remove or quarantine the local root)` | This host's local copy is older than a HEAD another holder published | When the process is gone (see the rule above), move `<durable-root>/v1.bin` and the files `v1.bin.chunk*` beside it into another directory, then start again: it starts fresh from HEAD |
 | `force-move: ... admissible at <time>, master clock` | The barrier has not passed | Wait until that time, rerun the same command |
 

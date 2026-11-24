@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -52,6 +53,13 @@ type WorkspaceLeaseGuard struct {
 	// after schedules Run's sleep between renewals (time.After; tests
 	// replace it before Run starts to observe the delays chosen).
 	after func(time.Duration) <-chan time.Time
+	// barrierAt, when set, returns the master's barrier time T (the host's
+	// master wait keeps the one copy): before the first grant Run sleeps until
+	// just past T instead of polling every second. Set before Run.
+	barrierAt func() time.Time
+	// observe, when set, receives every renewal's start and result (the
+	// host's master wait). Set before Run; never called with mu held.
+	observe func(time.Time, error)
 }
 
 // stopPendingPoll caps Run's sleep after a completed renewal while a stop is
@@ -96,12 +104,31 @@ func (g *WorkspaceLeaseGuard) ClearStopPending() {
 // while a stop is pending.
 func (g *WorkspaceLeaseGuard) renewDelay() time.Duration {
 	g.mu.Lock()
-	delay := g.until.Sub(g.now()) / 3
-	if g.until.IsZero() {
-		delay = time.Second
-	}
+	now := g.now()
+	delay := g.until.Sub(now) / 3
+	pregrant := g.until.IsZero()
 	pending := g.stopPending
 	g.mu.Unlock()
+	if pregrant {
+		// Before the first grant: poll about once a second, jittered so the
+		// volumes of one host do not stay in step; while the master has said
+		// it refuses until T, sleep until just past T (it refuses every call
+		// before; the request's own latency would otherwise land it early).
+		delay = jittered(time.Second, time.Second/5)
+		if g.barrierAt != nil {
+			if t := g.barrierAt(); t.After(now) {
+				delay = min(t.Sub(now)+barrierWakeMargin+jittered(0, barrierWakeJitter), barrierSleepCap)
+			} else if !t.IsZero() && now.Sub(t) < barrierFastPollFor {
+				// Just past T every lapsed volume re-grants at once and the
+				// master refuses the ones that find its writer busy: retry
+				// those soon, not a second later.
+				delay = jittered(barrierFastPoll, barrierFastPoll/4)
+			}
+		}
+		if !pending {
+			return delay
+		}
+	}
 	if delay < 50*time.Millisecond {
 		delay = 50 * time.Millisecond
 	}
@@ -208,6 +235,9 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 	}
 	defer cancel()
 	reply, err := g.client.RenewWorkspaceLease(rpcCtx, &g.id)
+	if g.observe != nil && ctx.Err() == nil {
+		g.observe(start, err)
+	}
 	if err != nil {
 		end := g.now()
 		elapsed := end.Sub(start).Round(time.Millisecond)
@@ -282,6 +312,30 @@ func (g *WorkspaceLeaseGuard) Refresh(ctx context.Context) error {
 		return g.drain(ctx, reply.Revoking)
 	}
 	return nil
+}
+
+// Before the first grant: after the master's barrier time the guard wakes
+// barrierWakeMargin plus up to barrierWakeJitter later (every volume a master
+// restart lapsed gets the same T); one sleep is at most barrierSleepCap.
+const (
+	barrierWakeMargin = 100 * time.Millisecond
+	barrierWakeJitter = 500 * time.Millisecond
+	barrierSleepCap   = 2 * time.Minute
+	// For barrierFastPollFor after T the pre-grant poll is barrierFastPoll.
+	barrierFastPoll    = 200 * time.Millisecond
+	barrierFastPollFor = 5 * time.Second
+)
+
+// jittered returns base plus a uniform offset in [-spread, +spread) (only
+// [0, spread) when base is zero).
+func jittered(base, spread time.Duration) time.Duration {
+	if spread <= 0 {
+		return base
+	}
+	if base == 0 {
+		return rand.N(spread)
+	}
+	return base - spread + rand.N(2*spread)
 }
 
 // renewalRPCTimeout bounds one renewal call; the lease deadline may bound it

@@ -116,6 +116,13 @@ type ProviderConfig struct {
 	// the host can apply its assignment. Zero defaults to 30s.
 	ChunkAssignmentTimeout time.Duration
 
+	// ChunkMasterWait, when set, replaces ChunkAssignmentTimeout's fixed
+	// deadline (a workspace primary): given the wait's start, the host
+	// returns the wait's one bound (zero: none, the master gives no reply or
+	// refuses the node) and whether a permanent refusal (moved or deleted)
+	// ends it now. It is read on the wait's poll and must not block.
+	ChunkMasterWait func(start time.Time) (deadline time.Time, final bool)
+
 	// WALRetentionLSNs is the operator-tunable retention window past
 	// the substrate's checkpoint LSN (G6 §1.A α). Zero = pre-G6
 	// strict checkpoint-driven recycle. Non-zero relaxes the recycle
@@ -1199,3 +1206,4 @@ func chunkSidecars(path string) ([]string, error) {
 
 // Compile-time check.
 var _ frontend.Provider = (*DurableProvider)(nil)
+
