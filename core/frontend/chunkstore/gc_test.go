@@ -4,11 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"path"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,11 +15,11 @@ import (
 
 type gcBlobs struct{ *fakeBlobs }
 
-func (b gcBlobs) DeleteBlob(_ context.Context, fid string) error {
+// deleteChunk is the volume server's side of the filer's deletion queue.
+func (b gcBlobs) deleteChunk(fid string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.data, fid)
-	return nil
 }
 
 type heldGCRemote struct {
@@ -44,6 +41,7 @@ func (r *heldGCRemote) CASHead(ctx context.Context, v storage.ChunkHeadVersion, 
 func gcFixture(t *testing.T) (*fakeFiler, gcBlobs, *Catalog, *Collector, *time.Time) {
 	t.Helper()
 	f, b := newFakeFiler(), gcBlobs{newFakeBlobs()}
+	f.deleteChunk = b.deleteChunk
 	c := newCat(t, f)
 	if e := f.CreateEntry(context.Background(), catBase, &filerpb.Entry{Name: "v1", IsDirectory: true}, true); e != nil {
 		t.Fatal(e)
@@ -338,42 +336,7 @@ func TestGC_CopyIntentSurvivesTakeover(t *testing.T) {
 	}
 }
 
-func TestSWFS_DeleteBlobStatusesAndExactPath(t *testing.T) {
-	for _, status := range []int{200, 202, 204, 404, 400, 401, 500} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			calls := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls++
-				if r.Method != "DELETE" || r.URL.Path != "/7,01abcdef" {
-					t.Errorf("unexpected delete %s %s", r.Method, r.URL.Path)
-				}
-				w.WriteHeader(status)
-			}))
-			defer server.Close()
-			c := &SWFS{http: server.Client(), vidCache: map[string][]string{"7": {strings.TrimPrefix(server.URL, "http://")}}}
-			e := c.DeleteBlob(context.Background(), "7,01abcdef")
-			if (e == nil) != (status == 200 || status == 202 || status == 204 || status == 404) {
-				t.Fatalf("status %d: %v", status, e)
-			}
-			if errors.Is(e, ErrBlobDeleteRejected) != (status == 400) {
-				t.Fatalf("wrong per-object refusal classification: status=%d err=%v", status, e)
-			}
-			if calls != 1 {
-				t.Fatalf("calls %d", calls)
-			}
-			for _, bad := range []string{"7,../bad", "7,a?bad", "7,a%2fb", "", ",a"} {
-				if e := c.DeleteBlob(context.Background(), bad); e == nil {
-					t.Errorf("invalid fid accepted: %q", bad)
-				}
-			}
-			if calls != 1 {
-				t.Fatal("invalid fid dispatched HTTP")
-			}
-		})
-	}
-}
-
-func TestGC_UnboundNeedleRetainedAndCountUnknown(t *testing.T) {
+func TestGC_UnboundNeedleRetained(t *testing.T) {
 	_, b, _, g, now := gcFixture(t)
 	ctx := context.Background()
 	fid, e := b.Put(ctx, []byte("pre-binding orphan"))
@@ -382,7 +345,7 @@ func TestGC_UnboundNeedleRetainedAndCountUnknown(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		result, e := g.Run(ctx)
-		if e != nil || !result.UnknownUnbound || result.Reclaimed != 0 {
+		if e != nil || result.Reclaimed != 0 {
 			t.Fatalf("unbound inventory claim: %+v %v", result, e)
 		}
 		*now = now.Add(2 * time.Hour)

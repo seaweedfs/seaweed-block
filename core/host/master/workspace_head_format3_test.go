@@ -15,7 +15,7 @@ import (
 type workspaceManifestBlobs struct{ chunkstore.Blobs }
 
 func (workspaceManifestBlobs) Put(context.Context, []byte) (string, error) {
-	return "1,0000000100000001", nil
+	return "1,0100000001", nil // stock form, its own canonical form
 }
 
 // Exercise the F4 writer and HTTP reader together, not a hand-written schema.

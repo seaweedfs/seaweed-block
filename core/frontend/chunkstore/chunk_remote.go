@@ -7,8 +7,9 @@ package chunkstore
 //
 //	<root>/HEAD         the published HEAD: JSON in the entry content,
 //	                    {gen, epoch, holder} mirrored in extended attributes
-//	<root>/keys/<key>   one write-once entry per chunk key, naming the
-//	                    needle (fid) that holds the chunk's bytes
+//	<root>/keys/<key>   one write-once standard file per chunk key whose
+//	                    one filer chunk is the needle holding its bytes
+//	                    (binding.go)
 //	<root>/intents/<id> one entry per live intent (<gen>-<nonce>): the keys a
 //	                    holder is about to publish; GC treats them as roots
 //
@@ -30,12 +31,11 @@ package chunkstore
 // storage.ErrChunkHeadPrecondition; every other error is returned as is,
 // so the chunk layer treats the outcome as unknown and re-reads HEAD.
 //
-// No entry ever carries filer chunks: UpdateEntry deletes chunks the new
-// entry drops, so needle ids live only in entry content and extended
-// attributes, which the filer does not interpret.
-//
-// Not implemented: reclaiming needles. Delete reports ErrDeleteUnsupported;
-// superseded chunks stay stored (the chunk layer never calls Delete).
+// A key binding names its needle as its one filer chunk, so the filer owns
+// the needle: GC reclaims a key by one conditional UpdateEntry that drops the
+// chunk (the done tombstone), and the filer deletes the dropped needle after
+// storing the update. The chunk layer itself never deletes (Delete reports
+// ErrDeleteUnsupported).
 
 import (
 	"context"
@@ -60,7 +60,6 @@ const (
 	extEpoch  = "swb.epoch"
 	extHolder = "swb.holder"
 	extKind   = "swb.kind"
-	extFid    = "swb.fid"
 
 	kindChunkHead   = "chunkhead"
 	kindChunkKey    = "chunkkey"
@@ -156,6 +155,9 @@ func (r *ChunkRemote) putObject(ctx context.Context, key string, data []byte, ob
 	if err != nil {
 		return err
 	}
+	if len(data) == 0 {
+		return fmt.Errorf("chunkstore: chunk key %q: an empty object cannot be bound (a size-0 chunk is garbage to the filer)", key)
+	}
 	if r.knownKey(key) {
 		return storage.ErrChunkKeyExists
 	}
@@ -186,18 +188,24 @@ func (r *ChunkRemote) knownKey(key string) bool {
 	return known
 }
 
-// bindKey binds key to the stored needle fid with an exclusive create.
+// bindKey binds key to the stored needle fid with an exclusive create of a
+// standard file whose one chunk is that needle (binding.go).
 func (r *ChunkRemote) bindKey(ctx context.Context, key, name, fid string, data []byte, object string) error {
+	chunk, err := bindingChunk(fid, len(data))
+	if err != nil {
+		return fmt.Errorf("chunkstore: chunk key %q: %w", key, err)
+	}
 	now := time.Now().Unix()
 	e := &filerpb.Entry{
 		Name:       name,
-		Attributes: &filerpb.FuseAttributes{Mtime: now, Crtime: now, FileMode: 0o644},
-		Extended:   map[string][]byte{extKind: []byte(kindChunkKey), extFid: []byte(fid)},
+		Chunks:     []*filerpb.FileChunk{chunk},
+		Attributes: &filerpb.FuseAttributes{Mtime: now, Crtime: now, FileMode: 0o644, FileSize: uint64(len(data))},
+		Extended:   map[string][]byte{extKind: []byte(kindChunkKey)},
 	}
 	if object == "segment" {
 		e.Extended["swb.object"] = []byte("segment")
-		e.Attributes.FileSize = uint64(len(data))
 	}
+	fid = chunk.GetFileId()
 	if err := r.f.CreateEntry(ctx, r.keyDir(), e, true); err != nil {
 		if errors.Is(err, ErrExists) {
 			return fmt.Errorf("%w: %s", storage.ErrChunkKeyExists, key)
@@ -225,41 +233,19 @@ func (r *ChunkRemote) Get(ctx context.Context, key string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("chunkstore: chunk key %q: %w", key, err)
 		}
-		if len(e.GetChunks()) != 0 || string(e.Extended[extKind]) != kindChunkKey || len(e.Extended[extFid]) == 0 {
-			return nil, fmt.Errorf("chunkstore: chunk key %q: entry is not a chunk key binding", key)
+		b, err := decodeBinding(e)
+		if err != nil {
+			return nil, fmt.Errorf("chunkstore: chunk key %q: %v", key, err)
 		}
-		fid = string(e.Extended[extFid])
+		if b.done {
+			return nil, fmt.Errorf("%w: %q", ErrBindingReclaimed, key)
+		}
+		fid = b.fid
 		r.mu.Lock()
 		r.fids[key] = fid
 		r.mu.Unlock()
 	}
 	return r.b.Get(ctx, fid)
-}
-
-// ReclaimKey deletes the needle bound to one of this volume's own keys
-// with GC's step (reclaimBinding): the binding is tombstoned, the exact fid
-// deleted, the binding kept for ever and marked done. It decides nothing:
-// the caller must know that no HEAD, snapshot, fork or intent references
-// key. An owner-qualified key is refused.
-func (r *ChunkRemote) ReclaimKey(ctx context.Context, key string, blobs BlobDeleter) error {
-	if err := storage.ValidChunkKey(key); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidKey, err)
-	}
-	if strings.HasPrefix(key, "@") {
-		return fmt.Errorf("%w: %q is owner-qualified; a volume reclaims only its own keys", ErrInvalidKey, key)
-	}
-	name, err := keyName(key)
-	if err != nil {
-		return err
-	}
-	e, err := r.f.LookupEntry(ctx, r.keyDir(), name)
-	if err != nil {
-		return fmt.Errorf("chunkstore: chunk key %q: %w", key, err)
-	}
-	if len(e.GetChunks()) != 0 || string(e.Extended[extKind]) != kindChunkKey || len(e.Extended[extFid]) == 0 {
-		return fmt.Errorf("chunkstore: chunk key %q: entry is not a chunk key binding", key)
-	}
-	return reclaimBinding(ctx, r.f, blobs, r.keyDir(), e)
 }
 
 // Delete is not supported; see ErrDeleteUnsupported.

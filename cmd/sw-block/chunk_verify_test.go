@@ -159,7 +159,7 @@ func TestOpsChunk_VerifyReadErrorExits3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := unreadableStore{mem, string(e.Extended["swb.fid"])}
+	store := unreadableStore{mem, e.GetChunks()[0].GetFileId()}
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
 		return store, func() error { return nil }, nil
 	}

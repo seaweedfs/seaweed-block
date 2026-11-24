@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"path"
 	"sort"
@@ -26,8 +27,8 @@ import (
 //     chunk). These are the bytes deleting that snapshot makes eligible
 //     for GC; GC still keeps them through its grace period and while any
 //     in-flight intent names them, so they are not reclaimed at once.
-//   - StoredBytes: the volume's chunk-key bindings in the filer (what is
-//     stored now, referenced or not). A binding a manifest references is
+//   - StoredBytes: the volume's live chunk-key bindings in the filer (what
+//     is stored now, referenced or not; a reclaimed binding stores nothing). A binding a manifest references is
 //     counted at its exact (clipped) size; any other binding at the full
 //     chunk size, so StoredBytes is an upper bound whenever
 //     StoredUpperBound is set.
@@ -214,14 +215,21 @@ func (c *Catalog) Usage(ctx context.Context, vol string) (VolumeUsage, error) {
 			if err != nil || strings.HasPrefix(key, "@") {
 				continue
 			}
+			bound, err := decodeBinding(e)
+			if err != nil {
+				return VolumeUsage{}, fmt.Errorf("chunkstore: chunk key %q of %s: %v", key, vol, err)
+			}
+			if bound.done {
+				continue // reclaimed: it stores nothing
+			}
 			u.StoredBindings++
-			if string(e.Extended["swb.object"]) == "segment" {
-				if e.Attributes == nil || e.Attributes.FileSize == 0 || e.Attributes.FileSize > maxManifestBytes {
+			if bound.segment {
+				if bound.size > maxManifestBytes {
 					return VolumeUsage{}, errors.New("chunkstore: invalid manifest binding size")
 				}
 				u.ManifestBindings++
-				u.ManifestBytes += e.Attributes.FileSize
-				u.StoredBytes += e.Attributes.FileSize
+				u.ManifestBytes += bound.size
+				u.StoredBytes += bound.size
 				continue
 			}
 

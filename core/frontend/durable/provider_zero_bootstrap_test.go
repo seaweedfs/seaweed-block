@@ -20,7 +20,7 @@ type bootstrapBlobs struct {
 func (b *bootstrapBlobs) Put(_ context.Context, data []byte) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	id := fmt.Sprintf("fid-%d", len(b.objects)+1)
+	id := fmt.Sprintf("1,%04x%08x", 0x101+len(b.objects), 0x5eed0001) // stock form, its own canonical form
 	b.objects[id] = bytes.Clone(data)
 	return id, nil
 }

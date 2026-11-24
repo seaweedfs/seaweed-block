@@ -515,7 +515,7 @@ Space comes back in two steps. Neither is immediate.
    sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
    ```
 
-   - Each pass prints its `Candidates`, `Reclaimed` and `failed_deletes`.
+   - Each pass prints its `Candidates` and `Reclaimed`.
    - A chunk shows as a candidate in the first pass that sees it and is reclaimed in a later pass.
    - Without `--apply`, a pass is read-only.
 2. **SeaweedFS vacuum compacts the volume files.** Reclaimed chunks are deleted needles.

@@ -169,13 +169,14 @@ func (c *SWFS) ListEntries(ctx context.Context, dir, prefix, startAfter string, 
 	}
 }
 
-// DeleteEntry implements Filer. It never deletes data or recurses. A failed
+// DeleteEntry implements Filer. It deletes the entry's data (its chunks, by
+// the filer's deletion queue) and never recurses. A failed
 // expected_extended (including a missing entry) comes back as gRPC
 // FailedPrecondition; other failures are a gRPC error or the response's
 // Error string, and are returned unwrapped from the sentinels.
 func (c *SWFS) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
 	resp, err := c.fc.DeleteEntry(ctx, &filerpb.DeleteEntryRequest{
-		Directory: dir, Name: name, IsDeleteData: false, IsRecursive: false, ExpectedExtended: expected,
+		Directory: dir, Name: name, IsDeleteData: true, IsRecursive: false, ExpectedExtended: expected,
 	})
 	if err != nil {
 		if status.Code(err) == codes.FailedPrecondition {
@@ -341,36 +342,3 @@ var (
 	_ Filer = (*SWFS)(nil)
 	_ Blobs = (*SWFS)(nil)
 )
-
-// DeleteBlob removes an immutable needle from every resolved replica. A
-// partial/unknown result is an error, so GC retains its binding tombstone
-// and retries later; no response body is used to infer success.
-// SeaweedFS writeDeleteResult returns 202 after ReplicatedDelete completes.
-func (c *SWFS) DeleteBlob(ctx context.Context, fid string) error {
-	vid, needle, ok := strings.Cut(fid, ",")
-	if !ok || vid == "" || needle == "" || strings.ContainsAny(fid, "/\\?#% \r\n") {
-		return fmt.Errorf("chunkstore: bad deletion fid %q", fid)
-	}
-	urls, _, err := c.lookupVolume(ctx, vid)
-	if err != nil {
-		return err
-	}
-	for _, host := range urls {
-		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, "http://"+host+"/"+fid, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := c.http.Do(req)
-		if err != nil {
-			return err
-		}
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusBadRequest {
-			return fmt.Errorf("%w: delete %s: http %d", ErrBlobDeleteRejected, fid, resp.StatusCode)
-		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
-			return fmt.Errorf("chunkstore: delete %s: http %d", fid, resp.StatusCode)
-		}
-	}
-	return nil
-}

@@ -165,7 +165,11 @@ func (fx *verifyFixture) fid(qkey string) string {
 	if err != nil {
 		fx.t.Fatalf("binding of %s: %v", qkey, err)
 	}
-	return string(e.Extended[extFid])
+	b, err := decodeBinding(e)
+	if err != nil {
+		fx.t.Fatalf("binding of %s: %v", qkey, err)
+	}
+	return b.fid
 }
 
 func (fx *verifyFixture) deleteBinding(qkey string) {
@@ -176,10 +180,19 @@ func (fx *verifyFixture) deleteBinding(qkey string) {
 	}
 }
 
+// tombstone reclaims qkey's binding as GC does; the filer deletes its needle.
 func (fx *verifyFixture) tombstone(qkey string) {
 	fx.t.Helper()
+	fid := fx.fid(qkey)
 	dir, name := bindingOf(fx.t, qkey)
-	fx.f.bumpExtended(path.Join(dir, name), extGCDeleted, "done")
+	e, err := fx.f.LookupEntry(context.Background(), dir, name)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	if err := reclaimBinding(context.Background(), fx.f, dir, e); err != nil {
+		fx.t.Fatal(err)
+	}
+	fx.needle(fid, dropNeedle)
 }
 
 // needle edits the stored bytes of fid (nil deletes the needle).
@@ -563,7 +576,6 @@ func TestVerify_TombstonedBinding(t *testing.T) {
 	fx := newVerifyFixture(t, "v1")
 	h := fx.publish("v1", map[uint64][]byte{0: verifyData(1), 1: verifyData(2)}, false)
 	fx.tombstone(h.Chunks[0].Key)
-	fx.needle(fx.fid(h.Chunks[0].Key), dropNeedle)
 	wantClasses(t, "bindings", fx.verify("v1", VerifyOptions{}), "BINDING_TOMBSTONED@0")
 	// No read of a tombstoned binding's needle: one finding, not two.
 	res := fx.verify("v1", VerifyOptions{Depth: VerifyData})
@@ -611,7 +623,6 @@ func TestVerify_SupersededDuringPass(t *testing.T) {
 		}, FindingBindingMissing},
 		{"binding tombstoned", VerifyBindings, func(fx *verifyFixture, k string) {
 			fx.tombstone(k)
-			fx.needle(fx.fid(k), dropNeedle)
 		}, FindingBindingTombstoned},
 		{"needle deleted", VerifyData, func(fx *verifyFixture, k string) { fx.needle(fx.fid(k), dropNeedle) }, FindingNeedleMissing},
 		{"needle overwritten", VerifyData, func(fx *verifyFixture, k string) { fx.needle(fx.fid(k), flipByte) }, FindingContentMismatch},
@@ -942,10 +953,10 @@ func TestVerify_IntentStale(t *testing.T) {
 // recordingStore counts every write the catalog makes through it.
 type recordingStore struct {
 	Filer
-	blobs                        *countingBlobs
-	mu                           sync.Mutex
-	creates, updates, deletes    int
-	blobPuts, blobDeletes, reads int
+	blobs                     *countingBlobs
+	mu                        sync.Mutex
+	creates, updates, deletes int
+	blobPuts, reads           int
 }
 
 func (r *recordingStore) CreateEntry(ctx context.Context, dir string, e *filerpb.Entry, o bool) error {
@@ -977,12 +988,6 @@ func (r *recordingStore) Get(ctx context.Context, fid string) ([]byte, error) {
 	r.reads++
 	r.mu.Unlock()
 	return r.blobs.Get(ctx, fid)
-}
-func (r *recordingStore) DeleteBlob(ctx context.Context, fid string) error {
-	r.mu.Lock()
-	r.blobDeletes++
-	r.mu.Unlock()
-	return r.blobs.DeleteBlob(ctx, fid)
 }
 
 // Verify writes nothing, at any depth, also on the miss, superseded and
@@ -1035,9 +1040,9 @@ func TestVerify_ReadOnlyAtEveryDepth(t *testing.T) {
 			}
 		}
 	}
-	if rec.creates+rec.updates+rec.deletes+rec.blobPuts+rec.blobDeletes != 0 {
-		t.Fatalf("verify wrote: %d creates, %d updates, %d deletes, %d blob puts, %d blob deletes",
-			rec.creates, rec.updates, rec.deletes, rec.blobPuts, rec.blobDeletes)
+	if rec.creates+rec.updates+rec.deletes+rec.blobPuts != 0 {
+		t.Fatalf("verify wrote: %d creates, %d updates, %d deletes, %d blob puts",
+			rec.creates, rec.updates, rec.deletes, rec.blobPuts)
 	}
 }
 

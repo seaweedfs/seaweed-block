@@ -23,7 +23,7 @@ func newManifestFixtureFiler(f chunkstore.Filer) *manifestFixtureFiler {
 func (f *manifestFixtureFiler) Put(_ context.Context, b []byte) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	id := fmt.Sprintf("fixture-%d", len(f.blobs))
+	id := fmt.Sprintf("1,%04x%08x", 0x100+len(f.blobs), 0x5eed0001) // stock form, its own canonical form
 	f.blobs[id] = append([]byte(nil), b...)
 	return id, nil
 }

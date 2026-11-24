@@ -310,6 +310,9 @@ func (rd *putRound) Put(ctx context.Context, i int, key string, data []byte) err
 	if err != nil {
 		return err
 	}
+	if len(data) == 0 {
+		return final(fmt.Errorf("chunkstore: chunk key %q: an empty object cannot be bound (a size-0 chunk is garbage to the filer)", key))
+	}
 	if rd.r.knownKey(key) {
 		return storage.ErrChunkKeyExists
 	}

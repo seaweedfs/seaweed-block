@@ -19,19 +19,16 @@ import (
 
 const extGCDeleted = "swb.gc.deleted"
 
-// ErrBlobDeleteRejected identifies a definite per-object refusal (HTTP400).
-// It never proves the needle absent; GC retains its tombstone and reports it.
-var ErrBlobDeleteRejected = errors.New("chunkstore: blob DELETE rejected")
-
 // DefaultGCClockSkew is the allowed pairwise difference between timestamp
 // writers and collectors. Deployments with a larger bound must raise ClockSkew;
 // no finite time-based grace can be safe with unbounded clock differences.
 const DefaultGCClockSkew = time.Minute
 
-// BlobDeleter deletes one immutable needle. Missing needles are success.
-// Implementations must not reuse a deleted fid.
-type BlobDeleter interface {
-	DeleteBlob(context.Context, string) error
+// BlobReader reads one immutable needle (a manifest segment, during the
+// mark). GC never deletes a needle: it reclaims a key by dropping the
+// binding's chunk, and the filer deletes the dropped needle.
+type BlobReader interface {
+	Get(context.Context, string) ([]byte, error)
 }
 
 // GCConfig binds a collector to the authoritative blockmaster epoch reader.
@@ -70,20 +67,17 @@ type GCObject struct {
 	Key    string `json:"key"`
 	FID    string `json:"fid"`
 }
-type GCDeleteFailure struct {
-	GCObject
-	Error string `json:"error"`
-}
 
+// GCResult reports one pass. Reclaimed counts the bindings this pass turned
+// from live into the done tombstone: unbound, their needles handed to the
+// filer's deletion queue (it does not prove a needle gone). A needle that was
+// uploaded but never bound, or whose deletion the filer lost, is referenced
+// by no entry: stock volume.fsck lists it as an orphan.
 type GCResult struct {
-	FailedDeletes                                           []GCDeleteFailure `json:"failed_deletes"`
-	Roots                                                   []GCRoot          `json:"roots"`
-	WouldDelete                                             []GCObject        `json:"would_delete"`
-	WouldExpireIntents                                      []string          `json:"would_expire_intents"`
+	Roots                                                   []GCRoot   `json:"roots"`
+	WouldDelete                                             []GCObject `json:"would_delete"`
+	WouldExpireIntents                                      []string   `json:"would_expire_intents"`
 	Volumes, Intents, ExpiredIntents, Candidates, Reclaimed int
-	// Pre-binding needles cannot be enumerated by this API. They are retained;
-	// UnknownUnbound is true rather than inventing a report-only count.
-	UnknownUnbound bool
 }
 
 type gcCandidate struct {
@@ -103,21 +97,21 @@ type gcIntent struct {
 // Collector traces all catalog roots. Calls are serialized per collector;
 // restarting loses candidates, which adds delay rather than authorizing a
 // deletion. No WAL, publication or shard lock is held during remote I/O.
-// Different collectors may duplicate idempotent blob deletes but cannot
-// shorten either collector's independent two-mark grace requirement.
+// Two collectors cannot both reclaim a binding (the reclaim is conditional on
+// it being live) and cannot shorten either one's two-mark grace requirement.
 type Collector struct {
 	scope      string // empty traces and reclaims the entire namespace
 	cat        *Catalog
-	blobs      BlobDeleter
+	blobs      BlobReader
 	cfg        GCConfig
 	mu         sync.Mutex
 	candidates map[string]gcCandidate
 	last       time.Time
 }
 
-func NewCollector(cat *Catalog, blobs BlobDeleter, cfg GCConfig) (*Collector, error) {
+func NewCollector(cat *Catalog, blobs BlobReader, cfg GCConfig) (*Collector, error) {
 	if cat == nil || blobs == nil || cfg.IntentTTL <= 0 || cfg.IssuedEpoch == nil {
-		return nil, errors.New("chunkstore: GC requires catalog, blob deletion, positive intent TTL and epoch authority")
+		return nil, errors.New("chunkstore: GC requires catalog, a blob reader, positive intent TTL and epoch authority")
 	}
 	if cfg.ClockSkew == 0 {
 		cfg.ClockSkew = DefaultGCClockSkew
@@ -155,11 +149,9 @@ func (g *Collector) Preview(ctx context.Context) (GCResult, error) { return g.ru
 func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	result.UnknownUnbound = true
 	result.Roots = []GCRoot{}
 	result.WouldDelete = []GCObject{}
 	result.WouldExpireIntents = []string{}
-	result.FailedDeletes = []GCDeleteFailure{}
 	defer func() {
 		if err != nil && apply {
 			g.candidates = map[string]gcCandidate{}
@@ -321,8 +313,11 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 				return result, e
 			}
 			for _, entry := range page {
-				if entry.GetName() <= pageAfter || entry.GetIsDirectory() || len(entry.GetChunks()) != 0 || string(entry.Extended[extKind]) != kindChunkKey || len(entry.Extended[extFid]) == 0 || entry.Attributes == nil || entry.Attributes.Crtime <= 0 {
+				if entry.GetName() <= pageAfter || entry.Attributes == nil || entry.Attributes.Crtime <= 0 {
 					return result, fmt.Errorf("chunkstore: invalid GC binding %s/%s", r.keyDir(), entry.GetName())
+				}
+				if _, e := decodeBinding(entry); e != nil {
+					return result, fmt.Errorf("chunkstore: invalid GC binding %s/%s: %v", r.keyDir(), entry.GetName(), e)
 				}
 				key, e := url.PathUnescape(entry.GetName())
 				if e != nil {
@@ -385,26 +380,17 @@ func (g *Collector) run(ctx context.Context, apply bool) (result GCResult, err e
 			nextCandidates[p] = candidate
 			continue
 		}
-		result.WouldDelete = append(result.WouldDelete, GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: string(b.entry.Extended[extFid])})
+		live, _ := decodeBinding(b.entry) // validated when listed
+		result.WouldDelete = append(result.WouldDelete, GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: live.fid})
 		if !apply {
 			continue
 		}
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
-		err = reclaimBinding(ctx, g.cat.f, g.blobs, path.Dir(p), b.entry)
+		err = reclaimBinding(ctx, g.cat.f, path.Dir(p), b.entry)
 		if err != nil && ctx.Err() != nil {
 			err = ctx.Err()
-		}
-		if errors.Is(err, ErrBlobDeleteRejected) {
-			// INV-GC-DELETE-PROGRESS-001: a confirmed object rejection
-			// must not starve later candidates or invalidate a complete mark.
-			// Keep the fid/tombstone and retry; never record this object done.
-			result.FailedDeletes = append(result.FailedDeletes, GCDeleteFailure{
-				GCObject: GCObject{Volume: b.volume, Key: mustUnescapeGCKey(b.entry.Name), FID: string(b.entry.Extended[extFid])}, Error: err.Error(),
-			})
-			nextCandidates[p] = candidate
-			continue
 		}
 		if err != nil {
 			return result, err
@@ -431,49 +417,26 @@ func (nilBlobs) Get(context.Context, string) ([]byte, error) {
 // The binding name was already validated before reclamation admission.
 func mustUnescapeGCKey(name string) string { k, _ := url.PathUnescape(name); return k }
 
-// GC needs immutable segment bytes as well as deletion. Flat-only legacy
-// adapters remain usable; a segmented root without a reader refuses the mark.
-type gcBlobReader struct{ BlobDeleter }
+// gcBlobReader gives the mark its read-only remote: segments are read,
+// nothing is uploaded.
+type gcBlobReader struct{ BlobReader }
 
 func (b gcBlobReader) Put(context.Context, []byte) (string, error) {
 	return "", errors.New("chunkstore: GC is read-only during mark")
 }
-func (b gcBlobReader) Get(ctx context.Context, fid string) ([]byte, error) {
-	reader, ok := b.BlobDeleter.(interface {
-		Get(context.Context, string) ([]byte, error)
-	})
-	if !ok {
-		return nil, errors.New("chunkstore: GC segment reader unavailable")
-	}
-	return reader.Get(ctx, fid)
-}
 
-// reclaimBinding deletes the needle a key binding names, keeping the binding
-// for ever: removing it would allow Put to rebind a key that once existed.
-// The binding first gets a conditional swb.gc.deleted=1 tombstone (which
-// also lets a failed physical delete be retried without losing the fid),
-// then the exact fid is deleted, then the tombstone becomes done. A binding
-// already done is left as it is. The caller decides that nothing references
-// the key.
-func reclaimBinding(ctx context.Context, f Filer, blobs BlobDeleter, dir string, entry *filerpb.Entry) error {
-	switch string(entry.Extended[extGCDeleted]) {
-	case "done":
-		return nil
-	case "1":
-	default:
-		e := proto.Clone(entry).(*filerpb.Entry)
-		e.Extended[extGCDeleted] = []byte("1")
-		expected := map[string][]byte{extKind: []byte(kindChunkKey), extFid: entry.Extended[extFid], extGCDeleted: nil}
-		if err := f.UpdateEntry(ctx, dir, e, expected); err != nil {
-			return err
-		}
-	}
-	if err := blobs.DeleteBlob(ctx, string(entry.Extended[extFid])); err != nil {
-		return err
-	}
+// reclaimBinding reclaims a key by one conditional UpdateEntry: the binding
+// is rewritten with no chunk and swb.gc.deleted=done, accepted only while it
+// is still live (kind chunkkey, swb.gc.deleted absent). The filer deletes the
+// dropped chunk's needle after storing the update (its own deletion queue);
+// GC deletes no needle. The binding stays for ever, so the key is never
+// rebound. A second collector reclaiming the same binding loses the condition
+// and its pass ends. The caller decides that nothing references the key.
+func reclaimBinding(ctx context.Context, f Filer, dir string, entry *filerpb.Entry) error {
 	e := proto.Clone(entry).(*filerpb.Entry)
+	e.Chunks = nil
 	e.Extended[extGCDeleted] = []byte("done")
-	return f.UpdateEntry(ctx, dir, e, map[string][]byte{extFid: entry.Extended[extFid], extGCDeleted: []byte("1")})
+	return f.UpdateEntry(ctx, dir, e, map[string][]byte{extKind: []byte(kindChunkKey), extGCDeleted: nil})
 }
 
 // INV-GC-CLOCK-SKEW-001: expiry uses a lower bound on elapsed time,

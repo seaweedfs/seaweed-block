@@ -87,8 +87,12 @@ func (b *rangeFake) putRange(ctx context.Context, r blobRange, i int, data []byt
 		store, perr = hook(ctx, fid)
 	}
 	if store {
+		c, _, err := canonicalFid(fid)
+		if err != nil {
+			return err
+		}
 		b.fakeBlobs.mu.Lock()
-		b.fakeBlobs.data[fid] = append([]byte(nil), data...)
+		b.fakeBlobs.data[c] = append([]byte(nil), data...)
 		b.fakeBlobs.mu.Unlock()
 	}
 	return perr
@@ -99,9 +103,13 @@ func (b *rangeFake) probe(_ context.Context, r blobRange, i int) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
+	c, _, err := canonicalFid(fid)
+	if err != nil {
+		return nil, err
+	}
 	b.fakeBlobs.mu.Lock()
 	defer b.fakeBlobs.mu.Unlock()
-	d, ok := b.fakeBlobs.data[fid]
+	d, ok := b.fakeBlobs.data[c]
 	if !ok {
 		return nil, fmt.Errorf("%w %s", errBlobAbsent, fid)
 	}
@@ -255,7 +263,7 @@ func TestChunkRound_CapacityRefusalReplacesRemainder(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkBound(t, r, 6)
-	if r.fids[roundKey(0)] != "1,0a0b0c0d0e" || r.fids[roundKey(1)] != "1,0a0b0c0d0e_1" {
+	if r.fids[roundKey(0)] != canon(t, "1,0a0b0c0d0e") || r.fids[roundKey(1)] != canon(t, "1,0a0b0c0d0e_1") {
 		t.Fatalf("committed prefix moved: %s %s", r.fids[roundKey(0)], r.fids[roundKey(1)])
 	}
 	if got := b.reserveCounts(); len(got) != 2 || got[1] != 4 {
@@ -619,7 +627,7 @@ func TestChunkRound_AmbiguousUploadKeepsItsFid(t *testing.T) {
 		if err := rd.Put(ctx, 1, roundKey(1), []byte(roundKey(1))); err != nil {
 			t.Fatal(err)
 		}
-		if fid := r.fids[roundKey(1)]; fid != "1,0a0b0c0d0e_1" {
+		if fid := r.fids[roundKey(1)]; fid != canon(t, "1,0a0b0c0d0e_1") {
 			t.Fatalf("retried slot bound to %s; want its first fid", fid)
 		}
 		if fid := r.fids[roundKey(0)]; !strings.HasPrefix(fid, "2,") {
@@ -660,7 +668,7 @@ func TestChunkRound_AmbiguousUploadKeepsItsFid(t *testing.T) {
 			}
 			fid, puts := r.fids[roundKey(0)], b.putList()
 			if stored {
-				if fid != "1,0a0b0c0d0e" || len(puts) != 1 {
+				if fid != canon(t, "1,0a0b0c0d0e") || len(puts) != 1 {
 					t.Fatalf("stored upload: bound %s after uploads %v; want its first fid, no resend", fid, puts)
 				}
 				return

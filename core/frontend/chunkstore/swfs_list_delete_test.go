@@ -117,8 +117,8 @@ func TestSWFS_DeleteEntry_ConditionalStyles(t *testing.T) {
 		t.Fatalf("ok delete: %v", err)
 	}
 	r := f.lastDelete
-	if r.Directory != "/d" || r.Name != "x" || r.IsDeleteData || r.IsRecursive || string(r.ExpectedExtended["swb.snap.state"]) != "deleting" {
-		t.Fatalf("request %+v: want no data delete, not recursive, expected_extended sent", r)
+	if r.Directory != "/d" || r.Name != "x" || !r.IsDeleteData || r.IsRecursive || string(r.ExpectedExtended["swb.snap.state"]) != "deleting" {
+		t.Fatalf("request %+v: want its data deleted, not recursive, expected_extended sent", r)
 	}
 
 	// The filer reports a failed precondition, including a missing entry, as

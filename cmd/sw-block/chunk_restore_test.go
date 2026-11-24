@@ -48,7 +48,7 @@ func TestOpsChunk_RestoreStartsAndReportsStatus(t *testing.T) {
 func restoreSource(t *testing.T, base string) (*gcCLIStore, *chunkstore.Catalog) {
 	t.Helper()
 	ctx := context.Background()
-	store := &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}
+	store := newGCCLIStore()
 	old := dialChunkFiler
 	t.Cleanup(func() { dialChunkFiler = old })
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }

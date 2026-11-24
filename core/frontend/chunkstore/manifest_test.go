@@ -232,8 +232,12 @@ func TestManifest_UnreadablePublishedSegmentRefusesWholeGC(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			bound, err := decodeBinding(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
 			b.mu.Lock()
-			b.data[string(entry.Extended[extFid])] = []byte("corrupted segment")
+			b.data[bound.fid] = []byte("corrupted segment")
 			before := len(b.data)
 			b.mu.Unlock()
 			if _, err := g.run(ctx, apply); err == nil {

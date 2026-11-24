@@ -6,9 +6,9 @@ A capture intent can expire only when its age strictly exceeds IntentTTL, the bl
 
 An immutable binding becomes a candidate only when its creation time is strictly older than Grace and no root names it. Reclamation requires another successful mark at least Grace after its first observation with the same binding bytes. A rooted candidate is forgotten; failed marks discard coverage. A bare Collector restart discards coverage; ExecuteGC restores only a completed, configuration-matching filer mark. Grace must exceed the catalog operation deadline plus the measured mark duration. Backward clock movement refuses the pass.
 
-Before physical deletion the binding receives a conditional `swb.gc.deleted=1` tombstone; after every resolved replica deletion succeeds it becomes `done`. Bindings are never removed or rebound. Failed/uncertain blob deletion returns an error and retains the fid for a conservative retry after fresh marks. The SeaweedFS adapter deletes the exact fid, accepts only HTTP 200/202/204/404 (SeaweedFS returns 202 after synchronous replicated deletion), and propagates transport/other HTTP failures. Authenticated deployments must supply a BlobDeleter with their write authorization; this patch does not add an auth provisioning path.
+A key binding is a standard filer file whose one chunk is its needle (binding.go). GC reclaims it by one UpdateEntry, conditional on the binding being live (`swb.kind=chunkkey`, `swb.gc.deleted` absent), that drops the chunk and sets `swb.gc.deleted=done`. The filer deletes the dropped needle after storing the update; GC deletes no needle. Bindings are never removed or rebound. A reclaim whose reply is lost fails the pass; the next pass reads the done binding and skips it.
 
-Unbound needles (upload succeeded but key binding never persisted) are RETAINED. The existing interfaces cannot enumerate/count them, so `UnknownUnbound=true` reports that limitation instead of a fabricated zero. No sweep is attempted.
+Unbound needles (upload succeeded but key binding never persisted) and needles whose deletion the filer lost are referenced by no entry: stock `volume.fsck` lists them as orphans.
 
 ## Scope and follow-ups
 
@@ -16,7 +16,7 @@ This first Draft implements the GC core and the real Capture/intent/HEAD caller 
 
 ## Lock order
 
-The new Collector mutex serializes its own passes and candidate state; it never enters WAL, publication, shard or chunk-layer locks. Remote calls execute only while holding that collector-local mutex. Producer Capture already uploads after releasing its capture/publication barrier, so GC adds no edge to the storage lock graph. The epoch-reader and BlobDeleter must not re-enter this Collector. Multiple collectors may repeat idempotent physical deletes, but each must independently satisfy the two-mark grace rule.
+The new Collector mutex serializes its own passes and candidate state; it never enters WAL, publication, shard or chunk-layer locks. Remote calls execute only while holding that collector-local mutex. Producer Capture already uploads after releasing its capture/publication barrier, so GC adds no edge to the storage lock graph. The epoch-reader and BlobReader must not re-enter this Collector. Two collectors cannot both reclaim a binding (the reclaim is conditional on it being live), and each must independently satisfy the two-mark grace rule.
 
 ## Evidence boundary
 

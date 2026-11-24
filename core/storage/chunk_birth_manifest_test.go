@@ -95,7 +95,7 @@ type birthBlobs struct {
 func (b *birthBlobs) Put(_ context.Context, d []byte) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	id := fmt.Sprint(len(b.data) + 1)
+	id := fmt.Sprintf("1,%04x%08x", 0x101+len(b.data), 0x5eed0001) // stock form, its own canonical form
 	b.data[id] = bytes.Clone(d)
 	return id, nil
 }

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 
 	"google.golang.org/protobuf/proto"
 
@@ -32,6 +33,13 @@ type fakeFiler struct {
 	failUpdateAfterApply func(p string) error
 	updates              int
 	deletes              int
+	// dropped is the filer's deletion queue: the file id of every chunk an
+	// update or delete dropped, in order. deleteChunk, if set, also receives
+	// each one (a test wires it to the blob store).
+	dropped     []string
+	deleteChunk func(fileID string)
+	// lastExpected is the condition of the last UpdateEntry applied.
+	lastExpected map[string][]byte
 	// beforeCreate, if set, runs under the lock just before an entry is
 	// created (it may read f.entries but must not call f's methods).
 	beforeCreate func(p string)
@@ -134,6 +142,8 @@ func (f *fakeFiler) UpdateEntry(_ context.Context, dir string, e *filerpb.Entry,
 	f.entries[p] = proto.Clone(e).(*filerpb.Entry)
 	f.written = append(f.written, proto.Clone(e).(*filerpb.Entry))
 	f.updates++
+	f.lastExpected = expected
+	f.drop(droppedChunks(cur, e))
 	if f.failUpdateAfterApply != nil {
 		if err := f.failUpdateAfterApply(p); err != nil {
 			return err
@@ -184,7 +194,17 @@ func (f *fakeFiler) DeleteEntry(_ context.Context, dir, name string, expected ma
 	}
 	delete(f.entries, p)
 	f.deletes++
+	f.drop(droppedChunks(cur, nil))
 	return nil
+}
+
+func (f *fakeFiler) drop(ids []string) {
+	f.dropped = append(f.dropped, ids...)
+	if f.deleteChunk != nil {
+		for _, id := range ids {
+			f.deleteChunk(id)
+		}
+	}
 }
 
 type deferredCreate struct {
@@ -235,6 +255,22 @@ type fakeBlobs struct {
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{data: map[string][]byte{}} }
 
+// testFid is a stock-form needle id "<vid>,<key><cookie>" whose canonical
+// form is itself (the key's top byte is not zero).
+func testFid(vid, n uint64) string {
+	return fmt.Sprintf("%d,%016x%08x", vid, uint64(1)<<56|n, 0x5eed0001)
+}
+
+// canon is the stock form a binding names fid by.
+func canon(t testing.TB, fid string) string {
+	t.Helper()
+	c, _, err := canonicalFid(fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
 func (b *fakeBlobs) Put(_ context.Context, d []byte) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -245,7 +281,7 @@ func (b *fakeBlobs) Put(_ context.Context, d []byte) (string, error) {
 		}
 	}
 	b.next++
-	fid := fmt.Sprintf("3,%08x", b.next)
+	fid := testFid(3, uint64(b.next))
 	b.data[fid] = append([]byte(nil), d...)
 	return fid, nil
 }
@@ -255,6 +291,11 @@ func (b *fakeBlobs) Get(_ context.Context, fid string) ([]byte, error) {
 	defer b.mu.Unlock()
 	b.gets++
 	d, ok := b.data[fid]
+	if !ok {
+		if c, _, err := canonicalFid(fid); err == nil {
+			d, ok = b.data[c]
+		}
+	}
 	if !ok {
 		return nil, fmt.Errorf("fake: no such fid %s: %w", fid, ErrBlobNotFound)
 	}

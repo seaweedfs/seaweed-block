@@ -16,7 +16,7 @@ import (
 // The CLI fixes the maximum cut/copy lifetime at five minutes and the HEAD
 // hydration reader at thirty seconds. A one-minute mark fits strictly inside
 // the one-hour grace. No elapsed TTL alone authorizes capture-intent expiry.
-func newChunkMaintenance(cat *chunkstore.Catalog, blobs chunkstore.BlobDeleter, collect bool, master string) (func(context.Context, string) error, func() error, error) {
+func newChunkMaintenance(cat *chunkstore.Catalog, blobs chunkstore.BlobReader, collect bool, master string) (func(context.Context, string) error, func() error, error) {
 	closeFn := func() error { return nil }
 	cfg := chunkstore.GCConfig{Grace: defaultChunkGCGrace, IntentTTL: defaultChunkIntentTTL}
 	if collect {

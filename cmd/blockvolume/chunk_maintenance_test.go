@@ -43,7 +43,6 @@ func (f *maintenanceGCFiler) DeleteEntry(ctx context.Context, dir, name string, 
 
 type maintenanceBlobs struct{}
 
-func (maintenanceBlobs) DeleteBlob(context.Context, string) error    { return nil }
 func (maintenanceBlobs) Put(context.Context, []byte) (string, error) { return "unused", nil }
 func (maintenanceBlobs) Get(context.Context, string) ([]byte, error) {
 	return nil, errors.New("unexpected blob read")

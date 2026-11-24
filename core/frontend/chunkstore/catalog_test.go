@@ -100,10 +100,16 @@ func catalogFixture(t *testing.T) (*fakeFiler, *fakeBlobs, *Catalog, storage.Chu
 	return f, b, c, h
 }
 
+// assertNoFilerChunks: only key bindings name filer chunks, each as a live
+// binding (one needle); every other entry carries none.
 func assertNoFilerChunks(t *testing.T, f *fakeFiler) {
 	t.Helper()
 	for _, e := range f.allWritten() {
-		if len(e.Chunks) != 0 {
+		if string(e.Extended[extKind]) == kindChunkKey {
+			if _, err := decodeBinding(e); err != nil {
+				t.Fatalf("key binding %q: %v", e.Name, err)
+			}
+		} else if len(e.Chunks) != 0 {
 			t.Fatalf("entry %q written with filer chunks", e.Name)
 		}
 	}

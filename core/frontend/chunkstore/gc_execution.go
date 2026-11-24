@@ -54,22 +54,20 @@ type GCExecution struct {
 // A write may commit despite a lost response: errors retain known effects
 // and identify uncertain stages, rather than asserting remote absence.
 // The catalog namespace is the scope; permanent tombstones are untouched.
-func (c *Catalog) ExecuteGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig, apply bool) (out GCExecution, err error) {
+func (c *Catalog) ExecuteGC(ctx context.Context, blobs BlobReader, cfg GCConfig, apply bool) (out GCExecution, err error) {
 	return c.executeGC(ctx, blobs, cfg, apply, "")
 }
 
 // ExecuteVolumeGC reclaims only volumeID's objects while tracing every volume's
 // roots. Its persisted two-mark coverage never aliases namespace-wide coverage.
-func (c *Catalog) ExecuteVolumeGC(ctx context.Context, volumeID string, blobs BlobDeleter, cfg GCConfig, apply bool) (GCExecution, error) {
+func (c *Catalog) ExecuteVolumeGC(ctx context.Context, volumeID string, blobs BlobReader, cfg GCConfig, apply bool) (GCExecution, error) {
 	if err := CheckVolumeID(volumeID); err != nil {
-		return GCExecution{GCResult: GCResult{UnknownUnbound: true}}, err
+		return GCExecution{}, err
 	}
 	return c.executeGC(ctx, blobs, cfg, apply, volumeID)
 }
 
-func (c *Catalog) executeGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig, apply bool, scope string) (out GCExecution, err error) {
-	// Pre-binding needles remain unenumerable even if admission/readback fails.
-	out.UnknownUnbound = true
+func (c *Catalog) executeGC(ctx context.Context, blobs BlobReader, cfg GCConfig, apply bool, scope string) (out GCExecution, err error) {
 	out.DryRun = !apply
 	out.MarkOutcome = "not_attempted"
 	out.UnknownOutcomes = []string{}
@@ -121,12 +119,6 @@ func (c *Catalog) executeGC(ctx context.Context, blobs BlobDeleter, cfg GCConfig
 	}
 	out.MarkOutcome = "complete"
 	out.MarkSaved = true
-	if len(out.FailedDeletes) != 0 {
-		// The mark completed and is reusable even though these tombstoned
-		// objects remain. Report partial failure after persisting coverage,
-		// so CLI/maintenance callers cannot mistake it for full reclamation.
-		return out, fmt.Errorf("%w: %d objects retained; complete GC mark saved", ErrBlobDeleteRejected, len(out.FailedDeletes))
-	}
 	return out, nil
 }
 

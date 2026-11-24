@@ -216,12 +216,11 @@ func (env *handoffEnv) gc(t *testing.T, apply bool) ([]gcObject, int) {
 	var body struct {
 		MarkSaved       bool       `json:"mark_saved"`
 		UnknownOutcomes []string   `json:"unknown_outcomes"`
-		FailedDeletes   []any      `json:"failed_deletes"`
 		WouldDelete     []gcObject `json:"would_delete"`
 		Candidates      int
 		Reclaimed       int
 	}
-	if err := json.Unmarshal([]byte(out), &body); err != nil || (apply && !body.MarkSaved) || len(body.UnknownOutcomes) != 0 || len(body.FailedDeletes) != 0 {
+	if err := json.Unmarshal([]byte(out), &body); err != nil || (apply && !body.MarkSaved) || len(body.UnknownOutcomes) != 0 {
 		t.Fatalf("gc pass (apply %v): %v\n%s", apply, err, out)
 	}
 	t.Logf("gc pass (apply %v): %d candidates, %d eligible, %d reclaimed", apply, body.Candidates, len(body.WouldDelete), body.Reclaimed)

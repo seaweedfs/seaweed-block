@@ -45,9 +45,9 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 			return exit
 		}
 	}
-	blobs, ok := f.(chunkstore.BlobDeleter)
+	blobs, ok := f.(chunkstore.BlobReader)
 	if !ok {
-		return chunkFail("gc", stdout, stderr, chunkExitFailed, codeInternalCLI, "chunk store cannot delete immutable blobs", false)
+		return chunkFail("gc", stdout, stderr, chunkExitFailed, codeInternalCLI, "chunk store cannot read immutable blobs", false)
 	}
 	cat, e := chunkstore.NewCatalog(f, base)
 	if e != nil {

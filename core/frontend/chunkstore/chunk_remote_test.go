@@ -95,11 +95,7 @@ func TestChunkRemote_HeadRoundTripAndCAS(t *testing.T) {
 	if got.Gen != 2 || got.RemoteLSN != 50 || len(got.Chunks) != 0 {
 		t.Fatalf("HEAD after refused CAS = %+v; want gen 2 at LSN 50", got)
 	}
-	for _, e := range f.allWritten() {
-		if len(e.GetChunks()) != 0 {
-			t.Fatalf("entry %s written with filer chunks", e.Name)
-		}
-	}
+	assertNoFilerChunks(t, f)
 }
 
 // An absent HEAD has epoch 0; an expectation of gen 0 at another epoch can

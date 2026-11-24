@@ -667,12 +667,19 @@ func (v *verifier) readSegment(ctx context.Context, ref storage.ChunkSegment) (*
 	if err != nil {
 		return nil, abortErr(ctx, err, "read segment binding %s/%s", dir, name)
 	}
-	s.fid = string(e.Extended[extFid])
-	if bad := bindingProblem(e); bad != "" {
-		s.class, s.detail = FindingBindingMissing, "invalid segment binding: "+bad
+	b, err := decodeBinding(e)
+	if err != nil {
+		s.class, s.detail = FindingBindingMissing, "invalid segment binding: "+err.Error()
 		return s, nil
 	}
-	s.tombstoned = len(e.Extended[extGCDeleted]) != 0
+	if b.done {
+		// Reclaimed: the binding names no needle any more (the filer deletes
+		// the dropped one); the tombstone is reported beside this outcome.
+		s.tombstoned = true
+		s.class, s.detail = FindingNeedleMissing, "segment binding reclaimed by GC; its needle was handed to the filer for deletion"
+		return s, nil
+	}
+	s.fid = b.fid
 	v.mu.Lock()
 	v.res.SegmentReads++
 	v.mu.Unlock()
@@ -724,21 +731,6 @@ func (v *verifier) judgeSegment(ctx context.Context, s *verifySegment, k segRef)
 	}
 	s.memo[k] = j
 	return j
-}
-
-// bindingProblem is what makes e unusable as a chunk key binding, or "".
-func bindingProblem(e *filerpb.Entry) string {
-	switch {
-	case e.GetIsDirectory():
-		return "is a directory"
-	case len(e.GetChunks()) != 0:
-		return fmt.Sprintf("carries %d filer chunks", len(e.GetChunks()))
-	case string(e.Extended[extKind]) != kindChunkKey:
-		return fmt.Sprintf("kind %q, want %q", e.Extended[extKind], kindChunkKey)
-	case len(e.Extended[extFid]) == 0:
-		return "no fid"
-	}
-	return ""
 }
 
 // walk reads the segments root h (of root, HEAD or a snapshot's label) names
@@ -1239,12 +1231,13 @@ func (v *verifier) evaluateBinding(w *verifyChunk, e *filerpb.Entry) {
 		v.settle(w, FindingBindingMissing, fmt.Sprintf("no binding in %s/keys", w.owner))
 		return
 	}
-	w.fid = string(e.Extended[extFid])
-	switch bad := bindingProblem(e); {
-	case bad != "":
-		v.settle(w, FindingBindingMissing, "invalid binding: "+bad)
-	case len(e.Extended[extGCDeleted]) != 0:
-		v.settle(w, FindingBindingTombstoned, fmt.Sprintf("binding tombstoned by GC (%s=%s)", extGCDeleted, e.Extended[extGCDeleted]))
+	b, err := decodeBinding(e)
+	w.fid = b.fid
+	switch {
+	case err != nil:
+		v.settle(w, FindingBindingMissing, "invalid binding: "+err.Error())
+	case b.done:
+		v.settle(w, FindingBindingTombstoned, fmt.Sprintf("binding tombstoned by GC (%s=done)", extGCDeleted))
 	default:
 		w.bound = true
 		if v.opts.Depth != VerifyData {

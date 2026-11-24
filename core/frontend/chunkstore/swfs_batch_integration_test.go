@@ -96,13 +96,13 @@ func TestIntegrationBatch_RoundBindsAndReadsBack(t *testing.T) {
 	if a := r.AssignCounts(); a.Initial != 3 || a.Extra() != 0 {
 		t.Fatalf("assign counts %+v; want 3 initial", a)
 	}
-	suffixed := 0
+	// A range shares its base's cookie: n distinct needles from 3 ranges.
+	fids, cookies := map[string]bool{}, map[string]bool{}
 	for i := 0; i < n; i++ {
-		if strings.Contains(r.fids[roundKey(i)], "_") {
-			suffixed++
-		}
+		fid := r.fids[roundKey(i)]
+		fids[fid], cookies[fid[len(fid)-8:]] = true, true
 	}
-	if suffixed != n-3 {
-		t.Fatalf("%d of %d bindings use an offset fid; want all but the 3 bases", suffixed, n)
+	if len(fids) != n || len(cookies) != 3 {
+		t.Fatalf("%d needles with %d cookies; want %d from 3 ranges", len(fids), len(cookies), n)
 	}
 }

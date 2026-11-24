@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,19 +15,32 @@ import (
 )
 
 type gcCLIStore struct {
-	writes       int
-	blobs        map[string][]byte
-	failDeleteAt int
-	afterUpdate  func(*filerpb.Entry) error
+	writes      int
+	blobs       map[string][]byte
+	uploads     int
+	afterUpdate func(*filerpb.Entry) error
 	*chunkstore.MemFiler
-	deletes int
+	deletes int // needles the filer deleted (chunks its entries dropped)
 }
 
+// newGCCLIStore is a filer and volume server: chunks the filer drops are
+// deleted from the blobs.
+func newGCCLIStore() *gcCLIStore {
+	s := &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}
+	s.MemFiler.DeleteChunk = func(fid string) {
+		s.deletes++
+		delete(s.blobs, fid)
+	}
+	return s
+}
+
+// Put stores under a stock-form fid that is its own canonical form.
 func (s *gcCLIStore) Put(_ context.Context, data []byte) (string, error) {
 	if s.blobs == nil {
 		s.blobs = map[string][]byte{}
 	}
-	fid := fmt.Sprintf("1,%d", len(s.blobs)+1)
+	s.uploads++
+	fid := fmt.Sprintf("1,%04x%08x", 0x100+s.uploads, 0x5eed0001)
 	s.blobs[fid] = append([]byte{}, data...)
 	return fid, nil
 }
@@ -38,14 +50,6 @@ func (s *gcCLIStore) Get(_ context.Context, fid string) ([]byte, error) {
 		return nil, errors.New("missing blob")
 	}
 	return b, nil
-}
-func (s *gcCLIStore) DeleteBlob(_ context.Context, fid string) error {
-	s.deletes++
-	delete(s.blobs, fid)
-	if s.deletes == s.failDeleteAt {
-		return errors.New("delete response lost")
-	}
-	return nil
 }
 
 func TestOpsChunkGC_DefaultIsReadOnly(t *testing.T) {
@@ -61,7 +65,7 @@ func TestOpsChunkGC_DefaultIsReadOnly(t *testing.T) {
 			t.Error(e)
 		}
 	}()
-	store := &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}
+	store := newGCCLIStore()
 	old := dialChunkFiler
 	defer func() { dialChunkFiler = old }()
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
@@ -130,7 +134,7 @@ func TestOpsChunkGC_InvalidAdmissionHasNoStoreEffects(t *testing.T) {
 
 func gcPartialFixture(t *testing.T) (*gcCLIStore, *time.Time) {
 	t.Helper()
-	store := &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}
+	store := newGCCLIStore()
 	oldDial, oldClock := dialChunkFiler, chunkGCNow
 	t.Cleanup(func() { dialChunkFiler = oldDial; chunkGCNow = oldClock })
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
@@ -201,13 +205,22 @@ func TestOpsChunkGC_PartialReclaimReportsKnownAndUnknown(t *testing.T) {
 		t.Fatalf("first mark: %d %s", rc, out)
 	}
 	*now = now.Add(2 * time.Hour)
-	store.failDeleteAt = 2
+	reclaims := 0
+	store.afterUpdate = func(e *filerpb.Entry) error {
+		if string(e.Extended["swb.gc.deleted"]) == "done" {
+			if reclaims++; reclaims == 2 {
+				return errors.New("reclaim response lost")
+			}
+		}
+		return nil
+	}
 	rc, out, _ := runPartialGC()
 	if rc != 1 {
 		t.Fatalf("partial failure exit=%d %s", rc, out)
 	}
-	// Both requests took effect, but only the first was acknowledged. The
-	// second is UNKNOWN to the caller; it must not be counted as known success.
+	// Both reclaims took effect (the filer deleted both needles), but only the
+	// first was acknowledged. The second is UNKNOWN to the caller; it must not
+	// be counted as known success.
 	if store.deletes != 2 || len(store.blobs) != 0 {
 		t.Fatal("partial-effect fixture was not exercised")
 	}
@@ -236,14 +249,14 @@ func (s *gcFailedMarkLookup) LookupEntry(ctx context.Context, dir, name string) 
 	}
 	return s.gcCLIStore.LookupEntry(ctx, dir, name)
 }
-func TestOpsChunkGC_FailedMarkLookupPreservesUnknownUnbound(t *testing.T) {
+func TestOpsChunkGC_FailedMarkLookupIsNotAttempted(t *testing.T) {
 	for _, apply := range []bool{false, true} {
 		name := "dry-run"
 		if apply {
 			name = "apply"
 		}
 		t.Run(name, func(t *testing.T) {
-			store := &gcFailedMarkLookup{gcCLIStore: &gcCLIStore{MemFiler: chunkstore.NewMemFiler()}}
+			store := &gcFailedMarkLookup{gcCLIStore: newGCCLIStore()}
 			old := dialChunkFiler
 			t.Cleanup(func() { dialChunkFiler = old })
 			dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
@@ -259,26 +272,9 @@ func TestOpsChunkGC_FailedMarkLookupPreservesUnknownUnbound(t *testing.T) {
 			if err := json.Unmarshal([]byte(out), &body); err != nil {
 				t.Fatal(err)
 			}
-			if rc != 1 || body.Code == "" || !strings.Contains(stderr, "mark lookup unavailable") || !body.GC.UnknownUnbound || body.GC.MarkOutcome != "not_attempted" || body.GC.DryRun == apply || body.GC.MarkSaved || store.lookups != 1 || store.writes != 0 || store.deletes != 0 {
+			if rc != 1 || body.Code == "" || !strings.Contains(stderr, "mark lookup unavailable") || body.GC.MarkOutcome != "not_attempted" || body.GC.DryRun == apply || body.GC.MarkSaved || store.lookups != 1 || store.writes != 0 || store.deletes != 0 {
 				t.Fatalf("failed lookup misreported/mutated: rc=%d out=%s stderr=%s lookups=%d writes=%d deletes=%d", rc, out, stderr, store.lookups, store.writes, store.deletes)
 			}
 		})
-	}
-}
-
-func TestOpsChunkGC_PermanentDeleteReportsFailureWithSavedCoverage(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	out := chunkstore.GCExecution{MarkOutcome: "complete", MarkSaved: true, GCResult: chunkstore.GCResult{
-		Reclaimed: 1, FailedDeletes: []chunkstore.GCDeleteFailure{{GCObject: chunkstore.GCObject{Volume: "v1", Key: "bad", FID: "3,bad"}, Error: "http 400"}},
-	}}
-	rc := chunkGCResult(out, chunkstore.ErrBlobDeleteRejected, &stdout, &stderr)
-	var body struct {
-		GC chunkstore.GCExecution `json:"gc"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if rc != 1 || !body.GC.MarkSaved || body.GC.MarkOutcome != "complete" || body.GC.Reclaimed != 1 || len(body.GC.FailedDeletes) != 1 || body.GC.FailedDeletes[0].FID != "3,bad" {
-		t.Fatalf("partial failure lost saved coverage or object identity: rc=%d body=%s", rc, stdout.String())
 	}
 }

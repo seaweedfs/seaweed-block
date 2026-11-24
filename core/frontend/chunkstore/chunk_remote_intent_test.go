@@ -32,11 +32,7 @@ func TestChunkRemote_IntentsRoundTripAndNonce(t *testing.T) {
 	if _, err := f.LookupEntry(ctx, "/swblock/chunks/v1/intents", a); err != nil {
 		t.Fatalf("intent %q not at <root>/intents/: %v", a, err)
 	}
-	for _, e := range f.allWritten() {
-		if len(e.Chunks) != 0 {
-			t.Fatalf("entry %q written with filer chunks", e.Name)
-		}
-	}
+	assertNoFilerChunks(t, f)
 	got, err := r.ListIntents(ctx)
 	if err != nil || len(got) != 2 {
 		t.Fatalf("ListIntents: %+v %v", got, err)

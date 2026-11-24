@@ -517,6 +517,10 @@ persisted-mark compatibility, future-clock resets and authority-preserving expir
 
 ## Per-object GC DELETE progress
 
+Retired with volume format 2 (`INV-GC-DELETE-PROGRESS-001` is ARCHIVED): GC
+sends no needle DELETE; the filer deletes the chunk a reclaim drops. The model
+is kept as a record.
+
 `GCDeleteProgress.tla` models the narrow sweep transition after a complete,
 authorised mark: three ordered candidates, first DELETE definitively rejected,
 later deletes accepted. It checks that the rejected fid is never reported
