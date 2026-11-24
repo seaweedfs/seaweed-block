@@ -96,25 +96,24 @@ func TestClean_ExcludesSnapshot(t *testing.T) {
 	}
 }
 
-func TestCleanSession_InterruptAtEveryStep(t *testing.T) {
-	t.Run("BeginClean", func(t *testing.T) {
-		interruptHead(t, idleHead(), func(st HeadStore) error {
-			_, err := RunBeginClean(context.Background(), st, me, "c1")
-			return err
-		}, func(t *testing.T, h Head) {
-			if h.Activity != (Activity{Kind: ActClean, Session: "c1"}) {
-				t.Fatalf("HEAD after BeginClean: %+v", h.Activity)
-			}
-		})
+func TestRunBeginClean_InterruptAtEveryStep(t *testing.T) {
+	interruptHead(t, idleHead(), func(st HeadStore) error {
+		_, err := RunBeginClean(context.Background(), st, me, "c1")
+		return err
+	}, func(t *testing.T, h Head) {
+		if h.Activity != (Activity{Kind: ActClean, Session: "c1"}) {
+			t.Fatalf("HEAD after BeginClean: %+v", h.Activity)
+		}
 	})
-	t.Run("EndClean", func(t *testing.T) {
-		interruptHead(t, cleanHead("c1"), func(st HeadStore) error {
-			_, err := RunEndClean(context.Background(), st, me, "c1")
-			return err
-		}, func(t *testing.T, h Head) {
-			if h.Activity != (Activity{Kind: ActIdle}) {
-				t.Fatalf("HEAD after EndClean: %+v", h.Activity)
-			}
-		})
+}
+
+func TestRunEndClean_InterruptAtEveryStep(t *testing.T) {
+	interruptHead(t, cleanHead("c1"), func(st HeadStore) error {
+		_, err := RunEndClean(context.Background(), st, me, "c1")
+		return err
+	}, func(t *testing.T, h Head) {
+		if h.Activity != (Activity{Kind: ActIdle}) {
+			t.Fatalf("HEAD after EndClean: %+v", h.Activity)
+		}
 	})
 }
