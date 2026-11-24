@@ -63,10 +63,11 @@ func TestLeaseRefusalKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := waitAuthorityLine(t, h.Publisher(), "v")
-	id := func(replica string, epoch uint64) *control.WorkspaceIdentity {
-		return &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: replica, Epoch: epoch, ServerId: "node-a"}
+	nodeB := &control.WorkspaceBinding{VolumeId: "v", ServerId: "node-b", DataAddr: "127.0.0.1:20000", CtrlAddr: "127.0.0.1:20001"}
+	id := func(server string, epoch uint64) *control.WorkspaceIdentity {
+		return &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r1", Epoch: epoch, ServerId: server}
 	}
-	e1 := id("r1", line.Epoch)
+	e1 := id("node-a", line.Epoch)
 	if _, err := ws.RenewWorkspaceLease(ctx, e1); err != nil {
 		t.Fatal("first grant:", err)
 	}
@@ -89,9 +90,9 @@ func TestLeaseRefusalKinds(t *testing.T) {
 		t.Fatal("re-grant after the barrier:", err)
 	}
 
-	// cleanMove revokes and ACKs the current holder, then moves the line on
-	// the same host to replica.
-	cleanMove := func(req string, from *control.WorkspaceIdentity, replica string) uint64 {
+	// cleanMove revokes and ACKs the current holder, then moves the line to
+	// the binding's host.
+	cleanMove := func(req string, from *control.WorkspaceIdentity, to *control.WorkspaceBinding) uint64 {
 		t.Helper()
 		if _, err := ws.RevokeWorkspace(ctx, from); err != nil {
 			t.Fatal(err)
@@ -101,11 +102,11 @@ func TestLeaseRefusalKinds(t *testing.T) {
 		if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: from, HeadGen: uint64(headGen.Load())}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
+		if _, err := ws.RegisterWorkspaceBinding(ctx, to); err != nil {
 			t.Fatal(err)
 		}
-		g, err := ws.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: req, VolumeId: "v", ExpectedReplicaId: from.GetReplicaId(), ExpectedEpoch: from.GetEpoch(),
-			TargetReplicaId: replica, TargetServerId: "node-a", TargetDataAddr: b.DataAddr, TargetCtrlAddr: b.CtrlAddr, Kind: "clean"})
+		g, err := ws.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: req, VolumeId: "v", ExpectedReplicaId: "r1", ExpectedEpoch: from.GetEpoch(),
+			TargetReplicaId: "r1", TargetServerId: to.GetServerId(), TargetDataAddr: to.GetDataAddr(), TargetCtrlAddr: to.GetCtrlAddr(), Kind: "clean"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -113,7 +114,7 @@ func TestLeaseRefusalKinds(t *testing.T) {
 	}
 
 	// OTHER: the same owner at a newer epoch (a clean move back to this host).
-	e2 := id("r1", cleanMove("same-replica", e1, "r1"))
+	e2 := id("node-a", cleanMove("same-host", e1, b))
 	text, r = refusalOf(t, "same owner, newer epoch", func() error { _, err := ws.RenewWorkspaceLease(ctx, e1); return err }())
 	if r != nil || text != "workspace lease: server identity does not match the current holder" {
 		t.Fatalf("same owner at a newer epoch: %q detail %v; want the unchanged text, no detail", text, r)
@@ -122,11 +123,12 @@ func TestLeaseRefusalKinds(t *testing.T) {
 		t.Fatal("grant at the newer epoch:", err)
 	}
 
-	// MOVED: the line names another replica.
-	e3 := id("r2", cleanMove("other-replica", e2, "r2"))
-	text, r = refusalOf(t, "line names another replica", func() error { _, err := ws.RenewWorkspaceLease(ctx, e2); return err }())
+	// MOVED: a newer epoch owned by another known server. (A line naming
+	// another replica is MOVED too; a v1 move keeps the replica id.)
+	e3 := id("node-b", cleanMove("other-host", e2, nodeB))
+	text, r = refusalOf(t, "moved to another host", func() error { _, err := ws.RenewWorkspaceLease(ctx, e2); return err }())
 	if r == nil || r.GetKind() != control.WorkspaceLeaseRefusal_MOVED || text != "workspace lease: server identity does not match the current holder" {
-		t.Fatalf("line names another replica: %q detail %v; want MOVED with the unchanged text", text, r)
+		t.Fatalf("moved to another host: %q detail %v; want MOVED with the unchanged text", text, r)
 	}
 
 	// An admitted deletion is OTHER; a committed one is DELETED.
