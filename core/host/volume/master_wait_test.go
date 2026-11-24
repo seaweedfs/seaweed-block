@@ -148,7 +148,9 @@ func TestLeaseGuardSleepsUntilTheBarrier(t *testing.T) {
 	now = now.Add(39 * time.Second)
 	in("1 s before T", g.renewDelay(), 1100*time.Millisecond, 1600*time.Millisecond)
 	now = now.Add(2 * time.Second)
-	in("past T: the 1 s poll", g.renewDelay(), 800*time.Millisecond, 1200*time.Millisecond)
+	in("just past T: the fast poll", g.renewDelay(), 150*time.Millisecond, 250*time.Millisecond)
+	now = now.Add(5 * time.Second)
+	in("5 s past T: the 1 s poll", g.renewDelay(), 800*time.Millisecond, 1200*time.Millisecond)
 	w.renewal(now, refusalWith(t, "barrier", control.WorkspaceLeaseRefusal_BARRIER, time.Hour))
 	in("a far barrier: capped", g.renewDelay(), 2*time.Minute, 2*time.Minute)
 	if observed != 2 {

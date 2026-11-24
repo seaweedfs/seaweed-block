@@ -118,6 +118,11 @@ func (g *WorkspaceLeaseGuard) renewDelay() time.Duration {
 		if g.barrierAt != nil {
 			if t := g.barrierAt(); t.After(now) {
 				delay = min(t.Sub(now)+barrierWakeMargin+jittered(0, barrierWakeJitter), barrierSleepCap)
+			} else if !t.IsZero() && now.Sub(t) < barrierFastPollFor {
+				// Just past T every lapsed volume re-grants at once and the
+				// master refuses the ones that find its writer busy: retry
+				// those soon, not a second later.
+				delay = jittered(barrierFastPoll, barrierFastPoll/4)
 			}
 		}
 		if !pending {
@@ -316,6 +321,9 @@ const (
 	barrierWakeMargin = 100 * time.Millisecond
 	barrierWakeJitter = 500 * time.Millisecond
 	barrierSleepCap   = 2 * time.Minute
+	// For barrierFastPollFor after T the pre-grant poll is barrierFastPoll.
+	barrierFastPoll    = 200 * time.Millisecond
+	barrierFastPollFor = 5 * time.Second
 )
 
 // jittered returns base plus a uniform offset in [-spread, +spread) (only

@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -197,9 +199,9 @@ func TestObsoleteUnitStopsWithReachableMaster(t *testing.T) {
 
 // revokeAndExit seals v1 on s1, revokes it at e and waits for the holder's
 // clean exit and recorded ACK: the volume is then admissible for delete.
-func revokeAndExit(t *testing.T, env *handoffEnv, holder *daemon, e uint64) {
+func revokeAndExit(t *testing.T, env *handoffEnv, hostID string, holder *daemon, e uint64) {
 	t.Helper()
-	b := env.hosts["s1"]
+	b := env.hosts[hostID]
 	out, _ := env.h.command(t, "ops", "chunk", "detach", "--plain", "--volume", "v1", "--status-addr", b.status, "--timeout", "120s")
 	var a struct {
 		HeadGen uint64 `json:"headGen"`
@@ -224,19 +226,42 @@ func revokeAndExit(t *testing.T, env *handoffEnv, holder *daemon, e uint64) {
 // exits 75 assignment_timeout, never 78.
 func TestWaitingVolumeDeletedDuringOutageExits78(t *testing.T) {
 	t.Run("committed", func(t *testing.T) {
-		env := startHandoffEnv(t, 1)
+		// The waiting s1 process reaches the master through a proxy the test
+		// cuts: while it cannot reach the master (no bound), the line moves to
+		// s2, s2 is revoked with an ACK and the delete commits. When the
+		// proxy returns, the renewal at its cached epoch meets the committed
+		// deletion.
+		env := startHandoffEnv(t, 2)
 		holder := env.start(t, "bv-del-holder", "s1")
 		e := env.adopt(t, holder, "s1")
-		revokeAndExit(t, env, holder, e)
-		waiting := env.start(t, "bv-del-waiting", "s1")
-		waiting.waitLog(t, 30*time.Second, "blockvolume: volume v1 adopted as PRIMARY at r1@")
+		holder.kill(t)
+		px := startMasterProxy(t, env.h.masterAddr)
+		args := env.volArgs("s1")
+		for i := range args {
+			if args[i] == "--master" {
+				args[i+1] = px.addr
+			}
+		}
+		time.Sleep(35 * time.Second) // the lease lapsed; the barrier has not passed
+		waiting := env.h.start(t, "bv-del-waiting", env.h.volume, args...)
+		poll(t, 30*time.Second, "/status never showed the barrier", func() bool {
+			mw, ok := masterWaitOf(env.hosts["s1"].status)
+			return ok && mw.Reason == "barrier"
+		})
+		px.cut()
+		env.forceMove(t, e, "s2", "force-before-delete")
+		s2 := env.start(t, "bv-del-s2", "s2")
+		e2 := env.adopt(t, s2, "s2")
+		revokeAndExit(t, env, "s2", s2, e2)
 		out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC,
 			"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-while-waiting")
 		var del struct{ Completed bool }
 		if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
 			t.Fatalf("volume-delete while a process waits: exit %d %s %s; want completed", code, out, errOut)
 		}
-		err := waiting.wait(30 * time.Second)
+		stillRunning(t, waiting, "while the master was unreachable")
+		px.restore()
+		err := waiting.wait(60 * time.Second)
 		if exitCode(err) != 78 || !waiting.has("blockvolume: exiting status=78 reason=deleted") {
 			t.Fatalf("waiting process after the committed delete: %v; want 78 reason=deleted", err)
 		}
@@ -245,7 +270,7 @@ func TestWaitingVolumeDeletedDuringOutageExits78(t *testing.T) {
 		env := startHandoffEnv(t, 1)
 		holder := env.start(t, "bv-adm-holder", "s1")
 		e := env.adopt(t, holder, "s1")
-		revokeAndExit(t, env, holder, e)
+		revokeAndExit(t, env, "s1", holder, e)
 		conn, err := grpc.NewClient(env.h.masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			t.Fatal(err)
@@ -307,26 +332,34 @@ func TestManyVolumesServeTogetherAfterMasterRestart(t *testing.T) {
 	env.masterProcess = env.h.start(t, "blockmaster-back", env.h.master, env.masterArgs...)
 	env.masterProcess.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
 
+	// One watcher per volume, every 50 ms: its barrier time from /status,
+	// then the moment it serves.
 	until := make([]time.Time, len(hosts))
 	served := make([]time.Time, len(hosts))
+	var wg sync.WaitGroup
 	deadline := time.Now().Add(3 * time.Minute)
-	for left := len(hosts); left > 0; time.Sleep(100 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatalf("%d of %d volumes never served after the master returned", left, len(hosts))
-		}
-		for i, b := range hosts {
-			if !served[i].IsZero() {
-				continue
-			}
-			if until[i].IsZero() {
-				if mw, ok := masterWaitOfVolume(b.status, b.volume); ok && mw.Reason == "barrier" {
-					until[i] = mw.Until
+	for i, b := range hosts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				if until[i].IsZero() {
+					if mw, ok := masterWaitOfVolume(b.status, b.volume); ok && mw.Reason == "barrier" {
+						until[i] = mw.Until
+					}
 				}
+				if volumeFrontendReady(b.status, b.volume) {
+					served[i] = time.Now()
+					return
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
-			if volumeFrontendReady(b.status, b.volume) {
-				served[i] = time.Now()
-				left--
-			}
+		}()
+	}
+	wg.Wait()
+	for i, b := range hosts {
+		if served[i].IsZero() {
+			t.Fatalf("%s never served after the master returned", b.volume)
 		}
 	}
 	var worst time.Duration
@@ -344,4 +377,74 @@ func TestManyVolumesServeTogetherAfterMasterRestart(t *testing.T) {
 	if worst > 2*time.Second {
 		t.Fatalf("a volume served %v after its barrier; want every one within 2 s", worst.Round(time.Millisecond))
 	}
+}
+
+// masterProxy forwards TCP connections to the master; cut closes its
+// listener and every open connection (the master is unreachable through it),
+// restore listens again on the same address.
+type masterProxy struct {
+	t      *testing.T
+	addr   string
+	target string
+	mu     sync.Mutex
+	ln     net.Listener
+	conns  []net.Conn
+}
+
+func startMasterProxy(t *testing.T, target string) *masterProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &masterProxy{t: t, addr: ln.Addr().String(), target: target}
+	p.serve(ln)
+	t.Cleanup(p.cut)
+	return p
+}
+
+func (p *masterProxy) serve(ln net.Listener) {
+	p.mu.Lock()
+	p.ln = ln
+	p.mu.Unlock()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			up, err := net.Dial("tcp", p.target)
+			if err != nil {
+				_ = c.Close()
+				continue
+			}
+			p.mu.Lock()
+			p.conns = append(p.conns, c, up)
+			p.mu.Unlock()
+			go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+			go func() { _, _ = io.Copy(c, up); _ = c.Close() }()
+		}
+	}()
+}
+
+func (p *masterProxy) cut() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ln != nil {
+		_ = p.ln.Close()
+		p.ln = nil
+	}
+	for _, c := range p.conns {
+		_ = c.Close()
+	}
+	p.conns = nil
+}
+
+func (p *masterProxy) restore() {
+	p.t.Helper()
+	ln, err := net.Listen("tcp", p.addr)
+	if err != nil {
+		p.t.Fatalf("proxy relisten %s: %v", p.addr, err)
+	}
+	p.serve(ln)
 }
