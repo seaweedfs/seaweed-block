@@ -156,14 +156,12 @@ func sessionFixture(t *testing.T) (func() *memVolume, map[uint64][]byte, CommitR
 	data := map[uint64][]byte{0: []byte("a"), 3: []byte("b2"), 10004: []byte("c")}
 	prev := manifest(ref("v1", 0, "a"), ref("v1", 3, "b"))
 	next := manifest(ref("v1", 0, "a"), ref("v1", 3, "b2"), ref("v1", 10004, "c"), ref("src", 7, "d"))
+	prevData := map[uint64][]byte{0: []byte("a"), 3: []byte("b")}
 	fresh := func() *memVolume {
-		f := &fakeStore{have: map[string]bool{}}
-		prevRoot := prepared(t, f, prev)
 		objs := map[string][]byte{}
-		for p := range f.have {
-			objs[p] = []byte("x")
-		}
-		h := Head{Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActIdle}, Current: &prevRoot, Position: 40}
+		prevRoot := writeImage(t, objs, prev, prevData)
+		h := Head{Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActIdle}, Current: &prevRoot, Position: 40,
+			Snapshots: map[string]Snapshot{"daily": {Root: prevRoot}}}
 		return &memVolume{head: &memHead{h: &h}, objects: objs}
 	}
 	return fresh, data, CommitRequest{Prev: prev, Next: next, Position: 50, Snapshot: "hourly"}
@@ -198,6 +196,9 @@ func requireCommitted(t *testing.T, v *memVolume, data map[uint64][]byte, req Co
 	}
 	if _, ok := v.objects[path.Join(volRoot, rn.Path())]; !ok {
 		t.Fatal("the committed root is missing")
+	}
+	if err := reachableMissing(h, v.objects); err != nil {
+		t.Fatalf("after the session HEAD reaches a missing object: %v", err)
 	}
 }
 
@@ -239,15 +240,123 @@ func TestSnapshotSession_InterruptAtEveryStep(t *testing.T) {
 	}
 }
 
-// requireReachablePresent: every own object HEAD's current root reaches
-// exists (checked after a kill, before the restart).
+// writeImage stores a manifest's own chunks (with their bytes), its
+// segments and its root, and returns the root's name.
+func writeImage(t *testing.T, objs map[string][]byte, m map[uint64]Ref, data map[uint64][]byte) RootName {
+	t.Helper()
+	root, segs, err := Build(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range m {
+		if r.Owner == "v1" {
+			objs[path.Join(volRoot, r.Chunk.Path())] = data[i]
+		}
+	}
+	for n, b := range segs {
+		objs[path.Join(volRoot, n.Path())] = b
+	}
+	rn, rb, err := NameRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs[path.Join(volRoot, rn.Path())] = rb
+	return rn
+}
+
+// reachableMissing walks every root HEAD names (current and every
+// snapshot) through its segments to this volume's chunks, reading the
+// stored bytes, and reports the first object that is missing or does not
+// hash to its name.
+func reachableMissing(h *Head, objs map[string][]byte) error {
+	roots := map[RootName]bool{}
+	if h.Current != nil {
+		roots[*h.Current] = true
+	}
+	for _, s := range h.Snapshots {
+		roots[s.Root] = true
+	}
+	get := func(rel string, want Hash) ([]byte, error) {
+		b, ok := objs[path.Join(volRoot, rel)]
+		if !ok {
+			return nil, fmt.Errorf("%s is missing", rel)
+		}
+		if Sum(b) != want {
+			return nil, fmt.Errorf("%s does not hash to its name", rel)
+		}
+		return b, nil
+	}
+	for rn := range roots {
+		rb, err := get(rn.Path(), rn.Hash)
+		if err != nil {
+			return err
+		}
+		root, err := DecodeRoot(rb)
+		if err != nil {
+			return err
+		}
+		for _, sn := range root.Segments {
+			sb, err := get(sn.Path(), sn.Hash)
+			if err != nil {
+				return err
+			}
+			seg, err := DecodeSegment(sb)
+			if err != nil {
+				return err
+			}
+			for _, r := range seg.Chunks {
+				if r.Owner != "v1" {
+					continue // the source's pool holds it
+				}
+				if _, err := get(r.Chunk.Path(), r.Chunk.Hash); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// requireReachablePresent: every object any root in HEAD reaches in this
+// volume exists with its bytes (checked after a kill, before the restart).
 func requireReachablePresent(t *testing.T, v *memVolume) {
 	t.Helper()
-	h := v.head.h
-	if h.Current == nil {
-		return
+	if err := reachableMissing(v.head.h, v.objects); err != nil {
+		t.Fatalf("after the kill HEAD reaches a missing object: %v", err)
 	}
-	if _, ok := v.objects[path.Join(volRoot, h.Current.Path())]; !ok {
-		t.Fatalf("HEAD names root %s, which is missing", h.Current)
+}
+
+// The reachability observer's negative controls: a reachable own chunk,
+// segment or snapshot root deleted (the current root kept) is reported.
+func TestReachableMissing_Controls(t *testing.T) {
+	fresh, _, req := sessionFixture(t)
+	if err := reachableMissing(fresh().head.h, fresh().objects); err != nil {
+		t.Fatalf("control: the fixture itself: %v", err)
+	}
+	_, segs, _ := Build(req.Prev)
+	var seg0 SegName
+	for n := range segs {
+		seg0 = n
+	}
+	for name, rel := range map[string]string{
+		"own chunk": req.Prev[3].Chunk.Path(),
+		"segment":   seg0.Path(),
+	} {
+		v := fresh()
+		delete(v.objects, path.Join(volRoot, rel))
+		if err := reachableMissing(v.head.h, v.objects); err == nil {
+			t.Errorf("%s deleted: not reported", name)
+		}
+	}
+	v := fresh()
+	other := RootName{Hash: Sum([]byte("missing root"))}
+	v.head.h.Snapshots["weekly"] = Snapshot{Root: other}
+	if err := reachableMissing(v.head.h, v.objects); err == nil {
+		t.Error("a snapshot root that is missing: not reported")
+	}
+	v = fresh()
+	v.objects[path.Join(volRoot, req.Prev[0].Chunk.Path())] = []byte("tampered")
+	if err := reachableMissing(v.head.h, v.objects); err == nil {
+		t.Error("a chunk whose bytes do not match its name: not reported")
 	}
 }
