@@ -142,8 +142,14 @@ func TestLeaseGuardSleepsUntilTheBarrier(t *testing.T) {
 	}
 	reply = refusalWith(t, "barrier", control.WorkspaceLeaseRefusal_BARRIER, 40*time.Second)
 	_ = g.Refresh(context.Background())
-	for i := 0; i < 20; i++ {
-		in("after BARRIER: until just past T", g.renewDelay(), 40*time.Second+100*time.Millisecond, 40*time.Second+600*time.Millisecond)
+	wakes := map[time.Duration]bool{}
+	for i := 0; i < 50; i++ {
+		d := g.renewDelay()
+		in("after BARRIER: until just past T", d, 40*time.Second+100*time.Millisecond, 40*time.Second+600*time.Millisecond)
+		wakes[d] = true
+	}
+	if len(wakes) < 10 {
+		t.Fatalf("%d distinct wake delays in 50; the wake past T must be jittered", len(wakes))
 	}
 	now = now.Add(39 * time.Second)
 	in("1 s before T", g.renewDelay(), 1100*time.Millisecond, 1600*time.Millisecond)

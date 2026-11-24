@@ -510,14 +510,16 @@ func TestChunkStartupExitFinalGives78(t *testing.T) {
 		return st.Err()
 	}
 	for _, tc := range []struct {
-		name   string
-		refuse error
-		code   int
-		reason string
+		name    string
+		refuse  error
+		foreign bool // the stream also delivered a newer line naming another replica
+		code    int
+		reason  string
 	}{
-		{"moved", refusal(control.WorkspaceLeaseRefusal_MOVED), exitWorkspaceSuperseded, "moved"},
-		{"deleted", refusal(control.WorkspaceLeaseRefusal_DELETED), exitWorkspaceSuperseded, "deleted"},
-		{"no detail", status.Error(codes.FailedPrecondition, "workspace lease: server identity does not match the current holder"), exitWorkspaceRetry, "assignment_timeout"},
+		{"moved", refusal(control.WorkspaceLeaseRefusal_MOVED), false, exitWorkspaceSuperseded, "moved"},
+		{"moved, newer foreign line also seen", refusal(control.WorkspaceLeaseRefusal_MOVED), true, exitWorkspaceSuperseded, "moved"},
+		{"deleted", refusal(control.WorkspaceLeaseRefusal_DELETED), false, exitWorkspaceSuperseded, "deleted"},
+		{"no detail", status.Error(codes.FailedPrecondition, "workspace lease: server identity does not match the current holder"), false, exitWorkspaceRetry, "assignment_timeout"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -538,6 +540,12 @@ func TestChunkStartupExitFinalGives78(t *testing.T) {
 			}
 			for tc.reason != "assignment_timeout" {
 				if _, final := h.MasterWaitState(); final != "" {
+					if tc.foreign {
+						assign("r2", 2)
+						if !h.IsCurrentReplicaSuperseded() {
+							t.Fatal("fixture: the newer foreign line does not supersede")
+						}
+					}
 					break
 				}
 				select {
