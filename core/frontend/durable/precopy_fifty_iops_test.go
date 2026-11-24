@@ -78,6 +78,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	writerDone, probeDone := make(chan struct{}), make(chan struct{})
 	var stopped atomic.Bool
 	var guestErrors atomic.Int64
+	var detachStart atomic.Pointer[time.Time]
 	t.Cleanup(func() {
 		stopped.Store(true)
 		releasePeer()
@@ -95,12 +96,24 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
 		for {
+			op := "Write"
 			_, err := backend.Write(ctx, 4096, block(0x5b))
 			if err == nil {
+				op = "Sync"
 				err = backend.Sync(ctx)
 			}
 			if err != nil {
 				if !stopped.Load() {
+					at := time.Now()
+					sinceDetach, sinceFreeze := "not-started", "not-frozen"
+					if start := detachStart.Load(); start != nil {
+						sinceDetach = at.Sub(*start).String()
+					}
+					if freeze := backend.(*durable.StorageBackend).StopFlipAt(); !freeze.IsZero() {
+						sinceFreeze = at.Sub(freeze).String()
+					}
+					// Sync covers the preceding Write at this offset.
+					t.Logf("guest error op=%s write_offset=4096 at=%s detach_elapsed=%s freeze_elapsed=%s caller_error=%v error=%v", op, at.UTC().Format(time.RFC3339Nano), sinceDetach, sinceFreeze, ctx.Err(), err)
 					guestErrors.Add(1)
 				}
 				return
@@ -143,6 +156,8 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 			}
 		}
 	}()
+	started := time.Now()
+	detachStart.Store(&started)
 	result, _, err := p.DetachVolume(ctx, "v1")
 	stopped.Store(true)
 	t.Logf("attempts=%d measurement_rounds=%d samples_at_start=%d drain=%s estimate=%s frozen=%t guest_errors=%d", result.Precopy.Attempts, result.Precopy.MeasurementRounds, result.Precopy.SamplesAtStart, result.Precopy.Drain, result.Precopy.Estimate, result.Precopy.Frozen, guestErrors.Load())
