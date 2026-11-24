@@ -72,7 +72,7 @@ func TestNeverStartedDeleteFencesALateStart(t *testing.T) {
 	b := env.hosts["n-v2"]
 	late := env.h.start(t, "blockvolume-v2-late", env.h.volume, env.volArgsFor(b)...)
 	err := late.wait(60 * time.Second)
-	served := late.has("adopted as PRIMARY") || volumeFrontendReady(b.status, "v2")
+	served := late.has("durable: HEAD claim for volume=v2 done") || volumeFrontendReady(b.status, "v2")
 	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	t.Logf("late start after the delete: exit %v, served %v, HEAD %s", err, served, firstLine(shown))
 	if served || err == nil || strings.Contains(fmt.Sprint(err), "still running") || !strings.Contains(shown, `"state":"deleted"`) {
@@ -114,7 +114,10 @@ func TestNeverStartedDeleteRacesAStart(t *testing.T) {
 		}()
 		r := <-deleted
 		_ = d.wait(30 * time.Second)
-		served := d.has("adopted as PRIMARY") || volumeFrontendReady(b.status, v)
+		// Served means the process claimed HEAD (no I/O is admitted before the
+		// claim) or its frontend became ready; adopting the assignment comes
+		// before the claim and is not serving.
+		served := d.has("durable: HEAD claim for volume="+v+" done") || volumeFrontendReady(b.status, v)
 		shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 		isDeleted := strings.Contains(shown, `"state":"deleted"`)
 		t.Logf("%s: delete exit %d, served %v, HEAD deleted %v: %s", v, r.code, served, isDeleted, firstLine(r.out))
