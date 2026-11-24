@@ -69,8 +69,9 @@ func TestMasterLinkReconnectsWithinTwoSeconds(t *testing.T) {
 	case <-sink.got:
 		lag := time.Since(back)
 		t.Logf("first heartbeat %v after the master returned", lag.Round(10*time.Millisecond))
-		if lag > 2400*time.Millisecond {
-			t.Fatalf("master link reconnected %v after the master returned; want <= 2.4 s", lag.Round(10*time.Millisecond))
+		// 2 s cap + 20 % jitter, plus one 200 ms heartbeat tick once connected.
+		if lag > 2600*time.Millisecond {
+			t.Fatalf("master link reconnected %v after the master returned; want <= 2.6 s", lag.Round(10*time.Millisecond))
 		}
 	case <-time.After(60 * time.Second):
 		t.Fatal("no heartbeat within 60 s of the master's return")

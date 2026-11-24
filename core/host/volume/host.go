@@ -267,7 +267,7 @@ func New(cfg Config) (*Host, error) {
 		lg = log.Default()
 	}
 
-	conn, err := link.Dial(cfg.MasterAddr)
+	conn, err := link.Dial(cfg.MasterAddr, link.MasterReconnect())
 	if err != nil {
 		return nil, fmt.Errorf("volume.New: dial master %q: %w", cfg.MasterAddr, err)
 	}
