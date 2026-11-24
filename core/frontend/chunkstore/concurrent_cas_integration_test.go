@@ -22,7 +22,13 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const concurrentCASWeedSHA256 = "5fafd54e10ee307a7fd7246ca6763d0069cefbef47f9a86ce722f304b162da7b"
+// concurrentCASWeedPins are the filer builds this test is pinned to, by
+// binary SHA-256: the mono build it was written against and stock SeaweedFS
+// 4.53 (4ab66fb7), the version the product supports.
+var concurrentCASWeedPins = map[string]string{
+	"5fafd54e10ee307a7fd7246ca6763d0069cefbef47f9a86ce722f304b162da7b": "mono 8b582399d",
+	"fa936e61bfb11f33c1f823045c4007e7da4b8b38bb6adc3b970f132d832e805b": "stock 4.53 4ab66fb7",
+}
 
 type casRPCResult struct {
 	index int
@@ -74,10 +80,12 @@ func requireConcurrentCASWeed(t *testing.T) {
 	if _, err := io.Copy(h, f); err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprintf("%x", h.Sum(nil)); got != concurrentCASWeedSHA256 {
-		t.Fatalf("weed must be pinned mono 8b582399d build: SHA256=%s want %s", got, concurrentCASWeedSHA256)
+	got := fmt.Sprintf("%x", h.Sum(nil))
+	build, ok := concurrentCASWeedPins[got]
+	if !ok {
+		t.Fatalf("weed must be a pinned build: SHA256=%s want one of %v", got, concurrentCASWeedPins)
 	}
-	t.Logf("real filer binary SHA256=%s (mono 8b582399d)", concurrentCASWeedSHA256)
+	t.Logf("real filer binary SHA256=%s (%s)", got, build)
 }
 
 func TestIntegration_ConcurrentHEADCASRealFiler(t *testing.T) {

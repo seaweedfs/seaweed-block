@@ -102,7 +102,7 @@ func refuseUnlessSingleFiler(name string, f chunkstore.Filer, base string, timeo
 	case errors.Is(err, chunkstore.ErrNotSingleFiler):
 		return chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 	default:
-		return chunkFail(name, stdout, stderr, chunkExitFailed, codeUnavailableCLI, "single-filer start check: "+err.Error(), true)
+		return chunkFail(name, stdout, stderr, chunkExitFailed, codeUnavailableCLI, "start check (single filer, chunk path rule): "+err.Error(), true)
 	}
 }
 

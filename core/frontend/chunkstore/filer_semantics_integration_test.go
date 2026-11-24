@@ -6,9 +6,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,4 +93,71 @@ func TestIntegration_FilerOwnsTheNeedles(t *testing.T) {
 	if h, err := r.GetHead(ctx); err != nil || h.Holder != "h1" {
 		t.Fatalf("GetHead of the chunked HEAD: %+v %v", h, err)
 	}
+}
+
+// C8-1: stock volume.fsck in report mode (no delete flag) lists no needle a
+// binding or a record names; an upload never bound is listed (the control).
+func TestIntegration_FsckReportsOnlyTrueOrphans(t *testing.T) {
+	c := startWeed(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	const root = "/swblock/fsck/v1"
+	cl := c.client(t, AssignPathFor(path.Dir(root)))
+	r, err := NewChunkRemote(cl, cl, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var live []string
+	for i := 0; i < 4; i++ {
+		key := fmt.Sprintf("chunks/e1/c%d/k", i)
+		if err := r.Put(ctx, key, bytes.Repeat([]byte{byte(i + 1)}, 4096)); err != nil {
+			t.Fatal(err)
+		}
+		name, _ := r.ownKeyName(key)
+		e, err := cl.LookupEntry(ctx, r.keyDir(), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := decodeBinding(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		live = append(live, b.fid)
+	}
+	old := recordInline
+	recordInline = 0
+	defer func() { recordInline = old }()
+	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "h1", Chunks: map[uint64]storage.ChunkRef{}}); err != nil {
+		t.Fatal(err)
+	}
+	he, err := cl.LookupEntry(ctx, root, headName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range he.GetChunks() {
+		live = append(live, ch.GetFileId())
+	}
+	unbound, err := cl.Put(ctx, []byte("uploaded, never bound"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unbound, _, _ = canonicalFid(unbound)
+	time.Sleep(2 * time.Second) // every needle older than the 1 s cutoff
+	cmd := exec.CommandContext(ctx, c.weed, "shell", "-master="+c.master, "-filer="+c.filerHTTP)
+	cmd.Dir = c.dir
+	cmd.Stdin = strings.NewReader("volume.fsck -v -cutoffTimeAgo=1s\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("volume.fsck: %v\n%s", err, out)
+	}
+	report := string(out)
+	for _, fid := range live {
+		if strings.Contains(report, ":"+fid+"\n") {
+			t.Errorf("fsck lists live needle %s as an orphan", fid)
+		}
+	}
+	if !strings.Contains(report, ":"+unbound+"\n") {
+		t.Fatalf("fsck did not list the unbound upload %s (control):\n%s", unbound, report)
+	}
+	t.Logf("fsck report:\n%s", report)
 }

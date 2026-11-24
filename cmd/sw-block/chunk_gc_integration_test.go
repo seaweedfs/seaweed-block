@@ -236,8 +236,13 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	if _, err = remote.Get(ctx, "orphan"); err == nil {
-		t.Fatal("orphan still readable")
+	// A reader that did not upload it learns the key was reclaimed, at once.
+	fresh, err := chunkstore.NewSWFSChunkRemote(s, base+"/vol-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fresh.Get(ctx, "orphan"); !errors.Is(err, chunkstore.ErrBindingReclaimed) {
+		t.Fatalf("orphan read after reclaim: %v; want ErrBindingReclaimed", err)
 	}
 	for _, key := range []string{"live", "held", "copy"} {
 		if got, err := remote.Get(ctx, key); err != nil || !bytes.Equal(got, data) {

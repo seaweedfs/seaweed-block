@@ -561,6 +561,8 @@ an earlier release (volume format 1) is refused at start; it is not converted.
   missing, which loses chunk keys, HEAD, snapshots or GC tombstones.
 - **Never delete or move files under the chunk path** (`fs.rm`, `fs.mv`, a mount's `rm`): deleting a file
   deletes its needles.
+- **Edit storage rules only with `fs.configure`** (never `filer.conf` by hand): blockvolume judges the chunk
+  path's rule as the filer merges `fs.configure`'s rules, one per prefix.
 - **Give chunk data its own collection** (`--chunk-collection`, `SWB_CHUNK_COLLECTION`) so it is easy to keep
   cluster maintenance away from it. Do not put a TTL on that collection or on the chunk path, and do not delete
   the collection: both remove needles or files without regard to what refers to them (blockvolume refuses a TTL

@@ -155,6 +155,10 @@ func TestIntegration_DeleteVolumeThenGC(t *testing.T) {
 			t.Fatalf("w1 chunk %s after GC: %v; want intact", kept, err)
 		}
 	}
+	// A reader that did not upload it learns the key was reclaimed, at once.
+	if _, err := c.remote(t, path.Join(base, "w1")).Get(ctx, a.Key); !errors.Is(err, ErrBindingReclaimed) {
+		t.Fatalf("w1 chunk %s from a fresh remote after GC: %v; want ErrBindingReclaimed", a.Key, err)
+	}
 	// w1 still holds the fid it uploaded; the filer deletes the dropped
 	// needle from its queue after the reclaim's update: poll, bounded.
 	for deadline := time.Now().Add(60 * time.Second); ; {
