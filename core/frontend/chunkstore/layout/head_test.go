@@ -197,43 +197,155 @@ func TestRunBegin(t *testing.T) {
 	}
 }
 
-// Interrupt at every step: RunBegin killed at each of its HEAD writes
-// (before it applies, and applied with its reply lost), then re-run with
-// the same session, ends in snap(session) with exactly one generation
-// step; a further re-run writes nothing.
+// Interrupt at every step: RunBegin killed at each of its HEAD writes and
+// re-run with the same session ends in snap(session).
 func TestRunBegin_InterruptAtEveryStep(t *testing.T) {
-	ctx := context.Background()
-	count := &memHead{h: func() *Head { h := idleHead(); return &h }()}
-	if _, err := RunBegin(ctx, count, me, "s1"); err != nil {
-		t.Fatal(err)
+	interruptHead(t, idleHead(), func(st HeadStore) error {
+		_, err := RunBegin(context.Background(), st, me, "s1")
+		return err
+	}, func(t *testing.T, h Head) {
+		if h.Activity != (Activity{Kind: ActSnap, Session: "s1"}) {
+			t.Fatalf("HEAD after Begin: %+v", h.Activity)
+		}
+	})
+}
+
+// interruptHead kills run at its one HEAD write (before it applies, and
+// applied with its reply lost), re-runs it, and checks the end state: want
+// at exactly start.Gen+1, and a further re-run writes nothing. Every
+// transition is exactly one conditional update; a run that makes another
+// number of writes fails.
+func interruptHead(t *testing.T, start Head, run func(HeadStore) error, want func(*testing.T, Head)) {
+	t.Helper()
+	fresh := func() *Head { h := start.clone(); return &h }
+	count := &memHead{h: fresh()}
+	if err := run(count); err != nil {
+		t.Fatalf("uninterrupted: %v", err)
 	}
+	want(t, *count.h)
 	steps := count.updates
 	if steps != 1 {
-		t.Fatalf("Begin made %d HEAD writes; want 1", steps)
+		t.Fatalf("the transition made %d HEAD writes; want exactly 1", steps)
 	}
 	for k := 1; k <= steps; k++ {
 		for _, after := range []bool{false, true} {
 			t.Run(fmt.Sprintf("write%d/after=%t", k, after), func(t *testing.T) {
-				h := idleHead()
-				st := &memHead{h: &h, killAt: k, after: after}
-				if _, err := RunBegin(ctx, st, me, "s1"); !errors.Is(err, errKilled) {
+				st := &memHead{h: fresh(), killAt: k, after: after}
+				if err := run(st); !errors.Is(err, errKilled) {
 					t.Fatalf("killed run: %v", err)
 				}
 				st.restart()
-				got, err := RunBegin(ctx, st, me, "s1")
-				if err != nil || got.Activity != (Activity{Kind: ActSnap, Session: "s1"}) {
-					t.Fatalf("re-run: %+v %v", got, err)
+				if err := run(st); err != nil {
+					t.Fatalf("re-run: %v", err)
 				}
-				if st.h.Gen != 8 {
-					t.Fatalf("HEAD gen %d after the re-run; want 8 (one step)", st.h.Gen)
+				want(t, *st.h)
+				if st.h.Gen != start.Gen+uint64(steps) {
+					t.Fatalf("HEAD gen %d after the re-run; want %d", st.h.Gen, start.Gen+uint64(steps))
 				}
 				before := st.updates
-				if _, err := RunBegin(ctx, st, me, "s1"); err != nil || st.updates != before {
+				if err := run(st); err != nil || st.updates != before {
 					t.Fatalf("second re-run: %v, wrote %d times", err, st.updates-before)
 				}
 			})
 		}
 	}
+}
+
+func snapHead(session string) Head {
+	rn := RootName{Hash: Sum([]byte("r"))}
+	h := idleHead()
+	h.Activity = Activity{Kind: ActSnap, Session: session}
+	h.Current = &rn
+	h.Position = 40
+	h.Snapshots = map[string]Snapshot{"daily": {Root: rn, Dependents: []string{"t1"}}}
+	return h
+}
+
+func TestAbort_Closure(t *testing.T) {
+	h := snapHead("s1")
+	next, changed, err := h.Abort(me, "s1")
+	if err != nil || !changed || next.Activity != (Activity{Kind: ActIdle}) {
+		t.Fatalf("Abort of the open session: %+v %t %v", next, changed, err)
+	}
+	if *next.Current != *h.Current || next.Position != h.Position || len(next.Snapshots) != 1 || next.Snapshots["daily"].Dependents[0] != "t1" {
+		t.Fatalf("Abort changed more than activity: %+v", next)
+	}
+	if h.Activity.Kind != ActSnap {
+		t.Fatal("Abort changed its receiver")
+	}
+	if again, changed, err := next.Abort(me, "s1"); err != nil || changed || again.Activity.Kind != ActIdle {
+		t.Fatalf("Abort over idle: %+v %t %v; want a replay", again, changed, err)
+	}
+	for name, tc := range map[string]struct {
+		h    Head
+		me   HolderID
+		want error
+	}{
+		"other session open": {snapHead("s2"), me, ErrNoSession},
+		"cleaning":           {Head{Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActClean, Session: "s1"}}, me, ErrNoSession},
+		"other epoch":        {h, HolderID{Epoch: 4, Holder: "srv-a"}, ErrNotHolder},
+		"other holder":       {h, HolderID{Epoch: 3, Holder: "srv-b"}, ErrNotHolder},
+	} {
+		if _, _, err := tc.h.Abort(tc.me, "s1"); !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v; want %v", name, err, tc.want)
+		}
+	}
+	if _, _, err := h.Abort(me, ""); err == nil {
+		t.Error("Abort without a session id accepted")
+	}
+}
+
+// Abort over idle succeeds and writes nothing whatever came before: a
+// session that never began, one already committed, one already aborted.
+// Success means only that no activity remains; it never says whether the
+// session's work was committed (that is read from HEAD's current root).
+func TestAbort_IdleMeansNoActivityRemains(t *testing.T) {
+	for name, h := range map[string]Head{
+		"never begun":     idleHead(),
+		"already aborted": func() Head { n, _, _ := snapHead("s1").Abort(me, "s1"); return n }(),
+	} {
+		next, changed, err := h.Abort(me, "s1")
+		if err != nil || changed || next.Activity.Kind != ActIdle || next.Gen != h.Gen {
+			t.Errorf("Abort over idle (%s): %+v %t %v; want unchanged, no error", name, next, changed, err)
+		}
+	}
+}
+
+// After its own crash a holder finds snap(s) at its epoch with nothing in
+// memory: a new session beside s is refused; rolling s back by Abort, then
+// Begin of a new session, succeeds.
+func TestAbort_RollBackAfterOwnCrash(t *testing.T) {
+	ctx := context.Background()
+	h := snapHead("s1")
+	st := &memHead{h: &h}
+	if _, err := RunBegin(ctx, st, me, "s2"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("a new session beside the open one: %v; want ErrBusy", err)
+	}
+	cur, _, err := st.ReadHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunAbort(ctx, st, me, cur.Activity.Session); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RunBegin(ctx, st, me, "s2")
+	if err != nil || got.Activity != (Activity{Kind: ActSnap, Session: "s2"}) || st.h.Gen != h.Gen+2 {
+		t.Fatalf("Begin after the roll back: %+v %v gen %d", got, err, st.h.Gen)
+	}
+	if _, err := RunAbort(ctx, &memHead{}, me, "s1"); !errors.Is(err, ErrHeadAbsent) {
+		t.Fatalf("Abort over an absent HEAD: %v", err)
+	}
+}
+
+func TestRunAbort_InterruptAtEveryStep(t *testing.T) {
+	interruptHead(t, snapHead("s1"), func(st HeadStore) error {
+		_, err := RunAbort(context.Background(), st, me, "s1")
+		return err
+	}, func(t *testing.T, h Head) {
+		if h.Activity != (Activity{Kind: ActIdle}) || h.Position != 40 {
+			t.Fatalf("HEAD after Abort: %+v", h)
+		}
+	})
 }
 
 // A name that is not valid UTF-8 is written by the JSON encoding as an
