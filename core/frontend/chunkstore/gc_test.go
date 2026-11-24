@@ -42,7 +42,7 @@ func gcFixture(t *testing.T) (*fakeFiler, gcBlobs, *Catalog, *Collector, *time.T
 	t.Helper()
 	f, b := newFakeFiler(), gcBlobs{newFakeBlobs()}
 	f.deleteChunk = b.deleteChunk
-	c := newCat(t, f)
+	c := newCat(t, f, b)
 	if e := f.CreateEntry(context.Background(), catBase, &filerpb.Entry{Name: "v1", IsDirectory: true}, true); e != nil {
 		t.Fatal(e)
 	}

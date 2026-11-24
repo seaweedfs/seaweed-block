@@ -29,8 +29,8 @@ func headFilerMtimeNS(h http.Header) int64 {
 	return t.UnixNano()
 }
 
-// NewWorkspaceHEADReader reads inline HEAD content from the configured filer
-// HTTP directory. It never follows redirects or accepts operator-supplied HEAD
+// NewWorkspaceHEADReader reads HEAD from the configured filer HTTP directory
+// (the filer serves inline content or streams the record's chunks). It never follows redirects or accepts operator-supplied HEAD
 // evidence. W2's detached state is part of the committed HEAD document. The
 // HEAD's filer mtime comes from the same response (headFilerMtimeNS).
 func NewWorkspaceHEADReader(base string) (func(context.Context, string) (authority.WorkspaceHead, error), error) {

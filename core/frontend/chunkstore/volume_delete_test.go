@@ -184,7 +184,7 @@ func TestCatalog_DeleteVolumeRefusesAnAttachBeforeTheMark(t *testing.T) {
 			return
 		}
 		if lookups++; lookups == 1 {
-			cur, _ := decodeHead(p, f.entries[p])
+			cur, _ := decodeHead(p, f.entries[p], f.entries[p].GetContent())
 			f.entries[p] = attachEntry(t, cur, "h2")
 		}
 	}
@@ -209,7 +209,7 @@ func TestCatalog_DeleteVolumeLosesToAnAttachAtTheMark(t *testing.T) {
 			return
 		}
 		if lookups++; lookups == 2 {
-			cur, _ := decodeHead(p, f.entries[p])
+			cur, _ := decodeHead(p, f.entries[p], f.entries[p].GetContent())
 			f.entries[p] = attachEntry(t, cur, "h2")
 		}
 	}

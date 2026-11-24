@@ -141,7 +141,7 @@ func (g *Collector) markDir() string {
 }
 
 func (g *Collector) readMark(ctx context.Context) (*savedGCMark, string, error) {
-	e, err := g.cat.f.LookupEntry(ctx, g.markDir(), gcMarkName)
+	e, body, err := lookupRecord(ctx, g.cat.f, g.cat.blobs, g.markDir(), gcMarkName)
 	if errors.Is(err, ErrNotFound) {
 		return nil, "", nil
 	}
@@ -149,11 +149,11 @@ func (g *Collector) readMark(ctx context.Context) (*savedGCMark, string, error) 
 		return nil, "", err
 	}
 	token := string(e.Extended[gcToken])
-	if e.GetIsDirectory() || len(e.GetChunks()) != 0 || string(e.Extended[extKind]) != gcMarkKind || !storage.ValidChunkIntentID(token) || len(e.Content) > 64<<20 {
+	if e.GetIsDirectory() || string(e.Extended[extKind]) != gcMarkKind || !storage.ValidChunkIntentID(token) || len(body) > 64<<20 {
 		return nil, "", errors.New("chunkstore: invalid GC mark entry")
 	}
 	var m savedGCMark
-	d := json.NewDecoder(bytes.NewReader(e.Content))
+	d := json.NewDecoder(bytes.NewReader(body))
 	d.DisallowUnknownFields()
 	if err = d.Decode(&m); err != nil {
 		return nil, "", err

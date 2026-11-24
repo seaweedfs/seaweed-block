@@ -540,14 +540,14 @@ func (v *verifier) run(ctx context.Context) error {
 	}
 
 	// HEAD: the root once, then the segments it names.
-	e, err := v.c.f.LookupEntry(ctx, v.root, headName)
+	e, body, err := lookupRecord(ctx, v.c.f, v.blobs, v.root, headName)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		v.finding(VerifyFinding{Root: "HEAD", Class: FindingRootInvalid, Detail: "the volume has a VOLUME entry but no HEAD"})
 	case err != nil:
 		return abortErr(ctx, err, "read HEAD of %s", v.vol)
 	default:
-		h, derr := decodeHead(path.Join(v.root, headName), e)
+		h, derr := decodeHead(path.Join(v.root, headName), e, body)
 		if derr != nil {
 			v.finding(VerifyFinding{Root: "HEAD", Class: FindingRootInvalid, Detail: derr.Error()})
 			break
@@ -827,14 +827,14 @@ func (v *verifier) settle(w *verifyChunk, class, detail string) {
 // exist, neither aborted nor marked deleting (the attempt path is never
 // reused, so a snapshot read gone stays gone).
 func (v *verifier) snapshotActive(ctx context.Context, s *verifyView) (bool, error) {
-	ne, err := v.c.f.LookupEntry(ctx, path.Join(v.root, snapNamesDir), s.name)
+	ne, neBody, err := lookupRecord(ctx, v.c.f, v.blobs, path.Join(v.root, snapNamesDir), s.name)
 	if errors.Is(err, ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, abortErr(ctx, err, "re-read snapshot name %s/%s", v.vol, s.name)
 	}
-	if rec, err := decodeNameRecord(path.Join(v.root, snapNamesDir, s.name), ne); err == nil && rec.Attempt != s.attempt {
+	if rec, err := decodeNameRecord(path.Join(v.root, snapNamesDir, s.name), ne, neBody); err == nil && rec.Attempt != s.attempt {
 		return false, nil
 	}
 	e, err := v.c.f.LookupEntry(ctx, path.Join(v.root, snapsDir, s.name), s.attempt)
@@ -974,7 +974,14 @@ func (v *verifier) forkRecord(ctx context.Context, vi VolumeInfo) error {
 				return remoteErr(nil, "non-advancing attempt listing of %s/%s", fr.Source, fr.Snapshot)
 			}
 			after = e.GetName()
-			info, _, err := decodeSnap(path.Join(dir, e.GetName()), e)
+			e, body, err := readRecord(ctx, v.c.f, v.blobs, dir, e)
+			if errors.Is(err, errRecordGone) {
+				continue
+			}
+			if err != nil {
+				return abortErr(ctx, err, "read attempt %s of %s/%s", after, fr.Source, fr.Snapshot)
+			}
+			info, _, err := decodeSnap(path.Join(dir, e.GetName()), e, body)
 			if err != nil || info.State == SnapAborted || info.HeadGen != fr.SourceGen {
 				continue
 			}
@@ -1030,7 +1037,14 @@ func (v *verifier) intents(ctx context.Context, h storage.ChunkHead, chunks map[
 				return remoteErr(nil, "non-advancing intent listing of %s", v.vol)
 			}
 			after = e.GetName()
-			in, err := decodeIntent(path.Join(dir, e.GetName()), e)
+			e, body, err := readRecord(ctx, v.c.f, v.blobs, dir, e)
+			if errors.Is(err, errRecordGone) {
+				continue // settled since it was listed
+			}
+			var in storage.ChunkIntent
+			if err == nil {
+				in, err = decodeIntent(path.Join(dir, e.GetName()), e, body)
+			}
 			if err != nil {
 				v.finding(VerifyFinding{Root: "intent " + e.GetName(), Class: FindingRootInvalid, Detail: err.Error()})
 				continue
@@ -1083,7 +1097,7 @@ func (v *verifier) maybeRefresh(ctx context.Context) error {
 // cannot keep the earlier one, so the pass is incomplete (an error).
 func (v *verifier) readHead(ctx context.Context, closing bool) (bool, error) {
 	v.lastRefresh = v.c.now()
-	e, err := v.c.f.LookupEntry(ctx, v.root, headName)
+	e, body, err := lookupRecord(ctx, v.c.f, v.blobs, v.root, headName)
 	if errors.Is(err, ErrNotFound) {
 		if !closing {
 			return false, nil
@@ -1094,7 +1108,7 @@ func (v *verifier) readHead(ctx context.Context, closing bool) (bool, error) {
 	if err != nil {
 		return false, abortErr(ctx, err, "refresh HEAD of %s", v.vol)
 	}
-	h, err := decodeHead(path.Join(v.root, headName), e)
+	h, err := decodeHead(path.Join(v.root, headName), e, body)
 	if err != nil {
 		if !closing {
 			return false, nil

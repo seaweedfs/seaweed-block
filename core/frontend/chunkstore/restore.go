@@ -127,7 +127,7 @@ func (c *Catalog) ReadIndependence(ctx context.Context, vol string) (RestoreInde
 	if err != nil {
 		return RestoreIndependence{}, false, err
 	}
-	e, err := c.f.LookupEntry(ctx, root, restoreIndependentName)
+	e, body, err := lookupRecord(ctx, c.f, c.blobs, root, restoreIndependentName)
 	if errors.Is(err, ErrNotFound) {
 		return RestoreIndependence{}, false, nil
 	}
@@ -138,7 +138,7 @@ func (c *Catalog) ReadIndependence(ctx context.Context, vol string) (RestoreInde
 		return RestoreIndependence{}, false, remoteErr(nil, "%s of %s: kind %q", restoreIndependentName, vol, k)
 	}
 	var m RestoreIndependence
-	if err := json.Unmarshal(e.GetContent(), &m); err != nil || m.VolumeID != vol {
+	if err := json.Unmarshal(body, &m); err != nil || m.VolumeID != vol {
 		return RestoreIndependence{}, false, remoteErr(err, "decode %s of %s", restoreIndependentName, vol)
 	}
 	return m, true, nil

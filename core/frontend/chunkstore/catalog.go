@@ -7,11 +7,14 @@ package chunkstore
 //	<base>/<vol>/keys/<key>    chunk key bindings (ChunkRemote)
 //	<base>/<vol>/intents/<id>  live intents (ChunkRemote; GC roots)
 //	<base>/<vol>/VOLUME        identity, geometry and lineage; write-once
-//	<base>/<vol>/snaps/<name>  snapshots: a full copy of one HEAD document
+//	<base>/<vol>/snapnames/<name>         a snapshot name: the attempt it names
+//	<base>/<vol>/snaps/<name>/<attempt>   a snapshot attempt: its own copy of
+//	                                      one HEAD root; never removed
 //
-// No entry carries filer chunks (UpdateEntry would delete chunks a new
-// entry drops); every entry carries swb.kind and is checked on read, and an
-// entry that does not check out is an error, never "absent".
+// Every record is a standard filer file (record.go): its payload is inline
+// below 64 KiB, else filer chunks the record alone names. Every entry
+// carries swb.kind and is checked on read, and an entry that does not check
+// out is an error, never "absent".
 //
 // Snapshot and fork are read-then-write. Each writes an intent naming the
 // keys it references before its final manifest write, and refuses that
@@ -316,7 +319,7 @@ func NewCatalog(f Filer, base string) (*Catalog, error) {
 		return nil, fmt.Errorf("chunkstore: chunk base %q must be a clean absolute directory other than /", base)
 	}
 	blobs, _ := f.(Blobs)
-	return &Catalog{f: f, blobs: blobs, base: base, now: time.Now}, nil
+	return &Catalog{f: recordFiler{f, blobs}, blobs: blobs, base: base, now: time.Now}, nil
 }
 
 // SetClock replaces the catalog's clock (tests).
@@ -390,15 +393,12 @@ func volumeEntry(v VolumeInfo, req string) (*filerpb.Entry, error) {
 	}, nil
 }
 
-func decodeVolume(p string, e *filerpb.Entry) (VolumeInfo, error) {
-	if len(e.GetChunks()) != 0 {
-		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s carries %d filer chunks", p, len(e.Chunks))
-	}
+func decodeVolume(p string, e *filerpb.Entry, body []byte) (VolumeInfo, error) {
 	if k := string(e.Extended[extKind]); k != kindChunkVolume {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: kind %q, want %q", p, k, kindChunkVolume)
 	}
 	var v VolumeInfo
-	if err := json.Unmarshal(e.GetContent(), &v); err != nil {
+	if err := json.Unmarshal(body, &v); err != nil {
 		return VolumeInfo{}, fmt.Errorf("chunkstore: VOLUME %s: decode: %v", p, err)
 	}
 	if v.Format != volumeFormat {
@@ -420,14 +420,14 @@ func (c *Catalog) ReadVolume(ctx context.Context, vol string) (VolumeInfo, bool,
 	if err != nil {
 		return VolumeInfo{}, false, err
 	}
-	e, err := c.f.LookupEntry(ctx, root, volumeName)
+	e, body, err := lookupRecord(ctx, c.f, c.blobs, root, volumeName)
 	if errors.Is(err, ErrNotFound) {
 		return VolumeInfo{}, false, nil
 	}
 	if err != nil {
 		return VolumeInfo{}, false, remoteErr(err, "read VOLUME of %s", vol)
 	}
-	v, err := decodeVolume(path.Join(root, volumeName), e)
+	v, err := decodeVolume(path.Join(root, volumeName), e, body)
 	if err != nil {
 		return VolumeInfo{}, false, err
 	}
@@ -470,14 +470,14 @@ func (c *Catalog) ReadHead(ctx context.Context, vol string) (storage.ChunkHead, 
 	if err != nil {
 		return storage.ChunkHead{}, false, err
 	}
-	e, err := c.f.LookupEntry(ctx, root, headName)
+	e, body, err := lookupRecord(ctx, c.f, c.blobs, root, headName)
 	if errors.Is(err, ErrNotFound) {
 		return storage.ChunkHead{}, false, nil
 	}
 	if err != nil {
 		return storage.ChunkHead{}, false, remoteErr(err, "read HEAD of %s", vol)
 	}
-	h, err := decodeHead(path.Join(root, headName), e)
+	h, err := decodeHead(path.Join(root, headName), e, body)
 	if err != nil {
 		return storage.ChunkHead{}, false, err
 	}
@@ -589,12 +589,12 @@ func nameRecordEntry(rec nameRecord) (*filerpb.Entry, error) {
 	}, nil
 }
 
-func decodeNameRecord(p string, e *filerpb.Entry) (nameRecord, error) {
+func decodeNameRecord(p string, e *filerpb.Entry, body []byte) (nameRecord, error) {
 	var rec nameRecord
 	if k := string(e.Extended[extKind]); k != kindSnapName {
 		return rec, fmt.Errorf("chunkstore: snapshot name %s: kind %q, want %q", p, k, kindSnapName)
 	}
-	if err := json.Unmarshal(e.GetContent(), &rec); err != nil {
+	if err := json.Unmarshal(body, &rec); err != nil {
 		return rec, fmt.Errorf("chunkstore: snapshot name %s: decode: %v", p, err)
 	}
 	if rec.Format != snapFormat || rec.Attempt == "" || rec.RequestID == "" ||
@@ -619,27 +619,27 @@ func (c *Catalog) resolveSnap(ctx context.Context, vol, name string) (snapRef, b
 	if err != nil {
 		return snapRef{}, false, err
 	}
-	re, err := c.f.LookupEntry(ctx, path.Join(root, snapNamesDir), name)
+	re, reBody, err := lookupRecord(ctx, c.f, c.blobs, path.Join(root, snapNamesDir), name)
 	if errors.Is(err, ErrNotFound) {
 		return snapRef{}, false, nil
 	}
 	if err != nil {
 		return snapRef{}, false, remoteErr(err, "read snapshot name %s/%s", vol, name)
 	}
-	rec, err := decodeNameRecord(path.Join(root, snapNamesDir, name), re)
+	rec, err := decodeNameRecord(path.Join(root, snapNamesDir, name), re, reBody)
 	if err != nil {
 		return snapRef{}, false, err
 	}
 	ref := snapRef{rec: rec}
 	dir := path.Join(root, snapsDir, name)
-	e, err := c.f.LookupEntry(ctx, dir, rec.Attempt)
+	e, body, err := lookupRecord(ctx, c.f, c.blobs, dir, rec.Attempt)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return ref, true, nil // the attempt has not published (in flight, or dead)
 	case err != nil:
 		return snapRef{}, false, remoteErr(err, "read snapshot %s/%s", vol, name)
 	}
-	info, _, err := decodeSnap(path.Join(dir, rec.Attempt), e)
+	info, _, err := decodeSnap(path.Join(dir, rec.Attempt), e, body)
 	if err != nil {
 		return snapRef{}, false, err
 	}
@@ -661,18 +661,15 @@ func (c *Catalog) readSnap(ctx context.Context, vol, name string) (SnapshotInfo,
 	return ref.info, nil
 }
 
-func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
+func decodeSnap(p string, e *filerpb.Entry, body []byte) (SnapshotInfo, string, error) {
 	fail := func(format string, a ...any) (SnapshotInfo, string, error) {
 		return SnapshotInfo{}, "", fmt.Errorf("chunkstore: snapshot %s: "+format, append([]any{p}, a...)...)
-	}
-	if len(e.GetChunks()) != 0 {
-		return fail("carries %d filer chunks; refusing", len(e.Chunks))
 	}
 	if k := string(e.Extended[extKind]); k != kindChunkSnap {
 		return fail("kind %q, want %q", k, kindChunkSnap)
 	}
 	var doc snapDoc
-	if err := json.Unmarshal(e.GetContent(), &doc); err != nil {
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return fail("decode: %v", err)
 	}
 	if doc.Format != snapFormat {
@@ -698,7 +695,7 @@ func decodeSnap(p string, e *filerpb.Entry) (SnapshotInfo, string, error) {
 	}
 	return SnapshotInfo{
 		VolumeID: doc.VolumeID, Name: doc.Name, HeadGen: head.Gen, HeadEpoch: head.Epoch, CutLSN: head.RemoteLSN,
-		CreatedNs: doc.CreatedNs, State: state, ChunkCount: manifestCount(head), ManifestBytes: len(e.GetContent()),
+		CreatedNs: doc.CreatedNs, State: state, ChunkCount: manifestCount(head), ManifestBytes: len(body),
 		Consistency: doc.Consistency, Labels: doc.Labels, Parent: doc.Parent, ExpiresAtNs: doc.ExpiresAtNs,
 		Class: doc.Class, head: head, geo: doc.Geometry, digest: digest,
 	}, doc.RequestID, nil
@@ -975,7 +972,11 @@ func (c *Catalog) CreateSnapshot(ctx context.Context, vol string, req SnapshotRe
 		// entry, never by resolving the name again (the name can be freed
 		// and reused meanwhile).
 		c.dropIntent(ctx, root, id)
-		info, _, err := decodeSnap(path.Join(dir, attempt), got)
+		got, body, err := readRecord(ctx, c.f, c.blobs, dir, got)
+		if err != nil {
+			return SnapshotInfo{}, remoteErr(err, "read snapshot %s/%s", vol, req.Name)
+		}
+		info, _, err := decodeSnap(path.Join(dir, attempt), got, body)
 		if err != nil {
 			return SnapshotInfo{}, err
 		}
@@ -1356,7 +1357,11 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 			if got == nil {
 				return ForkResult{}, catErr(CodeOutcomeUnknown, true, cerr, "fork %s: VOLUME create outcome unknown; retry with the same request id", req.Target)
 			}
-			v, err := decodeVolume(path.Join(dstRoot, volumeName), got)
+			var v VolumeInfo
+			got, body, err := readRecord(ctx, c.f, c.blobs, dstRoot, got)
+			if err == nil {
+				v, err = decodeVolume(path.Join(dstRoot, volumeName), got, body)
+			}
 			if err != nil || c.checkForkRecord(v, req, origin) != nil || v.Fork.HeadSHA256 != digest {
 				return ForkResult{}, catErr(CodeTargetExists, false, nil, "volume %s exists (another request, or another image)", req.Target)
 			}
@@ -1412,7 +1417,11 @@ func (c *Catalog) fork(ctx context.Context, req ForkRequest, origin string) (For
 		c.dropIntent(ctx, dstRoot, id) // refused for good, but HEAD could not be read
 		return ForkResult{}, remoteErr(cerr, "fork %s: HEAD exists but could not be read; retry with the same request id", req.Target)
 	}
-	h, err := decodeHead(path.Join(dstRoot, headName), got)
+	got, body, err := readRecord(ctx, c.f, c.blobs, dstRoot, got)
+	if err != nil {
+		return ForkResult{}, remoteErr(err, "fork %s: read the target HEAD; retry with the same request id", req.Target)
+	}
+	h, err := decodeHead(path.Join(dstRoot, headName), got, body)
 	if err != nil {
 		return ForkResult{}, err
 	}

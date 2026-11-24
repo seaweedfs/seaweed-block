@@ -97,8 +97,8 @@ func TestManifestPerf_64DirtyChunks(t *testing.T) {
 func TestManifestPerf_Written10GiBSnapshotFork(t *testing.T) {
 	ctx := context.Background()
 	f := newFakeFiler()
-	c := newCat(t, f)
 	b := manifestFiles{t.TempDir()}
+	c := newCat(t, f, b)
 	if err := f.CreateEntry(ctx, catBase, &filerpb.Entry{Name: "v1", IsDirectory: true}, true); err != nil {
 		t.Fatal(err)
 	}

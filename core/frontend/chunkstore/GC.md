@@ -147,7 +147,7 @@ one before it:
   recorded generation.
 - `bindings` (the default): also, every chunk key a checked root references has
   a binding in its owner's `keys/` (a fork's `@owner/key` resolves to the owner
-  volume), of the right kind, with a fid, without filer chunks, and not
+  volume), in the live shape (one plain needle chunk, binding.go), and not
   tombstoned by GC. Each owner's `keys/` is listed once. GC's mark does not make
   this check: it never looks up the bindings of the keys it roots.
 - `data`: also, every distinct chunk (owner and key, across all checked roots)

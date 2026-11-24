@@ -5,13 +5,14 @@ package chunkstore
 //
 // Layout under one volume's root directory:
 //
-//	<root>/HEAD         the published HEAD: JSON in the entry content,
+//	<root>/HEAD         the published HEAD: a JSON record (record.go),
 //	                    {gen, epoch, holder} mirrored in extended attributes
 //	<root>/keys/<key>   one write-once standard file per chunk key whose
 //	                    one filer chunk is the needle holding its bytes
 //	                    (binding.go)
-//	<root>/intents/<id> one entry per live intent (<gen>-<nonce>): the keys a
-//	                    holder is about to publish; GC treats them as roots
+//	<root>/intents/<id> one record per live intent (<gen>-<nonce>): the keys
+//	                    a holder is about to publish; GC treats them as
+//	                    roots; deleted with its data
 //
 // The chunk layer names chunks itself (immutable keys) while SeaweedFS
 // assigns needle ids, so a key entry binds the two.
@@ -34,8 +35,9 @@ package chunkstore
 // A key binding names its needle as its one filer chunk, so the filer owns
 // the needle: GC reclaims a key by one conditional UpdateEntry that drops the
 // chunk (the done tombstone), and the filer deletes the dropped needle after
-// storing the update. The chunk layer itself never deletes (Delete reports
-// ErrDeleteUnsupported).
+// storing the update. A record rewrite or delete drops its old payload
+// needles the same way. The chunk layer itself never deletes (Delete
+// reports ErrDeleteUnsupported).
 
 import (
 	"context"
@@ -102,7 +104,7 @@ func NewChunkRemote(f Filer, b Blobs, root string) (*ChunkRemote, error) {
 	if !path.IsAbs(root) || path.Clean(root) != root || root == "/" {
 		return nil, fmt.Errorf("chunkstore: chunk remote root %q must be a clean absolute directory other than /", root)
 	}
-	return &ChunkRemote{f: f, b: b, root: root, fids: map[string]string{}}, nil
+	return &ChunkRemote{f: recordFiler{f, b}, b: b, root: root, fids: map[string]string{}}, nil
 }
 
 func (r *ChunkRemote) keyDir() string { return path.Join(r.root, keysDir) }
@@ -327,7 +329,14 @@ func (r *ChunkRemote) ListIntents(ctx context.Context) ([]storage.ChunkIntent, e
 			return nil, err
 		}
 		for _, e := range page {
-			in, err := decodeIntent(path.Join(r.intentDir(), e.GetName()), e)
+			e, body, err := readRecord(ctx, r.f, r.b, r.intentDir(), e)
+			if errors.Is(err, errRecordGone) {
+				continue // settled since it was listed
+			}
+			if err != nil {
+				return nil, err
+			}
+			in, err := decodeIntent(path.Join(r.intentDir(), e.GetName()), e, body)
 			if err != nil {
 				return nil, err
 			}
@@ -340,12 +349,9 @@ func (r *ChunkRemote) ListIntents(ctx context.Context) ([]storage.ChunkIntent, e
 	}
 }
 
-func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
+func decodeIntent(p string, e *filerpb.Entry, body []byte) (storage.ChunkIntent, error) {
 	fail := func(format string, a ...any) (storage.ChunkIntent, error) {
 		return storage.ChunkIntent{}, fmt.Errorf("chunkstore: intent %s: "+format, append([]any{p}, a...)...)
-	}
-	if len(e.GetChunks()) != 0 {
-		return fail("carries %d filer chunks", len(e.Chunks))
 	}
 	if k := string(e.Extended[extKind]); k != kindChunkIntent {
 		return fail("kind %q, want %q", k, kindChunkIntent)
@@ -354,7 +360,7 @@ func decodeIntent(p string, e *filerpb.Entry) (storage.ChunkIntent, error) {
 		return fail("name is not \"<gen>-<nonce>\"")
 	}
 	var doc intentDoc
-	if err := json.Unmarshal(e.GetContent(), &doc); err != nil {
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return fail("decode: %v", err)
 	}
 	if doc.Format != intentFormat {
@@ -416,14 +422,14 @@ func (r *ChunkRemote) GetHeadRoot(ctx context.Context) (storage.ChunkHead, error
 // getHeadRoot validates the root and its CAS attributes without reading any
 // immutable segment. CASHead only needs authority and lineage from this root.
 func (r *ChunkRemote) getHeadRoot(ctx context.Context) (storage.ChunkHead, error) {
-	e, err := r.f.LookupEntry(ctx, r.root, headName)
+	e, body, err := lookupRecord(ctx, r.f, r.b, r.root, headName)
 	if errors.Is(err, ErrNotFound) {
 		return storage.ChunkHead{}, nil
 	}
 	if err != nil {
 		return storage.ChunkHead{}, err
 	}
-	return decodeHead(path.Join(r.root, headName), e)
+	return decodeHead(path.Join(r.root, headName), e, body)
 }
 
 // CASHead installs next, at generation expected.Gen+1, only if the stored
@@ -521,17 +527,14 @@ func headEntry(h storage.ChunkHead) (*filerpb.Entry, error) {
 	}, nil
 }
 
-func decodeHead(p string, e *filerpb.Entry) (storage.ChunkHead, error) {
+func decodeHead(p string, e *filerpb.Entry, body []byte) (storage.ChunkHead, error) {
 	fail := func(format string, a ...any) (storage.ChunkHead, error) {
 		return storage.ChunkHead{}, fmt.Errorf("chunkstore: HEAD %s: "+format, append([]any{p}, a...)...)
-	}
-	if len(e.GetChunks()) != 0 {
-		return fail("carries %d filer chunks; refusing (an update would let the filer delete them)", len(e.Chunks))
 	}
 	if k := string(e.Extended[extKind]); k != kindChunkHead {
 		return fail("kind %q, want %q", k, kindChunkHead)
 	}
-	h, err := decodeHeadDoc(p, e.GetContent())
+	h, err := decodeHeadDoc(p, body)
 	if err != nil {
 		return storage.ChunkHead{}, err
 	}

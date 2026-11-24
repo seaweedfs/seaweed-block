@@ -106,7 +106,7 @@ func FuzzDecodeHeadDocument(f *testing.F) {
 			}
 			t.Fatalf("an accepted head does not re-encode: %v (%+v)", err, h)
 		}
-		again, err := decodeHead("fuzz", e)
+		again, err := decodeHead("fuzz", e, e.GetContent())
 		if err != nil {
 			t.Fatalf("re-encoded head does not decode: %v", err)
 		}

@@ -34,7 +34,7 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 		if g.scope != "" && g.scope != vol {
 			continue
 		}
-		r, e := NewChunkRemote(g.cat.f, nilBlobs{}, path.Join(g.cat.base, vol))
+		r, e := NewChunkRemote(g.cat.f, gcBlobReader{g.blobs}, path.Join(g.cat.base, vol))
 		if e != nil {
 			return 0, e
 		}
@@ -72,11 +72,11 @@ func (g *Collector) SweepCopies(ctx context.Context) (settled int, err error) {
 				return settled, err
 			}
 			dir := path.Join(g.cat.base, a.vol, snapsDir, parts[1])
-			e, readErr := g.cat.f.LookupEntry(ctx, dir, parts[2])
+			e, body, readErr := lookupRecord(ctx, g.cat.f, gcBlobReader{g.blobs}, dir, parts[2])
 			if readErr != nil {
 				return settled, readErr
 			}
-			info, _, readErr := decodeSnap(path.Join(dir, parts[2]), e)
+			info, _, readErr := decodeSnap(path.Join(dir, parts[2]), e, body)
 			if readErr != nil {
 				return settled, readErr
 			}
@@ -165,7 +165,11 @@ func (g *Collector) snapshotAttemptHeads(ctx context.Context, vol string, now ti
 			if !storage.ValidChunkIntentID(e.Name) {
 				return nil, errors.New("chunkstore: invalid snapshot attempt identity")
 			}
-			info, _, err := decodeSnap(path.Join(root, dir.Name, e.Name), e)
+			e, body, err := readRecord(ctx, g.cat.f, gcBlobReader{g.blobs}, path.Join(root, dir.Name), e)
+			if err != nil {
+				return nil, err
+			}
+			info, _, err := decodeSnap(path.Join(root, dir.Name, e.Name), e, body)
 			if err != nil {
 				return nil, err
 			}

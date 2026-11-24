@@ -73,9 +73,11 @@ func isSnapPath(p, vol, name string) bool {
 	return strings.HasPrefix(p, path.Join(catBase, vol, snapsDir, name)+"/")
 }
 
-func newCat(t *testing.T, f *fakeFiler) *Catalog {
+// newCat is a catalog over f whose record payloads, when chunked, are needles
+// in b (the blob store the test's chunk remotes use, as in production).
+func newCat(t *testing.T, f *fakeFiler, b Blobs) *Catalog {
 	t.Helper()
-	c, err := NewCatalog(f, catBase)
+	c, err := NewCatalog(manifestFilerBlobs{f, b}, catBase)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +415,7 @@ func TestFork_ThenFreshHostReadsSnapshotImage(t *testing.T) {
 	ctx := context.Background()
 	const blocks, chunkBlocks = 64, 8
 	f, b := newFakeFiler(), newFakeBlobs()
-	c := newCat(t, f)
+	c := newCat(t, f, b)
 	geo := Geometry{NumBlocks: blocks, BlockSize: 4096, ChunkBlocks: chunkBlocks}
 	dir := t.TempDir()
 	attach := func(vol string, fresh bool, epoch uint64) (*storage.WALStore, storage.ChunkLayer) {
@@ -646,7 +648,7 @@ func TestDetach_ProductionSerializedHead(t *testing.T) {
 func TestCatalog_EnsureVolumeCreatesTheInitialHead(t *testing.T) {
 	ctx := context.Background()
 	f, b := newFakeFiler(), newFakeBlobs()
-	c := newCat(t, f)
+	c := newCat(t, f, b)
 	if _, err := c.EnsureVolume(ctx, "v1", catGeo); err != nil {
 		t.Fatal(err)
 	}

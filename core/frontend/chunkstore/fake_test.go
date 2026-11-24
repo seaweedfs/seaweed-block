@@ -40,6 +40,9 @@ type fakeFiler struct {
 	deleteChunk func(fileID string)
 	// lastExpected is the condition of the last UpdateEntry applied.
 	lastExpected map[string][]byte
+	// beforeList, if set, runs under the lock once a listing page is taken,
+	// before it is returned (it may use deleteLocked, not f's methods).
+	beforeList func()
 	// beforeCreate, if set, runs under the lock just before an entry is
 	// created (it may read f.entries but must not call f's methods).
 	beforeCreate func(p string)
@@ -173,7 +176,21 @@ func (f *fakeFiler) ListEntries(_ context.Context, dir, prefix, startAfter strin
 	for _, n := range names {
 		out = append(out, proto.Clone(f.entries[path.Join(dir, n)]).(*filerpb.Entry))
 	}
+	if f.beforeList != nil {
+		f.beforeList() // after the page is taken: changes race the caller
+	}
 	return out, nil
+}
+
+// deleteLocked deletes p and its data as DeleteEntry does (f.mu held).
+func (f *fakeFiler) deleteLocked(p string) error {
+	cur, ok := f.entries[p]
+	if !ok {
+		return ErrNotFound
+	}
+	delete(f.entries, p)
+	f.drop(droppedChunks(cur, nil))
+	return nil
 }
 
 func (f *fakeFiler) DeleteEntry(_ context.Context, dir, name string, expected map[string][]byte) error {

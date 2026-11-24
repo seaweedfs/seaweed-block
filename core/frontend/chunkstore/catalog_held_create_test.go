@@ -77,7 +77,7 @@ func lateSnapshotKeys(t *testing.T, f *fakeFiler, vol, name string) []string {
 	if err != nil {
 		t.Fatalf("the held create did not land: %v", err)
 	}
-	info, _, err := decodeSnap(path.Join(dir, name), e)
+	info, _, err := decodeSnap(path.Join(dir, name), e, e.GetContent())
 	if err != nil {
 		t.Fatal(err)
 	}
