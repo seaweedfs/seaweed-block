@@ -223,6 +223,12 @@ type HeadStore interface {
 // finds snap(session) and returns without writing. An absent HEAD refuses
 // (no path creates a HEAD here).
 func RunBegin(ctx context.Context, st HeadStore, me HolderID, session string) (Head, error) {
+	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.Begin(me, session) })
+}
+
+// runTransition is read HEAD, apply t, and one conditional update when t
+// changed it. An absent HEAD is refused: no transition creates one.
+func runTransition(ctx context.Context, st HeadStore, t func(Head) (Head, bool, error)) (Head, error) {
 	h, found, err := st.ReadHead(ctx)
 	if err != nil {
 		return Head{}, err
@@ -230,7 +236,7 @@ func RunBegin(ctx context.Context, st HeadStore, me HolderID, session string) (H
 	if !found {
 		return Head{}, ErrHeadAbsent
 	}
-	next, changed, err := h.Begin(me, session)
+	next, changed, err := t(h)
 	if err != nil || !changed {
 		return next, err
 	}
