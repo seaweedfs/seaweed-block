@@ -49,13 +49,24 @@ func TestSystemdFirstStartDuringAFilerOutageThenResetFailedServes(t *testing.T) 
 		}
 		quoted = append(quoted, fmt.Sprintf("%q", args[i]))
 	}
+	// Create the lock directory and its parent only if missing, and remove
+	// only what this test created (child first); nothing pre-existing is
+	// touched.
 	const lockDir = "/run/sw-block/locks"
-	if _, err := os.Stat(lockDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(lockDir, 0o755); err != nil {
-			t.Fatal(err)
+	var created []string
+	for _, dir := range []string{filepath.Dir(lockDir), lockDir} {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			created = append(created, dir)
 		}
-		t.Cleanup(func() { _ = os.Remove(lockDir); _ = os.Remove(filepath.Dir(lockDir)) })
 	}
+	t.Cleanup(func() {
+		for i := len(created) - 1; i >= 0; i-- {
+			_ = os.Remove(created[i])
+		}
+	})
 	spec := strings.Join([]string{
 		"[Unit]",
 		"Description=sw-block test unit: first start during a filer outage",
