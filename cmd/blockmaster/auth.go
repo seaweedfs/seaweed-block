@@ -21,6 +21,9 @@ import (
 type authFlags struct {
 	tlsCert, tlsKey, tlsClientCA, roleFile string
 	auditLog                               string // append-only audit log (optional)
+	// connectionAge is how long a client connection lives before blockmaster
+	// asks for a reconnect (a fresh handshake); 24 h, shorter only in tests.
+	connectionAge time.Duration
 }
 
 func (a authFlags) enabled() bool {
@@ -72,7 +75,11 @@ func (a authFlags) build() (*auth.Authenticator, []grpc.ServerOption, error) {
 		}
 		authn.SetAudit(l)
 	}
-	return authn, []grpc.ServerOption{creds, link.ConnectionAge(link.MasterConnectionAge)}, nil
+	age := a.connectionAge
+	if age <= 0 {
+		age = link.MasterConnectionAge
+	}
+	return authn, []grpc.ServerOption{creds, link.ConnectionAge(age)}, nil
 }
 
 // certDaysLeft is the days to expiry of the certificate file at path.

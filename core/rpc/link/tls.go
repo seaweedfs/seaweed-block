@@ -112,9 +112,14 @@ func ClientCredentials(f TLSFiles, serverName string) (grpc.DialOption, error) {
 const MasterConnectionAge = 24 * time.Hour
 
 // ConnectionAge closes each server connection after age (plus a grace for
-// calls in flight); clients reconnect.
+// calls in flight: 30 s, or half the age when that is shorter); clients
+// reconnect.
 func ConnectionAge(age time.Duration) grpc.ServerOption {
-	return grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: age, MaxConnectionAgeGrace: 30 * time.Second})
+	grace := 30 * time.Second
+	if age/2 < grace {
+		grace = age / 2
+	}
+	return grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: age, MaxConnectionAgeGrace: grace})
 }
 
 // DialMaster opens a lazy connection to blockmaster: mutual TLS when tls is

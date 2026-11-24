@@ -19,6 +19,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/launcher"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 )
 
@@ -125,6 +126,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.strictJournalIsolation, "strict-journal-isolation", false, "refuse new work on nodes whose durable root shares the authority store's file system (one journal): their heartbeats are refused until they serve a volume, and no placement or move targets them; off = alarm only")
 	fs.StringVar(&f.statusListen, "status-listen", "", "loopback HTTP address for the read-only GET /status/workspace-lease endpoint; empty = off")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
+	fs.DurationVar(&f.auth.connectionAge, "tls-connection-age-test-only", link.MasterConnectionAge, "internal test-only: how long a client connection lives before a reconnect (a fresh handshake)")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {

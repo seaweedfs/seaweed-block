@@ -251,3 +251,44 @@ func TestProcedureTLSRevokedHolderCertificate(t *testing.T) {
 		env.masterProcess.waitLog(t, 10*time.Second, "tls/roles reloaded")
 	}, true)
 }
+
+// T9: the daily reconnect, with the connection age set to 10 s: the holder's
+// lease keeps renewing through 20 forced reconnects (fresh handshakes), it
+// never fences, it keeps serving writes, and its assignment stream resumes
+// after each reconnect.
+func TestProcedureTLSLeasesSurviveForcedReconnects(t *testing.T) {
+	env := startHandoffEnvTLS(t, 1, nil, map[string]time.Time{}, "--tls-connection-age-test-only", "10s")
+	d := env.start(t, "blockvolume-s1", "s1")
+	env.adopt(t, d, "s1")
+	deadline := time.Now().Add(6 * time.Minute)
+	for i := uint64(0); time.Now().Before(deadline); i++ {
+		if strings.Count(tlsReadLog(t, d.log), "blockvolume: subscribe stream:") >= 20 {
+			break
+		}
+		b := bytes.Repeat([]byte{byte(i)}, 4096)
+		env.writeBlock(t, "s1", i%64, b)
+		if !bytes.Equal(env.readBlock(t, "s1", i%64), b) {
+			t.Fatalf("write %d did not read back across the reconnects", i)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	log := tlsReadLog(t, d.log)
+	if n := strings.Count(log, "blockvolume: subscribe stream:"); n < 20 {
+		t.Fatalf("%d stream reconnects in 6 minutes; want 20", n)
+	}
+	if n := strings.Count(log, "blockvolume: assignment stream delivery"); n < 20 {
+		t.Fatalf("the assignment stream delivered %d times; want it to resume after each of 20 reconnects", n)
+	}
+	if d.has("workspace lease: fenced") || !env.frontendReadyAt("s1") {
+		t.Fatal("the holder fenced or stopped serving across the forced reconnects")
+	}
+}
+
+func tlsReadLog(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
