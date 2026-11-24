@@ -216,6 +216,30 @@ func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, dur
 	}
 }
 
+// exitGeometryRefused ends the process with no restart (the shipped units'
+// RestartPreventExitStatus=78): a geometry flag that disagrees with the
+// volume record stays wrong until the operator changes the flag.
+const exitGeometryRefused = 78
+
+// geometryFlagsRefusal compares the geometry flags with the volume record
+// before any local store is created, so a wrong flag never leaves a store of
+// the wrong size behind. It returns the refusal line, or "" when the record
+// agrees, does not exist yet (the attach check creates it from the flags),
+// or cannot be read (the attach check still refuses a mismatch later), and
+// when no store is being created (numBlocks 0: an existing store opens with
+// its own geometry).
+func geometryFlagsRefusal(ctx context.Context, cat *chunkstore.Catalog, volumeID string, numBlocks uint64, blockSize uint32) string {
+	if numBlocks == 0 {
+		return "" // an existing store: the flags are not used
+	}
+	v, ok, err := cat.ReadVolume(ctx, volumeID)
+	if err != nil || !ok || (v.NumBlocks == numBlocks && v.BlockSize == blockSize) {
+		return ""
+	}
+	return fmt.Sprintf("blockvolume: geometry_mismatch: --durable-blocks %d --durable-blocksize %d disagree with the volume record of %s (%d blocks of %d bytes); no local store was created; start it with the record's geometry",
+		numBlocks, blockSize, volumeID, v.NumBlocks, v.BlockSize)
+}
+
 // chunkHolder is how this host names itself in HEAD: <server-id>/<replica-id>
 // (B9 W2 appendix). The replica id alone is not enough:
 // two hosts that both serve replica r1 would look like the same holder

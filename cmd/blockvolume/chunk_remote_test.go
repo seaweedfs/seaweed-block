@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 )
 
@@ -112,6 +114,74 @@ func TestChunkVolumeRootStaysInsideBase(t *testing.T) {
 			t.Errorf("volume id %q: unexpected error %v", id, err)
 		}
 	}
+}
+
+// Before any local store is created, a geometry flag that disagrees with the
+// volume record is refused with a line naming both; a matching record, a
+// missing record (the attach check creates it) and an unreadable one (the
+// attach check still applies) do not refuse.
+func TestGeometryFlagsRefusalComparesTheRecord(t *testing.T) {
+	ctx := context.Background()
+	cat, err := chunkstore.NewCatalog(chunkstore.NewMemFiler(), defaultChunkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := geometryFlagsRefusal(ctx, cat, "v1", 32768, 4096); got != "" {
+		t.Fatalf("no record yet: %q", got)
+	}
+	if _, err := cat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
+		t.Fatal(err)
+	}
+	if got := geometryFlagsRefusal(ctx, cat, "v1", 65536, 4096); got != "" {
+		t.Fatalf("matching flags refused: %q", got)
+	}
+	for _, c := range []struct {
+		blocks uint64
+		size   uint32
+	}{{32768, 4096}, {65536, 512}} {
+		got := geometryFlagsRefusal(ctx, cat, "v1", c.blocks, c.size)
+		for _, want := range []string{"geometry_mismatch", "--durable-blocks", "65536 blocks of 4096 bytes"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("flags %d x %d: refusal %q lacks %q", c.blocks, c.size, got, want)
+			}
+		}
+	}
+	if got := geometryFlagsRefusal(ctx, cat, "v1", 0, 0); got != "" {
+		t.Fatalf("an existing store (no create geometry) must not be refused: %q", got)
+	}
+	// An unreadable record: the same valid volume over a filer whose
+	// lookups fail. The record is read (and fails), and nothing is refused.
+	failing := &lookupFailFiler{MemFiler: chunkstore.NewMemFiler()}
+	failCat, err := chunkstore.NewCatalog(failing, defaultChunkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failCat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
+		t.Fatal(err)
+	}
+	failing.fail, failing.reads = true, 0
+	if got := geometryFlagsRefusal(ctx, failCat, "v1", 32768, 4096); got != "" {
+		t.Fatalf("an unreadable record must not refuse: %q", got)
+	}
+	if failing.reads == 0 {
+		t.Fatal("the unreadable-record case never read the record")
+	}
+}
+
+// lookupFailFiler is a MemFiler whose LookupEntry fails once fail is set; it
+// counts the lookups.
+type lookupFailFiler struct {
+	*chunkstore.MemFiler
+	fail  bool
+	reads int
+}
+
+func (f *lookupFailFiler) LookupEntry(ctx context.Context, dir, name string) (*filerpb.Entry, error) {
+	f.reads++
+	if f.fail {
+		return nil, errors.New("filer unavailable")
+	}
+	return f.MemFiler.LookupEntry(ctx, dir, name)
 }
 
 // The attach check is the VOLUME entry's attach rules (B9 W2 §4.2): the first

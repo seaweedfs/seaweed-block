@@ -3,17 +3,26 @@
 package main_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// The operations-guide cure for a blockvolume started with the wrong
-// --durable-blocks, run as written, in one sitting: the process is stopped
-// first; then the guard: `sw-block ops chunk show` must print the HEAD with
+// The operations-guide cure for a local store of the wrong size left by a
+// 1.0 start with the wrong --durable-blocks (from 1.0.1 such a start is
+// refused before any store exists), run as written, in one sitting. The
+// setup plants that store: testdata/onezero-wrong-geometry-store.txt holds,
+// as readable text, the four files a 3402e0dd (1.0 RC) run left under v2's
+// --durable-root
+// (65536-block record, --durable-blocks 32768). A start with the right flags
+// still fails geometry_mismatch at attach and never serves. The process is
+// stopped; then the guard: `sw-block ops chunk show` must print the HEAD with
 // epoch 0, no holder and state active (the volume never served, so its local
 // files hold no acknowledged write); then the four named files are removed
 // from --durable-root and a start with the right flags serves. Afterwards the
@@ -21,7 +30,36 @@ import (
 // forbids removing those files.
 func TestWrongGeometryCureAsWritten(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.strandTarget(t, "v2") // stopped: it exited 75 (under systemd: systemctl stop)
+	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	plantStore(t, filepath.Join("testdata", "onezero-wrong-geometry-store.txt"), env.hosts["n-v2"].root)
+	// The planted files are byte for byte the captured ones.
+	for name, want := range map[string]string{
+		"v2.bin":            "e9941d515c8b295dc860df1f3c89a4b36c3cc7d372334aa14527da9928b3de7e",
+		"v2.bin.chunkfresh": "02db0d2659c9d48bc15f81a388594fc0e3cf4c780fdc27ea21e0671afc37de19",
+		"v2.bin.chunkmap":   "ac6dba36a1b8bb106aaf9f10dda148818b5cf0b545cdf7fe92fa5c8ce52df4fc",
+		"v2.replica-floor":  "40ee91af4b55571765a602664a45913101254ccd16974ed3d01fbb8c7efa60e3",
+	} {
+		data, err := os.ReadFile(filepath.Join(env.hosts["n-v2"].root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != want {
+			t.Fatalf("planted %s: sha256 %s, captured %s", name, got, want)
+		}
+	}
+	stuck := env.h.start(t, "blockvolume-v2-right-flags-on-the-1.0-store", env.h.volume, env.volArgsFor(env.hosts["n-v2"])...)
+	err := stuck.wait(90 * time.Second) // stopped (under systemd: systemctl stop)
+	t.Logf("right flags on the 1.0 store: exit %v; %q; %q", err, stuck.line("geometry_mismatch"), stuck.line("exiting status="))
+	// The attach check refuses it (the store has its own geometry) and the
+	// process exits 75 after its retries; the pre-store flag check (exit
+	// 78) does not apply to an existing store. Over its whole life it never
+	// started a frontend (no *-listening or ublk-ready phase line).
+	mismatch := stuck.line("chunk attach check")
+	served := stuck.has(`"phase":"nvme-listening"`) || stuck.has(`"phase":"iscsi-listening"`) || stuck.has(`"phase":"ublk-ready"`)
+	if exitCode(err) != 75 || !strings.Contains(mismatch, "geometry_mismatch") || !strings.Contains(mismatch, "VOLUME geometry") || served {
+		t.Fatalf("setup: the right flags on the 1.0 store must fail the attach check with geometry_mismatch, exit 75, and never serve; exit %v, attach line %q, served %v", err, mismatch, served)
+	}
 	b := env.hosts["n-v2"]
 	guard := env.headOf(t, "v2")
 	t.Logf("guard: sw-block ops chunk show --volume v2: %s", guard)
@@ -55,29 +93,6 @@ func startSourceWithSnapshot(t *testing.T, targets ...string) *handoffEnv {
 	return env
 }
 
-// strandTarget restores v from v1's snapshot s1 and starts its blockvolume
-// with half the cluster spec's --durable-blocks (a wrong flag): the master
-// assigns it, it creates its local store at the wrong size, never becomes
-// promotion-ready and exits 75; its HEAD was never claimed (epoch 0, no
-// holder).
-func (env *handoffEnv) strandTarget(t *testing.T, v string) {
-	t.Helper()
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", v,
-		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	args := append([]string{}, env.volArgsFor(env.hosts["n-"+v])...)
-	for i := range args {
-		if args[i] == "--durable-blocks" {
-			args[i+1] = "32768"
-		}
-	}
-	d := env.h.start(t, "blockvolume-"+v+"-wrong-geometry", env.h.volume, args...)
-	err := d.wait(90 * time.Second)
-	head := env.headOf(t, v)
-	if exitCode(err) != 75 || !d.has("adopted as PRIMARY") || !strings.Contains(head, `"epoch":0`) || !strings.Contains(head, `"holder":""`) {
-		t.Fatalf("setup: %s is not assigned-never-claimed: exit %v, adopted %v, HEAD %s", v, err, d.has("adopted as PRIMARY"), head)
-	}
-}
-
 // headOf is the first line of `sw-block ops chunk show --volume v`.
 func (env *handoffEnv) headOf(t *testing.T, v string) string {
 	out, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
@@ -93,4 +108,59 @@ func listTree(root string) string {
 		return nil
 	})
 	return sb.String()
+}
+
+// plantStore writes the files a text fixture describes into root: each
+// "file <name> <size> <octal mode>" line starts a file of that size (all
+// zero, sparse where the file system allows), and each "<offset> <hex>" line
+// after it sets those bytes. Lines starting with # are comments.
+func plantStore(t *testing.T, fixture, root string) {
+	t.Helper()
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out *os.File
+	closeOut := func() {
+		if out != nil {
+			if err := out.Close(); err != nil {
+				t.Fatal(err)
+			}
+			out = nil
+		}
+	}
+	defer closeOut()
+	for n, line := range strings.Split(strings.ReplaceAll(string(data), "\r", ""), "\n") {
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 0 || strings.HasPrefix(f[0], "#"):
+		case f[0] == "file" && len(f) == 4:
+			closeOut()
+			size, err1 := strconv.ParseInt(f[2], 10, 64)
+			mode, err2 := strconv.ParseUint(f[3], 8, 32)
+			if err1 != nil || err2 != nil || strings.ContainsAny(f[1], "/\\") {
+				t.Fatalf("%s:%d: bad file line %q", fixture, n+1, line)
+			}
+			if out, err = os.OpenFile(filepath.Join(root, f[1]), os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(mode)); err != nil {
+				t.Fatal(err)
+			}
+			if err := out.Truncate(size); err != nil {
+				t.Fatal(err)
+			}
+		case out != nil && len(f) == 2:
+			off, err1 := strconv.ParseInt(f[0], 10, 64)
+			b, err2 := hex.DecodeString(f[1])
+			if err1 != nil || err2 != nil {
+				t.Fatalf("%s:%d: bad bytes line %q", fixture, n+1, line)
+			}
+			if _, err := out.WriteAt(b, off); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatalf("%s:%d: unexpected line %q", fixture, n+1, line)
+		}
+	}
 }
