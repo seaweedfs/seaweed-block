@@ -517,7 +517,7 @@ Space comes back in two steps. Neither is immediate.
    ```bash
    sw-block ops chunk snapshot-delete --volume v1 --name sched-20261120T031204Z --chunk-filer FILER
    # one hour or more later, and again one hour or more after that:
-   sw-block ops chunk gc --chunk-filer FILER --chunk-collection COLLECTION --master MASTER --apply
+   sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
    ```
 
    - Each pass prints its `Candidates`, `Reclaimed` and `failed_deletes`.

@@ -176,7 +176,7 @@ func TestIntegration_OpsChunkGC_RealMasterAndStore(t *testing.T) {
 	chunkGCNow = func() time.Time { return now }
 	call := func(apply bool) chunkstore.GCExecution {
 		t.Helper()
-		args := []string{"gc", "--chunk-collection", "swblock", "--master", m.Addr(), "--chunk-filer", filer, "--chunk-path", base}
+		args := []string{"gc", "--master", m.Addr(), "--chunk-filer", filer, "--chunk-path", base}
 		if apply {
 			args = append(args, "--apply")
 		}

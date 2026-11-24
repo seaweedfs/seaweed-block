@@ -65,7 +65,7 @@ func TestOpsChunkGC_DefaultIsReadOnly(t *testing.T) {
 	old := dialChunkFiler
 	defer func() { dialChunkFiler = old }()
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
-	code, out, errs := runChunk("gc", "--chunk-collection", "swblock", "--master", h.Addr(), "--chunk-filer", "local-test", "--chunk-path", "/gc-test")
+	code, out, errs := runChunk("gc", "--master", h.Addr(), "--chunk-filer", "local-test", "--chunk-path", "/gc-test")
 	if code != 0 {
 		t.Fatalf("missing safe GC entrypoint: exit=%d out=%s stderr=%s", code, out, errs)
 	}
@@ -113,21 +113,15 @@ func TestOpsChunkGC_InvalidAdmissionHasNoStoreEffects(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"gc"},
-		{"gc", "--chunk-collection", "swblock", "--chunk-filer", "store", "--master", "master", "--grace", "5m"},
-		{"gc", "--chunk-collection", "swblock", "--chunk-filer", "store", "--master", "master", "--intent-ttl", "0"},
-		{"gc", "--chunk-collection", "swblock", "--chunk-filer", "store", "--master", "master", "--timeout", "0"},
-		{"gc", "--chunk-collection", "swblock", "--chunk-filer", "store", "--master", "master", "unexpected"},
+		{"gc", "--chunk-filer", "store", "--master", "master", "--grace", "5m"},
+		{"gc", "--chunk-filer", "store", "--master", "master", "--intent-ttl", "0"},
+		{"gc", "--chunk-filer", "store", "--master", "master", "--timeout", "0"},
+		{"gc", "--chunk-filer", "store", "--master", "master", "unexpected"},
 	} {
 		rc, _, _ := runChunk(args...)
 		if rc != 2 {
 			t.Fatalf("invalid %v: exit=%d", args, rc)
 		}
-	}
-	// Only the collection is missing: GC must not guess which collection
-	// holds sw-block's needles.
-	rc, out, _ := runChunk("gc", "--chunk-filer", "store", "--master", "master")
-	if rc != 2 || !strings.Contains(out, "--chunk-collection is required") {
-		t.Fatalf("gc without --chunk-collection: exit=%d out=%s", rc, out)
 	}
 	if calls != 0 {
 		t.Fatalf("invalid admission dialed %d times", calls)
@@ -165,7 +159,7 @@ func gcPartialFixture(t *testing.T) (*gcCLIStore, *time.Time) {
 	return store, &now
 }
 func runPartialGC() (int, string, string) {
-	return runChunk("gc", "--chunk-collection", "swblock", "--master", "127.0.0.1:1", "--chunk-filer", "local", "--chunk-path", "/gc-partial", "--apply")
+	return runChunk("gc", "--master", "127.0.0.1:1", "--chunk-filer", "local", "--chunk-path", "/gc-partial", "--apply")
 }
 func TestOpsChunkGC_FinalWriteResponseLostReportsUnknown(t *testing.T) {
 	store, now := gcPartialFixture(t)
@@ -253,7 +247,7 @@ func TestOpsChunkGC_FailedMarkLookupPreservesUnknownUnbound(t *testing.T) {
 			old := dialChunkFiler
 			t.Cleanup(func() { dialChunkFiler = old })
 			dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
-			args := []string{"gc", "--chunk-collection", "swblock", "--master", "127.0.0.1:1", "--chunk-filer", "local", "--chunk-path", "/gc-lookup"}
+			args := []string{"gc", "--master", "127.0.0.1:1", "--chunk-filer", "local", "--chunk-path", "/gc-lookup"}
 			if apply {
 				args = append(args, "--apply")
 			}

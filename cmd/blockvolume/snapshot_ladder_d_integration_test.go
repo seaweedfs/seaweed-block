@@ -207,7 +207,7 @@ func requireBudget(t *testing.T, need time.Duration) {
 // objects it found eligible and how many it reclaimed.
 func (env *handoffEnv) gc(t *testing.T, apply bool) ([]gcObject, int) {
 	t.Helper()
-	args := []string{"ops", "chunk", "gc", "--chunk-collection", "swblock", "--master", env.h.masterAddr, "--grace", ladderGCGrace.String(),
+	args := []string{"ops", "chunk", "gc", "--master", env.h.masterAddr, "--grace", ladderGCGrace.String(),
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 	if apply {
 		args = append(args, "--apply")

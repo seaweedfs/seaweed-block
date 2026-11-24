@@ -19,13 +19,12 @@ var chunkGCNow = time.Now
 
 func chunkGC(args []string, stdout, stderr io.Writer) int {
 	fs := chunkFlagSet("gc", stderr)
-	var filer, base, master, collection string
+	var filer, base, master string
 	var apply bool
 	var grace, ttl, timeout time.Duration
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "chunk catalog namespace")
 	fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address")
-	fs.StringVar(&collection, "chunk-collection", "", "the collection used only by sw-block for chunk needles (required: the same name the blockvolumes run with)")
 	fs.BoolVar(&apply, "apply", false, "settle intents, save completed marks and reclaim eligible chunks; default is read-only")
 	fs.DurationVar(&grace, "grace", time.Hour, "two-mark interval and minimum upload age (at least the operation deadline + clock skew + CAS apply bound, and more than the operation deadline plus mark time)")
 	fs.DurationVar(&ttl, "intent-ttl", time.Hour, "minimum capture-intent age before authoritative epoch expiry")
@@ -35,11 +34,6 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() != 0 || filer == "" || master == "" || timeout <= 0 || ttl <= 0 || grace <= chunkstore.DefaultOpDeadline {
 		return chunkFail("gc", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer and --master are required; durations must be positive and grace must exceed the operation deadline", false)
-	}
-	// Chunk needles live in a collection used only by sw-block
-	// (INV-CHUNK-DEDICATED-COLLECTION-001); GC does not run without it named.
-	if collection == "" {
-		return chunkFail("gc", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-collection is required: the collection used only by sw-block, the same name the blockvolumes run with", false)
 	}
 	f, closeFn, e := dialChunkFiler(filer)
 	if e != nil {

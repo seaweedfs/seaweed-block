@@ -52,11 +52,9 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 not protect them: it confines the rules below (no fsck with a delete flag, no TTL, no collection delete) to that one
 collection, so the rest of the cluster keeps its normal maintenance.
 - Set `SWB_CHUNK_COLLECTION=<name>` in every host's blockvolume env file (`--chunk-collection`), the same name on
-  every host, and pass `--chunk-collection <name>` to `sw-block ops chunk gc`. A filer default or storage rule does
-  not count.
+  every host. A filer default or storage rule does not count.
 - Without it, blockvolume exits 78 (not restarted) before it creates anything, with `chunk volumes need a collection
-  used only by sw-block: set --chunk-collection <name>`; gc fails before it dials the filer. With it, blockvolume
-  logs `blockvolume: chunk collection "<name>"` at start.
+  used only by sw-block: set --chunk-collection <name>`. With it, blockvolume logs `blockvolume: chunk collection "<name>"` at start.
 - Do not put a TTL on that collection, do not delete it, and use it for nothing else.
 
 ## Upgrade
@@ -70,7 +68,6 @@ before it upgrades blockvolume; otherwise each upgraded volume exits 78 and stay
 2. Needles written before the upgrade stay in the collection they were written to (the filer default or a storage
    rule's). They are still read, and GC still reclaims them: it deletes by needle id. Keep the cluster maintenance
    rules above for that collection until the volumes that use it are deleted.
-3. Add `--chunk-collection <name>` to every scripted `sw-block ops chunk gc`.
 
 ## Size a host
 
@@ -222,7 +219,7 @@ Every command on the pages above, and the test that runs it.
 | `sw-block ops workspace force-move [--dry-run]`, `lost-range` | `TestProcedureForcedMoveWithTheOldHostReturning`, `TestProcedureRevokeWithoutACKThenForcedMove` | binary |
 | `sw-block ops volume-unheld --path` | `cmd/sw-block/volume_unheld_test.go` | CLI |
 | `sw-block ops chunk snapshot`, `snapshots`, `snapshot-delete` | `cmd/sw-block/chunk_test.go` | CLI |
-| `sw-block ops chunk gc --chunk-filer --chunk-collection --master --apply [--grace]` | `cmd/sw-block/chunk_gc_test.go`; `chunk_gc_integration_test.go` (real SeaweedFS) | CLI |
+| `sw-block ops chunk gc --chunk-filer --master --apply [--grace]` | `cmd/sw-block/chunk_gc_test.go`; `chunk_gc_integration_test.go` (real SeaweedFS) | CLI |
 | `sw-block ops chunk verify --all-snapshots --depth data` | `cmd/sw-block/chunk_verify_test.go` | CLI |
 | `sw-block ops chunk restore --source --snapshot --target`, `--volume ... [--status]` | `cmd/sw-block/chunk_restore_test.go` | CLI |
 | `curl STATUS/status?volume=v1` | the status checks in the binary tests above | binary |

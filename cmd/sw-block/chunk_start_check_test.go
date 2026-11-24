@@ -30,7 +30,7 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 		"fork":            append([]string{"ops", "chunk", "fork", "--source", "v1", "--snapshot", "s1", "--target", "v2", "--request-id", "r"}, filer...),
 		"retain":          append([]string{"ops", "chunk", "retain", "--volume", "v1"}, filer...),
 		"volume-delete":   append([]string{"ops", "chunk", "volume-delete", "--volume", "v1", "--master", "m:1", "--request-id", "r"}, filer...),
-		"gc --apply":      append([]string{"ops", "chunk", "gc", "--chunk-collection", "swblock", "--master", "m:1", "--apply"}, filer...),
+		"gc --apply":      append([]string{"ops", "chunk", "gc", "--master", "m:1", "--apply"}, filer...),
 	}
 	for name, args := range writing {
 		before := checks
@@ -48,7 +48,7 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 		"show":             append([]string{"ops", "chunk", "show", "--volume", "v1"}, filer...),
 		"usage":            append([]string{"ops", "chunk", "usage", "--volume", "v1"}, filer...),
 		"retain --dry-run": append([]string{"ops", "chunk", "retain", "--volume", "v1", "--dry-run"}, filer...),
-		"gc (read-only)":   append([]string{"ops", "chunk", "gc", "--chunk-collection", "swblock", "--master", "m:1"}, filer...),
+		"gc (read-only)":   append([]string{"ops", "chunk", "gc", "--master", "m:1"}, filer...),
 	}
 	for name, args := range readOnly {
 		before := checks
@@ -75,7 +75,7 @@ func TestOpsChunk_StartCheckIsBoundedByTheTimeout(t *testing.T) {
 	filer := []string{"--chunk-filer", "filer:18888", "--timeout", "200ms"}
 	for name, args := range map[string][]string{
 		"snapshot-delete": append([]string{"ops", "chunk", "snapshot-delete", "--volume", "v1", "--name", "s1"}, filer...),
-		"gc --apply":      append([]string{"ops", "chunk", "gc", "--chunk-collection", "swblock", "--master", "m:1", "--apply"}, filer...),
+		"gc --apply":      append([]string{"ops", "chunk", "gc", "--master", "m:1", "--apply"}, filer...),
 	} {
 		done := make(chan struct{})
 		var out, errb bytes.Buffer
