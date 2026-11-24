@@ -201,3 +201,44 @@ func TestRenewalReplicaMismatchAtOlderLineEpochIsOther(t *testing.T) {
 		}
 	}
 }
+
+// A holder whose server id is not registered is refused with the typed
+// IDENTITY detail (kind unregistered), on the lease renewal and on the
+// assignment stream, text unchanged; the volume waits on it like refused
+// credentials instead of exiting 75.
+func TestIdentityRefusalIsTyped(t *testing.T) {
+	h, conn, _ := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
+		return authority.WorkspaceHead{Gen: 1, Epoch: 1, Holder: "node-a/r1", Detached: true}, nil
+	}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	reviewCreate(t, conn, ctx, "v")
+	ws := control.NewWorkspaceServiceClient(conn)
+	b := &control.WorkspaceBinding{VolumeId: "v", ServerId: "node-a", DataAddr: "127.0.0.1:10000", CtrlAddr: "127.0.0.1:10001"}
+	if _, err := ws.RegisterWorkspaceBinding(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.PlaceWorkspace(ctx, &control.WorkspacePlacement{VolumeId: "v", ServerId: "node-a", ReplicaId: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	reviewHeartbeat(t, conn, ctx, "v", "node-a", b.DataAddr, b.CtrlAddr)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	line := waitAuthorityLine(t, h.Publisher(), "v")
+	check := func(rpc string, err error) {
+		t.Helper()
+		text, r := refusalOf(t, rpc, err)
+		if r == nil || r.GetKind() != control.WorkspaceLeaseRefusal_IDENTITY || r.GetIdentity() != "unregistered" ||
+			!strings.Contains(text, `server id "node-x" is not registered`) {
+			t.Fatalf("%s from an unregistered server: %q detail %v; want IDENTITY unregistered, text unchanged", rpc, text, r)
+		}
+	}
+	_, err := ws.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r1", Epoch: line.Epoch, ServerId: "node-x"})
+	check("renewal", err)
+	stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(ctx, &control.SubscribeRequest{VolumeId: "v", ReplicaId: "r1", ServerId: "node-x"})
+	if err == nil {
+		_, err = stream.Recv()
+	}
+	check("assignment stream", err)
+}

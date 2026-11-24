@@ -284,3 +284,36 @@ func TestFlappingMasterNeverExpiresEarly(t *testing.T) {
 		now = now.Add(10 * time.Second)
 	}
 }
+
+// An identity refusal (typed IDENTITY detail) waits like refused credentials:
+// no bound, reason "identity refused: <kind>" with its age; the first
+// accepted reply ends it.
+func TestIdentityRefusalWaitsVisibly(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	w := newMasterWait(func() time.Time { return now }, func(string, ...any) {})
+	st, err := status.New(codes.FailedPrecondition, `workspace lease: server id "s9" is not registered`).
+		WithDetails(&control.WorkspaceLeaseRefusal{Kind: control.WorkspaceLeaseRefusal_IDENTITY, Identity: "unregistered"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.call(nil) // the heartbeat is answered first
+	since := now
+	for i := 0; i < 600; i++ { // 20 min of refused renewals and streams
+		w.renewal(now, st.Err())
+		now = now.Add(2 * time.Second)
+	}
+	if d, final := w.state(); !d.IsZero() || final != "" {
+		t.Fatalf("after 20 min of identity refusals: bound %v final %q; want none", d, final)
+	}
+	if s := w.snapshot(true); s.Reason != "identity refused: unregistered" || !s.Since.Equal(since) || !s.Until.IsZero() {
+		t.Fatalf("status %+v; want identity refused: unregistered since the first refusal, no bound", s)
+	}
+	w.call(nil) // a heartbeat answer does not check identity: still refused
+	if s := w.snapshot(true); s.Reason != "identity refused: unregistered" {
+		t.Fatalf("status %+v after a heartbeat answer; want the identity wait to go on", s)
+	}
+	w.renewal(now, nil) // registered now: the renewal passes
+	if s := w.snapshot(true); s.Reason == "identity refused: unregistered" {
+		t.Fatalf("status %+v after an accepted call; want the identity wait over", s)
+	}
+}

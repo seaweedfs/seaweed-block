@@ -41,6 +41,8 @@ type masterWait struct {
 	last     time.Time // the latest reply
 	down     time.Time // first failure without a reply since the last contact
 	creds    time.Time // first credentials refusal since the last accepted call
+	ident    time.Time // first identity refusal since the last accepted call
+	identOf  string    // its kind: unregistered or wrong_host
 	barrier  time.Time // T: request start + retry_after of the latest BARRIER refusal
 	final    string    // "moved" or "deleted": a permanent refusal
 	logged   string    // the reason last logged
@@ -78,12 +80,30 @@ func masterCallClass(err error) (contact, credentials bool) {
 	return true, false
 }
 
-// call records one call's result.
+// call records one call's result. An identity refusal (the master's typed
+// IDENTITY detail: this server id is not registered, or calls from another
+// host) is not contact: like refused credentials it has no bound, because a
+// restart cannot fix a registration. It lasts until an identity-checked call
+// (a lease renewal, an assignment delivered) is accepted: the heartbeat does
+// not check identity, so its answers do not end it.
 func (w *masterWait) call(err error) {
 	contact, credentials := masterCallClass(err)
+	identity := ""
+	if r := leaseRefusalDetail(err); r != nil && r.GetKind() == control.WorkspaceLeaseRefusal_IDENTITY {
+		contact, identity = false, r.GetIdentity()
+		if identity == "" {
+			identity = "unknown"
+		}
+	}
 	w.mu.Lock()
 	now := w.now()
 	switch {
+	case identity != "":
+		w.down, w.creds = time.Time{}, time.Time{}
+		if w.ident.IsZero() {
+			w.ident = now
+		}
+		w.identOf = identity
 	case contact:
 		if w.contact.IsZero() {
 			w.contact = now
@@ -91,12 +111,12 @@ func (w *masterWait) call(err error) {
 		w.last = now
 		w.down, w.creds = time.Time{}, time.Time{}
 	case credentials:
-		w.contact, w.down = time.Time{}, time.Time{}
+		w.contact, w.down, w.ident = time.Time{}, time.Time{}, time.Time{}
 		if w.creds.IsZero() {
 			w.creds = now
 		}
 	default:
-		w.contact, w.creds = time.Time{}, time.Time{}
+		w.contact, w.creds, w.ident = time.Time{}, time.Time{}, time.Time{}
 		if w.down.IsZero() {
 			w.down = now
 		}
@@ -104,10 +124,21 @@ func (w *masterWait) call(err error) {
 	w.mu.Unlock()
 }
 
+// identityAccepted ends an identity refusal: an identity-checked call (a
+// lease renewal, an assignment delivered) was accepted.
+func (w *masterWait) identityAccepted() {
+	w.mu.Lock()
+	w.ident, w.identOf = time.Time{}, ""
+	w.mu.Unlock()
+}
+
 // renewal records a lease renewal started at start: the call itself, and
 // the typed kind of a refusal (status detail only, never its text).
 func (w *masterWait) renewal(start time.Time, err error) {
 	w.call(err)
+	if err == nil {
+		w.identityAccepted()
+	}
 	r := leaseRefusalDetail(err)
 	if r == nil {
 		return
@@ -144,7 +175,7 @@ func leaseRefusalDetail(err error) *control.WorkspaceLeaseRefusal {
 // deadlineLocked is max(contact streak start, barrier T) + MasterWaitLimit,
 // or zero while there is no contact (no bound). Caller holds mu.
 func (w *masterWait) deadlineLocked() time.Time {
-	if w.contact.IsZero() {
+	if w.contact.IsZero() || !w.ident.IsZero() {
 		return time.Time{}
 	}
 	from := w.contact
@@ -173,6 +204,8 @@ func (w *masterWait) snapshot(assigned bool) MasterWait {
 		out = MasterWait{Reason: w.final, Since: now}
 	case !w.creds.IsZero():
 		out = MasterWait{Reason: "credentials", Since: w.creds}
+	case !w.ident.IsZero():
+		out = MasterWait{Reason: "identity refused: " + w.identOf, Since: w.ident}
 	case w.contact.IsZero():
 		out = MasterWait{Reason: "unreachable", Since: w.down}
 		if w.down.IsZero() {
@@ -235,5 +268,8 @@ func (h *Host) MasterWaitContact() (streakStart, lastReply, barrier time.Time, f
 	w := h.mw
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if !w.ident.IsZero() {
+		return time.Time{}, w.last, w.barrier, w.final // no bound while identity is refused
+	}
 	return w.contact, w.last, w.barrier, w.final
 }

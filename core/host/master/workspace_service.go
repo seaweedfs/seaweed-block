@@ -146,7 +146,7 @@ func (s *services) RenewWorkspaceLease(ctx context.Context, q *control.Workspace
 		return nil, err
 	}
 	if ok, err := s.holderMatches(ctx, q.GetVolumeId(), q.GetReplicaId(), q.GetServerId(), q.GetEpoch()); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+		return nil, identityRefusal(err)
 	} else if !ok {
 		const text = "workspace lease: server identity does not match the current holder"
 		if s.renewalMoved(q.GetVolumeId(), q.GetReplicaId(), q.GetServerId(), q.GetEpoch()) {

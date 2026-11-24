@@ -24,10 +24,11 @@ const (
 type WorkspaceLeaseRefusal_Kind int32
 
 const (
-	WorkspaceLeaseRefusal_OTHER   WorkspaceLeaseRefusal_Kind = 0
-	WorkspaceLeaseRefusal_BARRIER WorkspaceLeaseRefusal_Kind = 1
-	WorkspaceLeaseRefusal_MOVED   WorkspaceLeaseRefusal_Kind = 2
-	WorkspaceLeaseRefusal_DELETED WorkspaceLeaseRefusal_Kind = 3
+	WorkspaceLeaseRefusal_OTHER    WorkspaceLeaseRefusal_Kind = 0
+	WorkspaceLeaseRefusal_BARRIER  WorkspaceLeaseRefusal_Kind = 1
+	WorkspaceLeaseRefusal_MOVED    WorkspaceLeaseRefusal_Kind = 2
+	WorkspaceLeaseRefusal_DELETED  WorkspaceLeaseRefusal_Kind = 3
+	WorkspaceLeaseRefusal_IDENTITY WorkspaceLeaseRefusal_Kind = 4
 )
 
 // Enum value maps for WorkspaceLeaseRefusal_Kind.
@@ -37,12 +38,14 @@ var (
 		1: "BARRIER",
 		2: "MOVED",
 		3: "DELETED",
+		4: "IDENTITY",
 	}
 	WorkspaceLeaseRefusal_Kind_value = map[string]int32{
-		"OTHER":   0,
-		"BARRIER": 1,
-		"MOVED":   2,
-		"DELETED": 3,
+		"OTHER":    0,
+		"BARRIER":  1,
+		"MOVED":    2,
+		"DELETED":  3,
+		"IDENTITY": 4,
 	}
 )
 
@@ -309,10 +312,14 @@ func (x *WorkspaceLeaseFact) GetRevoking() bool {
 // detail (code and text unchanged). A refusal without it is OTHER. MOVED and
 // DELETED are set only on a permanent, known fact; every doubtful case is
 // OTHER. retry_after_ns (BARRIER only) is relative to the request's start.
+// IDENTITY (also on a SubscribeAssignments refusal): the caller's server id is
+// not registered, or it calls from another host than the registered one;
+// identity names which ("unregistered" or "wrong_host").
 type WorkspaceLeaseRefusal struct {
 	state         protoimpl.MessageState     `protogen:"open.v1"`
 	Kind          WorkspaceLeaseRefusal_Kind `protobuf:"varint,1,opt,name=kind,proto3,enum=seaweedfs.block.control.WorkspaceLeaseRefusal_Kind" json:"kind,omitempty"`
 	RetryAfterNs  int64                      `protobuf:"varint,2,opt,name=retry_after_ns,json=retryAfterNs,proto3" json:"retry_after_ns,omitempty"`
+	Identity      string                     `protobuf:"bytes,3,opt,name=identity,proto3" json:"identity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -359,6 +366,13 @@ func (x *WorkspaceLeaseRefusal) GetRetryAfterNs() int64 {
 		return x.RetryAfterNs
 	}
 	return 0
+}
+
+func (x *WorkspaceLeaseRefusal) GetIdentity() string {
+	if x != nil {
+		return x.Identity
+	}
+	return ""
 }
 
 type WorkspaceRevocationAck struct {
@@ -1256,15 +1270,17 @@ const file_workspace_proto_rawDesc = "" +
 	"\rexpires_at_ns\x18\x04 \x01(\x03R\vexpiresAtNs\x12 \n" +
 	"\fvalid_for_ns\x18\x05 \x01(\x03R\n" +
 	"validForNs\x12\x1a\n" +
-	"\brevoking\x18\x06 \x01(\bR\brevoking\"\xbe\x01\n" +
+	"\brevoking\x18\x06 \x01(\bR\brevoking\"\xe8\x01\n" +
 	"\x15WorkspaceLeaseRefusal\x12G\n" +
 	"\x04kind\x18\x01 \x01(\x0e23.seaweedfs.block.control.WorkspaceLeaseRefusal.KindR\x04kind\x12$\n" +
-	"\x0eretry_after_ns\x18\x02 \x01(\x03R\fretryAfterNs\"6\n" +
+	"\x0eretry_after_ns\x18\x02 \x01(\x03R\fretryAfterNs\x12\x1a\n" +
+	"\bidentity\x18\x03 \x01(\tR\bidentity\"D\n" +
 	"\x04Kind\x12\t\n" +
 	"\x05OTHER\x10\x00\x12\v\n" +
 	"\aBARRIER\x10\x01\x12\t\n" +
 	"\x05MOVED\x10\x02\x12\v\n" +
-	"\aDELETED\x10\x03\"{\n" +
+	"\aDELETED\x10\x03\x12\f\n" +
+	"\bIDENTITY\x10\x04\"{\n" +
 	"\x16WorkspaceRevocationAck\x12F\n" +
 	"\bidentity\x18\x01 \x01(\v2*.seaweedfs.block.control.WorkspaceIdentityR\bidentity\x12\x19\n" +
 	"\bhead_gen\x18\x02 \x01(\x04R\aheadGen\"\xf6\x02\n" +

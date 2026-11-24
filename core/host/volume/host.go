@@ -782,6 +782,9 @@ func (h *Host) streamOnce(ctx context.Context) error {
 		fact, err := stream.Recv()
 		if ctx.Err() == nil && err != io.EOF {
 			h.mw.call(err) // a delivered fact or a handler's status is contact
+			if err == nil {
+				h.mw.identityAccepted() // the stream checks the holder's identity
+			}
 		}
 		if err == io.EOF {
 			return nil

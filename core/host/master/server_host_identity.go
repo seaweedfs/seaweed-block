@@ -2,13 +2,16 @@ package master
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 // addrHost is the host part of a host:port (or bare host) address.
@@ -80,17 +83,41 @@ func (h *Host) refuseWorkspaceHolderHost(ctx context.Context, rpc, server string
 	var err error
 	switch ph := peerHost(ctx); {
 	case !ok:
-		err = fmt.Errorf("%s: server id %q is not registered; a workspace holder's server id must be", rpc, server)
+		err = &holderIdentityError{Kind: "unregistered", msg: fmt.Sprintf("%s: server id %q is not registered; a workspace holder's server id must be", rpc, server)}
 	case ph == "" || !hosts[ph]:
 		if ph == "" {
 			ph = "an unknown peer"
 		}
-		err = fmt.Errorf("%s: server id %s is registered on host %s but connects from %s: register the node by the address it connects from (not loopback) in the cluster spec", rpc, server, named, ph)
+		err = &holderIdentityError{Kind: "wrong_host", msg: fmt.Sprintf("%s: server id %s is registered on host %s but connects from %s: register the node by the address it connects from (not loopback) in the cluster spec", rpc, server, named, ph)}
 	}
 	if err != nil {
 		h.log.Print(err)
 	}
 	return err
+}
+
+// holderIdentityError is refuseWorkspaceHolderHost's refusal; Kind is
+// "unregistered" or "wrong_host".
+type holderIdentityError struct {
+	Kind string
+	msg  string
+}
+
+func (e *holderIdentityError) Error() string { return e.msg }
+
+// identityRefusal is the FailedPrecondition status for a holder identity
+// refusal, with the IDENTITY detail and its kind (text unchanged); any
+// other error is a plain FailedPrecondition.
+func identityRefusal(err error) error {
+	var id *holderIdentityError
+	if !errors.As(err, &id) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	st := status.New(codes.FailedPrecondition, err.Error())
+	if d, e := st.WithDetails(&control.WorkspaceLeaseRefusal{Kind: control.WorkspaceLeaseRefusal_IDENTITY, Identity: id.Kind}); e == nil {
+		st = d
+	}
+	return st.Err()
 }
 
 // holderSlotFact is the slot fact of replica on the server the authority line names (workspaceSourceHost); a

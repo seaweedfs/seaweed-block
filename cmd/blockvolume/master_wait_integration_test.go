@@ -467,3 +467,37 @@ func (p *masterProxy) restore() {
 	}
 	p.serve(ln)
 }
+
+// A volume process whose server id is not registered (a misconfigured unit,
+// or a clone) never serves and never exits 75: the master refuses it with the
+// typed IDENTITY detail, and it waits visibly, /status MasterWait reason
+// "identity refused: unregistered", until its registration is fixed. A
+// restart cannot fix a registration, so a 75 loop would only burn the start
+// limit. SIGTERM still ends it at once.
+func TestUnregisteredServerWaitsVisibly(t *testing.T) {
+	env := startHandoffEnv(t, 1)
+	b := env.hosts["s1"]
+	args := env.volArgs("s1")
+	for i := range args {
+		if args[i] == "--server-id" {
+			args[i+1] = "s-unregistered"
+		}
+	}
+	d := env.h.start(t, "bv-unregistered", env.h.volume, args...)
+	poll(t, 30*time.Second, "/status never showed the identity refusal", func() bool {
+		mw, ok := masterWaitOf(b.status)
+		return ok && mw.Reason == "identity refused: unregistered" && mw.Until.IsZero()
+	})
+	time.Sleep(45 * time.Second) // past the 30 s bound a reachable master would give
+	stillRunning(t, d, "45 s refused as unregistered")
+	if volumeFrontendReady(b.status, "v1") {
+		t.Fatal("an unregistered server served")
+	}
+	if mw, ok := masterWaitOf(b.status); !ok || mw.Reason != "identity refused: unregistered" || time.Since(mw.Since) < 40*time.Second {
+		t.Fatalf("/status MasterWait %+v (present %v); want identity refused for 40 s or more", mw, ok)
+	}
+	d.term(t, 10*time.Second)
+	if d.err != nil {
+		t.Fatalf("exit %v after SIGTERM; want status 0", d.err)
+	}
+}
