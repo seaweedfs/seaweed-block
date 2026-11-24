@@ -630,6 +630,7 @@ func runVolume(f flags, exits *processExit) int {
 	var status *volume.StatusServer
 	if f.statusAddr != "" {
 		status = volume.NewStatusServer(h.ProjectionView())
+		status.SetMasterWait(h.MasterWaitStatus)
 		if f.nvmeListen != "" {
 			status.SetNVMeListenerReady(false)
 		}

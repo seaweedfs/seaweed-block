@@ -64,6 +64,7 @@ type StatusServer struct {
 	allowExternal   bool
 	peerSource      peerStatusSource
 	durableSource   durableStatusSource
+	masterWait      func() *MasterWait // why a workspace primary holds no grant; nil: not wired
 	nvmeSource      nvmeStatusSource
 	ublkSource      ublkStatusSource
 	runtimeSource   runtimeRecoverySource
@@ -218,6 +219,26 @@ type StatusProjection struct {
 	// wal_hole_suspected, issue #51). Visible, not an alert: they do not
 	// change Healthy or the frontend's readiness.
 	Warnings []string `json:",omitempty"`
+	// MasterWait is why a workspace primary holds no granted lease, present
+	// only while NotReadyReason is lease_not_held: Reason (unreachable,
+	// credentials, barrier, no_assignment, refused, moved, deleted), since
+	// when, and the wait's bound or the master's barrier time (UntilMs,
+	// absent while there is no bound).
+	MasterWait *MasterWaitStatus `json:",omitempty"`
+}
+
+// MasterWaitStatus is MasterWait on /status (unix milliseconds).
+type MasterWaitStatus struct {
+	Reason  string
+	SinceMs int64
+	UntilMs int64 `json:",omitempty"`
+}
+
+// SetMasterWait wires the host's master-wait reason into /status.
+func (s *StatusServer) SetMasterWait(f func() *MasterWait) {
+	s.mu.Lock()
+	s.masterWait = f
+	s.mu.Unlock()
 }
 
 // CatchUpStatus is a supporting replica's catch-up state.
@@ -506,6 +527,7 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	p.Healthy = p.Healthy && !nvmePending
 	p.FrontendPrimaryReady = p.FrontendPrimaryReady && !nvmePending
 	src := s.durableSource
+	masterWait := s.masterWait
 	s.mu.Unlock()
 	// INV-FE-PRIMARY-READY-OPERATIONAL-001: not FrontendPrimaryReady while the
 	// local backend admits no I/O (before the storage claim of a chunk volume,
@@ -534,6 +556,14 @@ func (s *StatusServer) statusProjection() StatusProjection {
 		switch {
 		case leaseNotHeld:
 			p.NotReadyReason = NotReadyLeaseNotHeld
+			if masterWait != nil {
+				if w := masterWait(); w != nil {
+					p.MasterWait = &MasterWaitStatus{Reason: w.Reason, SinceMs: w.Since.UnixMilli()}
+					if !w.Until.IsZero() {
+						p.MasterWait.UntilMs = w.Until.UnixMilli()
+					}
+				}
+			}
 		case backendReason != "":
 			p.NotReadyReason = backendReason
 		case nvmePending:

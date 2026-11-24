@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -159,5 +161,26 @@ func TestLeaseGuardSleepsUntilTheBarrier(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not stop during the barrier sleep")
+	}
+}
+
+// /status shows MasterWait (reason, since, until) only while a workspace
+// primary holds no granted lease.
+func TestStatusShowsTheMasterWait(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 1, EndpointVersion: 1}}
+	view := NewAdapterProjectionView(p, "v1", "r1", nil)
+	view.workspaceRequired = true
+	s := NewStatusServer(view)
+	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{VolumeID: "v1", Operational: true}}})
+	since, until := time.Unix(1000, 0), time.Unix(1045, 0)
+	s.SetMasterWait(func() *MasterWait { return &MasterWait{Reason: "barrier", Since: since, Until: until} })
+	got := s.statusProjection()
+	if got.NotReadyReason != NotReadyLeaseNotHeld || got.MasterWait == nil ||
+		*got.MasterWait != (MasterWaitStatus{Reason: "barrier", SinceMs: since.UnixMilli(), UntilMs: until.UnixMilli()}) {
+		t.Fatalf("status %q MasterWait %+v; want barrier since/until", got.NotReadyReason, got.MasterWait)
+	}
+	view.workspaceRequired = false
+	if got := s.statusProjection(); got.MasterWait != nil {
+		t.Fatalf("MasterWait %+v shown without a lease wait", got.MasterWait)
 	}
 }
