@@ -17,14 +17,14 @@ import (
 //
 //	idle      no session; HEAD idle (the engine has read HEAD)
 //	open      session s held; HEAD snap(s)
-//	abandoned session s held, the engine's AbortCut notice taken; HEAD snap(s)
+//	abandoned session s held, the engine's Abort notice taken; HEAD snap(s)
 //	pending   no session, a snapshot name set; HEAD idle
 //	dead      no session, nothing read yet; HEAD snap(d) of this holder (a dead process's)
 //
 // The other in-memory pieces (visible/ownGen/seen/forceView, cleaning,
-// snapErr, lastCommit) are covered by their own tests; when the intent
-// seam goes with the old store, PutIntent and the abandon notice remain
-// (the engine still opens and gives up cuts), so these states remain.
+// snapErr, lastCommit) are covered by their own tests. The seam's calls
+// are the kernel's: Begin opens the cut's session, Abort is the engine's
+// notice that it gave a cut up.
 func TestLayoutRemote_StateByCallTable(t *testing.T) {
 	ctx := context.Background()
 	type outcome struct {
@@ -33,30 +33,37 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 		named   bool   // the pending name is in HEAD after the call
 		settled string // AbortOpenSession's answer, when the call is it
 	}
-	calls := []string{"GetHead", "PutIntent", "Put", "CASHead", "AbortOpenSession", "CommitPendingSnapshot"}
+	// Abort is the engine's non-blocking notice: it writes nothing, so HEAD
+	// is what the state left; the next HEAD read ends the session.
+	calls := []string{"GetHead", "Begin", "Put", "CASHead", "Abort", "AbortOpenSession", "CommitPendingSnapshot"}
 	table := map[string]map[string]outcome{
 		"idle": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Abort":   {act: layout.ActIdle},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle},
 		},
 		"open": {
-			"GetHead": {act: layout.ActSnap}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Abort":   {act: layout.ActSnap},
+			"GetHead": {act: layout.ActSnap}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
 			"CommitPendingSnapshot": {act: layout.ActSnap},
 		},
 		"abandoned": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Abort":   {act: layout.ActSnap},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
 			"CommitPendingSnapshot": {act: layout.ActSnap},
 		},
 		"pending": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Abort":   {act: layout.ActIdle},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle, named: true}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle, named: true},
 		},
 		"dead": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Abort":   {act: layout.ActSnap},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {err: "precondition", act: layout.ActSnap}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
 			"CommitPendingSnapshot": {act: layout.ActSnap},
 		},
@@ -74,14 +81,14 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 		}
 		switch state {
 		case "open":
-			if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+			if _, err := r.Begin(ctx); err != nil {
 				t.Fatal(err)
 			}
 		case "abandoned":
-			if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+			if _, err := r.Begin(ctx); err != nil {
 				t.Fatal(err)
 			}
-			r.AbortCut()
+			r.Abort()
 		case "pending":
 			r.SetSnapshot("p", layout.SnapshotMeta{CreatedNs: 1})
 		case "dead":
@@ -106,8 +113,8 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 				switch call {
 				case "GetHead":
 					_, err = r.GetHead(ctx)
-				case "PutIntent":
-					_, err = r.PutIntent(ctx, storage.ChunkIntent{})
+				case "Begin":
+					_, err = r.Begin(ctx)
 				case "Put":
 					err = r.Put(ctx, r.ChunkKey(3, layout.Sum(data)), data)
 				case "CASHead":
@@ -115,6 +122,8 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 						_, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: r.visible, Epoch: lh.me.Epoch}, storage.ChunkHead{Epoch: lh.me.Epoch, Chunks: map[uint64]storage.ChunkRef{}})
 						return err
 					}()
+				case "Abort":
+					r.Abort()
 				case "AbortOpenSession":
 					settled, err = r.AbortOpenSession(ctx)
 				case "CommitPendingSnapshot":

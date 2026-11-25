@@ -63,20 +63,11 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	// A new holder's takeover starts serving the same image as active. The
 	// previous holder's final-cut proof belongs only to its detached HEAD.
 	next.State, next.DetachedBy = chunkHeadActive, nil
-	var intents []string
-	settled := true // no root RPC sent yet
-	defer func() {
-		if settled {
-			for _, id := range intents {
-				_ = remote.DeleteIntent(ctx, id)
-			}
-		}
-	}()
 	if builder, ok := remote.(ChunkManifestBuilder); ok && next.Segments == nil && len(next.Chunks) != 0 {
 		if cfg.RestoreChunkBytes == 0 {
 			return ChunkHead{}, errors.New("storage: legacy HEAD claim needs validated chunk geometry")
 		}
-		next, intents, err = builder.PrepareManifest(ctx, head, next, cfg.RestoreChunkBytes)
+		next, err = builder.PrepareManifest(ctx, head, next, cfg.RestoreChunkBytes)
 		if err != nil {
 			return ChunkHead{}, err
 		}
@@ -84,7 +75,6 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 	if err := allowed(); err != nil {
 		return ChunkHead{}, err
 	}
-	settled = false // an ambiguous CAS keeps its segment intents
 	gen, casErr := casChunkHead(ctx, remote, ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next)
 	if casErr == nil {
 		next.Gen = gen
@@ -94,7 +84,6 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 		if err := allowed(); err != nil {
 			return ChunkHead{}, err
 		}
-		settled = true
 		return next, nil
 	}
 	// Never blindly replay a possibly committed takeover. A re-read must
@@ -110,13 +99,11 @@ func ClaimChunkHead(ctx context.Context, remote ChunkRemote, cfg ChunkLayerConfi
 		if err := allowed(); err != nil {
 			return ChunkHead{}, err
 		}
-		settled = true
 		return current, nil
 	}
 	// A foreign publication is a fence, not permission to clean our roots.
 	if current.Gen != 0 && (current.Epoch != head.Epoch || current.Holder != head.Holder) {
 		return copyHead(current), fmt.Errorf("storage: HEAD claim displaced: %w", ErrChunkLayerFenced)
 	}
-	settled = errors.Is(casErr, ErrChunkHeadPrecondition) || current.Gen > head.Gen
 	return ChunkHead{}, fmt.Errorf("storage: HEAD claim not installed: %w", casErr)
 }

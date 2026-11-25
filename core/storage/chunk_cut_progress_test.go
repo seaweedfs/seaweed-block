@@ -68,7 +68,7 @@ func TestChunkStageV3_AbortedPointReusesUploads(t *testing.T) {
 	if bytes.Equal(f.imageOf(t, r.Head), f.imageOf(t, before)) {
 		t.Fatal("retry did not publish the submitted changes")
 	}
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
 
 // The changed image is four times the spill cap; only one hot chunk keeps
@@ -119,7 +119,7 @@ func TestChunkStageV3_FourTimesCapConvergesUnderSteadyWrites(t *testing.T) {
 		t.Fatal("large dirty image bypassed pre-copy")
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
 
 // Each of two deadlines interrupts the third upload, after two immutable chunks
@@ -214,5 +214,5 @@ func TestChunkStageV3_MultipleDeadlinesKeepProgress(t *testing.T) {
 	if previous != 4 {
 		t.Fatalf("reusable chunks=%d", previous)
 	}
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }

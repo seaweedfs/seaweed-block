@@ -8,36 +8,38 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestCutPayloadIntentCountIndependentOfCandidates(t *testing.T) {
+func TestCutPayloadSessionBeginsIndependentOfCandidates(t *testing.T) {
 	for _, n := range []int{4, 8} {
 		_, f, l, _ := precopyLayer(t, 0, n)
 		l.cfg.UploadConcurrency = 1
-		before := len(f.putIntents)
 		mark := len(f.stats().ops)
 		r, err := l.Cut(ctTimeout(t))
 		if err != nil {
 			t.Fatal(err)
 		}
-		rooted := map[string]bool{}
-		for _, in := range f.putIntents[before:] {
-			for _, key := range in.Keys {
-				rooted[key] = true
+		ops := opsSince(f, mark)
+		open, begins := false, 0
+		for _, op := range ops {
+			switch {
+			case strings.HasPrefix(op, "begin:") && op != "begin:fail":
+				open = true
+				begins++
+			case strings.HasPrefix(op, "abort:"), op == "cas:ok":
+				open = false
+			}
+			if k, ok := strings.CutPrefix(op, "put:"); ok && !open {
+				t.Fatalf("upload %s outside an open session", k)
 			}
 		}
-		for _, key := range uploadedKeys(opsSince(f, mark)) {
-			if !rooted[key] {
-				t.Fatalf("unrooted upload %s", key)
-			}
-		}
-		calls := len(f.putIntents) - before
-		if calls > 1+r.Stats.StageRounds {
-			t.Fatalf("candidates=%d intent writes=%d rounds=%d", n, calls, r.Stats.StageRounds)
+		if begins > 1+r.Stats.StageRounds {
+			t.Fatalf("candidates=%d Begins=%d rounds=%d", n, begins, r.Stats.StageRounds)
 		}
 	}
 }
@@ -71,27 +73,30 @@ func TestCutUploadRetriesPastThreeAttemptsAtSamePoint(t *testing.T) {
 	}
 }
 
-func TestChunkCloseDropsReusableButKeepsUnknownCASRoots(t *testing.T) {
+// Close drops the reusable uploads and aborts a cut's open session, except
+// while a commit is unresolved: its session stays for the settlement.
+func TestChunkCloseAbortsTheOpenSessionUnlessACommitIsUnresolved(t *testing.T) {
 	for _, pending := range []bool{false, true} {
 		t.Run(map[bool]string{false: "known-abort", true: "unknown-CAS"}[pending], func(t *testing.T) {
 			_, f, l, _ := precopyLayer(t, 0, 1)
-			id, err := f.PutIntent(context.Background(), chunkIntent{Keys: []string{"unpublished"}})
-			if err != nil {
+			if _, err := f.Begin(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			l.stMu.Lock()
-			l.reusable = map[uint64]stagedChunk{0: {capturedChunk: capturedChunk{intent: id}}}
+			l.reusable = map[uint64]stagedChunk{0: {}}
 			if pending {
 				l.pending = &chunkHead{Gen: 9}
-				l.pendingIntents = []string{id}
 			}
 			l.stMu.Unlock()
-			if err = l.Close(); err != nil {
+			if err := l.Close(); err != nil {
 				t.Fatal(err)
 			}
-			live := len(liveIntents(t, f))
-			if (pending && live != 1) || (!pending && live != 0) {
-				t.Fatalf("pending=%v live=%d", pending, live)
+			open := f.openSession() != ""
+			if open != pending {
+				t.Fatalf("pending=%v: session open after Close=%v", pending, open)
+			}
+			if l.reusable != nil {
+				t.Fatal("Close kept the reusable uploads")
 			}
 		})
 	}
@@ -202,7 +207,7 @@ func TestCutPayloadReadsOverlapEarlierUploadsWithinBudget(t *testing.T) {
 	t.Cleanup(func() { cancel(); free(); cowWaitSignal(t, done, "overlap cleanup") })
 	go func() {
 		defer close(done)
-		_, _, err := l.streamCutPayloads(ctx, []uint64{0, 1, 2}, chunkHead{}, false, func(_ context.Context, idx uint64) (capturedChunk, error) {
+		_, err := l.streamCutPayloads(ctx, []uint64{0, 1, 2}, chunkHead{}, false, func(_ context.Context, idx uint64) (capturedChunk, error) {
 			if idx == 2 {
 				close(readThird)
 			}
@@ -224,7 +229,7 @@ func TestCutPayloadReadsOverlapEarlierUploadsWithinBudget(t *testing.T) {
 	}
 }
 
-func TestCutPayloadIntentCountLargeCandidateSets(t *testing.T) {
+func TestCutPayloadOneBeginForLargeCandidateSets(t *testing.T) {
 	for _, n := range []int{256, 4096} {
 		_, _, l, _ := precopyLayer(t, 0, 1)
 		f := newFakeChunkRemote()
@@ -233,12 +238,13 @@ func TestCutPayloadIntentCountLargeCandidateSets(t *testing.T) {
 		for i := range batch {
 			batch[i] = uint64(i)
 		}
-		_, ids, err := l.streamCutPayloads(ctTimeout(t), batch, chunkHead{}, false, func(_ context.Context, idx uint64) (capturedChunk, error) {
+		_, err := l.streamCutPayloads(ctTimeout(t), batch, chunkHead{}, false, func(_ context.Context, idx uint64) (capturedChunk, error) {
 			data := makeBlock(ctBlockSize, byte(idx%255+1))
 			return capturedChunk{idx: idx, data: data, sum: sha256.Sum256(data)}, nil
 		})
-		if err != nil || len(ids) != 1 || len(f.putIntents) != 1 || len(f.putIntents[0].Keys) != n {
-			t.Fatalf("D=%d intents=%d ids=%d err=%v", n, len(f.putIntents), len(ids), err)
+		ops := f.stats().ops
+		if err != nil || countOps(ops, "begin:") != 1 || len(uploadedKeys(ops)) != n {
+			t.Fatalf("D=%d Begins=%d uploads=%d err=%v", n, countOps(ops, "begin:"), len(uploadedKeys(ops)), err)
 		}
 	}
 }

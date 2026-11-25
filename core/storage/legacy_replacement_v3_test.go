@@ -1617,5 +1617,5 @@ func TestNativeReplacementRecoverInvalidatesStagedImage(t *testing.T) {
 	if !bytes.Equal(f.imageOf(t, cut.Head)[:ctBlockSize], want) {
 		t.Fatal("cut reused bytes staged before native Recover")
 	}
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
