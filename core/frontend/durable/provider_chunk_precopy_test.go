@@ -148,11 +148,24 @@ func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 	}
 }
 
+type heldPrecopyManifestRemote struct {
+	*storage.MemChunkRemote
+	hold atomic.Bool
+}
+
+func (r *heldPrecopyManifestRemote) PrepareManifest(ctx context.Context, _, next storage.ChunkHead, _ uint64) (storage.ChunkHead, error) {
+	if r.hold.Load() && next.State == storage.ChunkHeadDetached {
+		<-ctx.Done()
+		return storage.ChunkHead{}, ctx.Err()
+	}
+	return next, nil
+}
+
 // An admitted final freeze has a physical deadline, even when its forecast
-// fitted: a remote that never completes its detach CAS must not hold guest I/O
-// until the ordinary 20-second detach timeout.
-func TestPrecopyFinalFreezeDeadlineAbortsHeldCAS(t *testing.T) {
-	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
+// fitted: a remote that never completes its final manifest must not hold guest
+// I/O until the ordinary 20-second detach timeout.
+func TestPrecopyFinalFreezeDeadlineAbortsSlowRemote(t *testing.T) {
+	remote := &heldPrecopyManifestRemote{MemChunkRemote: storage.NewMemChunkRemote()}
 	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
@@ -165,7 +178,7 @@ func TestPrecopyFinalFreezeDeadlineAbortsHeldCAS(t *testing.T) {
 	if _, err := p.CutVolume(context.Background(), "v1", 0); err != nil {
 		t.Fatal(err)
 	}
-	remote.set(func(r *faultRemote) { r.casMode = "hold-detach" })
+	remote.hold.Store(true)
 	var cutDeadline time.Time
 	durable.SetTestDetachTrace(p, func(stage string, deadline time.Time) {
 		if stage == "cut" {
@@ -175,8 +188,8 @@ func TestPrecopyFinalFreezeDeadlineAbortsHeldCAS(t *testing.T) {
 	started := time.Now()
 	_, _, err = p.DetachVolume(context.Background(), "v1")
 	elapsed := time.Since(started)
-	if !errors.Is(err, durable.ErrDetachAborted) {
-		t.Fatalf("held final CAS: %v; want aborted stop at the deadline", err)
+	if !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("held final manifest: %v; want aborted stop at the deadline", err)
 	}
 	if cutDeadline.IsZero() || cutDeadline.Sub(started) > 4*time.Second {
 		t.Fatalf("final pre-copy cut deadline is %s after call start; want <=4s of the 5s freeze bound", cutDeadline.Sub(started))
