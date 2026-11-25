@@ -94,6 +94,18 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 			t.Logf("DEBUG %s status: %s", b.id, body)
 		}
 	}
+	time.Sleep(3 * time.Second)
+	if data, err := os.ReadFile(master.log); err == nil {
+		n, last := 0, ""
+		for _, l := range strings.Split(string(data), "
+") {
+			if strings.Contains(l, "DEBUG attest") {
+				n++
+				last = l
+			}
+		}
+		t.Logf("DEBUG attest count=%d last=%s", n, last)
+	}
 
 	// 2. r3 can no longer persist a floor; r1 stops: a fencing round at 2
 	// gets only r2, publishes nothing, and r1 cannot answer the heal.
