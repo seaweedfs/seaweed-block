@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -608,8 +609,11 @@ func TestLayoutRemote_AbortOpenSession(t *testing.T) {
 	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionAborted || lh.head().Activity.Kind != layout.ActIdle {
 		t.Fatalf("own open session: %q %v, HEAD %+v", got, err, lh.head().Activity)
 	}
+	if _, err := r.GetHead(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if r.pending != nil || r.session != "" {
-		t.Fatal("the aborted session or its pending name is still held")
+		t.Fatal("the aborted session or its pending name is still held after the next call")
 	}
 	// A dead process's session.
 	st, _ := lh.cat.Store(lh.v)
@@ -653,5 +657,78 @@ func TestLayoutRemote_AbortOpenSession(t *testing.T) {
 	}
 	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionDetached {
 		t.Fatalf("a detached HEAD: %q %v", got, err)
+	}
+}
+
+// blockingCommitStore holds the next commit (an idle HEAD update) inside
+// its update until released.
+type blockingCommitStore struct {
+	sessionStore
+	entered, release chan struct{}
+}
+
+func (s *blockingCommitStore) UpdateHead(ctx context.Context, gen uint64, next layout.Head) error {
+	if next.Activity.Kind == layout.ActIdle && s.entered != nil {
+		close(s.entered)
+		s.entered = nil
+		<-s.release
+	}
+	return s.sessionStore.UpdateHead(ctx, gen, next)
+}
+
+// The abort never waits behind the commit it aborts: while a commit is held
+// inside its HEAD update, AbortOpenSession completes (aborted), and the
+// commit then fails its condition.
+func TestLayoutRemote_AbortOpenSessionDoesNotWaitForAHeldCommit(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	hold := &blockingCommitStore{sessionStore: r.st, entered: make(chan struct{}), release: make(chan struct{})}
+	entered := hold.entered
+	r.st = hold
+	writeSync(t, s, map[uint32][]byte{7: block(7)})
+	cut := make(chan error, 1)
+	go func() { _, err := l.Capture(ctx); cut <- err }()
+	<-entered
+	done := make(chan struct{})
+	var got string
+	var aerr error
+	go func() { got, aerr = r.AbortOpenSession(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(hold.release)
+		t.Fatal("AbortOpenSession waited behind the held commit")
+	}
+	if aerr != nil || got != SessionAborted {
+		t.Fatalf("abort during a held commit: %q %v; want aborted", got, aerr)
+	}
+	close(hold.release)
+	if err := <-cut; err == nil {
+		t.Fatal("the held commit applied after its session was aborted")
+	}
+	if h := lh.head(); h.Activity.Kind != layout.ActIdle {
+		t.Fatalf("HEAD after the abort: %+v", h.Activity)
+	}
+}
+
+// A HEAD of another holder, epoch or claim id is a fence for the stop's
+// settle, never idle (which would let it resume).
+func TestLayoutRemote_AbortOpenSessionFencesAForeignHead(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	for name, me := range map[string]layout.HolderID{
+		"another holder":   {Epoch: 1, Holder: "b", ClaimID: "k-a"},
+		"another epoch":    {Epoch: 2, Holder: "a", ClaimID: "k-a"},
+		"another claim id": {Epoch: 1, Holder: "a", ClaimID: "k-other"},
+	} {
+		r, err := NewLayoutRemote(lh.cat, lh.v, me)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := r.AbortOpenSession(ctx); !errors.Is(err, storage.ErrChunkLayerFenced) {
+			t.Errorf("%s: %q %v; want ErrChunkLayerFenced", name, got, err)
+		}
 	}
 }

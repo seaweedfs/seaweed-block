@@ -466,36 +466,49 @@ const (
 )
 
 // AbortOpenSession settles this holder's open transaction before a stop
-// resumes serving or retries: this process's own cleaning is ended, and a
-// session of this holder that HEAD shows open (held here or left by a dead
-// process) is rolled back, with its pending snapshot name dropped. It
-// reports what HEAD then says, from one HEAD read under the remote's lock.
+// resumes serving or retries. It takes no lock of the remote, so it never
+// waits behind a commit in flight (the very one it may abort) and honours
+// ctx; the kernel's conditional writes decide between them: an abort that
+// lands first makes the commit's update fail, a commit that lands first is
+// what HEAD then reports. A cleaning of this holder that HEAD shows open is
+// ended, then a session of this holder is rolled back (held here or left by
+// a dead process); the remote drops the session and its pending name at its
+// next call. HEAD of another holder, epoch or claim id is a fence, never
+// idle.
 func (l *LayoutRemote) AbortOpenSession(ctx context.Context) (string, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.takeAbandonLocked()
-	l.stopCleaningLocked()
-	h, found, err := l.st.ReadHead(ctx)
-	if err != nil {
-		return "", layoutRemoteErr(err)
-	}
-	if !found {
-		return "", layout.ErrHeadAbsent
-	}
-	l.viewLocked(h)
-	mine := h.Epoch == l.me.Epoch && h.Holder == l.me.Holder && h.ClaimID == l.me.ClaimID
-	switch {
-	case mine && h.State == layout.StateDetached:
-		return SessionDetached, nil
-	case mine && h.Activity.Kind == layout.ActSnap:
-		ah, err := layout.RunAbort(ctx, l.st, l.me, h.Activity.Session)
+	for {
+		h, found, err := l.st.ReadHead(ctx)
 		if err != nil {
 			return "", layoutRemoteErr(err)
 		}
-		l.session, l.pending, l.ownGen = "", nil, ah.Gen
-		return SessionAborted, nil
+		if !found {
+			return "", layout.ErrHeadAbsent
+		}
+		if h.Epoch != l.me.Epoch || h.Holder != l.me.Holder || h.ClaimID != l.me.ClaimID {
+			return "", fmt.Errorf("%w: HEAD is held by %s at epoch %d (claim %q)", storage.ErrChunkLayerFenced, h.Holder, h.Epoch, h.ClaimID)
+		}
+		switch {
+		case h.State == layout.StateDetached:
+			return SessionDetached, nil
+		case h.State != layout.StateLive:
+			return "", layoutRemoteErr(fmt.Errorf("%w: HEAD is %s", layout.ErrVolumeDeleting, h.State))
+		case h.Activity.Kind == layout.ActClean:
+			if _, err := layout.RunEndClean(ctx, l.st, l.me, h.Activity.Session); err != nil && !errors.Is(err, layout.ErrPrecondition) {
+				return "", layoutRemoteErr(err)
+			}
+			continue // read HEAD again: a session may follow
+		case h.Activity.Kind == layout.ActSnap:
+			if _, err := layout.RunAbort(ctx, l.st, l.me, h.Activity.Session); err != nil {
+				if errors.Is(err, layout.ErrPrecondition) {
+					continue // HEAD moved (the commit landed): read it again
+				}
+				return "", layoutRemoteErr(err)
+			}
+			l.abandoned.Store(true)
+			return SessionAborted, nil
+		}
+		return SessionIdle, nil
 	}
-	return SessionIdle, nil
 }
 
 // ReadHead reads the volume's HEAD as the kernel holds it (a stop's
