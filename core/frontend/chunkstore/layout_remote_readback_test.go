@@ -39,33 +39,54 @@ func (s *conflictBeforeCommitStore) UpdateHead(ctx context.Context, gen uint64, 
 	return s.sessionStore.UpdateHead(ctx, gen, next)
 }
 
-func TestLayoutRemote_OperatorSnapshotDeleteDuringCommitRetries(t *testing.T) {
-	ctx := context.Background()
-	lh := newLayoutHost(t)
-	s, layer, remote := lh.attach("active", true, true)
-	defer s.Close()
-	writeSync(t, s, map[uint32][]byte{2: block(2)})
-	remote.SetSnapshot("old", layout.SnapshotMeta{CreatedNs: 1})
-	if _, err := layer.Capture(ctx); err != nil {
-		t.Fatal(err)
+func TestLayoutRemote_OperatorHEADWriteDuringCommitRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(context.Context, *layoutHost, sessionStore) error
+	}{
+		{"delete snapshot", func(ctx context.Context, _ *layoutHost, st sessionStore) error {
+			_, err := layout.RunDeleteSnapshot(ctx, st, "old")
+			return err
+		}},
+		{"retire snapshot", func(ctx context.Context, _ *layoutHost, st sessionStore) error {
+			_, err := layout.RunRetireSnapshot(ctx, st, "old", 10)
+			return err
+		}},
+		{"add dependent", func(ctx context.Context, lh *layoutHost, st sessionStore) error {
+			_, reader, err := lh.cat.open(lh.v)
+			if err != nil {
+				return err
+			}
+			_, err = layout.RunAddDependent(ctx, st, reader, "old", layout.Dependent{Target: "target", TargetID: layout.VolumeID{7}})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			lh := newLayoutHost(t)
+			s, layer, remote := lh.attach("active", true, true)
+			defer s.Close()
+			writeSync(t, s, map[uint32][]byte{2: block(2)})
+			remote.SetSnapshot("old", layout.SnapshotMeta{CreatedNs: 1})
+			if _, err := layer.Capture(ctx); err != nil {
+				t.Fatal(err)
+			}
+			st := &conflictBeforeCommitStore{sessionStore: remote.st, armed: true}
+			st.change = func(ctx context.Context) error { return tc.change(ctx, lh, st.sessionStore) }
+			remote.st = st
+			writeSync(t, s, map[uint32][]byte{9: block(9)})
+			if _, err := layer.Capture(ctx); err != nil {
+				t.Fatalf("same-holder commit after operator write: %v", err)
+			}
+			if st.armed {
+				t.Fatal("operator write was not injected before the conditional commit")
+			}
+			if _, err := layer.Capture(ctx); err != nil {
+				t.Fatalf("next cut after operator write: %v", err)
+			}
+			lh.readBack("reader", map[uint32][]byte{2: block(2), 9: block(9)})
+		})
 	}
-	st := &conflictBeforeCommitStore{sessionStore: remote.st, armed: true}
-	st.change = func(ctx context.Context) error {
-		_, err := layout.RunDeleteSnapshot(ctx, st.sessionStore, "old")
-		return err
-	}
-	remote.st = st
-	writeSync(t, s, map[uint32][]byte{9: block(9)})
-	if _, err := layer.Capture(ctx); err != nil {
-		t.Fatalf("same-holder commit after snapshot delete: %v", err)
-	}
-	if st.armed {
-		t.Fatal("snapshot deletion was not injected before the conditional commit")
-	}
-	if _, err := layer.Capture(ctx); err != nil {
-		t.Fatalf("next cut after snapshot deletion: %v", err)
-	}
-	lh.readBack("reader", map[uint32][]byte{2: block(2), 9: block(9)})
 }
 
 func TestLayoutRemote_ForeignClaimDuringCommitFences(t *testing.T) {
