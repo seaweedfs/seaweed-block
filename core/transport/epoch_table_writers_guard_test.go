@@ -24,7 +24,8 @@ var epochTableWriters = []string{
 	"cmd/blockvolume/replication_ingress.go: func newReplicationIngress .TrimAbove",
 	"cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Note",
 	"cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Replace", // promoted over an invalid table: exactly [(e, next LSN)]
-	"core/transport/replica.go: func EnterDualLane .InvalidateDualLane",       // dual-lane session: before its first byte
+	"core/transport/replica.go: func BeginEpochRecovery .Invalidate",          // dual-lane session start: before its first data frame
+	"core/transport/replica.go: func CompleteEpochRecovery .CompleteRecovery", // dual-lane final barrier, only under its token
 	"core/transport/replica.go: func handleConn .Invalidate", // rebuild: before the first base byte
 	"core/transport/replica.go: func handleConn .Invalidate", // catch-up: at the recovery lane start
 	"core/transport/replica.go: func handleConn .Note",       // live-lane entry, before the apply
@@ -145,7 +146,7 @@ func typedWritesIn(f *ast.File, rel string, info *types.Info) []string {
 	return out
 }
 
-var epochWriter = map[string]bool{"Note": true, "Replace": true, "TrimAbove": true, "Invalidate": true, "InvalidateDualLane": true, "CompleteRecovery": true}
+var epochWriter = map[string]bool{"Note": true, "Replace": true, "TrimAbove": true, "Invalidate": true, "CompleteRecovery": true}
 
 func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 	got := epochWrites(t, filepath.Join("..", ".."))
@@ -175,8 +176,8 @@ func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 		})
 	}
 	sort.Strings(persisters)
-	if strings.Join(persisters, ",") != "CompleteRecovery,Invalidate,InvalidateDualLane,Note,Replace,TrimAbove" {
-		t.Fatalf("methods reaching persistLocked: %v; want CompleteRecovery, Invalidate, InvalidateDualLane, Note, Replace, TrimAbove", persisters)
+	if strings.Join(persisters, ",") != "CompleteRecovery,Invalidate,Note,Replace,TrimAbove" {
+		t.Fatalf("methods reaching persistLocked: %v; want CompleteRecovery, Invalidate, Note, Replace, TrimAbove", persisters)
 	}
 }
 
@@ -216,5 +217,22 @@ func notATable(o other) { _ = o.Note(1, 1) }
 	got := typedWritesIn(f, "sneak.go", info)
 	if len(got) != 2 || got[0] != "sneak.go: func sneak .Note" || got[1] != "sneak.go: func sneak .Note" {
 		t.Fatalf("census of planted writers (alias, field; not another type): %v", got)
+	}
+}
+
+// Replace is the one unconditional writer: it ignores the recovery token. Its
+// only caller is the primary role's adoption (a promotion over an invalid
+// table), and after FenceAsPrimary the listener refuses every inbound
+// recovery frame (the r.primary checks in admitMutation and EnterDualLane),
+// so no recovery's data can land under the table it writes.
+func TestEpochTableReplaceOnlyAtPrimaryAdoption(t *testing.T) {
+	var replaces []string
+	for _, w := range epochWrites(t, filepath.Join("..", "..")) {
+		if strings.HasSuffix(w, " .Replace") {
+			replaces = append(replaces, w)
+		}
+	}
+	if len(replaces) != 1 || replaces[0] != "cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Replace" {
+		t.Fatalf("unconditional Replace callers: %v; want only the primary adoption (notePrimaryEpoch)", replaces)
 	}
 }

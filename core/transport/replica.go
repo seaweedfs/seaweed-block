@@ -806,15 +806,23 @@ func (r *ReplicaListener) EnterDualLane(epoch uint64) (func(), error) {
 		r.endMutationFrame()
 		return nil, fmt.Errorf("replica: dual-lane epoch %d: %w", epoch, err)
 	}
-	// A dual-lane session applies history (base and WAL) whose epochs the
-	// table cannot name: invalid before its first byte. Its completion does
-	// not carry rows yet, so the table stays invalid: the replica reconciles
-	// as diverged and is rebuilt, never counted.
-	if err := r.epochs.InvalidateDualLane(); err != nil {
-		r.endMutationFrame()
-		return nil, fmt.Errorf("replica: dual-lane epoch %d: epoch table: %w", epoch, err)
-	}
 	return r.endMutationFrame, nil
+}
+
+// BeginEpochRecovery (recovery.EpochRecoveryGate): a dual-lane session
+// takes the epoch table's invalid mark under a fresh token at its start,
+// before its first data frame.
+func (r *ReplicaListener) BeginEpochRecovery() (uint64, error) { return r.epochs.Invalidate() }
+
+// CompleteEpochRecovery (recovery.EpochRecoveryGate): after the session's
+// data is synced, the primary's rows cut at end make the table valid, only
+// under the session's token.
+func (r *ReplicaListener) CompleteEpochRecovery(token uint64, rows []byte, end uint64) error {
+	decoded, err := DecodeEpochRows(rows)
+	if err != nil {
+		return err
+	}
+	return r.epochs.CompleteRecovery(RowsThrough(decoded, end), token)
 }
 
 func (r *ReplicaListener) beginMutationFrame() {

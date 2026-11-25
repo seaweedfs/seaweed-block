@@ -59,11 +59,6 @@ type epochTableRecord struct {
 	Owner uint64 `json:"owner,omitempty"`
 }
 
-// DualLaneOwner holds the invalid mark for dual-lane sessions, whose
-// completion carries no rows: no completion presents it, so none clears it.
-// A recovery token is never this value (nor 0).
-const DualLaneOwner = ^uint64(0)
-
 // ErrNotRecoveryOwner: a recovery's completion found the invalid mark held
 // by a newer recovery; it must not make the table valid over that one's data.
 var ErrNotRecoveryOwner = errors.New("epoch table: a newer recovery holds the invalid mark")
@@ -184,7 +179,7 @@ func (t *EpochTable) Invalidate() (token uint64, err error) {
 		return 0, nil
 	}
 	var b [8]byte
-	for token == 0 || token == DualLaneOwner {
+	for token == 0 {
 		if _, err := rand.Read(b[:]); err != nil {
 			return 0, fmt.Errorf("epoch table: recovery token: %w", err)
 		}
@@ -199,23 +194,7 @@ func (t *EpochTable) Invalidate() (token uint64, err error) {
 	return token, nil
 }
 
-// InvalidateDualLane marks the table invalid for dual-lane sessions (it runs
-// for each of their frames: one write, then none while the mark is theirs).
-func (t *EpochTable) InvalidateDualLane() error {
-	if t == nil {
-		return nil
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.invalid && t.owner == DualLaneOwner {
-		return nil
-	}
-	if err := t.persistLocked(nil, true, DualLaneOwner); err != nil {
-		return err
-	}
-	t.rows, t.invalid, t.owner = nil, true, DualLaneOwner
-	return nil
-}
+
 
 // CompleteRecovery makes rows the table and the table valid, at the end of
 // the recovery that holds token once its data is synced: only while the
@@ -225,7 +204,7 @@ func (t *EpochTable) CompleteRecovery(rows []EpochRow, owner uint64) error {
 	if t == nil {
 		return nil
 	}
-	if owner == 0 || owner == DualLaneOwner {
+	if owner == 0 {
 		return fmt.Errorf("%w (no recovery token)", ErrNotRecoveryOwner)
 	}
 	if err := checkEpochRows(rows); err != nil {

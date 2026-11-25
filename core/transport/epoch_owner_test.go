@@ -20,7 +20,7 @@ func TestEpochTable_OnlyTheMarksOwnerCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, err := tb.Invalidate() // recovery B takes the mark over
-	if err != nil || b == a || b == 0 || b == DualLaneOwner {
+	if err != nil || b == a || b == 0 {
 		t.Fatalf("tokens a=%d b=%d err=%v; want two distinct random tokens", a, b, err)
 	}
 	if err := tb.CompleteRecovery([]EpochRow{{Epoch: 1, FirstLSN: 1}}, a); !errors.Is(err, ErrNotRecoveryOwner) {
@@ -45,12 +45,13 @@ func TestEpochTable_OnlyTheMarksOwnerCompletes(t *testing.T) {
 	if err := reloaded.CompleteRecovery(nil, b); !errors.Is(err, ErrNotRecoveryOwner) {
 		t.Fatal("a second completion of a valid table was accepted")
 	}
-	if err := reloaded.InvalidateDualLane(); err != nil {
+	c, err := reloaded.Invalidate()
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tok := range []uint64{0, DualLaneOwner, b} {
+	for _, tok := range []uint64{0, b} {
 		if err := reloaded.CompleteRecovery(nil, tok); !errors.Is(err, ErrNotRecoveryOwner) {
-			t.Fatalf("completion with token %d cleared a dual-lane mark", tok)
+			t.Fatalf("completion with token %d cleared recovery %d's mark", tok, c)
 		}
 	}
 	if err := reloaded.Note(3, 20); err == nil {

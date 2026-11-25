@@ -23,8 +23,8 @@ var peerApplyPaths = map[string]string{
 	"core/transport/replica.go: func handleConn .BeginInstall":         "invalid first (beginInstall invalidates before BeginInstall)",
 	"core/replication/apply_gate.go: func applyRecovery .ApplyEntry":   "invalid first (reached only from handleConn's recovery lane)",
 	"core/replication/apply_gate.go: func applyLive .ApplyEntry":       "row first (reached only from handleConn's live lane, after the note)",
-	"core/recovery/receiver.go: func beginInstall .BeginInstall":       "invalid first (dual-lane: EnterDualLane invalidates before any frame)",
-	"core/recovery/rebuild_session.go: func ApplyBaseBlock .WriteBase": "invalid first (dual-lane: EnterDualLane invalidates before any frame)",
+	"core/recovery/receiver.go: func beginInstall .BeginInstall":       "invalid first (dual-lane: SessionStart takes the tokened mark before any data frame)",
+	"core/recovery/rebuild_session.go: func ApplyBaseBlock .WriteBase": "invalid first (dual-lane: SessionStart takes the tokened mark before any data frame)",
 }
 
 var peerApplyMethods = map[string]bool{"ApplyEntry": true, "WriteBase": true, "BeginInstall": true, "WriteExtentDirect": true}

@@ -319,13 +319,13 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> Valid
   Valid --> Valid: live entry of a new epoch, row noted before the apply; primary role adopted at the next LSN; load drops rows above the next LSN
-  Valid --> Invalid: catch-up lane start or rebuild's first base byte (Invalidate, new token); dual-lane session
+  Valid --> Invalid: catch-up lane start, rebuild's first base byte, or dual-lane SessionStart (Invalidate, new token)
   Invalid --> Invalid: another recovery starts (new token takes the mark); a completion with another token is refused
-  Invalid --> Valid: the token's recovery synced its data, then CompleteRecovery installs the primary's rows cut at its end
+  Invalid --> Valid: the token's recovery synced its data, then its final barrier or rebuild-done (dual-lane too) installs the primary's rows cut at its end
   Invalid --> Valid: primary role adopted over it: exactly [(epoch, next LSN)]
 ```
 
-While invalid the volume reports no last data epoch: it reconciles as diverged, is never counted and is rebuilt, and no live entry is noted.
+While invalid the volume reports no last data epoch: it reconciles as diverged, is never counted and is rebuilt, and no live entry is noted. The unconditional reset happens only at primary adoption, after the fence: a primary refuses every inbound recovery frame (`admitMutation`, `EnterDualLane`), so no recovery's data lands under it.
 
 **Invariants.**
 

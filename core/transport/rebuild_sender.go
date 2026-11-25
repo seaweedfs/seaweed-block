@@ -253,6 +253,12 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	//
 	sessionFromLSN := basePinLSN
 	log.Printf("g7-debug: startRebuildDualLane calling Bridge.StartRebuildSessionWithSink replica=%s sessionID=%d basePinLSN=%d frontierHint=%d", replicaID, sessionID, sessionFromLSN, frontierHint)
+	// The session's final barrier carries this primary's epoch rows, so the
+	// rebuilt replica's table names the history it now holds.
+	if e.epochs != nil {
+		epochs := e.epochs
+		dl.Bridge.SetEpochRows(func() []byte { return EncodeEpochRows(epochs.Rows()) })
+	}
 	if err := dl.Bridge.StartRebuildSessionAtEpoch(
 		context.Background(), conn, argRID, sessionID, epoch, sessionFromLSN, frontierHint, sink,
 	); err != nil {
