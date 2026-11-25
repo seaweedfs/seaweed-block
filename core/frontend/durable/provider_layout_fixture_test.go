@@ -12,13 +12,15 @@ import (
 
 // layoutCase keeps the store and its volume identity across provider restarts.
 type layoutCase struct {
-	cat *chunkstore.BCatalog
-	ref chunkstore.VolumeRef
+	cat   *chunkstore.BCatalog
+	ref   chunkstore.VolumeRef
+	blobs *layoutProviderBlobs
 }
 
 func newLayoutCase(t *testing.T, blocks, chunkBlocks uint64) *layoutCase {
 	t.Helper()
-	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), &layoutProviderBlobs{blobs: map[string][]byte{}}, "/layout-fixture")
+	blobs := &layoutProviderBlobs{blobs: map[string][]byte{}}
+	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), blobs, "/layout-fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +32,7 @@ func newLayoutCase(t *testing.T, blocks, chunkBlocks uint64) *layoutCase {
 	if _, err := cat.CreateVolume(context.Background(), ref, layout.Geometry{SizeBytes: blocks * 4096, BlockSize: 4096, ChunkBytes: chunkBlocks * 4096}); err != nil {
 		t.Fatal(err)
 	}
-	return &layoutCase{cat: cat, ref: ref}
+	return &layoutCase{cat: cat, ref: ref, blobs: blobs}
 }
 
 func (c *layoutCase) provider(t *testing.T, root string, view *stubView, holder string, configure func(*durable.ProviderConfig)) *durable.DurableProvider {

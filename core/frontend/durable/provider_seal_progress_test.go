@@ -17,14 +17,22 @@ import (
 
 type sealProgressRemote struct {
 	storage.ChunkRemote
-	keyer   storage.ChunkKeyer
-	aborter storage.CutAborter
-	mu      sync.Mutex
-	expire  context.CancelCauseFunc
-	keys    []string
-	images  map[[32]byte]int
-	bytes   int
-	calls   int
+	layoutRemote *chunkstore.LayoutRemote
+	keyer        storage.ChunkKeyer
+	aborter      storage.CutAborter
+	mu           sync.Mutex
+	expire       context.CancelCauseFunc
+	keys         []string
+	images       map[[32]byte]int
+	bytes        int
+	calls        int
+}
+
+func (r *sealProgressRemote) AbortOpenSession(ctx context.Context) (string, error) {
+	return r.layoutRemote.AbortOpenSession(ctx)
+}
+func (r *sealProgressRemote) ReadHead(ctx context.Context) (layout.Head, error) {
+	return r.layoutRemote.ReadHead(ctx)
 }
 
 func (r *sealProgressRemote) ChunkKey(idx uint64, sum [32]byte) string {
@@ -71,7 +79,7 @@ func TestPlainSealDeadlineRetryUploadsOnlyRemainingChunks(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			remote.ChunkRemote, remote.keyer, remote.aborter = r, r, r
+			remote.ChunkRemote, remote.layoutRemote, remote.keyer, remote.aborter = r, r, r, r
 			return remote, nil
 		}
 	})
@@ -106,17 +114,36 @@ func TestPlainSealDeadlineRetryUploadsOnlyRemainingChunks(t *testing.T) {
 		t.Fatalf("first attempt progress: calls=%d successful=%d bytes=%d", remote.calls, len(remote.keys), remote.bytes)
 	}
 	firstKeys := append([]string(nil), remote.keys...)
+	if _, _, err := p.DetachVolumePlain(parent, "v1"); !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(err, storage.ErrChunkHeadPrecondition) {
+		t.Fatalf("staged chunks from the ended session were accepted: %v", err)
+	}
 	r, last, err := p.DetachVolumePlain(parent, "v1")
 	if err != nil || r.Head.State != storage.ChunkHeadDetached || r.H != last || r.Head.RemoteLSN != last {
 		t.Fatalf("plain seal retry failed: %+v last=%d err=%v", r, last, err)
 	}
-	if len(remote.keys) != chunks || remote.bytes != chunks*chunkBytes {
-		t.Fatalf("plain seal retransmitted completed chunks: successful=%d bytes=%d want=%d", len(remote.keys), remote.bytes, chunks*chunkBytes)
+	if len(remote.keys) != 2*chunks || remote.bytes != 2*chunks*chunkBytes {
+		t.Fatalf("the refused cut did not restage in its new session: successful=%d bytes=%d", len(remote.keys), remote.bytes)
 	}
-	for sum, n := range remote.images {
-		if n != 1 {
-			t.Errorf("reuploaded unchanged payload %x count=%d", sum, n)
+	if len(remote.images) != chunks {
+		t.Fatalf("restaged image has %d distinct payloads, want %d", len(remote.images), chunks)
+	}
+	for _, n := range remote.images {
+		if n != 2 {
+			t.Fatalf("unexpected session PUT count %d", n)
 		}
+	}
+	// The kernel requires a Put in the new session, but the content-named
+	// filer entry is reused by a conditional metadata update, not a blob PUT.
+	c.blobs.Lock()
+	physicalChunks := 0
+	for _, raw := range c.blobs.blobs {
+		if len(raw) == chunkBytes {
+			physicalChunks++
+		}
+	}
+	c.blobs.Unlock()
+	if physicalChunks != chunks {
+		t.Fatalf("physical payload uploads=%d want=%d", physicalChunks, chunks)
 	}
 	committed, err := remote.GetHead(parent)
 	if err != nil {
