@@ -3,6 +3,8 @@ package authority
 import (
 	"context"
 	"fmt"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // FailbackRuntimeRequest is the narrow authority-owned failback seam.
@@ -34,6 +36,10 @@ type FailbackRuntimeResult struct {
 
 type FailbackAuthorityRuntime struct {
 	Publisher *Publisher
+	// Gate is the promotion gate's decision for this planned move: the
+	// target's probed evidence, or why the move is refused. A failback is a
+	// primary change: without a gate it publishes nothing.
+	Gate func(volumeID, targetReplicaID string) (adapter.PrimaryEvidence, error)
 }
 
 func (r FailbackAuthorityRuntime) ExecuteFailback(ctx context.Context, req FailbackRuntimeRequest) (FailbackRuntimeResult, error) {
@@ -59,12 +65,20 @@ func (r FailbackAuthorityRuntime) ExecuteFailback(ctx context.Context, req Failb
 	if before.ReplicaID == req.ReplicaID {
 		return FailbackRuntimeResult{}, fmt.Errorf("authority failback runtime: target replica %s is already current", req.ReplicaID)
 	}
+	if r.Gate == nil {
+		return FailbackRuntimeResult{}, fmt.Errorf("authority failback runtime: %w (no promotion gate)", ErrReassignWithoutKind)
+	}
+	evidence, err := r.Gate(req.VolumeID, req.ReplicaID)
+	if err != nil {
+		return FailbackRuntimeResult{}, fmt.Errorf("authority failback runtime: %w", err)
+	}
 	if err := r.Publisher.apply(AssignmentAsk{
 		VolumeID:  req.VolumeID,
 		ReplicaID: req.ReplicaID,
 		DataAddr:  req.TargetDataAddr,
 		CtrlAddr:  req.TargetCtrlAddr,
 		Intent:    IntentReassign,
+		Evidence:  evidence,
 	}); err != nil {
 		return FailbackRuntimeResult{}, err
 	}

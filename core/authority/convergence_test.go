@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // ============================================================
@@ -36,6 +38,9 @@ func convTestCtrl(t *testing.T, retryWindow time.Duration) (*TopologyController,
 // unreachable (forcing a failover Reassign to r2) and r2/r3 are
 // healthy. authority is the Authority field on the snapshot
 // (what the observation reports the system thinks is current).
+// gateEvidence is the promotion gate's evidence on a replica it allowed.
+var gateEvidence = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}
+
 func failoverSnapForV1(authority AuthorityBasis, rev uint64) ClusterSnapshot {
 	return ClusterSnapshot{
 		CollectedRevision: rev,
@@ -50,8 +55,8 @@ func failoverSnapForV1(authority AuthorityBasis, rev uint64) ClusterSnapshot {
 			Authority: authority,
 			Slots: []ReplicaCandidate{
 				{ReplicaID: "r1", ServerID: "s1", DataAddr: "d1", CtrlAddr: "c1", Reachable: false, ReadyForPrimary: false, Eligible: true},
-				{ReplicaID: "r2", ServerID: "s2", DataAddr: "d2", CtrlAddr: "c2", Reachable: true, ReadyForPrimary: true, Eligible: true},
-				{ReplicaID: "r3", ServerID: "s3", DataAddr: "d3", CtrlAddr: "c3", Reachable: true, ReadyForPrimary: true, Eligible: true},
+				{ReplicaID: "r2", ServerID: "s2", DataAddr: "d2", CtrlAddr: "c2", Reachable: true, ReadyForPrimary: true, Eligible: true, PromotionEvidence: gateEvidence},
+				{ReplicaID: "r3", ServerID: "s3", DataAddr: "d3", CtrlAddr: "c3", Reachable: true, ReadyForPrimary: true, Eligible: true, PromotionEvidence: gateEvidence},
 			},
 		}},
 	}
@@ -473,8 +478,8 @@ func TestConvergence_OneStuckVolumeDoesNotBlockOthers(t *testing.T) {
 				Authority: v1Stale,
 				Slots: []ReplicaCandidate{
 					{ReplicaID: "r1", ServerID: "sA", DataAddr: "d1", CtrlAddr: "c1", Reachable: false, ReadyForPrimary: false, Eligible: true},
-					{ReplicaID: "r2", ServerID: "sB", DataAddr: "d2", CtrlAddr: "c2", Reachable: true, ReadyForPrimary: true, Eligible: true},
-					{ReplicaID: "r3", ServerID: "sC", DataAddr: "d3", CtrlAddr: "c3", Reachable: true, ReadyForPrimary: true, Eligible: true},
+					{ReplicaID: "r2", ServerID: "sB", DataAddr: "d2", CtrlAddr: "c2", Reachable: true, ReadyForPrimary: true, Eligible: true, PromotionEvidence: gateEvidence},
+					{ReplicaID: "r3", ServerID: "sC", DataAddr: "d3", CtrlAddr: "c3", Reachable: true, ReadyForPrimary: true, Eligible: true, PromotionEvidence: gateEvidence},
 				},
 			},
 			{
@@ -482,8 +487,8 @@ func TestConvergence_OneStuckVolumeDoesNotBlockOthers(t *testing.T) {
 				Authority: v2Stale,
 				Slots: []ReplicaCandidate{
 					{ReplicaID: "s1", ServerID: "sA", DataAddr: "e1", CtrlAddr: "f1", Reachable: false, ReadyForPrimary: false, Eligible: true},
-					{ReplicaID: "s2", ServerID: "sB", DataAddr: "e2", CtrlAddr: "f2", Reachable: true, ReadyForPrimary: true, Eligible: true},
-					{ReplicaID: "s3", ServerID: "sC", DataAddr: "e3", CtrlAddr: "f3", Reachable: true, ReadyForPrimary: true, Eligible: true},
+					{ReplicaID: "s2", ServerID: "sB", DataAddr: "e2", CtrlAddr: "f2", Reachable: true, ReadyForPrimary: true, Eligible: true, PromotionEvidence: gateEvidence},
+					{ReplicaID: "s3", ServerID: "sC", DataAddr: "e3", CtrlAddr: "f3", Reachable: true, ReadyForPrimary: true, Eligible: true, PromotionEvidence: gateEvidence},
 				},
 			},
 		},
@@ -565,8 +570,8 @@ func TestConvergence_RetryStateIsPerVolume(t *testing.T) {
 			Authority: v2Stale,
 			Slots: []ReplicaCandidate{
 				{ReplicaID: "s1", ServerID: "sA", DataAddr: "e1", CtrlAddr: "f1", Reachable: false, ReadyForPrimary: false, Eligible: true},
-				{ReplicaID: "s2", ServerID: "sB", DataAddr: "e2", CtrlAddr: "f2", Reachable: true, ReadyForPrimary: true, Eligible: true},
-				{ReplicaID: "s3", ServerID: "sC", DataAddr: "e3", CtrlAddr: "f3", Reachable: true, ReadyForPrimary: true, Eligible: true},
+				{ReplicaID: "s2", ServerID: "sB", DataAddr: "e2", CtrlAddr: "f2", Reachable: true, ReadyForPrimary: true, Eligible: true, PromotionEvidence: gateEvidence},
+				{ReplicaID: "s3", ServerID: "sC", DataAddr: "e3", CtrlAddr: "f3", Reachable: true, ReadyForPrimary: true, Eligible: true, PromotionEvidence: gateEvidence},
 			},
 		}},
 	}

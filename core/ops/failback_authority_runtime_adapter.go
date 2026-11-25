@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 )
 
@@ -13,9 +14,11 @@ type AuthorityFailbackRuntime struct {
 	Runtime authority.FailbackAuthorityRuntime
 }
 
-func NewAuthorityFailbackRuntime(publisher *authority.Publisher) *AuthorityFailbackRuntime {
+// NewAuthorityFailbackRuntime adapts the authority failback runtime; gate is
+// the promotion gate's planned-move decision (nil: every failback refuses).
+func NewAuthorityFailbackRuntime(publisher *authority.Publisher, gate func(volumeID, targetReplicaID string) (adapter.PrimaryEvidence, error)) *AuthorityFailbackRuntime {
 	return &AuthorityFailbackRuntime{
-		Runtime: authority.FailbackAuthorityRuntime{Publisher: publisher},
+		Runtime: authority.FailbackAuthorityRuntime{Publisher: publisher, Gate: gate},
 	}
 }
 
