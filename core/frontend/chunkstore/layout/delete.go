@@ -38,11 +38,17 @@ type TargetStore interface {
 	CreateDeletedHead(ctx context.Context, h Head) error
 }
 
-// HolderGone is the deletion's premise: it returns nil only when no block
-// holds the volume (no line or lease the master grants). DeleteVolume calls
-// it immediately before marking HEAD deleting.
-type HolderGone interface {
-	NoHolder(ctx context.Context) error
+// DeleteAuthority is the master's side of a volume delete. Reserve durably
+// records the volume's delete reservation, after which the master grants
+// no line for it, ever (re-running it is a replay). NoLiveLease returns nil
+// only when no line of the volume holds a live lease, granted but
+// unclaimed lines included. After Reserve, "no live lease" can never
+// become false again, so DeleteVolume checks it between its HEAD read and
+// the conditional update that marks HEAD deleting: a claim landing in
+// between changes HEAD and the update fails.
+type DeleteAuthority interface {
+	Reserve(ctx context.Context) error
+	NoLiveLease(ctx context.Context) error
 }
 
 // MarkDeleting is the first step of a volume delete: live -> deleting,
@@ -110,8 +116,23 @@ func (h Head) ReleaseDependent(target VolumeID) (next Head, changed bool, err er
 }
 
 // RunMarkDeleting applies MarkDeleting by one conditional update.
-func RunMarkDeleting(ctx context.Context, st HeadStore) (Head, error) {
-	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.MarkDeleting() })
+//
+// The authority's no-live-lease check runs after the read and before the
+// update, as the claim's lease wait does.
+func RunMarkDeleting(ctx context.Context, st HeadStore, auth DeleteAuthority) (Head, error) {
+	if auth == nil {
+		return Head{}, errors.New("layout: MarkDeleting needs the master's delete authority")
+	}
+	return runTransition(ctx, st, func(h Head) (Head, bool, error) {
+		next, changed, err := h.MarkDeleting()
+		if err != nil || !changed {
+			return next, changed, err
+		}
+		if err := auth.NoLiveLease(ctx); err != nil {
+			return Head{}, false, fmt.Errorf("%w: %v", ErrHolderActive, err)
+		}
+		return next, true, nil
+	})
 }
 
 // RunMarkDeleted applies MarkDeleted by one conditional update.
@@ -127,27 +148,29 @@ func RunReleaseDependent(ctx context.Context, source HeadStore, target VolumeID)
 }
 
 // DeleteVolume runs a volume delete in its order, every prefix safe and
-// the whole re-runnable: HEAD deleting (refused while a holder acts or a
-// snapshot has dependents; no holder transition, claim or removal applies
-// from here), then this volume released from every source it depends on,
+// the whole re-runnable: the master's delete reservation (no line is
+// granted for the volume from then on), then HEAD deleting (refused while
+// any line holds a live lease, checked between the HEAD read and its
+// conditional update, or while a snapshot has dependents; no holder
+// transition, claim or removal applies from here), then this volume released from every source it depends on,
 // then every object of its pool, segments and roots deleted, each
 // conditional on belonging to this volume (a late delete of this run never
 // removes the object of a volume created again under the name), then HEAD
 // deleted. A source left out keeps an extra dependent, which over-protects
 // and is released by the operator's command.
-func DeleteVolume(ctx context.Context, st HeadStore, gone HolderGone, id VolumeID, sources []HeadStore, os ObjectStore, objects []string) error {
-	if gone == nil || os == nil {
-		return errors.New("layout: delete needs a holder check and an object store")
+func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id VolumeID, sources []HeadStore, os ObjectStore, objects []string) error {
+	if auth == nil || os == nil {
+		return errors.New("layout: delete needs the master's delete authority and an object store")
 	}
 	for _, rel := range objects {
 		if !isObjectPath(rel) {
 			return fmt.Errorf("%w: %q is not a pool, segment or root object; HEAD, VOLUME and the directory stay", ErrMalformed, rel)
 		}
 	}
-	if err := gone.NoHolder(ctx); err != nil {
-		return fmt.Errorf("%w: %v", ErrHolderActive, err)
+	if err := auth.Reserve(ctx); err != nil {
+		return fmt.Errorf("layout: delete reservation: %w", err)
 	}
-	if _, err := RunMarkDeleting(ctx, st); err != nil {
+	if _, err := RunMarkDeleting(ctx, st, auth); err != nil {
 		return err
 	}
 	for _, src := range sources {
