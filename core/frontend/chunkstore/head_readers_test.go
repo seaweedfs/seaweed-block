@@ -41,7 +41,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/share_guard.go beginShare -> ReadHead":                 "refuses outcome_unknown: the HEAD to share is no longer current",
 	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                            "GAP: reports an empty image, no error (probe Usage)",
 	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":                     "finding ROOT_INVALID (probe Verify)",
-	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target with no HEAD and no VOLUME was never created and is refused, one with VOLUME and no HEAD is being created and is refused; nothing is written (probe LayoutOperatorRelease)",
+	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: with no HEAD and no VOLUME the target was never created and gets a deleted HEAD written exclusively before the release; with VOLUME and no HEAD it is being created and is refused (probe LayoutOperatorRelease)",
 	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
 	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
@@ -300,8 +300,9 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatalf("operator release of a target with VOLUME and no HEAD: %v, %d writes; want ErrTargetLive and none", err, src.updates)
 		}
 		none, _ := layout.NewReader("/swblock/chunks", "t", func(context.Context, string) ([]byte, bool, error) { return nil, false, nil })
-		if _, err := layout.OperatorReleaseDependent(ctx, src, &absentLayoutHead{}, none, tid); !errors.Is(err, layout.ErrTargetNeverCreated) || src.updates != 0 {
-			t.Fatalf("operator release of a target never created: %v, %d writes; want ErrTargetNeverCreated and none", err, src.updates)
+		tomb := &absentLayoutHead{}
+		if _, err := layout.OperatorReleaseDependent(ctx, src, tomb, none, tid); err != nil || tomb.created == nil || tomb.created.State != layout.StateDeleted || tomb.created.VolumeID != tid {
+			t.Fatalf("operator release of a target never created: %v, tombstone %+v; want a deleted HEAD of the target's id written before the release", err, tomb.created)
 		}
 		absent := &absentLayoutHead{}
 		if _, err := layout.OperatorReleaseDependent(ctx, absent, &absentLayoutHead{}, r, tid); !errors.Is(err, layout.ErrHeadAbsent) || absent.updates != 0 {
@@ -336,8 +337,17 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 	})
 }
 
-// absentLayoutHead is a layout HEAD store whose HEAD is absent.
-type absentLayoutHead struct{ updates int }
+// absentLayoutHead is a layout HEAD store whose HEAD is absent; it records
+// a tombstone created in it.
+type absentLayoutHead struct {
+	updates int
+	created *layout.Head
+}
+
+func (a *absentLayoutHead) CreateDeletedHead(_ context.Context, h layout.Head) error {
+	a.created = &h
+	return nil
+}
 
 func (a *absentLayoutHead) ReadHead(context.Context) (layout.Head, bool, error) {
 	return layout.Head{}, false, nil
