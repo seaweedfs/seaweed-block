@@ -6,6 +6,9 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -17,6 +20,16 @@ type casObservedRemote struct {
 	onCAS       func(next storage.ChunkHead)
 	onGetHead   func(n int)
 	reads, cass int
+}
+
+// The layout adapter supplies content keys as well as the observed CAS path.
+type casObservedLayoutRemote struct {
+	*casObservedRemote
+	keyer storage.ChunkKeyer
+}
+
+func (r *casObservedLayoutRemote) ChunkKey(index uint64, sum [32]byte) string {
+	return r.keyer.ChunkKey(index, sum)
 }
 
 func (r *casObservedRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
@@ -46,11 +59,11 @@ func TestCutPublishesOnlyLocallyDurableLSN(t *testing.T) {
 		t.Skip("the open store's byte-range lock keeps its files unreadable for the crash image")
 	}
 	ctx := context.Background()
-	inner := storage.NewMemChunkRemote()
+	fixture := newLayoutCase(t, pcBlocks, pcChunkBlocks)
 	root, crash := t.TempDir(), t.TempDir()
 	var ws *storage.WALStore
 	var images int
-	remote := &casObservedRemote{ChunkRemote: inner}
+	remote := &casObservedRemote{}
 	remote.onCAS = func(next storage.ChunkHead) {
 		if ws == nil || next.RemoteLSN == 0 {
 			return
@@ -61,7 +74,16 @@ func TestCutPublishesOnlyLocallyDurableLSN(t *testing.T) {
 		copyRootFiles(t, root, crash) // the root as a crash right after this CAS leaves it
 		images++
 	}
-	a := chunkProvider(t, root, remote, v1View(), 0)
+	a := fixture.provider(t, root, v1View(), "s/r1", func(cfg *durable.ProviderConfig) {
+		cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			inner, err := chunkstore.NewLayoutRemote(fixture.cat, fixture.ref, me)
+			if err != nil {
+				return nil, err
+			}
+			remote.ChunkRemote = inner
+			return &casObservedLayoutRemote{casObservedRemote: remote, keyer: inner}, nil
+		}
+	})
 	s := openRecovered(t, a)
 	ws = s.(*storage.WALStore)
 	for lba := uint32(0); lba < 3; lba++ {
@@ -75,9 +97,9 @@ func TestCutPublishesOnlyLocallyDurableLSN(t *testing.T) {
 	if images == 0 {
 		t.Fatal("no cut published a HEAD")
 	}
-	head, _ := inner.GetHead(ctx)
+	head := fixture.head(t)
 
-	b := chunkProvider(t, crash, inner, v1View(), 0)
+	b := fixture.provider(t, crash, v1View(), "s/r1", nil)
 	got := openRecovered(t, b) // the refusal must not fire on the crash image
 	for lba := uint32(0); lba < 3; lba++ {
 		buf, err := got.Read(lba)
@@ -85,7 +107,7 @@ func TestCutPublishesOnlyLocallyDurableLSN(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(buf, block(byte(lba+1))) {
-			t.Fatalf("crash image under HEAD remote_lsn %d lost block %d", head.RemoteLSN, lba)
+			t.Fatalf("crash image under HEAD position %d lost block %d", head.Position, lba)
 		}
 	}
 }

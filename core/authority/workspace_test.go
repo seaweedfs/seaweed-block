@@ -118,7 +118,7 @@ func TestWorkspaceCleanMoveNeedsDetachedHEADAndRevocationAck(t *testing.T) {
 	if _, err := p.MoveWorkspace(ctx, req, head); err == nil {
 		t.Fatal("clean without ack")
 	}
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "old", Epoch: 1, HeadGen: 7}); err == nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "old", Epoch: 1, HeadGen: 7}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "", RemoteLSN: 0}); err == nil {
 		t.Fatal("unsolicited ack accepted")
 	}
 	if err := p.BeginWorkspaceRevocation(ctx, "v", "old", 1); err != nil {
@@ -128,7 +128,7 @@ func TestWorkspaceCleanMoveNeedsDetachedHEADAndRevocationAck(t *testing.T) {
 	if err != nil || !lease.Revoking {
 		t.Fatal("revocation not delivered", lease, err)
 	}
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "old", Epoch: 1, HeadGen: 7}); err != nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "old", Epoch: 1, HeadGen: 7, Holder: "old-node/old", RemoteLSN: 42}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "old-node/old", RemoteLSN: 42}); err != nil {
 		t.Fatal(err)
 	}
 	bad := head
@@ -137,9 +137,9 @@ func TestWorkspaceCleanMoveNeedsDetachedHEADAndRevocationAck(t *testing.T) {
 		t.Fatal("attached head accepted")
 	}
 	bad = head
-	bad.Gen++
+	bad.RemoteLSN++
 	if _, err := p.MoveWorkspace(ctx, req, bad); err == nil {
-		t.Fatal("different generation accepted")
+		t.Fatal("different sealed position accepted")
 	}
 	r, err := p.MoveWorkspace(ctx, req, head)
 	if err != nil || r.NewEpoch != 2 || !r.Issued {

@@ -9,7 +9,6 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // admitRecorder is the provider's cut budget: the real limiter, with
@@ -44,11 +43,11 @@ func (r *admitRecorder) snapshot() []admitEvent {
 // whose only normal slot another process holds; release frees it. baseGen
 // is HEAD's generation once the volume is open (opening may publish one
 // itself, without a cut).
-func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecorder, remote *storage.MemChunkRemote, release func(), baseGen uint64) {
+func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecorder, c *layoutCase, release func(), baseGen uint64) {
 	t.Helper()
-	c := hostlimit.DefaultConfig(t.TempDir())
-	c.NormalSlots, c.UrgentSlots = 1, 1
-	holder, err := hostlimit.New(c)
+	limitCfg := hostlimit.DefaultConfig(t.TempDir())
+	limitCfg.NormalSlots, limitCfg.UrgentSlots = 1, 1
+	holder, err := hostlimit.New(limitCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,20 +64,17 @@ func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecor
 		}
 	}
 	t.Cleanup(release)
-	inner, err := hostlimit.New(c)
+	inner, err := hostlimit.New(limitCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(inner.Close)
 	lim = &admitRecorder{Limiter: inner}
-	remote = storage.NewMemChunkRemote()
-	p, err = durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096,
-		ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkCaptureInterval: 100 * time.Millisecond,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { p.Close() })
+	c = newLayoutCase(t, pcBlocks, pcChunkBlocks)
+	p = c.provider(t, t.TempDir(), v1View(), "s/r1", func(cfg *durable.ProviderConfig) {
+		cfg.ChunkBudget = lim
+		cfg.ChunkCaptureInterval = 100 * time.Millisecond
+	})
 	s := openRecovered(t, p)
 	if _, err = s.Write(0, block(0x5c)); err != nil {
 		t.Fatal(err)
@@ -86,11 +82,7 @@ func slotWaitProvider(t *testing.T) (p *durable.DurableProvider, lim *admitRecor
 	if _, err = s.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	h, err := remote.GetHead(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return p, lim, remote, release, h.Gen
+	return p, lim, c, release, c.head(t).Gen
 }
 
 // admitted reports whether any recorded Admit call succeeded.
@@ -119,7 +111,7 @@ func refusedAt(events []admitEvent) []time.Time {
 // slot is held; once it frees, the next attempt is admitted within that
 // bound. Times are the limiter's own Admit calls.
 func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
-	p, lim, remote, release, baseGen := slotWaitProvider(t)
+	p, lim, c, release, baseGen := slotWaitProvider(t)
 	time.Sleep(2500 * time.Millisecond)
 	refusals := refusedAt(lim.snapshot())
 	// A failure backoff (1 s, 2 s, ...) allows at most 3 attempts in 2.5 s.
@@ -134,7 +126,7 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 	if admitted(lim.snapshot()) {
 		t.Fatal("a cut was admitted while the only slot was held")
 	}
-	if h, _ := remote.GetHead(context.Background()); h.Gen != baseGen {
+	if h := c.head(t); h.Gen != baseGen {
 		t.Fatalf("HEAD moved from generation %d to %d while the only slot was held", baseGen, h.Gen)
 	}
 	if cs := chunkStatus(t, p).CutSchedule; cs == nil || cs.HostSlotWaits == 0 || cs.HostSlotWaitSinceNs == 0 {
@@ -160,7 +152,7 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 		t.Fatalf("the first admission came %s after the slot freed; want <= 400 ms", d)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if h, _ := remote.GetHead(context.Background()); h.Gen > baseGen {
+		if h := c.head(t); h.Gen > baseGen {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -180,7 +172,7 @@ func TestTimerCutRunsSoonAfterHostSlotFrees(t *testing.T) {
 // A plain detach stops the timer before its seal; the seal (urgent, so it
 // takes the urgent slot) succeeds, and status no longer reports a wait.
 func TestSlotWaitEndsWithASuccessfulDetachSeal(t *testing.T) {
-	p, lim, remote, _, baseGen := slotWaitProvider(t)
+	p, lim, c, _, baseGen := slotWaitProvider(t)
 	time.Sleep(600 * time.Millisecond)
 	if len(refusedAt(lim.snapshot())) == 0 {
 		t.Fatal("no refused timer cut while the slot was held")
@@ -190,7 +182,7 @@ func TestSlotWaitEndsWithASuccessfulDetachSeal(t *testing.T) {
 	if _, _, err := p.DetachVolumePlain(ctx, "v1"); err != nil {
 		t.Fatalf("plain detach: %v", err)
 	}
-	if h, _ := remote.GetHead(context.Background()); h.Gen <= baseGen {
+	if h := c.head(t); h.Gen <= baseGen {
 		t.Fatalf("the seal did not publish: HEAD generation %d, %d at open", h.Gen, baseGen)
 	}
 	cs := chunkStatus(t, p).CutSchedule

@@ -3,14 +3,13 @@ package authority
 import (
 	"bytes"
 	"context"
-	"errors"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 type regrantStorageView struct{}
@@ -22,33 +21,29 @@ func (regrantStorageView) Projection() frontend.Projection {
 // These component controls obtain the real authority re-grant before opening
 // the returning file-backed provider. They do not model a second live process.
 func TestWorkspaceLeaseRegrantPreservesLocalLogThroughFirstCut(t *testing.T) {
-	testWorkspaceRegrantStorage(t, false, false)
+	testWorkspaceRegrantStorage(t)
 }
 
-func TestWorkspaceLeaseRegrantCannotUnsealSameEpoch(t *testing.T) {
-	testWorkspaceRegrantStorage(t, true, false)
-}
-
-func TestWorkspaceLeaseRegrantEmptyRootClaimsOnlyHEAD(t *testing.T) {
-	testWorkspaceRegrantStorage(t, false, true)
-}
-
-func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
+// The B-layout equivalents of the removed legacy-only cases are
+// TestLayoutPlainDetachLostReplyRestartReplaysProof and
+// TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot.
+func testWorkspaceRegrantStorage(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	disk, _ := newTempStore(t)
 	clock := newTestClock()
 	p := newLeasePublisher(t, disk, time.Second, clock)
 	bindAndGrant(t, p, "v", "r")
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v", 64, 4)
 	root := t.TempDir()
 	open := func() *durable.DurableProvider {
 		t.Helper()
-		provider, err := durable.NewDurableProvider(durable.ProviderConfig{
+		cfg := durable.ProviderConfig{
 			Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64,
 			BlockSize: 4096, ChunkBlocks: 4,
-			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-		}, regrantStorageView{})
+		}
+		fixture.Configure(&cfg)
+		provider, err := durable.NewDurableProvider(cfg, regrantStorageView{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -81,14 +76,9 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 		t.Fatal(err)
 	}
 	write(4096, b) // completed Sync, deliberately absent from the last HEAD
-	if sealed {
-		if _, _, err := first.DetachVolumePlain(ctx, "v"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
+	before, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found {
+		t.Fatalf("HEAD before regrant: found=%v err=%v", found, err)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -97,26 +87,8 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err != nil {
 		t.Fatal("returning process could not obtain the authority re-grant", err)
 	}
-	if fresh {
-		root = t.TempDir()
-		b = make([]byte, 4096) // the absent local log cannot be claimed as present
-	}
 	second := open()
 	_, err = second.RecoverVolume(ctx, "v")
-	if sealed {
-		after, readErr := remote.GetHead(ctx)
-		if !errors.Is(err, storage.ErrChunkLayerDetached) || readErr != nil || !reflect.DeepEqual(after, before) {
-			t.Fatal("same-epoch re-grant reactivated the seal", after, err, readErr)
-		}
-		blocked, openErr := second.Open(ctx, "v")
-		if openErr != nil {
-			t.Fatal(openErr)
-		}
-		if _, readErr := blocked.Read(ctx, 0, make([]byte, 4096)); !errors.Is(readErr, frontend.ErrNotReady) {
-			t.Fatal("sealed re-granted process exposed guest I/O", readErr)
-		}
-		return
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,25 +102,31 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 			t.Fatal("return lost locally acknowledged bytes", i, err)
 		}
 	}
-	claimed, err := remote.GetHead(ctx)
-	if err != nil || claimed.Gen <= before.Gen || claimed.Epoch != 1 || claimed.Holder != before.Holder || claimed.RemoteLSN != before.RemoteLSN {
-		t.Fatal("return served without the new generation fence", claimed, err)
+	claimed, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found || claimed.Gen != before.Gen || claimed.Epoch != 1 || claimed.Holder != before.Holder || claimed.ClaimID != before.ClaimID || claimed.Position != before.Position {
+		t.Fatal("same-root return changed the B HEAD before the first cut", claimed, err)
 	}
 	if _, err := second.CaptureVolume(ctx, "v"); err != nil {
 		t.Fatal(err)
 	}
-	final, err := remote.GetHead(ctx)
-	if fresh {
-		if err != nil || !reflect.DeepEqual(final, claimed) {
-			t.Fatal("empty-root return published bytes/frontier absent from HEAD", final, err)
-		}
-		return
-	}
-	if err != nil || final.RemoteLSN <= before.RemoteLSN {
+	final, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found || final.Position <= before.Position {
 		t.Fatal("first returning cut did not cover the local log", final, err)
 	}
-	payload, err := remote.Get(ctx, final.Chunks[0].Key)
-	if err != nil || len(payload) < 8192 || !bytes.Equal(payload[:4096], a) || !bytes.Equal(payload[4096:8192], b) {
+	st, err := fixture.Catalog.Store(fixture.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := layout.NewReader("/provider-test", fixture.Ref.Dir(), st.Fetch)
+	if err != nil || final.Current == nil {
+		t.Fatal("first cut has no B image", err)
+	}
+	image, err := reader.Open(ctx, *final.Current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := image.Chunk(ctx, 0)
+	if err != nil || chunk.Zero || len(chunk.Data) < 8192 || !bytes.Equal(chunk.Data[:4096], a) || !bytes.Equal(chunk.Data[4096:8192], b) {
 		t.Fatal("first cut did not publish the full acknowledged image", err)
 	}
 }

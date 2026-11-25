@@ -5,117 +5,11 @@ package chunkstore
 import (
 	"context"
 	"errors"
-	"path"
 	"testing"
 	"time"
 
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
-
-// filerObjects is a layout.ObjectStore on a real filer: an object is an
-// entry under root whose extended attributes carry the writer's session
-// and the removal mark ("-" when unmarked); every change of an existing
-// entry is a conditional update or delete on those attributes.
-type filerObjects struct {
-	cl   *SWFS
-	root string
-}
-
-const (
-	objSessKey = "swb-sess"
-	objMarkKey = "swb-mark"
-	unmarked   = "-"
-)
-
-func (f filerObjects) loc(rel string) (string, string) {
-	full := path.Join(f.root, rel)
-	return path.Dir(full), path.Base(full)
-}
-
-func metaOf(e *filerpb.Entry) layout.ObjectMeta {
-	m := layout.ObjectMeta{Session: string(e.GetExtended()[objSessKey]), Mark: string(e.GetExtended()[objMarkKey])}
-	if m.Mark == unmarked {
-		m.Mark = ""
-	}
-	return m
-}
-
-func markValue(m string) []byte {
-	if m == "" {
-		return []byte(unmarked)
-	}
-	return []byte(m)
-}
-
-func expected(m layout.ObjectMeta) map[string][]byte {
-	return map[string][]byte{objSessKey: []byte(m.Session), objMarkKey: markValue(m.Mark)}
-}
-
-func layoutErr(err error) error {
-	if errors.Is(err, ErrPrecondition) {
-		return layout.ErrPrecondition
-	}
-	return err
-}
-
-func (f filerObjects) Stat(ctx context.Context, rel string) (layout.ObjectMeta, bool, error) {
-	dir, name := f.loc(rel)
-	e, err := f.cl.LookupEntry(ctx, dir, name)
-	if errors.Is(err, ErrNotFound) {
-		return layout.ObjectMeta{}, false, nil
-	}
-	if err != nil {
-		return layout.ObjectMeta{}, false, err
-	}
-	return metaOf(e), true, nil
-}
-
-func (f filerObjects) Create(ctx context.Context, rel string, data []byte, session string) error {
-	dir, name := f.loc(rel)
-	e := &filerpb.Entry{Name: name, Content: data, Attributes: &filerpb.FuseAttributes{FileMode: 0o644, Mtime: time.Now().Unix()},
-		Extended: map[string][]byte{objSessKey: []byte(session), objMarkKey: []byte(unmarked)}}
-	err := f.cl.CreateEntry(ctx, dir, e, true)
-	if errors.Is(err, ErrExists) {
-		return layout.ErrExists
-	}
-	return layoutErr(err)
-}
-
-// rewrite updates the entry's attributes to next, conditional on expect.
-func (f filerObjects) rewrite(ctx context.Context, rel string, expect, next layout.ObjectMeta) error {
-	dir, name := f.loc(rel)
-	e, err := f.cl.LookupEntry(ctx, dir, name)
-	if errors.Is(err, ErrNotFound) {
-		return layout.ErrPrecondition
-	}
-	if err != nil {
-		return err
-	}
-	e.Extended[objSessKey] = []byte(next.Session)
-	e.Extended[objMarkKey] = markValue(next.Mark)
-	return layoutErr(f.cl.UpdateEntry(ctx, dir, e, expected(expect)))
-}
-
-func (f filerObjects) Reuse(ctx context.Context, rel string, expect layout.ObjectMeta, session string) error {
-	return f.rewrite(ctx, rel, expect, layout.ObjectMeta{Session: session})
-}
-
-func (f filerObjects) Mark(ctx context.Context, rel string, expect layout.ObjectMeta, mark string) error {
-	return f.rewrite(ctx, rel, expect, layout.ObjectMeta{Session: expect.Session, Mark: mark})
-}
-
-func (f filerObjects) DeleteMarked(ctx context.Context, rel string, mark string) error {
-	dir, name := f.loc(rel)
-	err := f.cl.DeleteEntry(ctx, dir, name, map[string][]byte{objMarkKey: markValue(mark)})
-	if errors.Is(err, ErrPrecondition) {
-		if _, found, serr := f.Stat(ctx, rel); serr == nil && !found {
-			return nil // a missing entry succeeds
-		}
-		return layout.ErrPrecondition
-	}
-	return err
-}
 
 // On a real filer (stock weed): the removal's two conditional writes and
 // the upload's reuse write behave as the layout needs. A delete whose
@@ -127,15 +21,23 @@ func TestIntegration_ObjectMarkAndConditionalDelete(t *testing.T) {
 	c := startWeed(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	const root = "/swblock/objs/v1"
-	f := filerObjects{cl: c.client(t, root+"/"), root: root}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := "/swblock/objs/" + layout.VolumeDir("v1", id)
+	cl := c.client(t, root+"/")
+	f, err := NewLayoutStore(cl, cl, root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rel := layout.NameChunk(5, []byte("orphan")).Path()
 
 	if err := layout.EnsureObject(ctx, f, rel, []byte("orphan"), "s0"); err != nil {
 		t.Fatal(err)
 	}
 	plan, found, err := f.Stat(ctx, rel)
-	if err != nil || !found || plan != (layout.ObjectMeta{Session: "s0"}) {
+	if err != nil || !found || plan != (layout.ObjectMeta{Session: "s0", Volume: id}) {
 		t.Fatalf("created object: %+v %t %v", plan, found, err)
 	}
 	if err := f.Mark(ctx, rel, plan, "c1"); err != nil {
@@ -151,7 +53,7 @@ func TestIntegration_ObjectMarkAndConditionalDelete(t *testing.T) {
 	if err := layout.EnsureObject(ctx, f, rel, []byte("orphan"), "successor"); err != nil {
 		t.Fatal(err)
 	}
-	if m, _, _ := f.Stat(ctx, rel); m != (layout.ObjectMeta{Session: "successor"}) {
+	if m, _, _ := f.Stat(ctx, rel); m != (layout.ObjectMeta{Session: "successor", Volume: id}) {
 		t.Fatalf("after the reuse: %+v; want session successor, unmarked", m)
 	}
 	if err := f.DeleteMarked(ctx, rel, "c1"); !errors.Is(err, layout.ErrPrecondition) {
@@ -176,5 +78,58 @@ func TestIntegration_ObjectMarkAndConditionalDelete(t *testing.T) {
 	}
 	if err := f.DeleteMarked(ctx, rel, "c2"); err != nil {
 		t.Fatalf("delete of a missing entry: %v; want success", err)
+	}
+}
+
+// On a real filer: the catalog's whole life of a restore. A source with a
+// committed snapshot; a restore target that reads the source's chunk
+// through its copied root; the snapshot refused deletion while the target
+// depends on it; the target's delete empties its pool, keeps its VOLUME
+// and a deleted HEAD, and releases the source, whose snapshot then deletes.
+func TestIntegration_CatalogRestoreAndDelete(t *testing.T) {
+	c := startWeed(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	const base = "/swblock/cat"
+	cl := c.client(t, base+"/")
+	cat, err := NewBCatalog(cl, cl, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, tgt := newRef(t, "src"), newRef(t, "t")
+	if _, err := cat.CreateVolume(ctx, src, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("real source chunk")
+	commitSnapshot(t, cat, src, data, "daily")
+	th, err := cat.Restore(ctx, src, "daily", tgt)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	_, tr, err := cat.open(tgt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := tr.Open(ctx, *th.Current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := img.Chunk(ctx, 1); err != nil || string(got.Data) != string(data) {
+		t.Fatalf("target reads the source's chunk: %+v %v", got, err)
+	}
+	if _, err := cat.DeleteSnapshot(ctx, src, "daily"); !errors.Is(err, layout.ErrHasDependents) {
+		t.Fatalf("delete a depended-on snapshot: %v", err)
+	}
+	if err := cat.DeleteVolume(ctx, tgt, okDeleteAuthority{}); err != nil {
+		t.Fatalf("delete the target: %v", err)
+	}
+	if objs, err := cat.listObjects(ctx, tgt); err != nil || len(objs) != 0 {
+		t.Fatalf("target objects after delete: %v %v", objs, err)
+	}
+	if h, found, err := cat.ReadHead(ctx, tgt); err != nil || !found || h.State != layout.StateDeleted {
+		t.Fatalf("target HEAD after delete: %+v %t %v", h, found, err)
+	}
+	if _, err := cat.DeleteSnapshot(ctx, src, "daily"); err != nil {
+		t.Fatalf("delete the released snapshot: %v", err)
 	}
 }

@@ -22,6 +22,9 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
+	"google.golang.org/grpc"
 )
 
 // TestStandalonePlannedHandoffToTheSameHost runs the planned hand-over back
@@ -39,7 +42,6 @@ func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
 	// 4. blockvolume adopts the volume.
 	vol1 := h.start(t, "blockvolume-1", h.volume, volArgs...)
 	e := mustU(adoptedEpoch(vol1.waitLog(t, 60*time.Second, "blockvolume: volume v1 adopted as PRIMARY at r1@")))
-	vol1.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in")
 	h.waitPrimary(t, e)
 
 	// 5. The lease.
@@ -59,9 +61,9 @@ func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
 	g := mustU(sealedGen(out, errOut, e))
 
 	// 9. The seal is in the object store.
-	chunkShow := []string{"ops", "chunk", "show", "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath}
+	chunkShow := []string{"ops", "chunk", "show", "--master", h.masterAddr, "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath}
 	out, _ = h.command(t, chunkShow...)
-	l := mustU(sealedHeadLSN(out, e, g))
+	l := mustU(sealedLayoutHeadPosition(out, e, g))
 
 	// 10. Revoke with the sealed generation.
 	out, _ = h.command(t, "ops", "workspace", "revoke", "--master", h.masterAddr, "--volume", "v1", "--replica", "r1",
@@ -99,8 +101,6 @@ func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
 
 	// 14. Start again with the same root, within the new lease (30 s).
 	vol2 := h.start(t, "blockvolume-2", h.volume, volArgs...)
-	vol2.waitLog(t, 60*time.Second, fmt.Sprintf(`durable: HEAD claim for volume=v1 starting: target epoch=%d holder="s1/r1"`, e2))
-	must(checkClaimDone(vol2.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in"), e2))
 	vol2.waitLog(t, 60*time.Second, fmt.Sprintf("blockvolume: volume v1 adopted as PRIMARY at r1@%d", e2))
 	for _, bad := range []string{"refusing to attach volume=v1", "assignment unavailable, not serving"} {
 		if vol2.has(bad) {
@@ -115,7 +115,7 @@ func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
 
 	// 16. The new epoch claimed HEAD.
 	out, _ = h.command(t, chunkShow...)
-	must(checkHeadReopened(out, e2, g, l))
+	must(checkLayoutHeadReopened(out, e2, g, l))
 
 	// 17. The block written before the hand-over reads back unchanged.
 	c = dialNVMe(t, h.nvmeAddr, nqn)
@@ -143,8 +143,8 @@ func TestStandaloneCleanMoveWithoutTheACKIsRefused(t *testing.T) {
 	c.close()
 	out, errOut := h.command(t, "ops", "chunk", "detach", "--plain", "--volume", "v1", "--status-addr", h.statusAddr, "--timeout", "120s")
 	g := mustU(sealedGen(out, errOut, e))
-	out, _ = h.command(t, "ops", "chunk", "show", "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
-	mustU(sealedHeadLSN(out, e, g)) // HEAD is sealed: only the ACK is missing
+	out, _ = h.command(t, "ops", "chunk", "show", "--master", h.masterAddr, "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
+	mustU(sealedLayoutHeadPosition(out, e, g)) // HEAD is sealed: only the ACK is missing
 	vol.kill(t)
 
 	out, _ = h.command(t, "ops", "workspace", "revoke", "--master", h.masterAddr, "--volume", "v1", "--replica", "r1",
@@ -185,6 +185,8 @@ type handoffEnv struct {
 	// A crash test restarts exactly this owned master with the same stores.
 	masterProcess *daemon
 	masterArgs    []string
+	layoutMu      sync.Mutex
+	layoutIDs     map[string]string
 	// tls, when set, runs every process with mutual TLS (procedure_tls_harness_test.go).
 	tls *procedureTLS
 }
@@ -223,6 +225,13 @@ func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...st
 // startHandoffEnvTLS is startHandoffEnvWith with mutual TLS when tlsNotAfter
 // is non-nil (it overrides chosen node certificates' expiry).
 func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, masterArgs ...string) *handoffEnv {
+	return startHandoffEnvConfigured(t, n, targets, tlsNotAfter, true, masterArgs...)
+}
+
+// startHandoffEnvConfigured can reserve target placement without importing a
+// VolumeRecord. The restore-create test uses that form so the master creates
+// the target's identity and restored image in one request.
+func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, precreateTargets bool, masterArgs ...string) *handoffEnv {
 	t.Helper()
 	h := newPlannedHandoffHarness(t)
 	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
@@ -252,16 +261,20 @@ func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[s
 	node := func(b bvHost) {
 		fmt.Fprintf(&nodes, "  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", b.id, b.data, b.ctrl)
 	}
-	volume := func(v, server string) {
-		fmt.Fprintf(&volumes, "  - id: %s\n    size_bytes: 268435456\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: r1\n", v, server)
+	volume := func(v, server string, create bool) {
+		size := ""
+		if create {
+			size = "    size_bytes: 268435456\n"
+		}
+		fmt.Fprintf(&volumes, "  - id: %s\n%s    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: r1\n", v, size, server)
 	}
 	for i := 1; i <= n; i++ {
 		node(env.hosts[fmt.Sprintf("s%d", i)])
 	}
-	volume("v1", "s1")
+	volume("v1", "s1", true)
 	for _, v := range targets {
 		node(env.hosts["n-"+v])
-		volume(v, "n-"+v)
+		volume(v, "n-"+v, precreateTargets)
 	}
 	spec := filepath.Join(h.dir, "cluster-spec.yaml")
 	must(os.WriteFile(spec, []byte("nodes:\n"+nodes.String()+"volumes:\n"+volumes.String()), 0o644))
@@ -272,6 +285,7 @@ func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[s
 		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
 		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)
+	env.masterArgs = append(env.masterArgs, "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
 	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
 	env.masterProcess = master
 	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
@@ -285,11 +299,43 @@ func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[s
 	env.show = []string{"ops", "workspace", "show", "--master", h.masterAddr, "--volume", "v1"}
 	out, _ := h.command(t, env.show...)
 	must(checkShowBeforeStart(out))
+	// Cache the identities imported by the master while it is available. Some
+	// tests assemble restart arguments after deliberately stopping the master.
+	env.layoutIDs = make(map[string]string)
+	env.layoutID("v1")
+	if precreateTargets {
+		for _, v := range targets {
+			env.layoutID(v)
+		}
+	}
 	return env
 }
 
 // volArgs is the chapter's blockvolume command for one host.
 func (env *handoffEnv) volArgs(id string) []string { return env.volArgsFor(env.hosts[id]) }
+
+func (env *handoffEnv) layoutID(volume string) string {
+	t := env.h.t
+	t.Helper()
+	env.layoutMu.Lock()
+	defer env.layoutMu.Unlock()
+	if id := env.layoutIDs[volume]; id != "" {
+		return id
+	}
+	conn, err := grpc.NewClient(env.h.masterAddr, env.masterDialOption(t, "admin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, err := lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), volume)
+	if err != nil {
+		t.Fatalf("resolve layout identity for %s: %v", volume, err)
+	}
+	env.layoutIDs[volume] = id.String()
+	return id.String()
+}
 
 // volArgsFor is the chapter's blockvolume command for b. The default
 // scheduled snapshot (daily:7, at a per-volume offset) stays on, as the page
@@ -308,6 +354,7 @@ func (env *handoffEnv) volArgsFor(b bvHost) []string {
 		replica = "r1"
 	}
 	return append([]string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", server, "--volume-id", vol, "--replica-id", replica,
+		"--layout-id", env.layoutID(vol),
 		"--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
 		"--durable-blocks", "65536", "--durable-blocksize", "4096",

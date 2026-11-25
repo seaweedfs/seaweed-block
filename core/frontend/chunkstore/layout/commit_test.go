@@ -46,7 +46,7 @@ func manifest(entries ...Ref) map[uint64]Ref {
 func TestCommit_Closure(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("new"))}
 	h := snapHead("s1")
-	next, changed, err := h.Commit(me, "s1", rn, 50, "hourly", StateLive)
+	next, changed, err := h.Commit(me, "s1", rn, 50, "hourly", SnapshotMeta{}, StateLive)
 	if err != nil || !changed || next.Activity.Kind != ActIdle || *next.Current != rn || next.Position != 50 || next.Snapshots["hourly"].Root != rn {
 		t.Fatalf("Commit: %+v %t %v", next, changed, err)
 	}
@@ -56,10 +56,10 @@ func TestCommit_Closure(t *testing.T) {
 	if h.Activity.Kind != ActSnap || h.Snapshots["hourly"].Root == rn {
 		t.Fatal("Commit changed its receiver")
 	}
-	if again, changed, err := next.Commit(me, "s1", rn, 50, "hourly", StateLive); err != nil || changed || again.Gen != next.Gen {
+	if again, changed, err := next.Commit(me, "s1", rn, 50, "hourly", SnapshotMeta{}, StateLive); err != nil || changed || again.Gen != next.Gen {
 		t.Fatalf("Commit over its applied HEAD: %+v %t %v; want a replay", again, changed, err)
 	}
-	if n2, changed, err := h.Commit(me, "s1", rn, 50, "", StateLive); err != nil || !changed || len(n2.Snapshots) != 1 {
+	if n2, changed, err := h.Commit(me, "s1", rn, 50, "", SnapshotMeta{}, StateLive); err != nil || !changed || len(n2.Snapshots) != 1 {
 		t.Fatalf("Commit without a snapshot name: %+v %t %v", n2, changed, err)
 	}
 	full := snapHead("s1")
@@ -80,7 +80,7 @@ func TestCommit_Closure(t *testing.T) {
 		"name taken":     {h, me, "daily", ErrSnapshotExists},
 		"snapshot limit": {full, me, "one-more", ErrTooManySnapshots},
 	} {
-		if _, _, err := tc.h.Commit(tc.me, "s1", rn, 50, tc.snapshot, StateLive); !errors.Is(err, tc.want) {
+		if _, _, err := tc.h.Commit(tc.me, "s1", rn, 50, tc.snapshot, SnapshotMeta{}, StateLive); !errors.Is(err, tc.want) {
 			t.Errorf("%s: %v; want %v", name, err, tc.want)
 		}
 	}

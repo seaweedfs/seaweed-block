@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type workspaceStopResult struct {
@@ -47,22 +47,23 @@ func startWorkspaceLease(ctx context.Context, h *volume.Host) (<-chan workspaceS
 	return requests, done
 }
 
-// CLEAN requires a prior Detach while the lease was valid. This is read-only:
-// revocation, expiry and cancellation never manufacture a final cut/proof.
-func workspaceDetachedGeneration(ctx context.Context, remoteFor func(string) (storage.ChunkRemote, error), id *control.WorkspaceIdentity, holder string) (uint64, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
+// workspaceLayoutDetachedGeneration accepts only the attached Start identity's
+// exact detached HEAD. Missing, foreign or unknown evidence never yields ACK.
+// The returned generation is diagnostic readout, not the clean-move identity:
+// the master reads this detached epoch/holder/position when recording the ACK.
+func workspaceLayoutDetachedGeneration(ctx context.Context, st layout.HeadStore, id *control.WorkspaceIdentity, me layout.HolderID) (uint64, error) {
+	if id == nil || me.Epoch == 0 || id.Epoch != me.Epoch || me.Holder == "" || id.ServerId+"/"+id.ReplicaId != me.Holder || me.ClaimID == "" {
+		return 0, layout.ErrNotHolder
 	}
-	if remoteFor == nil || id == nil {
-		return 0, fmt.Errorf("workspace remote/identity missing")
-	}
-	remote, err := remoteFor(id.VolumeId)
+	h, found, err := st.ReadHead(ctx)
 	if err != nil {
 		return 0, err
 	}
-	head, err := storage.ReadDetachedChunkHead(ctx, remote, id.Epoch, holder)
-	if err != nil {
-		return 0, err
+	if !found {
+		return 0, layout.ErrHeadAbsent
 	}
-	return head.Gen, nil
+	if !layout.DetachedBy(h, me) {
+		return 0, fmt.Errorf("workspace: no detached proof for the attached claim")
+	}
+	return h.Gen, nil
 }

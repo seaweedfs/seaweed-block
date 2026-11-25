@@ -460,3 +460,10 @@ func TestHead_HolderNeedsAClaimID(t *testing.T) {
 		t.Fatalf("HEAD with a holder and no claim id: %v; want ErrMalformed", err)
 	}
 }
+
+func (m *memHead) ReadVolumeRecord(context.Context) (Volume, bool, error) {
+	if m.h == nil {
+		return Volume{}, false, nil
+	}
+	return Volume{ID: m.h.VolumeID, Name: "v1", Format: VolumeFormat, Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}}, true, nil
+}

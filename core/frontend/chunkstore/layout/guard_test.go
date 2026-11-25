@@ -191,6 +191,14 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 			bad = append(bad, fn+" uses CreateDeletedHead: only the operator's release writes a tombstone, for a target never created")
 		}
 	}
+	// HEAD creates are exactly three: a new volume's and a restore target's
+	// unclaimed HEAD (createVolume, for CreateVolume and CreateTarget) and
+	// the operator's tombstone (above).
+	for _, fn := range owners(code["CreateHead"]) {
+		if fn != "createVolume" {
+			bad = append(bad, fn+" uses CreateHead: only createVolume creates a HEAD (unclaimed), besides the operator's tombstone")
+		}
+	}
 	for _, fn := range owners(code["RunReleaseDependent"]) {
 		if fn != "DeleteVolume" && fn != "OperatorReleaseDependent" {
 			bad = append(bad, fn+" uses RunReleaseDependent: only DeleteVolume (target deleting) and OperatorReleaseDependent (target checked) release")
@@ -200,6 +208,9 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 		bad = append(bad, "OperatorReleaseDependent does not read the target's HEAD before releasing")
 	}
 	for name, by := range code {
+		if name == "DeleteSnapshot" {
+			continue // a HEAD transition (a snapshot's name leaves HEAD), not a store remover
+		}
 		if strings.HasPrefix(name, "Delete") || strings.HasPrefix(name, "Remove") {
 			for _, fn := range owners(by) {
 				if fn != "RemoveUnreachable" && fn != "DeleteVolume" {
@@ -480,6 +491,7 @@ func w(ctx context.Context, x g) error { return x.NoLiveLease(ctx) }`, want: "on
 		"one mark, two deletes":                    {file: "remove.go", src: removeVariant(t, "second"), want: "without a mark gate immediately before it"},
 		"unlisted removal method":                  {file: "remove.go", src: removeVariant(t, "other"), want: "without a mark gate immediately before it"},
 		"claim outside Start":                      {src: `func w(ctx context.Context, st HeadStore, l LeaseWait, me HolderID) { _, _ = RunClaim(ctx, st, l, me) }`, want: "a claim is made only by Start"},
+		"a fourth HEAD create":                     {src: `func w(ctx context.Context, st NewVolumeStore, h Head) { _ = st.CreateHead(ctx, h) }`, want: "only createVolume creates a HEAD"},
 		"tombstone outside the operator's release": {src: `func w(ctx context.Context, t TargetStore, h Head) { _ = t.CreateDeletedHead(ctx, h) }`, want: "only the operator's release writes a tombstone"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
 func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable (mark-gated) and DeleteVolume"},

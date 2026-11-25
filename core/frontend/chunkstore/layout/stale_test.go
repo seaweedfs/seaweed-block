@@ -22,7 +22,7 @@ func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 	steps := map[string]func(Head, HolderID) error{
 		"Begin":      func(h Head, c HolderID) error { _, _, err := h.Begin(c, "s"); return err },
 		"Abort":      func(h Head, c HolderID) error { _, _, err := h.Abort(c, "s"); return err },
-		"Commit":     func(h Head, c HolderID) error { _, _, err := h.Commit(c, "s", rn, 1, "", StateLive); return err },
+		"Commit":     func(h Head, c HolderID) error { _, _, err := h.Commit(c, "s", rn, 1, "", SnapshotMeta{}, StateLive); return err },
 		"BeginClean": func(h Head, c HolderID) error { _, _, err := h.BeginClean(c, "c"); return err },
 		"EndClean":   func(h Head, c HolderID) error { _, _, err := h.EndClean(c, "c"); return err },
 		"Claim":      func(h Head, c HolderID) error { _, _, err := h.Claim(c); return err },
@@ -85,7 +85,19 @@ func TestHolderFunctions_RefuseAStaleHolder(t *testing.T) {
 	// id are its cases in start_test.go (TestStart_Refusals and the same-host
 	// forced successor); startCheck is Start's check, run again inside the
 	// claim (TestStart_ValidatesAgainstTheHeadItUpdates).
-	covered := map[string]bool{"RemoveUnreachable": true, "Start": true, "startCheck": true}
+	// DetachedBy: my own committed, idle detach proves nothing to a stale
+	// caller in any one dimension.
+	mine := Head{Gen: 1, State: StateDetached, Epoch: me.Epoch, Holder: me.Holder, ClaimID: me.ClaimID}
+	mine.Activity.Kind = ActIdle
+	if !DetachedBy(mine, me) {
+		t.Fatal("DetachedBy refused the holder's own detach")
+	}
+	for who, c := range callers {
+		if DetachedBy(mine, c) {
+			t.Errorf("DetachedBy accepted %s", who)
+		}
+	}
+	covered := map[string]bool{"RemoveUnreachable": true, "Start": true, "startCheck": true, "DetachedBy": true}
 	var missing []string
 	for fname, src := range packageSources(t, false) {
 		file, err := parser.ParseFile(token.NewFileSet(), fname, src, 0)

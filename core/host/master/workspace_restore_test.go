@@ -9,7 +9,10 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -17,14 +20,18 @@ type restoreProjection struct{ projection frontend.Projection }
 
 func (v restoreProjection) Projection() frontend.Projection { return v.projection }
 
+func layoutWorkspaceHead(h layout.Head) authority.WorkspaceHead {
+	return authority.WorkspaceHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, Detached: h.State == layout.StateDetached}
+}
+
 type restoreRemote struct {
-	storage.ChunkRemote
-	gets atomic.Uint64
+	*chunkstore.LayoutRemote
+	gets *atomic.Uint64
 }
 
 func (r *restoreRemote) Get(ctx context.Context, key string) ([]byte, error) {
 	r.gets.Add(1)
-	return r.ChunkRemote.Get(ctx, key)
+	return r.LayoutRemote.Get(ctx, key)
 }
 
 // This CPU component loop uses a real master authority runtime, two real
@@ -43,16 +50,33 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldLine := waitAuthorityLine(t, m.Publisher(), "vol-a")
-	remote := &restoreRemote{ChunkRemote: storage.NewMemChunkRemote()}
+	fixture := testutil.NewLayoutFixture(t, "vol-a", 64, 4)
+	var gets atomic.Uint64
+	readHead := func() layout.Head {
+		t.Helper()
+		h, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+		if err != nil || !found {
+			t.Fatalf("layout HEAD: found=%v err=%v", found, err)
+		}
+		return h
+	}
 	open := func(line authority.AuthorityBasis) (*durable.DurableProvider, frontend.Backend) {
 		t.Helper()
 		view := restoreProjection{frontend.Projection{VolumeID: "vol-a", ReplicaID: line.ReplicaID,
 			Epoch: line.Epoch, EndpointVersion: line.EndpointVersion, Healthy: true}}
-		p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		cfg := durable.ProviderConfig{
 			Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 			BlockSize: 4096, ChunkBlocks: 4,
-			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-		}, view)
+		}
+		fixture.Configure(&cfg)
+		cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			inner, err := chunkstore.NewLayoutRemote(fixture.Catalog, fixture.Ref, me)
+			if err != nil {
+				return nil, err
+			}
+			return &restoreRemote{LayoutRemote: inner, gets: &gets}, nil
+		}
+		p, err := durable.NewDurableProvider(cfg, view)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,9 +107,9 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	headBefore, err := remote.GetHead(ctx)
-	if err != nil || headBefore.RemoteLSN != cut || len(headBefore.Chunks) != 2 {
-		t.Fatalf("initial HEAD=%+v err=%v", headBefore, err)
+	headBefore := readHead()
+	if headBefore.Position != cut || headBefore.Current == nil {
+		t.Fatalf("initial HEAD=%+v", headBefore)
 	}
 
 	// The authority runtime, not either provider, allocates the next epoch.
@@ -105,18 +129,15 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 	if !ok || newLine.ReplicaID != "r1" || newLine.Epoch <= oldLine.Epoch {
 		t.Fatalf("master did not move authority: %+v", newLine)
 	}
-	gets := remote.gets.Load()
+	beforeGets := gets.Load()
 	freshProvider, freshBackend := open(newLine) // unrelated empty local directory
-	if remote.gets.Load() != gets {
+	if gets.Load() != beforeGets {
 		t.Error("restore eagerly fetched chunk bodies before any read")
 	}
-	claimed, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claimed.Epoch != newLine.Epoch || claimed.Holder != newLine.ReplicaID || claimed.RemoteLSN != cut {
+	claimed := readHead()
+	if claimed.Epoch != newLine.Epoch || claimed.Holder != newLine.ReplicaID || claimed.Position != cut {
 		t.Errorf("restore served before HEAD takeover: HEAD epoch=%d holder=%q cut=%d; want master epoch=%d holder=%q cut=%d",
-			claimed.Epoch, claimed.Holder, claimed.RemoteLSN, newLine.Epoch, newLine.ReplicaID, cut)
+			claimed.Epoch, claimed.Holder, claimed.Position, newLine.Epoch, newLine.ReplicaID, cut)
 	}
 	for offset, data := range want {
 		got := make([]byte, len(data))
@@ -124,7 +145,7 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 			t.Fatalf("fresh exact read offset=%d n=%d err=%v", offset, n, err)
 		}
 	}
-	if remote.gets.Load() <= gets {
+	if gets.Load() <= beforeGets {
 		t.Error("fresh reads did not lazily fetch HEAD chunks")
 	}
 	// With assignment delivery held, the stale host can still have local dirt.
@@ -143,10 +164,7 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 	if err := oldBackend.Sync(ctx); err == nil {
 		t.Error("old host kept acknowledging Sync after its refused cut")
 	}
-	afterStale, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	afterStale := readHead()
 	if !reflect.DeepEqual(afterStale, claimed) {
 		t.Errorf("stale host changed claimed HEAD: %+v", afterStale)
 	}
@@ -165,15 +183,9 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 	if newCut <= cut {
 		t.Errorf("restored WAL did not advance beyond HEAD: old=%d new=%d", cut, newCut)
 	}
-	newHead, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	final, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if final.Epoch != newLine.Epoch || final.Holder != newLine.ReplicaID || final.RemoteLSN != newCut || final.Gen != newHead.Gen || !reflect.DeepEqual(final.Chunks, newHead.Chunks) {
+	newHead := readHead()
+	final := readHead()
+	if final.Epoch != newLine.Epoch || final.Holder != newLine.ReplicaID || final.Position != newCut || final.Gen != newHead.Gen || !reflect.DeepEqual(final.Current, newHead.Current) {
 		t.Errorf("old host changed restored HEAD: %+v", final)
 	}
 	for offset, data := range want {

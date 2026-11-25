@@ -1,6 +1,7 @@
 package volume
 
 import (
+ "github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"context"
 	"encoding/json"
 	"errors"
@@ -49,7 +50,7 @@ func (p *plainDetachProvider) DetachVolumePlain(ctx context.Context, id string) 
 }
 func TestChunkDetachPlainAdapterAndBusyResponse(t *testing.T) {
 	p := &plainDetachProvider{fakeChunkProvider: &fakeChunkProvider{detach: storage.ChunkCutResult{H: 9, Head: storage.ChunkHead{Gen: 3, Epoch: 2, State: storage.ChunkHeadDetached}}, last: 9}}
-	s := chunkServer(t, NewChunkControl(p, nil), true)
+	s := chunkServer(t, NewChunkControl(p, nil, chunkstore.VolumeRef{}), true)
 	w := serve(t, s, http.MethodPost, "/chunk/detach", `{"volumeID":"v1","plain":true,"timeoutMs":60000}`, "")
 	if w.Code != 200 || p.plainCalls != 1 {
 		t.Fatalf("plain adapter: %d %s calls=%d", w.Code, w.Body, p.plainCalls)

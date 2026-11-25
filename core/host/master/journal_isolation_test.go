@@ -46,7 +46,7 @@ func newIsolationRig(t *testing.T, strict bool, authorityDir, lifecycleDir strin
 func startIsolationRig(t *testing.T, strict bool, authorityDir, lifecycleDir string, self *storeident.Identity) *isolationRig {
 	t.Helper()
 	logs := &syncBuffer{}
-	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: authorityDir, LifecycleStoreDir: lifecycleDir, WorkspaceRPC: true,
+	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: authorityDir, LifecycleStoreDir: lifecycleDir, WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume,
 		StrictJournalIsolation: strict, Logger: log.New(logs, "", 0),
 		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
 			return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil

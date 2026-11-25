@@ -28,12 +28,8 @@ package storage
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -156,7 +152,6 @@ type chunkRef struct {
 	Key      string
 	SHA256   [32]byte
 	Encoding string
-	BirthLSN uint64
 }
 
 // chunkHeadVersion is the CAS guard of HEAD.
@@ -223,8 +218,7 @@ const (
 func chunkHeadIsDetached(h chunkHead) bool { return h.State == chunkHeadDetached }
 
 // chunkRemote is the remote store. Keys are non-empty valid UTF-8 strings
-// (validChunkKey); Put and PutIntent refuse any other key before writing
-// anything. Keys are immutable: Put of a key that
+// (validChunkKey); Put refuses any other key before writing anything. Keys are immutable: Put of a key that
 // exists, or once existed, fails with errChunkKeyExists and never replaces
 // stored bytes. CASHead installs next only when the stored HEAD matches
 // expected and returns the new generation; a mismatch fails with
@@ -233,79 +227,32 @@ func chunkHeadIsDetached(h chunkHead) bool { return h.State == chunkHeadDetached
 // further CAS, never retries blindly, and reports no success or frontier
 // advance while it is unresolved.
 //
-// Intents protect chunks a holder is about to publish (W5): GC treats every
-// live intent as a root. A holder durably writes an intent naming the keys
-// before it uploads the first of them (or, for a snapshot or fork, before it
-// writes the manifest that references them), and deletes it after the HEAD
-// CAS succeeds or the attempt is cleanly abandoned.
-//   - PutIntent stores in durably and returns its id, "<in.Gen>-<nonce>",
-//     unique per call; the id and CreatedNs it assigns are listed back.
-//   - DeleteIntent removes that one intent; a missing id is not an error.
-//   - ListIntents returns every live intent of the volume, or an error; it
-//     never skips an intent it cannot read.
+// A cut runs in the holder's session (the layout kernel's Begin, Commit and
+// Abort; Put of a content-named object is its Ensure):
+//   - Begin opens the session before the cut's first upload and returns it;
+//     a Begin while the session is open is its replay. Every object the cut
+//     writes belongs to the session until CASHead commits it.
+//   - Abort is the notice that a cut ended without a commit. It never
+//     blocks: the remote rolls the session back at its next HEAD read.
 type chunkRemote interface {
 	Put(ctx context.Context, key string, data []byte) error
 	Get(ctx context.Context, key string) ([]byte, error)
 	GetHead(ctx context.Context) (chunkHead, error)
 	CASHead(ctx context.Context, expected chunkHeadVersion, next chunkHead) (uint64, error)
 	Delete(ctx context.Context, key string) error
-	PutIntent(ctx context.Context, in chunkIntent) (string, error)
-	DeleteIntent(ctx context.Context, id string) error
-	ListIntents(ctx context.Context) ([]chunkIntent, error)
-}
-
-// chunkIntent is one live intent: the keys a holder at HEAD generation Gen
-// and epoch Epoch is about to publish.
-type chunkIntent struct {
-	Segments   map[uint64]ChunkSegment
-	ChunkBytes uint64
-	ID         string // "<Gen>-<nonce>"; assigned by PutIntent
-	Gen        uint64
-	Epoch      uint64
-	Holder     string
-	Keys       []string
-	CreatedNs  int64 // assigned by PutIntent
-	// DeadlineNs (unix ns) is a copy intent's publication deadline, kept as
-	// metadata: a GC sweep settles a dead copy attempt by claiming its
-	// publishing entry with a tombstone, never by the deadline alone (W5).
-	// 0 for capture intents.
-	DeadlineNs int64
-}
-
-// newChunkIntentID returns "<gen>-<16 lowercase hex digits>" from a random
-// nonce.
-func newChunkIntentID(gen uint64) (string, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("storage: intent nonce: %w", err)
-	}
-	return strconv.FormatUint(gen, 10) + "-" + hex.EncodeToString(b[:]), nil
+	Begin(ctx context.Context) (string, error)
+	Abort()
 }
 
 // validChunkKey is the chunk key domain: a non-empty, valid UTF-8 string.
-// Every remote refuses any other key at Put and at PutIntent, before it
-// persists anything, so a key protected by an intent always lists back
-// byte-identical to the key stored (an encoding that replaced invalid
-// bytes would otherwise protect a different key than the one stored).
+// Every remote refuses any other key at Put, before it persists anything (an
+// encoding that replaced invalid bytes would store another key than the
+// one named).
 func validChunkKey(key string) error {
 	if key == "" || !utf8.ValidString(key) {
 		return fmt.Errorf("%w: %q", errChunkKeyInvalid, key)
 	}
 	return nil
-}
-
-// validChunkIntentID accepts exactly the ids newChunkIntentID produces.
-func validChunkIntentID(id string) bool {
-	gen, nonce, ok := strings.Cut(id, "-")
-	if !ok || len(nonce) != 16 || strings.ToLower(nonce) != nonce {
-		return false
-	}
-	v, err := strconv.ParseUint(gen, 10, 64)
-	if err != nil || strconv.FormatUint(v, 10) != gen {
-		return false
-	}
-	_, err = hex.DecodeString(nonce)
-	return err == nil
 }
 
 // chunkLayerConfig configures one attachment.
@@ -348,16 +295,6 @@ type chunkLayerConfig struct {
 	// with it and FreshFromHead: a fresh marker left by an earlier start, an
 	// older binary or another opener is never trusted.
 	CreatedThisStart bool
-	// RestoreGuard binds fresh attachment to the HEAD the provider claimed
-	// and durably seeded. A changed read refuses before hooks/readiness; the
-	// next recovery must repeat claim and seed. Nil is for direct layer users.
-	RestoreGuard *chunkHeadVersion
-	// PrepareRestore runs after ClaimChunkHead validates its observed HEAD
-	// and before any ownership CAS (also for an idempotent claim). The owner
-	// durably seeds the local frontier and rebases cached ship cursors here,
-	// while its frontend is gated. An error leaves remote ownership unchanged.
-	// No store/layer/remote lock is held across the callback.
-	PrepareRestore func(head chunkHead) error
 	// RestoreChunkBytes is the local, validated geometry for upgrading a flat
 	// legacy image during an ownership claim; it is never inferred from data.
 	RestoreChunkBytes uint64
@@ -438,7 +375,6 @@ type chunkCutStats struct {
 	PublishPrepareNs int64
 	ManifestNs       int64
 	CommitStateNs    int64
-	IntentCleanupNs  int64
 	NonPayloadCopyNs int64
 
 	PayloadNs int64 // disjoint streaming/copy/upload wall intervals

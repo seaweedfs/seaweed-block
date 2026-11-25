@@ -8,16 +8,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+func precopyLayoutProvider(t *testing.T, c *layoutCase, view *parkView, hooks ...*detachHooks) *durable.DurableProvider {
+	t.Helper()
+	return c.provider(t, t.TempDir(), view.stubView, "s/r1", func(cfg *durable.ProviderConfig) {
+		cfg.ChunkDetachPrecopy = true
+		if len(hooks) > 0 {
+			cfg.OnChunkDetach = hooks[0].detach
+			cfg.OnChunkDetachResumed = hooks[0].resume
+		}
+	})
+}
+
 func TestPlainDetachAfterPrecopyRefusalRequiresIdleFrontend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
+	c := newLayoutCase(t, pcBlocks, pcChunkBlocks)
 	hooks := &detachHooks{}
-	p := precopyProvider(t, remote, &parkView{stubView: v1View()}, hooks)
+	p := precopyLayoutProvider(t, c, &parkView{stubView: v1View()}, hooks)
 	openRecovered(t, p)
 	b, err := p.Open(ctx, "v1")
 	if err != nil {
@@ -62,16 +74,16 @@ func TestPlainDetachAfterPrecopyRefusalRequiresIdleFrontend(t *testing.T) {
 	if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen {
 		t.Fatalf("expected thawed pre-copy refusal: %+v %v", r, err)
 	}
-	before, err := remote.GetHead(ctx)
-	if err != nil || before.State == storage.ChunkHeadDetached {
-		t.Fatalf("refusal detached: %+v %v", before, err)
+	before := c.head(t)
+	if before.State == layout.StateDetached {
+		t.Fatalf("refusal detached: %+v", before)
 	}
 	if _, _, err = p.DetachVolumePlain(ctx, "v1"); !errors.Is(err, durable.ErrPlainDetachBusy) {
 		t.Fatalf("plain accepted admitted I/O: %v", err)
 	}
-	after, err := remote.GetHead(ctx)
-	if err != nil || after.Gen != before.Gen || after.State != before.State {
-		t.Fatalf("busy plain mutated HEAD: before=%+v after=%+v err=%v", before, after, err)
+	after := c.head(t)
+	if after.Gen != before.Gen || after.State != before.State {
+		t.Fatalf("busy plain mutated HEAD: before=%+v after=%+v", before, after)
 	}
 	starts, resumes := hooks.calls()
 	if len(starts) != 1 || len(resumes) != 1 {
@@ -99,7 +111,7 @@ func TestPlainDetachAfterPrecopyRefusalRequiresIdleFrontend(t *testing.T) {
 		lba   uint32
 		value byte
 	}{{1, 0x4a}, {2, 0x5b}} {
-		if !bytes.Equal(headBlock(t, remote, x.lba), block(x.value)) {
+		if !bytes.Equal(c.block(t, x.lba), block(x.value)) {
 			t.Fatalf("plain lost acknowledged block %d", x.lba)
 		}
 	}
@@ -115,8 +127,8 @@ func TestPlainDetachAfterPrecopyRefusalRequiresIdleFrontend(t *testing.T) {
 func TestPlainDetachSkipsPrecopyCostAdmission(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
+	c := newLayoutCase(t, pcBlocks, pcChunkBlocks)
+	p := precopyLayoutProvider(t, c, &parkView{stubView: v1View()})
 	openRecovered(t, p)
 	b, err := p.Open(ctx, "v1")
 	if err != nil {
@@ -126,7 +138,7 @@ func TestPlainDetachSkipsPrecopyCostAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, _, err := p.DetachVolumePlain(ctx, "v1")
-	if err != nil || r.Head.State != storage.ChunkHeadDetached || len(r.Precopy.Rounds) != 0 || !bytes.Equal(headBlock(t, remote, 1), block(0x7c)) {
+	if err != nil || r.Head.State != storage.ChunkHeadDetached || len(r.Precopy.Rounds) != 0 || !bytes.Equal(c.block(t, 1), block(0x7c)) {
 		t.Fatalf("plain request used pre-copy admission or lost its point: %+v %v", r, err)
 	}
 }

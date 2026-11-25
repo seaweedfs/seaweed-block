@@ -27,7 +27,7 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 	if stores == nil {
 		return LifecycleWorkloadPlanTickResult{}, nil
 	}
-	volumes := stores.Volumes.ListVolumes()
+	volumes := h.readyVolumeRecords(stores.Volumes.ListVolumes())
 	volumeByID := make(map[string]lifecycle.VolumeRecord, len(volumes))
 	for _, volume := range volumes {
 		volumeByID[volume.Spec.VolumeID] = volume

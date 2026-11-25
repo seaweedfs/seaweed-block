@@ -13,6 +13,18 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
+// testLayoutCreateVolume stands in for the filer's two exclusive creates in
+// authority tests; the product path uses BCatalog.CreateVolume instead.
+func testLayoutCreateVolume(context.Context, lifecycle.VolumeSpec) error { return nil }
+
+func testCreateReadyVolume(store *lifecycle.FileStore, spec lifecycle.VolumeSpec) (lifecycle.VolumeRecord, error) {
+	rec, err := store.CreateVolume(spec)
+	if err != nil {
+		return rec, err
+	}
+	return store.MarkStoreReady(rec.Spec.VolumeID, rec.Spec.LayoutID)
+}
+
 func TestMasterLifecycleStore_OptionalNilByDefault(t *testing.T) {
 	h := newTestMaster(t, "")
 	defer closeTestMaster(t, h)

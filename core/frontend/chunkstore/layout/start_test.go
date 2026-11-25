@@ -29,7 +29,7 @@ func start(t *testing.T, h Head, line HolderID, local LocalRoot) (*memHead, Head
 func TestStart_OwnEpochFreshRootRefusedBeforeClaim(t *testing.T) {
 	h := startHead(3, "s1/r1", "k-old")
 	line := HolderID{Epoch: 3, Holder: "s1/r1"}
-	fresh := LocalRoot{ClaimID: "k-new", Fresh: true}
+	fresh := LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k-new", Fresh: true, CanStartFrom: anyStart}
 	st, _, err := start(t, h, line, fresh)
 	if !errors.Is(err, ErrMissingLocalRoot) {
 		t.Fatalf("own-epoch fresh root: %v; want ErrMissingLocalRoot", err)
@@ -50,7 +50,7 @@ func TestStart_OwnEpochFreshRootRefusedBeforeClaim(t *testing.T) {
 // The same root restarting at its own epoch continues: its marker is the
 // claim id HEAD holds. No claim is written.
 func TestStart_OwnEpochSameRootContinues(t *testing.T) {
-	st, got, err := start(t, startHead(3, "s1/r1", "k3"), HolderID{Epoch: 3, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3"})
+	st, got, err := start(t, startHead(3, "s1/r1", "k3"), HolderID{Epoch: 3, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k3"})
 	if err != nil || st.updates != 0 || got.ClaimID != "k3" {
 		t.Fatalf("same-root restart: %+v %v (%d writes); want continue without a write", got, err, st.updates)
 	}
@@ -60,7 +60,7 @@ func TestStart_OwnEpochSameRootContinues(t *testing.T) {
 // with the same marker: HEAD holds that claim id at this epoch, so it
 // continues.
 func TestStart_LostClaimReplyContinues(t *testing.T) {
-	st, got, err := start(t, startHead(5, "s1/r1", "k5"), HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{ClaimID: "k5", Fresh: true})
+	st, got, err := start(t, startHead(5, "s1/r1", "k5"), HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k5", Fresh: true, CanStartFrom: anyStart})
 	if err != nil || st.updates != 0 || got.Epoch != 5 {
 		t.Fatalf("restart after a lost claim reply: %+v %v (%d writes)", got, err, st.updates)
 	}
@@ -74,7 +74,7 @@ func TestStart_SameHostForcedSuccessorRefusesTheRemountedOldRoot(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("successor image"))}
 	h := startHead(4, "s1/r1", "k4")
 	h.Current = &rn
-	st, _, err := start(t, h, HolderID{Epoch: 4, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3"})
+	st, _, err := start(t, h, HolderID{Epoch: 4, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k3"})
 	if !errors.Is(err, ErrStaleLocalRoot) || !errors.Is(err, ErrNotHolder) {
 		t.Fatalf("remounted old root: %v; want ErrStaleLocalRoot and fenced (ErrNotHolder)", err)
 	}
@@ -87,7 +87,7 @@ func TestStart_SameHostForcedSuccessorRefusesTheRemountedOldRoot(t *testing.T) {
 // claims with its marker's claim id.
 func TestStart_FreshRootAtHigherEpochClaims(t *testing.T) {
 	for _, server := range []string{"s1/r1", "s2/r1"} {
-		st, got, err := start(t, startHead(3, "s1/r1", "k3"), HolderID{Epoch: 4, Holder: server}, LocalRoot{ClaimID: "k4", Fresh: true})
+		st, got, err := start(t, startHead(3, "s1/r1", "k3"), HolderID{Epoch: 4, Holder: server}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k4", Fresh: true, CanStartFrom: anyStart})
 		if err != nil || st.updates != 1 || got.Epoch != 4 || got.Holder != server || got.ClaimID != "k4" {
 			t.Fatalf("fresh root at epoch 4 on %s: %+v %v (%d writes)", server, got, err, st.updates)
 		}
@@ -97,17 +97,17 @@ func TestStart_FreshRootAtHigherEpochClaims(t *testing.T) {
 // An older line is fenced; the same epoch held by another server is not
 // this holder's; an absent HEAD is refused (nothing is created).
 func TestStart_Refusals(t *testing.T) {
-	if _, _, err := start(t, startHead(4, "s1/r1", "k4"), HolderID{Epoch: 3, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3"}); !errors.Is(err, ErrStaleEpoch) {
+	if _, _, err := start(t, startHead(4, "s1/r1", "k4"), HolderID{Epoch: 3, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k3"}); !errors.Is(err, ErrStaleEpoch) {
 		t.Errorf("older line: %v; want ErrStaleEpoch", err)
 	}
-	if _, _, err := start(t, startHead(4, "s1/r1", "k4"), HolderID{Epoch: 4, Holder: "s2/r1"}, LocalRoot{ClaimID: "k9", Fresh: true}); !errors.Is(err, ErrNotHolder) {
+	if _, _, err := start(t, startHead(4, "s1/r1", "k4"), HolderID{Epoch: 4, Holder: "s2/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k9", Fresh: true, CanStartFrom: anyStart}); !errors.Is(err, ErrNotHolder) {
 		t.Errorf("same epoch, another server: %v; want ErrNotHolder", err)
 	}
 	st := &memHead{}
-	if _, err := Start(context.Background(), st, &fakeLease{ended: true}, HolderID{Epoch: 1, Holder: "s1/r1"}, LocalRoot{ClaimID: "k1", Fresh: true}); !errors.Is(err, ErrHeadAbsent) || st.updates != 0 {
+	if _, err := Start(context.Background(), st, &fakeLease{ended: true}, HolderID{Epoch: 1, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k1", Fresh: true, CanStartFrom: anyStart}); !errors.Is(err, ErrHeadAbsent) || st.updates != 0 {
 		t.Errorf("absent HEAD: %v", err)
 	}
-	if _, _, err := start(t, startHead(3, "s1/r1", "k3"), HolderID{Epoch: 4, Holder: "s1/r1"}, LocalRoot{}); err == nil {
+	if _, _, err := start(t, startHead(3, "s1/r1", "k3"), HolderID{Epoch: 4, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}}); err == nil {
 		t.Error("start without a local claim id accepted")
 	}
 }
@@ -121,7 +121,7 @@ func TestStart_HigherEpochRefusesAnOlderLineage(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("image published at epoch 4"))}
 	h := startHead(4, "s1/r1", "k4")
 	h.Current = &rn
-	st, _, err := start(t, h, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3"})
+	st, _, err := start(t, h, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k3"})
 	if !errors.Is(err, ErrStaleLocalRoot) || !errors.Is(err, ErrNotHolder) {
 		t.Fatalf("old root at a higher epoch: %v; want ErrStaleLocalRoot, fenced", err)
 	}
@@ -130,7 +130,7 @@ func TestStart_HigherEpochRefusesAnOlderLineage(t *testing.T) {
 	}
 	// The continuing lineage (the root HEAD's claim id names) claims at the
 	// higher epoch, keeping its data.
-	st2, got, err := start(t, h, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{ClaimID: "k4"})
+	st2, got, err := start(t, h, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k4"})
 	if err != nil || st2.updates != 1 || got.Epoch != 5 || got.ClaimID != "k4" {
 		t.Fatalf("continuing lineage at epoch 5: %+v %v (%d writes)", got, err, st2.updates)
 	}
@@ -143,11 +143,11 @@ func TestStart_OldCopyOfTheRightRootRefused(t *testing.T) {
 	h := startHead(4, "s1/r1", "k4")
 	h.Position = 100
 	for _, epoch := range []uint64{4, 5} {
-		st, _, err := start(t, h, HolderID{Epoch: epoch, Holder: "s1/r1"}, LocalRoot{ClaimID: "k4", Position: 99})
+		st, _, err := start(t, h, HolderID{Epoch: epoch, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k4", Position: 99})
 		if !errors.Is(err, ErrStaleLocalRoot) || st.updates != 0 {
 			t.Fatalf("root at position 99 under HEAD at 100, epoch %d: %v (%d writes); want ErrStaleLocalRoot, no write", epoch, err, st.updates)
 		}
-		st, _, err = start(t, h, HolderID{Epoch: epoch, Holder: "s1/r1"}, LocalRoot{ClaimID: "k4", Position: 100})
+		st, _, err = start(t, h, HolderID{Epoch: epoch, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k4", Position: 100})
 		if err != nil {
 			t.Fatalf("root at HEAD's position, epoch %d: %v", epoch, err)
 		}
@@ -160,7 +160,7 @@ func TestStart_OldCopyOfTheRightRootRefused(t *testing.T) {
 // claims or finds its own claim and continues; it is never refused.
 func TestStart_InterruptAtTheClaim(t *testing.T) {
 	for _, fresh := range []bool{true, false} {
-		local := LocalRoot{ClaimID: "k3", Fresh: fresh}
+		local := LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k3", Fresh: fresh, CanStartFrom: anyStart}
 		for _, after := range []bool{false, true} {
 			h := startHead(3, "s1/r1", "k3")
 			if fresh {
@@ -192,14 +192,14 @@ func TestStart_FreshAcrossACrashContinuesTheRestore(t *testing.T) {
 	h.Position = 50
 	st := &memHead{h: &h}
 	line := HolderID{Epoch: 4, Holder: "s1/r1"}
-	if _, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{ClaimID: "k4", Fresh: true}); err != nil {
+	if _, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k4", Fresh: true, CanStartFrom: anyStart}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{ClaimID: "k4", Fresh: true})
+	got, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k4", Fresh: true, CanStartFrom: anyStart})
 	if err != nil || got.ClaimID != "k4" || got.Epoch != 4 {
 		t.Fatalf("restart of a still-fresh root: %+v %v; want continue", got, err)
 	}
-	if _, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{ClaimID: "k4", Position: 0}); !errors.Is(err, ErrStaleLocalRoot) {
+	if _, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k4", Position: 0}); !errors.Is(err, ErrStaleLocalRoot) {
 		t.Fatalf("the same root reported non-fresh at 0 under 50: %v; want ErrStaleLocalRoot", err)
 	}
 }
@@ -210,7 +210,7 @@ func TestStart_DeletingVolumeRefused(t *testing.T) {
 	h := startHead(3, "s1/r1", "k3")
 	h.State = StateDeleting
 	for _, line := range []HolderID{{Epoch: 3, Holder: "s1/r1"}, {Epoch: 4, Holder: "s1/r1"}} {
-		st, _, err := start(t, h, line, LocalRoot{ClaimID: "k3"})
+		st, _, err := start(t, h, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k3"})
 		if !errors.Is(err, ErrVolumeDeleting) || st.updates != 0 {
 			t.Fatalf("start at epoch %d of a deleting volume: %v (%d writes); want ErrVolumeDeleting", line.Epoch, err, st.updates)
 		}
@@ -221,7 +221,7 @@ func TestStart_DeletingVolumeRefused(t *testing.T) {
 // another root claimed in between, so it is refused as stale, and the
 // error names the cure.
 func TestStart_StaleRootNamesTheCure(t *testing.T) {
-	_, _, err := start(t, startHead(5, "s2/r1", "k5"), HolderID{Epoch: 6, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3"})
+	_, _, err := start(t, startHead(5, "s2/r1", "k5"), HolderID{Epoch: 6, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k3"})
 	if !errors.Is(err, ErrStaleLocalRoot) || !strings.Contains(err.Error(), StaleLocalRootCure) {
 		t.Fatalf("old directory after a move away and back: %v; want ErrStaleLocalRoot naming %q", err, StaleLocalRootCure)
 	}
@@ -241,7 +241,7 @@ func TestStart_ValidatesAgainstTheHeadItUpdates(t *testing.T) {
 			h.Position = 50
 			st := &memHead{h: &h}
 			st.afterRead = func() { change(st.h) }
-			_, err := Start(context.Background(), st, &fakeLease{ended: true}, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3", Position: 50})
+			_, err := Start(context.Background(), st, &fakeLease{ended: true}, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k3", Position: 50})
 			if !errors.Is(err, ErrStaleLocalRoot) || st.updates != 0 {
 				t.Fatalf("start after HEAD changed under it: %v (%d writes); want ErrStaleLocalRoot, nothing written", err, st.updates)
 			}

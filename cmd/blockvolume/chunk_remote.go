@@ -15,22 +15,20 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
 )
 
 const (
-	defaultChunkPath = "/swblock/chunks"
+	defaultChunkPath = chunkstore.DefaultChunkPath
 	// Periodic HEAD publication bounds the host-loss recovery point. Scheduled
 	// named snapshots are set by --chunk-snapshot-schedule.
 	defaultChunkCaptureInterval     = 0
 	defaultChunkMaintenanceInterval = time.Hour
 	defaultChunkCutTimeout          = 5 * time.Minute
 	defaultChunkMaintenanceTimeout  = time.Minute
-	defaultChunkGCGrace             = time.Hour
-	defaultChunkIntentTTL           = time.Hour
 )
 
 type chunkFlags struct {
@@ -155,16 +153,14 @@ func (s *snapshotSchedule) Set(v string) error {
 }
 
 type chunkWiring struct {
-	remoteFor   func(volumeID string) (storage.ChunkRemote, error)
-	catalog     *chunkstore.Catalog
-	maintenance func(context.Context, string) error
-	close       func() error
+	bCatalog *chunkstore.BCatalog
+	close    func() error
 }
 
 // newChunkWiring dials the filer and refuses unless it is the only filer of
 // its group (chunkstore.CheckSingleFiler).
 func newChunkWiring(c chunkFlags, masterTLS grpc.DialOption, master ...string) (chunkWiring, error) {
-	client, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{
+	bcat, client, err := chunkstore.DialBCatalog(context.Background(), chunkstore.SWFSConfig{
 		FilerGRPC:   c.filer,
 		Collection:  c.collection,
 		Replication: c.replication,
@@ -173,47 +169,42 @@ func newChunkWiring(c chunkFlags, masterTLS grpc.DialOption, master ...string) (
 	if err != nil {
 		return chunkWiring{}, err
 	}
-	// Deployment rule: block metadata goes through exactly one filer.
-	if err := client.CheckSingleFiler(context.Background()); err != nil {
-		_ = client.Close()
-		return chunkWiring{}, err
-	}
-	cat, err := chunkstore.NewCatalog(client, c.path)
-	if err != nil {
-		_ = client.Close()
-		return chunkWiring{}, err
-	}
-	var masterAddr string
-	if len(master) > 0 {
-		masterAddr = master[0]
-	}
-	maintenance, closeMaintenance, err := newChunkMaintenance(cat, client, c.automaticGC, masterAddr, masterTLS)
-	if err != nil {
-		_ = client.Close()
-		return chunkWiring{}, err
-	}
 	return chunkWiring{
-		maintenance: maintenance,
-		remoteFor: func(volumeID string) (storage.ChunkRemote, error) {
-			root, err := chunkVolumeRoot(c.path, volumeID)
-			if err != nil {
-				return nil, err
-			}
-			return chunkstore.NewSWFSChunkRemote(client, root)
-		},
-		catalog: cat,
-		close:   func() error { return errors.Join(closeMaintenance(), client.Close()) },
+		bCatalog: bcat,
+		close:    client.Close,
 	}, nil
 }
 
-// chunkAttachCheck applies the VOLUME entry's attach rules before the chunk
-// layer attaches (B9 W2 §4.2): create VOLUME from the local geometry when
-// it is missing, refuse geometry_mismatch, and refuse fork_incomplete for a
-// fork whose HEAD is not written yet.
-func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, durable.ChunkGeometry) error {
-	return func(ctx context.Context, volumeID string, g durable.ChunkGeometry) error {
-		_, err := cat.EnsureVolume(ctx, volumeID, chunkstore.Geometry{NumBlocks: g.NumBlocks, BlockSize: g.BlockSize, ChunkBlocks: g.ChunkBlocks})
-		return err
+// chunkAttachCheck admits only a volume the master already created in the
+// store. Starting a holder never creates VOLUME or HEAD.
+func chunkAttachCheck(cat *chunkstore.BCatalog, ref chunkstore.VolumeRef) func(context.Context, string, durable.ChunkGeometry) error {
+	return func(ctx context.Context, name string, g durable.ChunkGeometry) error {
+		if cat == nil || name != ref.Name || ref.ID.IsZero() {
+			return layout.ErrIdentity
+		}
+		st, err := cat.Store(ref)
+		if err != nil {
+			return err
+		}
+		v, found, err := st.ReadVolumeRecord(ctx)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: volume %s not created in the store", layout.ErrMissing, name)
+		}
+		want := layout.Geometry{SizeBytes: g.NumBlocks * uint64(g.BlockSize), BlockSize: g.BlockSize, ChunkBytes: uint64(g.ChunkBlocks) * uint64(g.BlockSize)}
+		if v.Geometry != want {
+			return fmt.Errorf("%w: local %+v differs from VOLUME %+v", layout.ErrGeometryMismatch, want, v.Geometry)
+		}
+		_, found, err = cat.ReadHead(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: volume %s not created in the store", layout.ErrHeadAbsent, name)
+		}
+		return nil
 	}
 }
 
@@ -222,33 +213,31 @@ func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, dur
 // volume record stays wrong until the operator changes the flag.
 const exitGeometryRefused = 78
 
-// geometryFlagsRefusal compares the geometry flags with the volume record
-// before any local store is created, so a wrong flag never leaves a store of
-// the wrong size behind. It returns the refusal line and its exit status:
-// exitGeometryRefused (78) when the record disagrees or is there but does not
-// decode; exitWorkspaceRetry (75) when the filer could not be read (an
-// unknown, never taken as "absent"); ("", 0) when the record agrees, does
-// not exist yet (the attach
-// check creates it from the flags), or no store is being created (numBlocks
-// 0: an existing store opens with its own geometry).
-func geometryFlagsRefusal(ctx context.Context, cat *chunkstore.Catalog, volumeID string, numBlocks uint64, blockSize uint32) (string, int) {
+// geometryFlagsRefusal reads only the immutable size_bytes, block_size and
+// chunk_bytes of VOLUME before creating a local store. An unreadable record
+// is unknown (75); corrupt bytes or a mismatch are final refusals (78).
+func geometryFlagsRefusal(ctx context.Context, cat *chunkstore.BCatalog, ref chunkstore.VolumeRef, numBlocks uint64, blockSize uint32, chunkBlocks uint32) (string, int) {
 	if numBlocks == 0 {
-		return "", 0 // an existing store: the flags are not used
-	}
-	v, ok, err := cat.ReadVolume(ctx, volumeID)
-	if err != nil && chunkstore.CodeOf(err) == chunkstore.CodeRemoteUnavailable {
-		return fmt.Sprintf("blockvolume: the volume record of %s could not be read (%v); no local store was created; retrying", volumeID, err), exitWorkspaceRetry
-	}
-	if err != nil {
-		// A record that is there but does not decode stays that way: a
-		// permanent refusal, not a retry loop.
-		return fmt.Sprintf("blockvolume: the volume record of %s is unreadable (corrupt: %v); no local store was created; restore or recreate the record", volumeID, err), exitGeometryRefused
-	}
-	if !ok || (v.NumBlocks == numBlocks && v.BlockSize == blockSize) {
 		return "", 0
 	}
-	return fmt.Sprintf("blockvolume: geometry_mismatch: --durable-blocks %d --durable-blocksize %d disagree with the volume record of %s (%d blocks of %d bytes); no local store was created; start it with the record's geometry",
-		numBlocks, blockSize, volumeID, v.NumBlocks, v.BlockSize), exitGeometryRefused
+	st, err := cat.Store(ref)
+	if err != nil {
+		return fmt.Sprintf("blockvolume: invalid volume identity: %v", err), exitGeometryRefused
+	}
+	v, found, err := st.ReadVolumeRecord(ctx)
+	if err != nil {
+		if errors.Is(err, layout.ErrMalformed) || errors.Is(err, layout.ErrCorrupt) || errors.Is(err, layout.ErrIdentity) {
+			return fmt.Sprintf("blockvolume: the volume record of %s is unreadable (corrupt: %v); no local store was created; restore or recreate the record", ref.Name, err), exitGeometryRefused
+		}
+		return fmt.Sprintf("blockvolume: the volume record of %s could not be read (%v); no local store was created; retrying", ref.Name, err), exitWorkspaceRetry
+	}
+	if !found {
+		return fmt.Sprintf("blockvolume: volume %s was not created in the store; no local store was created; retry the master CreateVolume operation", ref.Name), exitGeometryRefused
+	}
+	if v.SizeBytes == numBlocks*uint64(blockSize) && v.BlockSize == blockSize && v.ChunkBytes == uint64(chunkBlocks)*uint64(blockSize) {
+		return "", 0
+	}
+	return fmt.Sprintf("blockvolume: geometry_mismatch: --durable-blocks %d --durable-blocksize %d --chunk-blocks %d disagree with the volume record of %s (%d blocks of %d bytes, chunk_bytes %d); no local store was created; start it with the record's geometry", numBlocks, blockSize, chunkBlocks, ref.Name, v.SizeBytes/uint64(v.BlockSize), v.BlockSize, v.ChunkBytes), exitGeometryRefused
 }
 
 // chunkHolder is how this host names itself in HEAD: <server-id>/<replica-id>

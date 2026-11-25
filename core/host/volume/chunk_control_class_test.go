@@ -9,8 +9,7 @@ import (
 )
 
 // An invalid class is refused before anything cuts or writes, and as a
-// client error (400); a valid class cuts once, and its replay cuts none
-// (review of #142).
+// client error (400).
 func TestChunkControl_InvalidClassRefusedBeforeCut(t *testing.T) {
 	ctx := context.Background()
 	fp, ctl := adapterFixture(t)
@@ -30,12 +29,4 @@ func TestChunkControl_InvalidClassRefusedBeforeCut(t *testing.T) {
 		}
 	}
 
-	info, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r1", Class: chunkstore.SnapshotClassPinned})
-	if err != nil || info.Class != chunkstore.SnapshotClassPinned || fp.cuts != 1 {
-		t.Fatalf("valid class: %+v %v cuts=%d", info, err, fp.cuts)
-	}
-	info, err = ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r1", Class: chunkstore.SnapshotClassPinned})
-	if err != nil || !info.Replayed || fp.cuts != 1 {
-		t.Fatalf("replay: %+v %v cuts=%d; want a replay with no new cut", info, err, fp.cuts)
-	}
 }

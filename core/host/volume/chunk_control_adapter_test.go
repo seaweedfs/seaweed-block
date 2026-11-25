@@ -10,18 +10,21 @@ import (
 
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type fakeChunkProvider struct {
-	cut      storage.ChunkCutResult
-	cutErr   error
-	cutCheck func(context.Context) error
-	detach   storage.ChunkCutResult
-	last     uint64
-	cuts     int
-	lastMin  uint64
+	cut          storage.ChunkCutResult
+	cutErr       error
+	cutCheck     func(context.Context) error
+	detach       storage.ChunkCutResult
+	last         uint64
+	cuts         int
+	lastMin      uint64
+	snapshotMeta layout.SnapshotMeta
+	snapshotName string
 }
 
 type adapterManifestFiler struct {
@@ -68,68 +71,28 @@ func (f *fakeChunkProvider) DetachVolume(context.Context, string) (storage.Chunk
 
 func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	t.Helper()
-	fp, cat := adapterCatalog(t)
-	return fp, NewChunkControl(fp, cat)
-}
-
-// adapterCatalog is a catalog holding volume v1 and a provider whose cut
-// installs a published HEAD of v1.
-func adapterCatalog(t *testing.T) (*fakeChunkProvider, *chunkstore.Catalog) {
-	t.Helper()
-	head := storage.ChunkHead{Gen: 3, Epoch: 2, Holder: "r1", RemoteLSN: 9, State: storage.ChunkHeadActive,
-		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e2/c0/k1"}, 5: {Key: "chunks/e2/c5/k2"}}}
+	fp := &fakeChunkProvider{cut: storage.ChunkCutResult{H: 9, Head: storage.ChunkHead{Gen: 3, Epoch: 2, Holder: "r1", RemoteLSN: 9}}}
 	f := &adapterManifestFiler{Filer: chunkstore.NewMemFiler(), blobs: map[string][]byte{}}
-	r, err := chunkstore.NewChunkRemote(f, f, "/swblock/chunks/v1")
+	cat, err := chunkstore.NewBCatalog(f, f, "/chunks")
 	if err != nil {
 		t.Fatal(err)
 	}
-	head, _, err = r.PrepareManifest(context.Background(), storage.ChunkHead{}, head, 8*4096)
-	if err != nil {
+	id, _ := layout.ParseVolumeID("00112233445566778899aabbccddeeff")
+	v := chunkstore.VolumeRef{Name: "v1", ID: id}
+	if _, err := cat.CreateVolume(context.Background(), v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
-	fp := &fakeChunkProvider{cut: storage.ChunkCutResult{H: 9, Head: head}}
-	cat, err := chunkstore.NewCatalog(f, "/swblock/chunks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cat.EnsureVolume(context.Background(), "v1", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
-		t.Fatal(err)
-	}
-	return fp, cat
+	return fp, NewChunkControl(fp, cat, v)
 }
 
-// Snapshot validates before it cuts, then stores the HEAD its cut
-// installed (§3.2); list and delete go to the catalog.
-func TestChunkControl_SnapshotStoresTheCutHead(t *testing.T) {
-	ctx := context.Background()
-	fp, ctl := adapterFixture(t)
-	for _, bad := range []ChunkSnapshotRequest{{Name: "a/b", RequestID: "r"}, {Name: "s1"}} {
-		if _, err := ctl.Snapshot(ctx, "v1", bad); chunkstore.CodeOf(err) != chunkstore.CodeInvalidName {
-			t.Fatalf("snapshot %+v: %v, want invalid_name", bad, err)
-		}
+func (f *fakeChunkProvider) SnapshotVolume(ctx context.Context, volumeID string, name string, meta layout.SnapshotMeta) (layout.Head, error) {
+	f.snapshotName = name
+	f.snapshotMeta = meta
+	r, err := f.CutVolume(ctx, volumeID, 0)
+	if err != nil {
+		return layout.Head{}, err
 	}
-	if fp.cuts != 0 {
-		t.Fatalf("an invalid snapshot request cut %d times", fp.cuts)
-	}
-	info, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r", Labels: map[string]string{"agent.step": "x"}, Consistency: "app"})
-	if err != nil || fp.cuts != 1 || info.HeadGen != 3 || info.HeadEpoch != 2 || info.CutLSN != 9 || info.ChunkCount != 2 ||
-		info.Labels["agent.step"] != "x" || info.Consistency != "app" || info.Replayed {
-		t.Fatalf("snapshot: %+v %v (cuts %d)", info, err, fp.cuts)
-	}
-	again, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r"})
-	if err != nil || !again.Replayed || again.HeadGen != 3 {
-		t.Fatalf("snapshot retry: %+v %v", again, err)
-	}
-	if _, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "other"}); chunkstore.CodeOf(err) != chunkstore.CodeSnapshotExists {
-		t.Fatalf("snapshot with another request id: %v, want snapshot_exists", err)
-	}
-	list, _, err := ctl.ListSnapshots(ctx, "v1", chunkstore.ListOptions{})
-	if err != nil || len(list) != 1 || list[0].Name != "s1" {
-		t.Fatalf("list: %+v %v", list, err)
-	}
-	if st, err := ctl.DeleteSnapshot(ctx, "v1", "s1"); err != nil || st != chunkstore.SnapDeleting {
-		t.Fatalf("delete: %q %v", st, err)
-	}
+	return layout.Head{Gen: r.Head.Gen, Epoch: r.Head.Epoch, Position: r.H, Snapshots: map[string]layout.Snapshot{name: {Meta: meta}}}, nil
 }
 
 // The cut body carries the statistics the chunk layer measured for that

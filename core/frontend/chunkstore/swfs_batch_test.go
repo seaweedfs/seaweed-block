@@ -192,20 +192,6 @@ func TestSWFSRange_ReserveValidates(t *testing.T) {
 			t.Fatalf("reserve %d: offset %d gave %q", n, n, fid)
 		}
 	}
-	// A rejected location leaves nothing to upload to: a round over it makes
-	// no upload at all.
-	vol := newBatchVolume(t)
-	bad := startFakeFiler(t, &fakeFilerGRPC{assignResp: &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 2, Location: &filerpb.Location{Url: vol.host() + "\t"}}})
-	rr, err := NewChunkRemote(newFakeFiler(), bad, "/swblock/vols/v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rr.BeginPutRound(2, 4096).Put(context.Background(), 0, "k00000", []byte("x")); err == nil {
-		t.Fatal("round over a malformed location stored an object")
-	}
-	if uploads, _, _ := vol.snapshot(); len(uploads) != 0 {
-		t.Fatalf("uploads %v after a malformed location", uploads)
-	}
 	s := startFakeFiler(t, &fakeFilerGRPC{assignResp: &filerpb.AssignVolumeResponse{FileId: "3,0a0b0c0d0e", Count: 1, Location: loc}})
 	for _, n := range []int{0, -1, maxRangeCount + 1} {
 		if _, err := s.reserve(context.Background(), n, 4096); err == nil {

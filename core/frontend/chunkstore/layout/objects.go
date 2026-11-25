@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // ObjectMeta is what an object entry (chunk, segment, root) carries besides
@@ -81,6 +82,33 @@ func EnsureObject(ctx context.Context, os ObjectStore, rel string, data []byte, 
 		}
 	}
 	return fmt.Errorf("layout: %s kept moving under %d attempts", rel, maxEnsureRounds)
+}
+
+// PrepareRoot writes root for session: every segment it names (segs holds
+// their bytes, by name) in shard order, then the root itself, each by
+// EnsureObject, so the root is written only after all it names. It returns
+// the root's name. A segment the root names that segs lacks is an error.
+func PrepareRoot(ctx context.Context, os ObjectStore, root Root, segs map[SegName][]byte, session string) (RootName, error) {
+	shards := make([]uint64, 0, len(root.Segments))
+	for sh := range root.Segments {
+		shards = append(shards, sh)
+	}
+	sort.Slice(shards, func(a, b int) bool { return shards[a] < shards[b] })
+	for _, sh := range shards {
+		n := root.Segments[sh]
+		b, ok := segs[n]
+		if !ok {
+			return RootName{}, fmt.Errorf("layout: root names segment %s, its bytes are not given", n.Path())
+		}
+		if err := EnsureObject(ctx, os, n.Path(), b, session); err != nil {
+			return RootName{}, err
+		}
+	}
+	rn, rb, err := NameRoot(root)
+	if err != nil {
+		return RootName{}, err
+	}
+	return rn, EnsureObject(ctx, os, rn.Path(), rb, session)
 }
 
 // ownedBySession reports whether rel exists, carries session as its writer

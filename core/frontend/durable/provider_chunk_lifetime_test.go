@@ -19,13 +19,18 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // gatedRemote wraps a remote with failure and hold points.
 type gatedRemote struct {
 	storage.ChunkRemote
+	layout.StartStore
+	fixture *testutil.LayoutFixture
 
 	mu          sync.Mutex
 	failGetHead int           // fail the next N GetHead calls
@@ -80,6 +85,38 @@ func (g *gatedRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	return g.ChunkRemote.GetHead(ctx)
 }
 
+// B Start reads HEAD through StartStore before constructing its content
+// remote. Keep the same failure/hold schedule at that earlier seam.
+func (g *gatedRemote) ReadHead(ctx context.Context) (layout.Head, bool, error) {
+	g.mu.Lock()
+	fail := g.failGetHead > 0
+	if fail {
+		g.failGetHead--
+	}
+	ch := g.holdGetHead
+	g.mu.Unlock()
+	if fail {
+		return layout.Head{}, false, errors.New("injected ReadHead failure")
+	}
+	var h layout.Head
+	var found bool
+	var err error
+	if g.holdAfter {
+		h, found, err = g.StartStore.ReadHead(ctx)
+	}
+	if err := g.hold(ctx, "gethead", ch); err != nil {
+		return layout.Head{}, false, err
+	}
+	if !g.holdAfter {
+		h, found, err = g.StartStore.ReadHead(ctx)
+	}
+	return h, found, err
+}
+
+func (g *gatedRemote) ChunkKey(index uint64, sum [32]byte) string {
+	return g.ChunkRemote.(storage.ChunkKeyer).ChunkKey(index, sum)
+}
+
 func (g *gatedRemote) Put(ctx context.Context, key string, data []byte) error {
 	g.mu.Lock()
 	ch := g.holdPut
@@ -127,12 +164,12 @@ func recvErr(t *testing.T, ch <-chan error, what string) error {
 	}
 }
 
-// seededRemote returns a remote whose HEAD publishes 0x33 at LBA 33
+// seededLayoutFixture returns a B HEAD that publishes 0x33 at LBA 33
 // (chunk 2) and 0x64 at LBA 100 (chunk 6).
-func seededRemote(t *testing.T) *storage.MemChunkRemote {
+func seededLayoutFixture(t *testing.T) *testutil.LayoutFixture {
 	t.Helper()
-	remote := storage.NewMemChunkRemote()
-	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := layoutChunkProvider(t, t.TempDir(), fixture, v1View(), 0)
 	s := openRecovered(t, p)
 	for lba, fill := range map[uint32]byte{33: 0x33, 100: 0x64} {
 		if _, err := s.Write(lba, block(fill)); err != nil {
@@ -145,7 +182,79 @@ func seededRemote(t *testing.T) *storage.MemChunkRemote {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return remote
+	return fixture
+}
+
+func nextSeededView() *stubView {
+	return newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+}
+
+type gatedLayoutStartStore struct {
+	layout.StartStore
+	mu        sync.Mutex
+	failRead  int
+	holdRead  chan struct{}
+	holdAfter bool
+	honourCtx bool
+	entered   chan string
+	once      sync.Once
+}
+
+func (g *gatedLayoutStartStore) ReadHead(ctx context.Context) (layout.Head, bool, error) {
+	g.mu.Lock()
+	fail := g.failRead > 0
+	if fail {
+		g.failRead--
+	}
+	hold, after, honour := g.holdRead, g.holdAfter, g.honourCtx
+	g.mu.Unlock()
+	if fail {
+		return layout.Head{}, false, errors.New("injected ReadHead failure")
+	}
+	read := func() (layout.Head, bool, error) { return g.StartStore.ReadHead(ctx) }
+	var h layout.Head
+	var found bool
+	var err error
+	if after {
+		h, found, err = read()
+	}
+	if hold != nil {
+		g.entered <- "readhead"
+		if honour {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+				return layout.Head{}, false, ctx.Err()
+			}
+		} else {
+			<-hold
+		}
+	}
+	if !after {
+		h, found, err = read()
+	}
+	return h, found, err
+}
+
+func (g *gatedLayoutStartStore) release() {
+	g.once.Do(func() {
+		if g.holdRead != nil {
+			close(g.holdRead)
+		}
+	})
+}
+
+func layoutGatedProvider(t *testing.T, root string, fixture *testutil.LayoutFixture, view *stubView, gated *gatedLayoutStartStore) *durable.DurableProvider {
+	t.Helper()
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks}
+	fixture.Configure(&cfg)
+	cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return gated, nil }
+	p, err := durable.NewDurableProvider(cfg, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	return p
 }
 
 func readEq(t *testing.T, s storage.LogicalStorage, lba uint32, want []byte, what string) {
@@ -162,11 +271,14 @@ func readEq(t *testing.T, s storage.LogicalStorage, lba uint32, want []byte, wha
 // A fresh volume whose first attach fails is still fresh after a normal
 // close and reopen: it reads HEAD, never the untouched local zeros.
 func TestWALStoreChunk_FailedFreshAttachThenReopenReadsHead(t *testing.T) {
-	remote := seededRemote(t)
+	fixture := seededLayoutFixture(t)
 	root := t.TempDir()
-	g := newGated(remote)
-	g.failGetHead = 1
-	p := chunkProvider(t, root, g, v1View(), 0)
+	store, err := fixture.Catalog.Store(fixture.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &gatedLayoutStartStore{StartStore: store, failRead: 1}
+	p := layoutGatedProvider(t, root, fixture, nextSeededView(), g)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +288,7 @@ func TestWALStoreChunk_FailedFreshAttachThenReopenReadsHead(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2 := chunkProvider(t, root, remote, v1View(), 0)
+	p2 := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	s := openRecovered(t, p2)
 	readEq(t, s, 33, block(0x33), "reopen after a failed fresh attach")
 	readEq(t, s, 100, block(0x64), "reopen after a failed fresh attach")
@@ -184,16 +296,16 @@ func TestWALStoreChunk_FailedFreshAttachThenReopenReadsHead(t *testing.T) {
 
 // Interrupted before any attach: created, never recovered, closed.
 func TestWALStoreChunk_CreatedNeverAttachedThenReopenReadsHead(t *testing.T) {
-	remote := seededRemote(t)
+	fixture := seededLayoutFixture(t)
 	root := t.TempDir()
-	p := chunkProvider(t, root, remote, v1View(), 0)
+	p := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2 := chunkProvider(t, root, remote, v1View(), 0)
+	p2 := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	s := openRecovered(t, p2)
 	readEq(t, s, 33, block(0x33), "reopen of a never-attached fresh volume")
 }
@@ -202,9 +314,9 @@ func TestWALStoreChunk_CreatedNeverAttachedThenReopenReadsHead(t *testing.T) {
 // keeps its local writes over HEAD and still reads untouched chunks from
 // HEAD.
 func TestWALStoreChunk_FreshVolumeKeepsLocalWritesAfterRestart(t *testing.T) {
-	remote := seededRemote(t)
+	fixture := seededLayoutFixture(t)
 	root := t.TempDir()
-	p := chunkProvider(t, root, remote, v1View(), 0)
+	p := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	s := openRecovered(t, p)
 	if _, err := s.Write(33, block(0x77)); err != nil {
 		t.Fatal(err)
@@ -215,7 +327,7 @@ func TestWALStoreChunk_FreshVolumeKeepsLocalWritesAfterRestart(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2 := chunkProvider(t, root, remote, v1View(), 0)
+	p2 := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	s2 := openRecovered(t, p2)
 	readEq(t, s2, 33, block(0x77), "restart after a fresh attach")
 	readEq(t, s2, 100, block(0x64), "restart after a fresh attach")
@@ -233,11 +345,11 @@ func TestWALStoreChunk_LineageDriftRefusesCapture(t *testing.T) {
 	}
 	for name, drift := range cases {
 		t.Run(name, func(t *testing.T) {
-			remote := storage.NewMemChunkRemote()
+			fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 			view := v1View()
-			p := chunkProvider(t, t.TempDir(), remote, view, 0)
+			p := layoutChunkProvider(t, t.TempDir(), fixture, view, 0)
 			s := openRecovered(t, p)
-			claimed := freshV1Claim(t, remote)
+			claimed := layoutHead(t, fixture)
 			if _, err := s.Write(1, block(1)); err != nil {
 				t.Fatal(err)
 			}
@@ -247,18 +359,18 @@ func TestWALStoreChunk_LineageDriftRefusesCapture(t *testing.T) {
 				view.set(proj)
 			}
 			_, err := p.CaptureVolume(context.Background(), "v1")
-			head, _ := remote.GetHead(context.Background())
+			head := layoutHead(t, fixture)
 			if drift == nil {
-				if err != nil || head.Gen != claimed.Gen+1 {
-					t.Fatalf("capture under the attach lineage: %v (HEAD gen %d)", err, head.Gen)
+				if err != nil || head.Current == nil || head.Position <= claimed.Position {
+					t.Fatalf("capture under the attach lineage: %v (HEAD %+v)", err, head)
 				}
 				return
 			}
 			if !errors.Is(err, storage.ErrChunkCaptureRefused) {
 				t.Fatalf("capture after %s drift: %v; want refused", name, err)
 			}
-			if head.Gen != claimed.Gen || remote.Puts() != 0 {
-				t.Fatalf("capture after %s drift published: HEAD gen %d, %d chunks stored", name, head.Gen, remote.Puts())
+			if head.Current != nil || head.Position != claimed.Position || fixture.Blobs.Puts() != 0 {
+				t.Fatalf("capture after %s drift published: HEAD %+v, %d blobs stored", name, head, fixture.Blobs.Puts())
 			}
 		})
 	}
@@ -274,7 +386,7 @@ func TestWALStoreChunk_LineageDriftDuringHeldUploadRefusesPublication(t *testing
 	view := v1View()
 	p := chunkProvider(t, t.TempDir(), g, view, 0)
 	s := openRecovered(t, p)
-	claimed := freshV1Claim(t, remote)
+	claimed := layoutHead(t, g.fixture)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -288,8 +400,8 @@ func TestWALStoreChunk_LineageDriftDuringHeldUploadRefusesPublication(t *testing
 	if err := recvErr(t, errc, "CaptureVolume"); !errors.Is(err, storage.ErrChunkCaptureRefused) {
 		t.Fatalf("capture whose lineage moved during upload: %v; want refused", err)
 	}
-	if head, _ := remote.GetHead(context.Background()); head.Gen != claimed.Gen {
-		t.Fatalf("stale lineage published HEAD gen %d", head.Gen)
+	if head := layoutHead(t, g.fixture); head.Current != nil || head.Position != claimed.Position {
+		t.Fatalf("stale lineage published an image: %+v", head)
 	}
 }
 
@@ -494,9 +606,9 @@ func TestWALStoreChunk_LayerOutlivesRecoveryContext(t *testing.T) {
 // layer to epoch 0: once the projection carries the assignment, the
 // volume publishes under it.
 func TestWALStoreChunk_AttachWaitsForMasterAuthority(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"}) // pre-assignment
-	p := chunkProvider(t, t.TempDir(), remote, view, 0)
+	p := layoutChunkProvider(t, t.TempDir(), fixture, view, 0)
 	s, err := p.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -504,17 +616,14 @@ func TestWALStoreChunk_AttachWaitsForMasterAuthority(t *testing.T) {
 	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
 		t.Fatalf("RecoverVolume before assignment: %v", err)
 	}
-	if _, err := s.Write(1, block(1)); err != nil {
-		t.Fatal(err)
-	}
 	// Healthy but with no master-assigned epoch is not authority either.
 	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1"}))
 	time.Sleep(150 * time.Millisecond)
 	if _, err := p.CaptureVolume(context.Background(), "v1"); err == nil {
 		t.Fatal("capture succeeded under a healthy projection with epoch 0")
 	}
-	if head, _ := remote.GetHead(context.Background()); head.Gen != 0 {
-		t.Fatalf("published under epoch 0: HEAD gen %d epoch %d", head.Gen, head.Epoch)
+	if head := layoutHead(t, fixture); head.Epoch != 0 || head.Current != nil {
+		t.Fatalf("published under epoch 0: HEAD %+v", head)
 	}
 	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
 	deadline := time.Now().Add(10 * time.Second)
@@ -528,7 +637,13 @@ func TestWALStoreChunk_AttachWaitsForMasterAuthority(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if head, _ := remote.GetHead(context.Background()); head.Epoch != 4 {
+	if _, err := s.Write(1, block(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if head := layoutHead(t, fixture); head.Epoch != 4 || head.Current == nil {
 		t.Fatalf("HEAD epoch %d, want the assigned 4", head.Epoch)
 	}
 }
@@ -715,13 +830,15 @@ func TestCorruptWALWrite_NoncePayloadOverlap(t *testing.T) {
 func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 	root := t.TempDir()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	seedPreviouslyServedRoot(t, root, fixture)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, view)
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -733,9 +850,6 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 	ctx := context.Background()
 	if _, err := p.RecoverVolume(ctx, "v1"); err != nil { // A: ok, no authority
 		t.Fatalf("recovery A: %v", err)
-	}
-	if _, err := s.Write(5, block(0xA7)); err != nil {
-		t.Fatal(err)
 	}
 	// This oracle requires corruption below a persisted W. Default mode C
 	// intentionally permits losing its newest uncheckpointed batch instead.
@@ -796,12 +910,15 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 	root := t.TempDir()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	seedPreviouslyServedRoot(t, root, fixture)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
-	}, view)
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -816,9 +933,6 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 	}
 	if _, err := p.CaptureVolume(ctx, "v1"); errors.Is(err, durable.ErrNotChunkVolume) || err == nil {
 		t.Fatalf("after recovery without authority: %v; want the volume awaiting authority", err)
-	}
-	if _, err := s.Write(5, block(0xA7)); err != nil {
-		t.Fatal(err)
 	}
 	// This oracle requires corruption below a persisted W. Default mode C
 	// intentionally permits losing its newest uncheckpointed batch instead.
@@ -883,13 +997,13 @@ func (v *parkingView) Projection() frontend.Projection {
 
 // countingRemote counts HEAD reads (an attach starts with one).
 type countingRemote struct {
-	storage.ChunkRemote
+	*chunkstore.LayoutRemote
 	heads atomic.Int64
 }
 
 func (c *countingRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	c.heads.Add(1)
-	return c.ChunkRemote.GetHead(ctx)
+	return c.LayoutRemote.GetHead(ctx)
 }
 
 // The window the per-tick check cannot cover: wait A has passed its tick
@@ -898,13 +1012,24 @@ func (c *countingRemote) GetHead(ctx context.Context) (storage.ChunkHead, error)
 func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	root := t.TempDir()
 	view := &parkingView{stubView: newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})}
-	remote := &countingRemote{ChunkRemote: storage.NewMemChunkRemote()}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	seedPreviouslyServedRoot(t, root, fixture)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, view)
+	}
+	fixture.Configure(&cfg)
+	remote := &countingRemote{}
+	cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+		inner, err := chunkstore.NewLayoutRemote(fixture.Catalog, fixture.Ref, me)
+		if err != nil {
+			return nil, err
+		}
+		remote.LayoutRemote = inner
+		return remote, nil
+	}
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -916,9 +1041,6 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	ctx := context.Background()
 	if _, err := p.RecoverVolume(ctx, "v1"); err != nil { // A: ok, no authority
 		t.Fatalf("recovery A: %v", err)
-	}
-	if _, err := s.Write(5, block(0xA7)); err != nil {
-		t.Fatal(err)
 	}
 	// This oracle requires corruption below a persisted W. Default mode C
 	// intentionally permits losing its newest uncheckpointed batch instead.
@@ -994,6 +1116,43 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 		t.Fatalf("capture after convergence: %v", err)
 	}
 	readEq(t, s, 5, block(0xA7), "repaired WAL record after convergence")
+}
+
+// Recovery-race fixtures start from a real B root that previously served and
+// acknowledged a write. Reopening it without authority then exercises the
+// deferred-attach path without fabricating a fresh root's identity.
+func seedPreviouslyServedRoot(t *testing.T, root string, fixture *testutil.LayoutFixture) {
+	t.Helper()
+	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, WALRecoveryTestDisableFlusher: true}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // captureWhenReconciled cuts once the volume's chunk layer has reconciled

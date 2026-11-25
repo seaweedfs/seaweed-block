@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 // With ChunkMasterWait set (a workspace primary), the startup authority wait
@@ -26,7 +27,7 @@ func TestChunkAuthorityWaitFollowsTheMasterWait(t *testing.T) {
 			var bound atomic.Int64 // unix ns; 0 = no bound
 			var final atomic.Bool
 			v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			cfg := durable.ProviderConfig{
 				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 				BlockSize: 4096, ChunkBlocks: 4, ChunkAssignmentTimeout: time.Millisecond,
 				ChunkMasterWait: func(time.Time) (time.Time, bool) {
@@ -35,11 +36,14 @@ func TestChunkAuthorityWaitFollowsTheMasterWait(t *testing.T) {
 					}
 					return time.Time{}, final.Load()
 				},
-				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
-					t.Error("remote reached without authority")
-					return storage.NewMemChunkRemote(), nil
-				},
-			}, v)
+			}
+			testutil.NewLayoutFixture(t, "v1", 64, 4).Configure(&cfg)
+			start := cfg.ChunkLayoutHeadFor
+			cfg.ChunkLayoutHeadFor = func(name string) (layout.StartStore, error) {
+				t.Error("layout reached without authority")
+				return start(name)
+			}
+			p, err := durable.NewDurableProvider(cfg, v)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,15 +80,16 @@ func TestChunkAuthorityWaitFollowsTheMasterWait(t *testing.T) {
 func TestChunkAuthorityWaitPassesItsOwnStart(t *testing.T) {
 	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
 	var starts atomic.Int64
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 		BlockSize: 4096, ChunkBlocks: 4,
 		ChunkMasterWait: func(start time.Time) (time.Time, bool) {
 			starts.Store(start.UnixNano())
 			return time.Time{}, false
 		},
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
-	}, v)
+	}
+	testutil.NewLayoutFixture(t, "v1", 64, 4).Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +122,7 @@ func TestChunkGrantedAttachThatKeepsFailingIsBounded(t *testing.T) {
 	captureWriteLogs(t, logs)
 	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
 	var bound atomic.Int64
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 		BlockSize: 4096, ChunkBlocks: 4,
 		ChunkMasterWait: func(time.Time) (time.Time, bool) {
@@ -126,10 +131,10 @@ func TestChunkGrantedAttachThatKeepsFailingIsBounded(t *testing.T) {
 			}
 			return time.Time{}, false
 		},
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
-			return nil, errors.New("chunk store unreachable")
-		},
-	}, v)
+	}
+	testutil.NewLayoutFixture(t, "v1", 64, 4).Configure(&cfg)
+	cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return nil, errors.New("chunk store unreachable") }
+	p, err := durable.NewDurableProvider(cfg, v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,14 +161,15 @@ func TestChunkGrantedAttachThatKeepsFailingIsBounded(t *testing.T) {
 func TestChunkAuthorityWaitAttachesAGrantOnTheBoundsTick(t *testing.T) {
 	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
 	var ended atomic.Bool // the master wait reports its end together with the grant
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 		BlockSize: 4096, ChunkBlocks: 4, ChunkAssignmentTimeout: time.Millisecond,
 		ChunkMasterWait: func(time.Time) (time.Time, bool) {
 			return time.Time{}, ended.Load()
 		},
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
-	}, v)
+	}
+	testutil.NewLayoutFixture(t, "v1", 64, 4).Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v)
 	if err != nil {
 		t.Fatal(err)
 	}

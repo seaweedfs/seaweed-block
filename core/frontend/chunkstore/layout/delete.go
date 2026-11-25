@@ -25,6 +25,8 @@ var (
 	ErrHasDependents = errors.New("layout: a snapshot has dependents")
 	// ErrHolderActive: a transaction is open on the volume.
 	ErrHolderActive = errors.New("layout: a holder is acting on the volume")
+	// ErrNotDeleting: MarkDeleted on a HEAD whose delete never began.
+	ErrNotDeleting = errors.New("layout: the volume's delete has not begun")
 	// ErrTargetLive: the operator asked to release a dependent whose
 	// target still exists and may still name the source's chunks.
 	ErrTargetLive = errors.New("layout: the dependent's target is live")
@@ -80,7 +82,7 @@ func (h Head) MarkDeleted() (next Head, changed bool, err error) {
 	case StateDeleted:
 		return h, false, nil
 	case StateLive, StateDetached:
-		return Head{}, false, fmt.Errorf("layout: HEAD is %q; a delete marks it deleting first", h.State)
+		return Head{}, false, fmt.Errorf("%w: HEAD is %q; a delete marks it deleting first", ErrNotDeleting, h.State)
 	}
 	next = h.clone()
 	next.State = StateDeleted
@@ -159,14 +161,14 @@ func RunReleaseDependent(ctx context.Context, source HeadStore, target VolumeID)
 // removes the object of a volume created again under the name), then HEAD
 // deleted. A source left out keeps an extra dependent, which over-protects
 // and is released by the operator's command.
-func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id VolumeID, sources []HeadStore, os ObjectStore, objects []string) error {
-	if auth == nil || os == nil {
-		return errors.New("layout: delete needs the master's delete authority and an object store")
-	}
-	for _, rel := range objects {
-		if !isObjectPath(rel) {
-			return fmt.Errorf("%w: %q is not a pool, segment or root object; HEAD, VOLUME and the directory stay", ErrMalformed, rel)
-		}
+//
+// The objects are listed (list) only after HEAD is deleting, so nothing a
+// holder uploaded before the reservation escapes the listing. A re-run on
+// a deleted HEAD lists and deletes again: the operator's sweep for a late
+// object of a dead holder.
+func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id VolumeID, sources []HeadStore, os ObjectStore, list func(context.Context) ([]string, error)) error {
+	if auth == nil || os == nil || list == nil {
+		return errors.New("layout: delete needs the master's delete authority, an object store and a lister")
 	}
 	if err := auth.Reserve(ctx); err != nil {
 		return fmt.Errorf("layout: delete reservation: %w", err)
@@ -179,6 +181,15 @@ func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id Vo
 			return err
 		}
 	}
+	objects, err := list(ctx)
+	if err != nil {
+		return fmt.Errorf("layout: list the volume's objects: %w", err)
+	}
+	for _, rel := range objects {
+		if !isObjectPath(rel) {
+			return fmt.Errorf("%w: %q is not a pool, segment or root object; HEAD, VOLUME and the directory stay", ErrMalformed, rel)
+		}
+	}
 	for _, rel := range objects {
 		if err := os.DeleteOfVolume(ctx, rel, id); err != nil {
 			if errors.Is(err, ErrPrecondition) {
@@ -187,7 +198,7 @@ func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id Vo
 			return fmt.Errorf("layout: delete %s: %w", rel, err)
 		}
 	}
-	_, err := RunMarkDeleted(ctx, st)
+	_, err = RunMarkDeleted(ctx, st)
 	return err
 }
 
@@ -252,28 +263,10 @@ func OperatorReleaseDependent(ctx context.Context, source HeadStore, target Targ
 // Every shard of every root is read; an unreadable one is an error, never
 // "names nothing".
 func namesVolume(ctx context.Context, r *Reader, h Head, owner VolumeID) (bool, error) {
-	roots := map[RootName]bool{}
-	if h.Current != nil {
-		roots[*h.Current] = true
-	}
-	for _, s := range h.Snapshots {
-		roots[s.Root] = true
-	}
-	for rn := range roots {
-		img, err := r.Open(ctx, rn)
-		if err != nil {
-			return false, err
-		}
-		for shard := range img.root.Segments {
-			seg, _, err := img.Segment(ctx, shard)
-			if err != nil {
-				return false, err
-			}
-			for _, ref := range seg.Chunks {
-				if ref.OwnerID == owner {
-					return true, nil
-				}
-			}
+	found := false
+	for _, rn := range HeadRoots(h) {
+		if err := r.EachRef(ctx, rn, AllShards, func(_ uint64, ref Ref) bool { found = ref.OwnerID == owner; return !found }); err != nil || found {
+			return found, err
 		}
 	}
 	return false, nil

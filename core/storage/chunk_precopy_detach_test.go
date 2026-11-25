@@ -41,13 +41,13 @@ func TestPrecopyDetachConvergesBeforeStoppingIO(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatal("detached HEAD differs from local image")
 	}
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
 
 func TestPrecopyDetachUnsettledRoundsKeepDirtyBytes(t *testing.T) {
 	s, f, l, w := precopyLayer(t, 1024, 1)
 	// Fail before publication, after a candidate image has been collected.
-	f.failPutIntent = errFakeRemoteDown
+	f.failBegin = errFakeRemoteDown
 	stopped := 0
 	_, err := l.PrecopyDetach(ctTimeout(t), func() bool { stopped++; return true })
 	if !errors.Is(err, ErrPrecopyUnknown) || stopped != 0 {
@@ -56,7 +56,7 @@ func TestPrecopyDetachUnsettledRoundsKeepDirtyBytes(t *testing.T) {
 	if f.stats().head.State == ChunkHeadDetached {
 		t.Fatal("failed rounds detached")
 	}
-	f.failPutIntent = nil
+	f.failBegin = nil
 	r, err := l.Cut(ctTimeout(t))
 	if err != nil {
 		t.Fatal(err)
@@ -248,12 +248,23 @@ func TestPrecopyDetachSustainedWrapFlushAndFreshRestore(t *testing.T) {
 	next.Holder = "host-b"
 	next.FreshFromHead = true
 	next.RestoreChunkBytes = ctChunkBytes
-	next.PrepareRestore = func(h ChunkHead) error { return fresh.SeedChunkFrontier(h.RemoteLSN) }
-	h, err := ClaimChunkHead(ctTimeout(t), f, next)
+	// layout.Start owns the epoch transition in the B path. Publish the
+	// successor HEAD here so this engine test still checks sustained writes,
+	// detach and lazy fresh readback without calling the removed flat claim.
+	oldHead, err := f.GetHead(ctTimeout(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	next.RestoreGuard = &ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}
+	if err := fresh.SeedChunkFrontier(oldHead.RemoteLSN); err != nil {
+		t.Fatal(err)
+	}
+	h := copyHead(oldHead)
+	h.Epoch, h.Holder, h.State, h.DetachedBy = next.Epoch, next.Holder, ChunkHeadActive, nil
+	gen, err := f.CASHead(ctTimeout(t), ChunkHeadVersion{Gen: oldHead.Gen, Epoch: oldHead.Epoch}, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Gen = gen
 	mustAttach(t, fresh, f, next)
 	for lba := uint32(0); lba < ctNumBlocks; lba++ {
 		got, err := fresh.Read(lba)

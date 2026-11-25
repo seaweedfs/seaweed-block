@@ -95,6 +95,8 @@ service ClusterEvidenceService {
 // epoch, endpoint_version, readiness, or primary facts.
 service LifecycleService {
     rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+    // Resolve the durable volume identity without creating or changing it.
+    rpc GetVolume(GetLifecycleVolumeRequest) returns (CreateVolumeResponse);
     rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
     // MarkVolumeDeleting admits a chunk volume delete: under the same locks
     // as every assignment, placement and binding write it refuses
@@ -108,6 +110,15 @@ service LifecycleService {
     rpc MarkVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
     rpc AbortVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
     rpc CommitVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
+    // ReserveVolumeDeletion is the layout volume delete's reservation: it
+    // commits the delete reservation under the token and stops every later
+    // grant for the volume, refused while an authority line is live. A
+    // committed reservation is never given back.
+    rpc ReserveVolumeDeletion(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
+    // CheckVolumeNoLiveLease is the layout volume delete's check between its
+    // HEAD read and its update: OK only with the committed reservation and
+    // no live lease on any line of the volume (granted lines included).
+    rpc CheckVolumeNoLiveLease(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
 }
 
 // FailbackService — disabled-by-default authority failback endpoint.
@@ -490,6 +501,11 @@ message CreateVolumeRequest {
     string pvc_uid = 7;
     string protocol = 8; // "iscsi" default | "nvme"
     string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
+    uint32 block_size = 10; // omitted: 4096, persisted on first create
+    uint64 chunk_bytes = 11; // omitted: 4 MiB, persisted on first create
+    string source_volume = 12; // restore only: source lifecycle name
+    string source_snapshot = 13; // restore only: named source snapshot
+    string create_request_id = 14; // restore retry identity, bound to name/source/snapshot
 }
 
 message CreateVolumeResponse {
@@ -502,6 +518,14 @@ message CreateVolumeResponse {
     string pvc_uid = 7;
     string protocol = 8; // "iscsi" default | "nvme"
     string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
+    string layout_id = 10; // master-minted, immutable 32 lower-case hex digits
+    uint32 block_size = 11;
+    uint64 chunk_bytes = 12;
+    bool store_ready = 13; // false: created, store not ready; retry CreateVolume
+}
+
+message GetLifecycleVolumeRequest {
+    string volume_id = 1; // lifecycle name
 }
 
 message DeleteVolumeRequest {

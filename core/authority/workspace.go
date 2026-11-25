@@ -55,6 +55,8 @@ type WorkspaceLease struct {
 type WorkspaceRevokeAck struct {
 	ReplicaID      string
 	Epoch, HeadGen uint64
+	Holder         string
+	RemoteLSN      uint64
 }
 
 type WorkspaceMoveRecord struct {
@@ -188,13 +190,14 @@ func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, 
 }
 
 func validateWorkspaceMoveRequest(req WorkspaceMoveRequest) error {
-	// INV-WS-SAME-HOST-CLEAN-MOVE-001: clean moves may reuse the host,
-	// but every move preserves its logical replica slot.
+	// A same-host clean move still needs its seal/ACK; a forced recovery
+	// still needs its expired lease barrier and persisted lost range.
+	// Every move preserves its logical replica slot.
 	// Refuse before locking or persisting a reservation/authority epoch.
 	if req.ExpectedReplicaID != req.TargetReplicaID {
 		return fmt.Errorf("workspace move: v1 requires the same logical replica id")
 	}
-	if req.RequestID == "" || req.VolumeID == "" || req.ExpectedHost == "" || req.TargetHost == "" || (req.ExpectedHost == req.TargetHost && (req.Kind != "clean" || req.Force)) || req.ExpectedReplicaID == "" || req.ExpectedEpoch == 0 || req.TargetReplicaID == "" ||
+	if req.RequestID == "" || req.VolumeID == "" || req.ExpectedHost == "" || req.TargetHost == "" || req.ExpectedReplicaID == "" || req.ExpectedEpoch == 0 || req.TargetReplicaID == "" ||
 		req.TargetDataAddr == "" || req.TargetCtrlAddr == "" || (req.Kind != "clean" && req.Kind != "forced") || req.Force != (req.Kind == "forced") {
 		return fmt.Errorf("workspace move: invalid request")
 	}
@@ -264,6 +267,10 @@ func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest,
 		return WorkspaceMoveRecord{}, err
 	}
 	p.mu.Lock()
+	if p.deleteReserved[req.VolumeID] {
+		p.mu.Unlock()
+		return WorkspaceMoveRecord{}, ErrWorkspaceDeleteReserved
+	}
 	r, replay, err := p.issuedWorkspaceReplayLocked(req)
 	p.mu.Unlock()
 	if err != nil {
@@ -305,7 +312,7 @@ func (p *Publisher) BeginWorkspaceRevocation(ctx context.Context, volume, holder
 	return p.persistWorkspaceLocked(volume, s)
 }
 
-func (p *Publisher) AckWorkspaceRevocation(ctx context.Context, volume string, ack WorkspaceRevokeAck) error {
+func (p *Publisher) AckWorkspaceRevocation(ctx context.Context, volume string, ack WorkspaceRevokeAck, h WorkspaceHead) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -313,16 +320,23 @@ func (p *Publisher) AckWorkspaceRevocation(ctx context.Context, volume string, a
 	defer p.mu.Unlock()
 	_, line, ok := p.workspaceLineLocked(volume)
 	s := cloneWorkspace(p.workspace[volume])
-	if !ok || line.info.ReplicaID != ack.ReplicaID || line.info.Epoch != ack.Epoch || ack.HeadGen == 0 || s == nil || s.Lease == nil || !s.Lease.Revoking {
+	if !ok || line.info.ReplicaID != ack.ReplicaID || line.info.Epoch != ack.Epoch || ack.Holder == "" || s == nil || s.Lease == nil || !s.Lease.Revoking {
 		return fmt.Errorf("workspace revoke ACK: stale or unsolicited")
 	}
+	if !h.Detached || h.Deleting || h.Epoch != ack.Epoch || h.Holder != ack.Holder {
+		return fmt.Errorf("workspace revoke ACK: no detached HEAD for this holder")
+	}
+	ack.RemoteLSN = h.RemoteLSN
 	lease := *s.Lease
 	lease.ExpiresAtNS = min(lease.ExpiresAtNS, p.leaseDeadlineLocked(volume).UnixNano())
 	if p.WorkspaceLeaseValidity(lease) == 0 {
 		return fmt.Errorf("workspace revoke ACK: lease expired; forced move required")
 	}
-	if s.Ack != nil && *s.Ack != ack {
-		return fmt.Errorf("workspace revoke ACK changed")
+	if s.Ack != nil {
+		if s.Ack.ReplicaID != ack.ReplicaID || s.Ack.Epoch != ack.Epoch || s.Ack.Holder != ack.Holder || s.Ack.RemoteLSN != ack.RemoteLSN {
+			return fmt.Errorf("workspace revoke ACK changed")
+		}
+		return nil // generation is readout only; retain the original ACK
 	}
 	s.Ack = &ack
 	return p.persistWorkspaceLocked(volume, s)
@@ -529,7 +543,7 @@ func (p *Publisher) prepareWorkspaceMoveLocked(ask AssignmentAsk, g workspaceGra
 		return nil, 0, time.Time{}, fmt.Errorf("workspace move: HEAD not owned by expected holder")
 	}
 	if q.Kind == "clean" {
-		if !h.Detached || !s.Lease.Revoking || s.Ack == nil || s.Ack.ReplicaID != q.ExpectedReplicaID || s.Ack.Epoch != q.ExpectedEpoch || s.Ack.HeadGen != h.Gen {
+		if !h.Detached || !s.Lease.Revoking || s.Ack == nil || s.Ack.ReplicaID != q.ExpectedReplicaID || s.Ack.Epoch != h.Epoch || s.Ack.Holder != h.Holder || s.Ack.RemoteLSN != h.RemoteLSN {
 			return nil, 0, time.Time{}, fmt.Errorf("workspace clean move needs detached HEAD and matching revocation ACK")
 		}
 	}

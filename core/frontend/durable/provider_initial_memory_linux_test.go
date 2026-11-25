@@ -20,20 +20,42 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Payloads live on disk so the remote fixture cannot account for a volume's
+// Payloads live on disk so the B blob fixture cannot account for a volume's
 // worth of anonymous RSS in the process under measurement.
 type memoryDiskRemote struct {
-	*storage.MemChunkRemote
 	dir        string
 	mu         sync.Mutex
-	head       storage.ChunkHead
 	hashes     map[string][32]byte
+	next       uint64
 	firstPut   sync.Once
 	atFirstPut func()
+}
+
+func memoryLayout(t *testing.T, cfg *durable.ProviderConfig, blobs *memoryDiskRemote) (*chunkstore.BCatalog, chunkstore.VolumeRef) {
+	t.Helper()
+	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), blobs, "/memory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
+	if _, err := cat.CreateVolume(context.Background(), ref, layout.Geometry{SizeBytes: uint64(cfg.NumBlocks) * uint64(cfg.BlockSize), BlockSize: uint32(cfg.BlockSize), ChunkBytes: uint64(cfg.ChunkBlocks) * uint64(cfg.BlockSize)}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return cat.Store(ref) }
+	cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+		return chunkstore.NewLayoutRemote(cat, ref, me)
+	}
+	return cat, ref
 }
 
 // The ledger uses alternating hot/cold 4 KiB blocks and fsync after EVERY
@@ -45,8 +67,9 @@ func TestWALStoreChunk_LedgerWriteAnonymousMemory(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
-	r := &memoryDiskRemote{MemChunkRemote: storage.NewMemChunkRemote(), dir: t.TempDir(), hashes: make(map[string][32]byte)}
-	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkCaptureInterval: 0, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}
+	r := &memoryDiskRemote{dir: t.TempDir(), hashes: make(map[string][32]byte)}
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkCaptureInterval: 0}
+	memoryLayout(t, &cfg, r)
 	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
@@ -165,54 +188,34 @@ func (r *memoryDiskRemote) path(key string) string {
 	h := sha256.Sum256([]byte(key))
 	return filepath.Join(r.dir, hex.EncodeToString(h[:]))
 }
-func (r *memoryDiskRemote) Put(ctx context.Context, key string, data []byte) error {
+func (r *memoryDiskRemote) Put(ctx context.Context, data []byte) (string, error) {
 	r.firstPut.Do(func() {
 		if r.atFirstPut != nil {
 			r.atFirstPut()
 		}
 	})
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.hashes[key]; ok {
-		return storage.ErrChunkKeyExists
+	r.next++
+	id := fmt.Sprintf("needle-%d", r.next)
+	if err := os.WriteFile(r.path(id), data, 0600); err != nil {
+		return "", err
 	}
-	if err := os.WriteFile(r.path(key), data, 0600); err != nil {
-		return err
-	}
-	r.hashes[key] = sha256.Sum256(data)
-	return nil
+	r.hashes[id] = sha256.Sum256(data)
+	return id, nil
 }
 func (r *memoryDiskRemote) Get(ctx context.Context, key string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return os.ReadFile(r.path(key))
-}
-func (r *memoryDiskRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.head, ctx.Err()
-}
-func (r *memoryDiskRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return 0, err
+	b, err := os.ReadFile(r.path(key))
+	if os.IsNotExist(err) {
+		return nil, chunkstore.ErrBlobNotFound
 	}
-	if expected.Gen != r.head.Gen || expected.Epoch != r.head.Epoch {
-		return 0, storage.ErrChunkHeadPrecondition
-	}
-	for _, ref := range next.Chunks {
-		if sum, ok := r.hashes[ref.Key]; !ok || sum != ref.SHA256 {
-			return 0, fmt.Errorf("invalid stored ref %s", ref.Key)
-		}
-	}
-	next.Gen = r.head.Gen + 1
-	r.head = next
-	return next.Gen, nil
+	return b, err
 }
 
 func memoryAnonBytes() (uint64, error) {
@@ -238,8 +241,8 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	r := &memoryDiskRemote{MemChunkRemote: storage.NewMemChunkRemote(), dir: t.TempDir(), hashes: make(map[string][32]byte)}
-	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkCaptureInterval: 0, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}
+	r := &memoryDiskRemote{dir: t.TempDir(), hashes: make(map[string][32]byte)}
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkCaptureInterval: 0}
 	if raw := os.Getenv("SWBLOCK_MEMORY_CHUNKS"); raw != "" {
 		chunks, e := strconv.Atoi(raw)
 		if e != nil || chunks <= 0 {
@@ -252,6 +255,7 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 		cfg.ChunkBlocks = uint32(cb)
 		cfg.NumBlocks = uint32(chunks * cb)
 	}
+	cat, ref := memoryLayout(t, &cfg, r)
 	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
@@ -412,14 +416,23 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 		}
 		t.Logf("first_cut_bytes=%d wall=%s stageRounds=%d candidates=%d", cfg.NumBlocks*4096, time.Since(cutStart), cut.Stats.StageRounds, cut.Stats.CandidateChunks)
 		if os.Getenv("SWBLOCK_MEMORY_FULL") != "" {
-			head, e := r.GetHead(ctx)
+			head, found, e := cat.ReadHead(ctx, ref)
+			if e != nil || !found || head.Current == nil {
+				t.Fatalf("B HEAD: found=%v err=%v head=%+v", found, e, head)
+			}
+			st, e := cat.Store(ref)
+			if e != nil {
+				t.Fatal(e)
+			}
+			reader, e := layout.NewReader("/memory", ref.Dir(), st.Fetch)
+			if e != nil {
+				t.Fatal(e)
+			}
+			image, e := reader.Open(ctx, *head.Current)
 			if e != nil {
 				t.Fatal(e)
 			}
 			wantChunks := int(cfg.NumBlocks / cfg.ChunkBlocks)
-			if len(head.Chunks) != wantChunks {
-				t.Fatalf("full image references=%d, want %d", len(head.Chunks), wantChunks)
-			}
 			h := sha256.New()
 			for left := int(cfg.ChunkBlocks) * 4096; left > 0; {
 				n := min(left, len(buf))
@@ -428,9 +441,10 @@ func TestWALStoreChunk_InitialWriteAnonymousMemory(t *testing.T) {
 			}
 			var want [32]byte
 			copy(want[:], h.Sum(nil))
-			for idx, ref := range head.Chunks {
-				if ref.SHA256 != want {
-					t.Fatalf("chunk %d differs from submitted bytes", idx)
+			for idx := 0; idx < wantChunks; idx++ {
+				chunk, e := image.Chunk(ctx, uint64(idx))
+				if e != nil || chunk.Zero || sha256.Sum256(chunk.Data) != want {
+					t.Fatalf("B chunk %d differs from submitted bytes: %v", idx, e)
 				}
 			}
 		}

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storage/parallelwal"
@@ -66,12 +67,12 @@ const (
 	// ImplWALStoreChunk is a walstore volume with an attached chunk layer:
 	// an asynchronous remote copy of immutable chunks published by a HEAD
 	// compare-and-swap. On disk it is a walstore file. Requires
-	// ProviderConfig.ChunkRemoteFor. Opt-in proof of concept.
+	// ProviderConfig.ChunkLayoutHeadFor and ChunkLayoutRemoteFor.
 	ImplWALStoreChunk ImplName = "walstore-chunk"
 )
 
-// defaultChunkBlocks is 4 MiB chunks of 4 KiB blocks.
-const defaultChunkBlocks = 1024
+// DefaultChunkBlocks is 4 MiB chunks of 4 KiB blocks.
+const DefaultChunkBlocks = 1024
 
 // ErrImplKindMismatch is returned by Open when the configured
 // selector does not match the on-disk superblock magic. Named so
@@ -152,9 +153,10 @@ type ProviderConfig struct {
 	// restart and prove real replay. Default false.
 	WALRecoveryTestDisableFlusher bool
 
-	// ChunkRemoteFor returns the remote that holds volumeID's chunks and
-	// HEAD. Required for ImplWALStoreChunk, ignored otherwise.
-	ChunkRemoteFor func(volumeID string) (storage.ChunkRemote, error)
+	// ChunkLayoutHeadFor and ChunkLayoutRemoteFor select the content-named layout.
+	// The remote is constructed once, with the identity confirmed by Start.
+	ChunkLayoutHeadFor   func(string) (layout.StartStore, error)
+	ChunkLayoutRemoteFor func(string, layout.HolderID) (storage.ChunkRemote, error)
 	// ChunkBlocks is the number of blocks per chunk. Zero: 1024.
 	ChunkBlocks uint32
 	// ChunkAttachCheck, if set, runs before every chunk layer attach, ahead
@@ -323,7 +325,10 @@ type volHandle struct {
 	startupEnded      uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
 	runtimeFenced     bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
 	chunk             storage.ChunkLayer // after RecoverVolume
-	chunkLineage      chunkLineage       // immutable authority captured by this attachment
+	layoutHolder      layout.HolderID    // successful Start identity; guarded by p.mu
+	layoutHead        layout.HeadStore
+	layoutRemote      storage.ChunkRemote // one runtime per attachment, including attach retries
+	chunkLineage      chunkLineage        // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
@@ -403,8 +408,11 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 		return nil, fmt.Errorf("durable: unknown impl %q (want auto (empty), %q, %q, %q, or %q)",
 			cfg.Impl, ImplSmartWAL, ImplWALStore, ImplParallelWALStore, ImplWALStoreChunk)
 	}
-	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkRemoteFor == nil {
-		return nil, fmt.Errorf("durable: impl %q requires ProviderConfig.ChunkRemoteFor", ImplWALStoreChunk)
+	if (cfg.ChunkLayoutHeadFor == nil) != (cfg.ChunkLayoutRemoteFor == nil) {
+		return nil, errors.New("durable: both layout factories are required")
+	}
+	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkLayoutHeadFor == nil {
+		return nil, fmt.Errorf("durable: impl %q requires the layout head and remote factories", ImplWALStoreChunk)
 	}
 	if cfg.ChunkCaptureInterval < 0 || cfg.ChunkCutTimeout < 0 || cfg.ChunkMaintenanceInterval < 0 || cfg.ChunkMaintenanceTimeout < 0 {
 		return nil, fmt.Errorf("durable: chunk schedule durations must not be negative")
@@ -424,7 +432,7 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 		}
 	}
 	if cfg.ChunkBlocks == 0 {
-		cfg.ChunkBlocks = defaultChunkBlocks
+		cfg.ChunkBlocks = DefaultChunkBlocks
 	}
 	if cfg.BlockSize == 0 {
 		cfg.BlockSize = 4096
@@ -848,10 +856,13 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 		if err != nil || p.cfg.Impl != ImplWALStoreChunk {
 			return h, err
 		}
-		if h.fresh, err = fileExists(chunkFreshMarker(path)); err != nil {
-			_ = h.storage.Close()
-			return nil, fmt.Errorf("durable: stat fresh marker: %w", err)
+		ws := h.storage.(*storage.WALStore)
+		_, fresh, ok := ws.LayoutIdentity()
+		if !ok {
+			_ = ws.Close()
+			return nil, errors.New("durable: legacy local root has no layout identity; recreate it")
 		}
+		h.fresh = fresh
 		return h, nil
 	}
 	// Existing storage ignores create geometry; admission precedes all fresh sidecars.
@@ -864,13 +875,6 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	// Headroom before any sidecar: a refused create leaves nothing behind.
 	if err := p.refuseCreateWithoutHeadroom(volumeID); err != nil {
 		return nil, err
-	}
-	if p.cfg.Impl == ImplWALStoreChunk {
-		// Durable before the volume file exists: a crash anywhere between
-		// here and the first successful attach leaves a fresh volume.
-		if err := writeChunkFreshMarker(path); err != nil {
-			return nil, err
-		}
 	}
 	impl := p.cfg.Impl
 	if impl == ImplAuto {
@@ -963,7 +967,7 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 		// Zero (pre-G6 default) preserves strict checkpoint-driven
 		// recycle.
 		// Defer before Recover can publish a completed BASE away.
-		if impl == ImplWALStoreChunk && p.cfg.ChunkRemoteFor != nil {
+		if impl == ImplWALStoreChunk {
 			ws.DeferBaseRetirementV3()
 		}
 		if p.cfg.WALRetentionLSNs > 0 {
@@ -1015,9 +1019,15 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 		if err != nil {
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)
 		}
+		if impl == ImplWALStoreChunk {
+			if err := initializeLayoutRoot(ws); err != nil {
+				_ = ws.Close()
+				return nil, err
+			}
+		}
 		// G6 §1.A α (see openExisting comment for semantics).
 		// Defer before Recover can publish a completed BASE away.
-		if impl == ImplWALStoreChunk && p.cfg.ChunkRemoteFor != nil {
+		if impl == ImplWALStoreChunk {
 			ws.DeferBaseRetirementV3()
 		}
 		if p.cfg.WALRetentionLSNs > 0 {
@@ -1207,4 +1217,3 @@ func chunkSidecars(path string) ([]string, error) {
 
 // Compile-time check.
 var _ frontend.Provider = (*DurableProvider)(nil)
-

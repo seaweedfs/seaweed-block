@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -43,7 +44,12 @@ func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error)
 	h.startupEnded = gen
 	h.startupSuperseded = errors.Is(cause, errChunkForeignClaim)
 	h.startupCure = ""
-	if errors.Is(cause, ErrChunkStaleLocalRoot) {
+	switch {
+	case errors.Is(cause, layout.ErrStaleLocalRoot):
+		h.startupCure = layout.StaleLocalRootCure
+	case errors.Is(cause, layout.ErrMissingLocalRoot):
+		h.startupCure = layout.MissingLocalRootCure
+	case errors.Is(cause, ErrChunkStaleLocalRoot):
 		h.startupCure = ChunkStaleLocalRootCure
 	}
 	select {

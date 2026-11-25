@@ -470,6 +470,9 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 }
 
 func (s *WALStore) WriteContext(ctx context.Context, lba uint32, data []byte) (uint64, error) {
+	if v := s.v3; v != nil && v.layoutFresh.Load() {
+		return 0, ErrLayoutFresh
+	}
 	deadline := s.writeAdmissionDeadline(ctx)
 	if err := s.acquireWriteLock(ctx, deadline, s.captureMu.TryRLock, s.captureMu.RLock); err != nil {
 		return 0, err
@@ -566,6 +569,9 @@ func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error
 }
 
 func (s *WALStore) WriteBatchContext(ctx context.Context, startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	if v := s.v3; v != nil && v.layoutFresh.Load() {
+		return nil, ErrLayoutFresh
+	}
 	deadline := s.writeAdmissionDeadline(ctx)
 	if err := s.acquireWriteLock(ctx, deadline, s.captureMu.TryRLock, s.captureMu.RLock); err != nil {
 		return nil, err
@@ -881,6 +887,16 @@ func (s *WALStore) NumBlocks() uint32 {
 
 // BlockSize returns the IO unit size in bytes.
 func (s *WALStore) BlockSize() int { return int(s.sb.BlockSize) }
+
+// ChunkBlocks is the immutable chunk-map shape stored with this local root.
+func (s *WALStore) ChunkBlocks() uint64 {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.v3 == nil || s.v3.ownedMap == nil {
+		return 0
+	}
+	return s.v3.ownedMap.chunkBlocks
+}
 
 // SetRecoveryRetentionLSNs configures the WAL retention window past
 // checkpointLSN. After this is set, the recovery scan accepts

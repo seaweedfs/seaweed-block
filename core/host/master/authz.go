@@ -16,6 +16,10 @@ import (
 // move's admin check is MoveWorkspace's (auth.RequireRole). A method missing
 // here is refused (TestMasterAuthorizationTableCoversEveryMethod).
 var masterRules = map[string]auth.Rule{
+	control.LifecycleService_GetVolume_FullMethodName:              {Min: auth.RoleViewer},
+	control.LifecycleService_ReserveVolumeDeletion_FullMethodName:  {Min: auth.RoleAdmin, Strict: true},
+	control.LifecycleService_CheckVolumeNoLiveLease_FullMethodName: {Min: auth.RoleViewer},
+
 	control.ObservationService_ReportHeartbeat_FullMethodName:    {Node: true},
 	control.ObservationService_ReportClusterEvent_FullMethodName: {Min: auth.RoleOperator},
 

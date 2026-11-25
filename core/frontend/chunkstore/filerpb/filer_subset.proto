@@ -59,10 +59,12 @@ message Entry {
     bytes content = 9; // if not empty, the file content
 }
 
-// Only file_id is modelled: chunkstore never writes chunks, and reads them
-// only to refuse a HEAD entry that carries any.
+// A layout object is one ordinary filer file backed by one complete needle.
+// These field numbers match SeaweedFS's FileChunk.
 message FileChunk {
     string file_id = 1;
+    int64 offset = 2;
+    uint64 size = 3;
 }
 
 message FuseAttributes {

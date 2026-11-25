@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
 )
 
 // ErrMissing reports an object a root reaches that is not in the store: a
@@ -87,6 +88,64 @@ type Image struct {
 	root Root
 }
 
+// ReadRef reads the chunk ref names from the pool of its owner's
+// directory (VolumeDir of its owner name and id), after checking that
+// directory's VOLUME id is the reference's (ErrIdentity otherwise); the
+// bytes are checked against the name. A missing chunk is ErrMissing.
+func (r *Reader) ReadRef(ctx context.Context, ref Ref) ([]byte, error) {
+	if err := checkOwner(ref.Owner); err != nil {
+		return nil, err
+	}
+	dir := VolumeDir(ref.Owner, ref.OwnerID)
+	id, err := r.VolumeID(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	if id != ref.OwnerID {
+		return nil, fmt.Errorf("%w: %s names id %s, VOLUME has %s", ErrIdentity, ref.Owner, ref.OwnerID, id)
+	}
+	return r.get(ctx, dir, ref.Chunk.Path(), ref.Chunk.Hash)
+}
+
+// Shards returns the shards the image's root names, in order.
+func (img *Image) Shards() []uint64 {
+	out := make([]uint64, 0, len(img.root.Segments))
+	for sh := range img.root.Segments {
+		out = append(out, sh)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
+	return out
+}
+
+// AllShards selects every shard in EachRef.
+const AllShards = ^uint64(0)
+
+// EachRef calls fn for every chunk reference root rn names in shard (or in
+// every shard, AllShards), until fn returns false. A root or segment that
+// cannot be read is an error, never a partial walk.
+func (r *Reader) EachRef(ctx context.Context, rn RootName, shard uint64, fn func(index uint64, ref Ref) bool) error {
+	img, err := r.Open(ctx, rn)
+	if err != nil {
+		return err
+	}
+	shards := img.Shards()
+	if shard != AllShards {
+		shards = []uint64{shard}
+	}
+	for _, sh := range shards {
+		seg, _, err := img.Segment(ctx, sh)
+		if err != nil {
+			return err
+		}
+		for idx, ref := range seg.Chunks {
+			if !fn(idx, ref) {
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
 // Open reads and checks the root rn.
 func (r *Reader) Open(ctx context.Context, rn RootName) (*Image, error) {
 	b, err := r.get(ctx, r.vol, rn.Path(), rn.Hash)
@@ -159,17 +218,9 @@ func (img *Image) Chunk(ctx context.Context, index uint64) (Chunk, error) {
 	if zero {
 		return Chunk{Zero: true}, nil
 	}
-	dir := VolumeDir(ref.Owner, ref.OwnerID)
-	id, err := img.r.VolumeID(ctx, dir)
+	b, err := img.r.ReadRef(ctx, ref)
 	if err != nil {
-		return Chunk{}, err
-	}
-	if id != ref.OwnerID {
-		return Chunk{}, fmt.Errorf("%w: chunk %d names %s id %s, VOLUME has %s", ErrIdentity, index, ref.Owner, ref.OwnerID, id)
-	}
-	b, err := img.r.get(ctx, dir, ref.Chunk.Path(), ref.Chunk.Hash)
-	if err != nil {
-		return Chunk{}, err
+		return Chunk{}, fmt.Errorf("chunk %d: %w", index, err)
 	}
 	return Chunk{Ref: ref, Data: b}, nil
 }

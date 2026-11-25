@@ -82,11 +82,19 @@ func (r *crashRemote) Delete(ctx context.Context, key string) error {
 	return r.fakeChunkRemote.Delete(ctx, key)
 }
 
-func (r *crashRemote) PutIntent(ctx context.Context, in chunkIntent) (string, error) {
+func (r *crashRemote) Begin(ctx context.Context) (string, error) {
 	if r.isDead() {
 		return "", errProcessDead
 	}
-	return r.fakeChunkRemote.PutIntent(ctx, in)
+	return r.fakeChunkRemote.Begin(ctx)
+}
+
+// Abort from a dead process never reaches the remote.
+func (r *crashRemote) Abort() {
+	if r.isDead() {
+		return
+	}
+	r.fakeChunkRemote.Abort()
 }
 
 func (r *crashRemote) Get(ctx context.Context, key string) ([]byte, error) {
@@ -101,20 +109,6 @@ func (r *crashRemote) GetHead(ctx context.Context) (chunkHead, error) {
 		return chunkHead{}, errProcessDead
 	}
 	return r.fakeChunkRemote.GetHead(ctx)
-}
-
-func (r *crashRemote) ListIntents(ctx context.Context) ([]chunkIntent, error) {
-	if r.isDead() {
-		return nil, errProcessDead
-	}
-	return r.fakeChunkRemote.ListIntents(ctx)
-}
-
-func (r *crashRemote) DeleteIntent(ctx context.Context, id string) error {
-	if r.isDead() {
-		return errProcessDead
-	}
-	return r.fakeChunkRemote.DeleteIntent(ctx, id)
 }
 
 // cutCrashImage is the volume's content as a byte image.
@@ -240,9 +234,7 @@ func TestChunkCutCrashAtEachStage(t *testing.T) {
 			if !bytes.Equal(f.imageOf(t, final), want) {
 				t.Fatalf("the cut after the restart (gen %d) does not publish the volume as it is", final.Gen)
 			}
-			if intents, err := f.ListIntents(ctx); err == nil {
-				t.Logf("stage %q: HEAD gen %d -> crash -> %d -> %d after the next cut; %d intent(s) left", st.name, old.Gen, head.Gen, final.Gen, len(intents))
-			}
+			t.Logf("stage %q: HEAD gen %d -> crash -> %d -> %d after the next cut; open session %q", st.name, old.Gen, head.Gen, final.Gen, f.openSession())
 		})
 	}
 }

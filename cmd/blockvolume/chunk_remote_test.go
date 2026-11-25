@@ -10,6 +10,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 )
 
@@ -120,73 +121,53 @@ func TestChunkVolumeRootStaysInsideBase(t *testing.T) {
 // Before any local store is created, a geometry flag that disagrees with the
 // volume record is refused with a line naming both (78); a record the filer
 // could not deliver is refused as retryable (75), never taken as "absent";
-// a record that is there but does not decode is refused for good (78); a matching
-// record, a missing record (the attach check creates it) and an existing
-// store (no create geometry) are not refused.
+// a record that is there but does not decode is refused for good (78);
+// a missing record is also refused (78), while matching geometry proceeds.
 func TestGeometryFlagsRefusalComparesTheRecord(t *testing.T) {
 	ctx := context.Background()
-	cat, err := chunkstore.NewCatalog(chunkstore.NewMemFiler(), defaultChunkPath)
+
+	id, err := layout.NewVolumeID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, code := geometryFlagsRefusal(ctx, cat, "v1", 32768, 4096); got != "" || code != 0 {
-		t.Fatalf("no record yet: %q, %d", got, code)
-	}
-	if _, err := cat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
-		t.Fatal(err)
-	}
-	if got, code := geometryFlagsRefusal(ctx, cat, "v1", 65536, 4096); got != "" || code != 0 {
-		t.Fatalf("matching flags refused: %q, %d", got, code)
-	}
-	for _, c := range []struct {
-		blocks uint64
-		size   uint32
-	}{{32768, 4096}, {65536, 512}} {
-		got, code := geometryFlagsRefusal(ctx, cat, "v1", c.blocks, c.size)
-		if code != exitGeometryRefused {
-			t.Fatalf("flags %d x %d: exit %d, want %d", c.blocks, c.size, code, exitGeometryRefused)
-		}
-		for _, want := range []string{"geometry_mismatch", "--durable-blocks", "65536 blocks of 4096 bytes"} {
-			if !strings.Contains(got, want) {
-				t.Fatalf("flags %d x %d: refusal %q lacks %q", c.blocks, c.size, got, want)
-			}
-		}
-	}
-	if got, code := geometryFlagsRefusal(ctx, cat, "v1", 0, 0); got != "" || code != 0 {
-		t.Fatalf("an existing store (no create geometry) must not be refused: %q, %d", got, code)
-	}
-	// An unreadable record: the same valid volume over a filer whose
-	// lookups fail. The record is read, fails, and the start is refused as
-	// retryable before anything is created.
-	failing := &lookupFailFiler{MemFiler: chunkstore.NewMemFiler()}
-	failCat, err := chunkstore.NewCatalog(failing, defaultChunkPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := failCat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
-		t.Fatal(err)
-	}
-	failing.fail, failing.reads = true, 0
-	for _, blocks := range []uint64{32768, 65536} { // a wrong and a right flag alike
-		got, code := geometryFlagsRefusal(ctx, failCat, "v1", blocks, 4096)
-		if code != exitWorkspaceRetry || !strings.Contains(got, "the volume record of v1 could not be read") || !strings.Contains(got, "no local store was created; retrying") {
-			t.Fatalf("--durable-blocks %d over an unreadable record: %q, exit %d; want a retryable refusal (%d)", blocks, got, code, exitWorkspaceRetry)
-		}
-	}
-	if failing.reads == 0 {
-		t.Fatal("the unreadable-record case never read the record")
-	}
-	// A record that is there but does not decode: a permanent refusal
-	// (78), not a retry loop, for a wrong and a right flag alike.
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
 	mem := chunkstore.NewMemFiler()
-	corruptCat, err := chunkstore.NewCatalog(mem, defaultChunkPath)
+	blobs := &maintenanceBlobs{d: map[string][]byte{}}
+	cat, err := chunkstore.NewBCatalog(mem, blobs, defaultChunkPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := corruptCat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 32768, 4096, 1024); code != exitGeometryRefused || !strings.Contains(got, "not created in the store") {
+		t.Fatal("missing VOLUME must refuse attach", got, code)
+	}
+	g := layout.Geometry{SizeBytes: 65536 * 4096, BlockSize: 4096, ChunkBytes: 1024 * 4096}
+	if _, err := cat.CreateVolume(ctx, ref, g); err != nil {
 		t.Fatal(err)
 	}
-	dir := path.Join(defaultChunkPath, "v1")
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 65536, 4096, 1024); got != "" || code != 0 {
+		t.Fatal(got, code)
+	}
+	for _, g := range []struct {
+		blocks      uint64
+		size, chunk uint32
+	}{{32768, 4096, 1024}, {65536, 512, 1024}, {65536, 4096, 512}} {
+		got, code := geometryFlagsRefusal(ctx, cat, ref, g.blocks, g.size, g.chunk)
+		if code != exitGeometryRefused || !strings.Contains(got, "geometry_mismatch") || !strings.Contains(got, "65536 blocks of 4096 bytes") {
+			t.Fatalf("mismatch: %q %d", got, code)
+		}
+	}
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 0, 0, 0); got != "" || code != 0 {
+		t.Fatal(got, code)
+	}
+	failing := &lookupFailFiler{MemFiler: mem, fail: true}
+	failCat, err := chunkstore.NewBCatalog(failing, blobs, defaultChunkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, code := geometryFlagsRefusal(ctx, failCat, ref, 65536, 4096, 1024); code != exitWorkspaceRetry || !strings.Contains(got, "could not be read") || failing.reads == 0 {
+		t.Fatal(got, code, failing.reads)
+	}
+	dir := path.Join(defaultChunkPath, ref.Dir())
 	e, err := mem.LookupEntry(ctx, dir, "VOLUME")
 	if err != nil {
 		t.Fatal(err)
@@ -195,12 +176,10 @@ func TestGeometryFlagsRefusalComparesTheRecord(t *testing.T) {
 	if err := mem.UpdateEntry(ctx, dir, e, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, blocks := range []uint64{32768, 65536} {
-		got, code := geometryFlagsRefusal(ctx, corruptCat, "v1", blocks, 4096)
-		if code != exitGeometryRefused || !strings.Contains(got, "the volume record of v1 is unreadable (corrupt:") || !strings.Contains(got, "no local store was created") {
-			t.Fatalf("--durable-blocks %d over a corrupt record: %q, exit %d; want a permanent refusal (%d)", blocks, got, code, exitGeometryRefused)
-		}
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 65536, 4096, 1024); code != exitGeometryRefused || !strings.Contains(got, "unreadable (corrupt:") {
+		t.Fatal(got, code)
 	}
+
 }
 
 // lookupFailFiler is a MemFiler whose LookupEntry fails once fail is set; it
@@ -219,32 +198,54 @@ func (f *lookupFailFiler) LookupEntry(ctx context.Context, dir, name string) (*f
 	return f.MemFiler.LookupEntry(ctx, dir, name)
 }
 
-// The attach check is the VOLUME entry's attach rules (B9 W2 §4.2): the first
-// attach creates VOLUME from the local geometry, a later attach with the same
-// geometry passes, and another geometry is refused.
+// Attach only reads the master's identified VOLUME and HEAD.
 func TestChunkAttachCheckAppliesVolumeRules(t *testing.T) {
 	ctx := context.Background()
-	cat, err := chunkstore.NewCatalog(chunkstore.NewMemFiler(), defaultChunkPath)
+	f := &layoutAttachFiler{MemFiler: chunkstore.NewMemFiler()}
+	cat, err := chunkstore.NewBCatalog(f, f, defaultChunkPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check := chunkAttachCheck(cat)
+	id, _ := layout.ParseVolumeID("00112233445566778899aabbccddeeff")
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
+	check := chunkAttachCheck(cat, ref)
 	g := durable.ChunkGeometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}
-	if err := check(ctx, "v1", g); err != nil {
-		t.Fatalf("first attach: %v", err)
+	if err := check(ctx, "v1", g); !errors.Is(err, layout.ErrMissing) {
+		t.Fatal("attach created a missing volume", err)
 	}
-	v, ok, err := cat.ReadVolume(ctx, "v1")
-	if err != nil || !ok || v.Origin != chunkstore.OriginCreate || v.Geometry != (chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}) {
-		t.Fatalf("VOLUME after the first attach: %+v ok=%v %v", v, ok, err)
+	if _, found, err := cat.ReadHead(ctx, ref); err != nil || found {
+		t.Fatal("attach created a missing HEAD", found, err)
 	}
-	if err := check(ctx, "v1", g); err != nil {
-		t.Fatalf("attach with the same geometry: %v", err)
+	if _, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 8 * 4096}); err != nil {
+		t.Fatal(err)
 	}
-	other := g
-	other.NumBlocks = 128
-	if err := check(ctx, "v1", other); chunkstore.CodeOf(err) != chunkstore.CodeGeometryMismatch {
-		t.Fatalf("attach with another geometry: %v, want geometry_mismatch", err)
+	for i := 0; i < 2; i++ {
+		if err := check(ctx, "v1", g); err != nil {
+			t.Fatal(err)
+		}
 	}
+	h, found, err := cat.ReadHead(ctx, ref)
+	if err != nil || !found || h.VolumeID != id || h.Epoch != 0 || h.Holder != "" || h.Current != nil {
+		t.Fatalf("unclaimed HEAD: %+v %v", h, err)
+	}
+	if err := check(ctx, "other", g); !errors.Is(err, layout.ErrIdentity) {
+		t.Fatalf("wrong name: %v", err)
+	}
+	if err := chunkAttachCheck(cat, chunkstore.VolumeRef{Name: "v1"})(ctx, "v1", g); !errors.Is(err, layout.ErrIdentity) {
+		t.Fatalf("missing master id: %v", err)
+	}
+	if found, err := f.LookupEntry(ctx, defaultChunkPath+"/v1", "VOLUME"); err == nil || found != nil {
+		t.Fatalf("legacy directory created: %v", err)
+	}
+}
+
+type layoutAttachFiler struct{ *chunkstore.MemFiler }
+
+func (*layoutAttachFiler) Put(context.Context, []byte) (string, error) {
+	return "", errors.New("attach must not upload data")
+}
+func (*layoutAttachFiler) Get(context.Context, string) ([]byte, error) {
+	return nil, errors.New("attach must not read data")
 }
 
 // HEAD names a host as <server-id>/<replica-id>: two servers serving the same

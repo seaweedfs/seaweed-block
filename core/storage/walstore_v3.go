@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // Impl-3 internals of the real WALStore (format bump v3, DESIGN r15
@@ -25,7 +26,10 @@ import (
 // migration tool or restore into a newly created volume. BASE mutations use
 // install handles; raw extent writes and frontier jumps remain refused.
 type walStoreV3State struct {
-	pub        *descriptorPublisherV3
+	// layoutFresh mirrors the descriptor's layout identity: set while the
+	// local root is fresh, when no guest write may be acknowledged.
+	layoutFresh atomic.Bool
+	pub         *descriptorPublisherV3
 	w          *walWriterV3
 	ownedMap   *chunkLSNMapV3
 	mapEntries []chunkLSNEntryV3 // guarded by WALStore.mu; UNKNOWN is never cleared here
@@ -409,6 +413,7 @@ func openWALStoreV3File(path string, f *os.File, requireMap bool, opts WALStoreO
 	}
 	s, err := openInitializedV3(path, f, &sb, metadata, func(s *WALStore) error {
 		v := &walStoreV3State{}
+		v.layoutFresh.Store(d.LayoutSet && d.LayoutFresh)
 		v.pub = newDescriptorPublisherV3(d, id, other, descriptorIOV3{
 			writeSlot: func(off int64, buf []byte) error {
 				if h := s.v3.testBeforeSlotWrite; h != nil {
@@ -904,6 +909,55 @@ func (s *WALStore) refreshW() error {
 	}
 	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = wack; return nil })
 	return err
+}
+
+// ErrLayoutFresh: a guest write to a local root still marked fresh (no
+// acknowledged write and no durable base yet). The start clears fresh
+// before it serves: after the base on a restore, right after the claim
+// when there is nothing to restore.
+var ErrLayoutFresh = errors.New("storage: the local root is still fresh; a guest write is refused until it is not")
+
+// SetLayoutIdentity records this local root's layout identity: the claim
+// id its marker carries and whether it is still fresh. It is one atomic
+// descriptor publication, durable when it returns; a start calls it before
+// any claim, and again with fresh = false once the root may hold an
+// acknowledged write. The claim id never changes once set, and fresh
+// never comes back.
+func (s *WALStore) SetLayoutIdentity(claimID string, fresh bool) error {
+	v := s.v3
+	if v == nil {
+		return errV3NotYet
+	}
+	if claimID == "" || len(claimID) > MaxLayoutClaimIDBytes || !utf8.ValidString(claimID) {
+		return fmt.Errorf("storage: layout claim id %q: 1-%d bytes of UTF-8", claimID, MaxLayoutClaimIDBytes)
+	}
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
+		if n.LayoutSet && n.LayoutClaimID != claimID {
+			return fmt.Errorf("storage: the local root carries claim id %q; it never changes (to %q)", n.LayoutClaimID, claimID)
+		}
+		if n.LayoutSet && !n.LayoutFresh && fresh {
+			return errors.New("storage: the local root is no longer fresh; it never becomes fresh again")
+		}
+		n.LayoutSet, n.LayoutFresh, n.LayoutClaimID = true, fresh, claimID
+		return nil
+	})
+	if err == nil {
+		v.layoutFresh.Store(fresh)
+	}
+	return err
+}
+
+// LayoutIdentity returns this local root's layout identity (ok false when
+// none was ever recorded).
+func (s *WALStore) LayoutIdentity() (claimID string, fresh bool, ok bool) {
+	v := s.v3
+	if v == nil {
+		return "", false, false
+	}
+	d := v.pub.current()
+	return d.LayoutClaimID, d.LayoutFresh, d.LayoutSet
 }
 
 // SetWMode changes the W mode (DESIGN 6.4). It runs a Sync first, so every

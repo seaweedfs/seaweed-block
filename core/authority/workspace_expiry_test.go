@@ -21,7 +21,7 @@ func TestWorkspaceExpiredLeaseCannotAcknowledgeCLEAN(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(2 * time.Second)
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7}); err == nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7, Holder: "host/r", RemoteLSN: 42}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "host/r", RemoteLSN: 42}); err == nil {
 		t.Fatal("expired lease recorded a CLEAN revocation ACK")
 	}
 	if p.WorkspaceState("v").Ack != nil {

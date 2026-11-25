@@ -11,6 +11,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/auth"
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -69,17 +70,132 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	if stores.Deletions.Reserved(spec.VolumeID) {
 		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
 	}
+	// A retry may carry a different restore tuple. The target's durable
+	// binding decides that conflict before looking up the caller's new source
+	// snapshot, which might itself be absent.
+	if existing, ok := stores.Volumes.GetVolume(spec.VolumeID); ok &&
+		(existing.Spec.SourceVolume != spec.SourceVolume || existing.Spec.SourceSnapshot != spec.SourceSnapshot || existing.Spec.CreateRequestID != spec.CreateRequestID) {
+		return nil, status.Errorf(codes.AlreadyExists, "create volume: %s is bound to another restore request", spec.VolumeID)
+	}
+	if spec.SourceVolume != "" || spec.SourceSnapshot != "" || spec.CreateRequestID != "" {
+		if spec.SourceVolume == "" || spec.SourceSnapshot == "" || spec.CreateRequestID == "" || spec.SourceVolume == spec.VolumeID {
+			return nil, status.Error(codes.InvalidArgument, "restore needs a distinct source volume, snapshot and request id")
+		}
+		source, ok := stores.Volumes.GetVolume(spec.SourceVolume)
+		if !ok || !source.StoreReady {
+			return nil, status.Errorf(codes.FailedPrecondition, "restore source %q is not store-ready", spec.SourceVolume)
+		}
+		if source.Spec.ReplicationFactor != 1 || spec.ReplicationFactor > 1 {
+			return nil, status.Error(codes.FailedPrecondition, "restore of an RF>1 volume is not supported")
+		}
+		if s.host.cfg.LayoutReadVolume == nil || s.host.cfg.LayoutReadHead == nil || s.host.cfg.LayoutCreateTarget == nil {
+			return nil, status.Error(codes.FailedPrecondition, "master has no restore store")
+		}
+		v, err := s.host.cfg.LayoutReadVolume(ctx, source.Spec)
+		if err != nil {
+			return nil, status.Errorf(codes.Unavailable, "read restore source VOLUME: %v", err)
+		}
+		id, err := layout.ParseVolumeID(source.Spec.LayoutID)
+		if err != nil || v.ID != id || v.Name != source.Spec.VolumeID || v.CheckIdentity() != nil || v.Geometry.Check() != nil {
+			return nil, status.Error(codes.FailedPrecondition, "restore source VOLUME identity or geometry is invalid")
+		}
+		head, err := s.host.cfg.LayoutReadHead(ctx, source.Spec)
+		if err != nil {
+			if errors.Is(err, layout.ErrHeadAbsent) || errors.Is(err, layout.ErrVolumeDeleting) {
+				return nil, status.Errorf(codes.FailedPrecondition, "restore source HEAD is unavailable: %v", err)
+			}
+			return nil, status.Errorf(codes.Unavailable, "read restore source HEAD: %v", err)
+		}
+		if head.VolumeID != id || head.State != layout.StateLive && head.State != layout.StateDetached {
+			return nil, status.Error(codes.FailedPrecondition, "restore source HEAD is absent, foreign or not live/detached")
+		}
+		if _, ok := head.Snapshots[spec.SourceSnapshot]; !ok {
+			return nil, status.Errorf(codes.NotFound, "restore source snapshot %q is absent", spec.SourceSnapshot)
+		}
+		spec.SourceLayoutID = source.Spec.LayoutID
+		if (spec.SizeBytes != 0 && spec.SizeBytes != v.Geometry.SizeBytes) || (spec.BlockSize != 0 && spec.BlockSize != v.Geometry.BlockSize) || (spec.ChunkBytes != 0 && spec.ChunkBytes != v.Geometry.ChunkBytes) {
+			return nil, status.Error(codes.InvalidArgument, "restore target geometry must match source VOLUME")
+		}
+		spec.SizeBytes, spec.BlockSize, spec.ChunkBytes = v.Geometry.SizeBytes, v.Geometry.BlockSize, v.Geometry.ChunkBytes
+		if spec.ReplicationFactor == 0 {
+			spec.ReplicationFactor = source.Spec.ReplicationFactor
+		}
+		if spec.Protocol == "" {
+			spec.Protocol = source.Spec.Protocol
+		}
+		if spec.FrontendTransport == "" {
+			spec.FrontendTransport = source.Spec.FrontendTransport
+		}
+	}
 	if createVolumeHook != nil {
 		createVolumeHook(spec.VolumeID)
 	}
 	s.host.log.Printf("blockmaster: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
-	rec, err := stores.Volumes.CreateVolume(spec)
+	rec, err := s.host.createLifecycleVolume(ctx, spec)
 	if err != nil {
+		if errors.Is(err, layout.ErrNoSnapshot) {
+			return nil, status.Errorf(codes.NotFound, "restore snapshot: %v", err)
+		}
+		if errors.Is(err, layout.ErrForeignSource) || errors.Is(err, layout.ErrVolumeDeleting) || errors.Is(err, layout.ErrExists) {
+			return nil, status.Errorf(codes.FailedPrecondition, "restore target: %v", err)
+		}
+		if errors.Is(err, errLayoutStoreNotReady) {
+			return nil, status.Errorf(codes.Unavailable, "create volume: created, store not ready; retry: %v", err)
+		}
 		return nil, lifecycleError("create volume", err)
+	}
+	return lifecycleVolumeResponse(rec)
+}
+
+var errLayoutStoreNotReady = errors.New("layout store not ready")
+
+// createLifecycleVolume is called under workspaceMu. A failed filer create
+// leaves the durable record not-ready; replay uses its same identity and
+// completes VOLUME/HEAD before publishing the one-way placement hint.
+func (h *Host) createLifecycleVolume(ctx context.Context, spec lifecycle.VolumeSpec) (lifecycle.VolumeRecord, error) {
+	rec, err := h.lifecycle.Volumes.CreateVolume(spec)
+	if err != nil {
+		return lifecycle.VolumeRecord{}, err
+	}
+	if h.cfg.LayoutCreateVolume == nil && rec.Spec.SourceVolume == "" {
+		if h.cfg.WorkspaceRPC {
+			return lifecycle.VolumeRecord{}, fmt.Errorf("%w: master has no filer writer", errLayoutStoreNotReady)
+		}
+		return rec, nil
+	}
+	if rec.StoreReady {
+		// A missing HEAD after the volume was made ready is damage, not a
+		// half-finished create. Start checks the filer and refuses it; a
+		// CreateVolume replay must never seed an empty HEAD over its lineage.
+		return rec, nil
+	}
+	var createErr error
+	if rec.Spec.SourceVolume != "" {
+		source, ok := h.lifecycle.Volumes.GetVolume(rec.Spec.SourceVolume)
+		if !ok || source.Spec.LayoutID != rec.Spec.SourceLayoutID || h.cfg.LayoutCreateTarget == nil {
+			return lifecycle.VolumeRecord{}, fmt.Errorf("%w: restore source or target creator is unavailable", errLayoutStoreNotReady)
+		}
+		createErr = h.cfg.LayoutCreateTarget(ctx, source.Spec, rec.Spec, rec.Spec.SourceSnapshot)
+	} else {
+		createErr = h.cfg.LayoutCreateVolume(ctx, rec.Spec)
+	}
+	if createErr != nil {
+		return lifecycle.VolumeRecord{}, fmt.Errorf("%w: %w", errLayoutStoreNotReady, createErr)
+	}
+	return h.lifecycle.Volumes.MarkStoreReady(rec.Spec.VolumeID, rec.Spec.LayoutID)
+}
+
+func lifecycleVolumeResponse(rec lifecycle.VolumeRecord) (*control.CreateVolumeResponse, error) {
+	if rec.Spec.LayoutID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "volume has no layout identity; recreate the legacy volume")
 	}
 	return &control.CreateVolumeResponse{
 		VolumeId:          rec.Spec.VolumeID,
+		LayoutId:          rec.Spec.LayoutID,
 		SizeBytes:         rec.Spec.SizeBytes,
+		BlockSize:         rec.Spec.BlockSize,
+		ChunkBytes:        rec.Spec.ChunkBytes,
+		StoreReady:        rec.StoreReady,
 		ReplicationFactor: int32(rec.Spec.ReplicationFactor),
 		Protocol:          rec.Spec.Protocol,
 		FrontendTransport: rec.Spec.FrontendTransport,
@@ -88,6 +204,26 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		PvcUid:            rec.Spec.PVCUID,
 		PvName:            rec.Spec.PVName,
 	}, nil
+}
+
+// GetVolume resolves a name using durable lifecycle intent only. It never
+// creates a record or infers an identity from the filer or an assignment.
+func (s *services) GetVolume(ctx context.Context, req *control.GetLifecycleVolumeRequest) (*control.CreateVolumeResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+	stores := s.host.Lifecycle()
+	if stores == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
+	}
+	rec, ok := stores.Volumes.GetVolume(req.GetVolumeId())
+	if !ok {
+		return nil, status.Error(codes.NotFound, "volume not found")
+	}
+	return lifecycleVolumeResponse(rec)
 }
 
 func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRequest) (*control.DeleteVolumeResponse, error) {
@@ -206,7 +342,7 @@ func (h *Host) ImportLifecycleVolume(spec lifecycle.VolumeSpec) (imported bool, 
 	if stores.Deletions.Reserved(spec.VolumeID) {
 		return false, nil
 	}
-	if _, err := stores.Volumes.CreateVolume(spec); err != nil {
+	if _, err := h.createLifecycleVolume(context.Background(), spec); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -349,6 +485,8 @@ func lifecycleSpecFromWire(req *control.CreateVolumeRequest) lifecycle.VolumeSpe
 	return lifecycle.VolumeSpec{
 		VolumeID:          req.GetVolumeId(),
 		SizeBytes:         req.GetSizeBytes(),
+		BlockSize:         req.GetBlockSize(),
+		ChunkBytes:        req.GetChunkBytes(),
 		ReplicationFactor: int(req.GetReplicationFactor()),
 		Protocol:          req.GetProtocol(),
 		FrontendTransport: req.GetFrontendTransport(),
@@ -356,6 +494,9 @@ func lifecycleSpecFromWire(req *control.CreateVolumeRequest) lifecycle.VolumeSpe
 		PVCNamespace:      req.GetPvcNamespace(),
 		PVCUID:            req.GetPvcUid(),
 		PVName:            req.GetPvName(),
+		SourceVolume:      req.GetSourceVolume(),
+		SourceSnapshot:    req.GetSourceSnapshot(),
+		CreateRequestID:   req.GetCreateRequestId(),
 	}
 }
 
@@ -477,7 +618,9 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 		lastEpoch uint64
 		lastEV    uint64
 		sentAny   bool
-		lastInfo  adapter.AssignmentInfo
+		// current rebuilds the fact of the last line sent (no local copy of
+		// the assignment: only the publisher mints one).
+		current func() *control.AssignmentFact
 	)
 	// A change of the volume's store record re-sends the current fact: its
 	// descriptors carry the recorded stores (the same generation; the
@@ -492,8 +635,8 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 			return nil
 		case <-storesChanged:
 			storesChanged = s.host.attest.watch(req.VolumeId)
-			if sentAny {
-				if err := stream.Send(s.assignmentFact(lastInfo)); err != nil {
+			if current != nil {
+				if err := stream.Send(current()); err != nil {
 					return err
 				}
 			}
@@ -530,7 +673,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 
 			lastEpoch = info.Epoch
 			lastEV = info.EndpointVersion
-			lastInfo = info
+			current = func() *control.AssignmentFact { return s.assignmentFact(info) }
 			sentAny = true
 			fact := s.assignmentFact(info)
 			if err := stream.Send(fact); err != nil {

@@ -27,7 +27,7 @@ import (
 // holder; the old host, still reporting the replica id with a newer observation, wins none of them.
 func TestDisplayedPrimaryIsTheIssuedHolderNotThePlacementSlot(t *testing.T) {
 	heads := map[string]authority.WorkspaceHead{"a2": {Gen: 9, Epoch: 1, Holder: "node-b/r1", RemoteLSN: 42, Detached: true}}
-	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true,
+	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume,
 		WorkspaceHeadReader: func(_ context.Context, v string) (authority.WorkspaceHead, error) { return heads[v], nil }})
 	if err != nil {
 		t.Fatal(err)

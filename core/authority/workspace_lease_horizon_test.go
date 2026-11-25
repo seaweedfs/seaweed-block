@@ -178,7 +178,7 @@ func TestWorkspaceLeaseViewMatchesDeriveAfterEveryWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("revocation")
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7}); err != nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7, Holder: "old/r", RemoteLSN: 42}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "old/r", RemoteLSN: 42}); err != nil {
 		t.Fatal(err)
 	}
 	check("ack")
@@ -878,7 +878,7 @@ func TestWorkspaceLeaseConcurrentRenewalsWritersExtendersClose(t *testing.T) {
 			writersDone <- fmt.Errorf("revocation: %w", err)
 			return
 		}
-		err := p.AckWorkspaceRevocation(ctx, vol(cleanVol), WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7})
+		err := p.AckWorkspaceRevocation(ctx, vol(cleanVol), WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7, Holder: "old/r", RemoteLSN: 42}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "old/r", RemoteLSN: 42})
 		clock.Resume()
 		if err != nil {
 			writersDone <- fmt.Errorf("ack: %w", err)

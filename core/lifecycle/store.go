@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/geometry"
 )
 
@@ -34,8 +35,17 @@ var volumeIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // VolumeSpec is the product-level desired volume shape. It carries no
 // authority lineage and no placement decision.
 type VolumeSpec struct {
-	VolumeID          string `json:"volume_id"`
-	SizeBytes         uint64 `json:"size_bytes"`
+	VolumeID   string `json:"volume_id"`
+	LayoutID   string `json:"layout_id,omitempty"`
+	SizeBytes  uint64 `json:"size_bytes"`
+	BlockSize  uint32 `json:"block_size"`
+	ChunkBytes uint64 `json:"chunk_bytes"`
+	// A restore request is bound to one source snapshot before the target's
+	// layout is created. These fields never change on a replay.
+	SourceVolume      string `json:"source_volume,omitempty"`
+	SourceLayoutID    string `json:"source_layout_id,omitempty"`
+	SourceSnapshot    string `json:"source_snapshot,omitempty"`
+	CreateRequestID   string `json:"create_request_id,omitempty"`
 	ReplicationFactor int    `json:"replication_factor"`
 	Protocol          string `json:"protocol,omitempty"`
 	FrontendTransport string `json:"frontend_transport,omitempty"`
@@ -49,6 +59,10 @@ type VolumeSpec struct {
 type VolumeRecord struct {
 	Spec       VolumeSpec `json:"spec"`
 	AttachedTo string     `json:"attached_to,omitempty"`
+	// StoreReady is a one-way placement hint, set only after the matching
+	// VOLUME and unclaimed HEAD have been created in the filer. Start still
+	// checks those records independently before serving.
+	StoreReady bool `json:"store_ready,omitempty"`
 }
 
 // FileStore persists one JSON record per volume ID.
@@ -121,12 +135,15 @@ func OpenFileStore(dir string) (*FileStore, error) {
 // idempotent; changing a previously-created spec is rejected.
 func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	spec = normalizeVolumeSpec(spec)
-	if err := validateSpec(spec); err != nil {
-		return VolumeRecord{}, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.records[spec.VolumeID]; ok {
+		if existing.Spec.SourceVolume != spec.SourceVolume || existing.Spec.SourceLayoutID != spec.SourceLayoutID || existing.Spec.SourceSnapshot != spec.SourceSnapshot || existing.Spec.CreateRequestID != spec.CreateRequestID {
+			return VolumeRecord{}, ErrVolumeConflict
+		}
+		if err := validateSpec(spec); err != nil {
+			return VolumeRecord{}, err
+		}
 		if !volumeSpecsCompatible(existing.Spec, spec) {
 			return VolumeRecord{}, ErrVolumeConflict
 		}
@@ -145,6 +162,40 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	if err := geometry.ValidateVolumeSize(spec.SizeBytes); err != nil {
 		return VolumeRecord{}, fmt.Errorf("%w: %w", ErrInvalidVolumeSpec, err)
 	}
+	if err := validateSpec(spec); err != nil {
+		return VolumeRecord{}, err
+	}
+	// A previous create may have renamed its complete record but lost the
+	// directory-sync result. Settle that identity instead of minting another.
+	if raw, err := os.ReadFile(s.path(spec.VolumeID)); err == nil {
+		var rec VolumeRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			return VolumeRecord{}, err
+		}
+		if !volumeSpecsCompatible(rec.Spec, spec) {
+			return VolumeRecord{}, ErrVolumeConflict
+		}
+		if _, err := layout.ParseVolumeID(rec.Spec.LayoutID); err != nil {
+			return VolumeRecord{}, fmt.Errorf("%w: existing layout identity: %v; recreate", ErrInvalidVolumeSpec, err)
+		}
+		rec.Spec = mergeVolumeSpecMetadata(rec.Spec, spec)
+		if err := s.putLocked(rec); err != nil {
+			return VolumeRecord{}, err
+		}
+		s.records[spec.VolumeID] = rec
+		s.publishLocked()
+		return rec, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return VolumeRecord{}, err
+	}
+	if spec.LayoutID != "" {
+		return VolumeRecord{}, fmt.Errorf("%w: layout_id is minted by the master", ErrInvalidVolumeSpec)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		return VolumeRecord{}, err
+	}
+	spec.LayoutID = id.String()
 	rec := VolumeRecord{Spec: spec}
 	if err := s.putLocked(rec); err != nil {
 		return VolumeRecord{}, err
@@ -154,11 +205,43 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	return rec, nil
 }
 
+// MarkStoreReady publishes the durable placement hint after the filer has
+// accepted both exclusive creates. A retry of the same create may repeat it;
+// another layout identity may not mark this record ready.
+func (s *FileStore) MarkStoreReady(volumeID, layoutID string) (VolumeRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[volumeID]
+	if !ok {
+		return VolumeRecord{}, ErrVolumeNotFound
+	}
+	if rec.Spec.LayoutID != layoutID {
+		return VolumeRecord{}, ErrVolumeConflict
+	}
+	if rec.StoreReady {
+		return rec, nil
+	}
+	rec.StoreReady = true
+	if err := s.putLocked(rec); err != nil {
+		return VolumeRecord{}, err
+	}
+	s.records[volumeID] = rec
+	s.publishLocked()
+	return rec, nil
+}
+
 func volumeSpecsCompatible(a, b VolumeSpec) bool {
 	a = normalizeVolumeSpec(a)
 	b = normalizeVolumeSpec(b)
 	return a.VolumeID == b.VolumeID &&
+		(b.LayoutID == "" || a.LayoutID == b.LayoutID) &&
 		a.SizeBytes == b.SizeBytes &&
+		a.BlockSize == b.BlockSize &&
+		a.ChunkBytes == b.ChunkBytes &&
+		a.SourceVolume == b.SourceVolume &&
+		a.SourceLayoutID == b.SourceLayoutID &&
+		a.SourceSnapshot == b.SourceSnapshot &&
+		a.CreateRequestID == b.CreateRequestID &&
 		a.ReplicationFactor == b.ReplicationFactor &&
 		a.Protocol == b.Protocol &&
 		a.FrontendTransport == b.FrontendTransport
@@ -319,8 +402,33 @@ func validateSpec(spec VolumeSpec) error {
 	if err := validateVolumeID(spec.VolumeID); err != nil {
 		return err
 	}
+	if spec.SourceVolume != "" || spec.SourceLayoutID != "" || spec.SourceSnapshot != "" || spec.CreateRequestID != "" {
+		if err := validateVolumeID(spec.SourceVolume); err != nil || spec.SourceSnapshot == "" || spec.CreateRequestID == "" || spec.SourceVolume == spec.VolumeID {
+			return fmt.Errorf("%w: restore needs a distinct source volume, snapshot and request id", ErrInvalidVolumeSpec)
+		}
+		if _, err := layout.ParseVolumeID(spec.SourceLayoutID); err != nil {
+			return fmt.Errorf("%w: restore needs the source layout id: %v", ErrInvalidVolumeSpec, err)
+		}
+		if err := layout.CheckSnapshot(spec.SourceSnapshot, layout.SnapshotMeta{}); err != nil {
+			return fmt.Errorf("%w: restore snapshot: %v", ErrInvalidVolumeSpec, err)
+		}
+		if len(spec.CreateRequestID) > 128 {
+			return fmt.Errorf("%w: restore request id is over 128 bytes", ErrInvalidVolumeSpec)
+		}
+	}
+	if spec.LayoutID != "" {
+		if _, err := layout.ParseVolumeID(spec.LayoutID); err != nil {
+			return fmt.Errorf("%w: layout_id: %v", ErrInvalidVolumeSpec, err)
+		}
+	}
 	if spec.SizeBytes == 0 {
 		return fmt.Errorf("%w: size_bytes must be > 0", ErrInvalidVolumeSpec)
+	}
+	if err := (layout.Geometry{SizeBytes: spec.SizeBytes, BlockSize: spec.BlockSize, ChunkBytes: spec.ChunkBytes}).Check(); err != nil {
+		return fmt.Errorf("%w: geometry: %v", ErrInvalidVolumeSpec, err)
+	}
+	if spec.BlockSize != 4096 || spec.ChunkBytes != 4<<20 {
+		return fmt.Errorf("%w: v1 accepts only block_size=4096 and chunk_bytes=4194304", ErrInvalidVolumeSpec)
 	}
 	if spec.ReplicationFactor <= 0 {
 		return fmt.Errorf("%w: replication_factor must be > 0", ErrInvalidVolumeSpec)
@@ -341,6 +449,12 @@ func validateSpec(spec VolumeSpec) error {
 }
 
 func normalizeVolumeSpec(spec VolumeSpec) VolumeSpec {
+	if spec.BlockSize == 0 {
+		spec.BlockSize = 4096
+	}
+	if spec.ChunkBytes == 0 {
+		spec.ChunkBytes = 4 << 20
+	}
 	if spec.Protocol == "" {
 		spec.Protocol = "iscsi"
 	}
