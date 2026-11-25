@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -28,16 +29,38 @@ import (
 //
 // Keys are layout:<owner>:<owner id>:<chunk name> (ChunkKey), so a key
 // alone resolves the owner's directory and is verified by name.
+// sessionStore is what the remote writes through: HEAD and the objects.
+type sessionStore interface {
+	layout.HeadStore
+	layout.ObjectStore
+}
+
 type LayoutRemote struct {
-	st  *LayoutStore
+	st  sessionStore
 	r   *layout.Reader
 	vol VolumeRef
 	me  layout.HolderID
 
-	mu        sync.Mutex
-	session   string
-	beganFrom uint64 // HEAD generation this session's Begin started from
+	mu      sync.Mutex
+	session string
+	// visible is the HEAD generation the engine sees: it moves with this
+	// remote's commits and with writes of anyone else, never with this
+	// remote's own Begin, Abort or cleaning; ownGen is HEAD's generation
+	// after this remote's last own write.
+	visible, ownGen uint64
+	// abandoned is set by the engine when a cut ends without a commit
+	// (AbortCut): the next call drops the session and the pending name.
+	abandoned atomic.Bool
 	pending   *pendingSnapshot
+	// snapErr is why the last commit could not name its snapshot (the cut
+	// itself committed unnamed); TakeSnapshotErr hands it to the request.
+	snapErr error
+	// cleaning is this process's open cleaning: its session and the way to
+	// end it early, so a cut or a stop never waits on it or fails busy.
+	cleaning    string
+	cleanCancel context.CancelFunc
+	cleanDone   chan struct{}
+	lastCommit  layout.Head
 }
 
 type pendingSnapshot struct {
@@ -48,6 +71,7 @@ type pendingSnapshot struct {
 var (
 	_ storage.ChunkRemote = (*LayoutRemote)(nil)
 	_ storage.ChunkKeyer  = (*LayoutRemote)(nil)
+	_ storage.CutAborter  = (*LayoutRemote)(nil)
 )
 
 // NewLayoutRemote returns the remote of volume v for the holder me (the
@@ -112,6 +136,7 @@ func (l *LayoutRemote) openSessionLocked(ctx context.Context) error {
 	if l.session != "" {
 		return nil
 	}
+	l.stopCleaningLocked()
 	if _, err := l.rollBackLocked(ctx); err != nil {
 		return err
 	}
@@ -124,7 +149,7 @@ func (l *LayoutRemote) openSessionLocked(ctx context.Context) error {
 	if err != nil {
 		return layoutRemoteErr(err)
 	}
-	l.session, l.beganFrom = s, h.Gen-1
+	l.session, l.ownGen = s, h.Gen
 	return nil
 }
 
@@ -139,10 +164,19 @@ func (l *LayoutRemote) rollBackLocked(ctx context.Context) (layout.Head, error) 
 	if !found {
 		return layout.Head{}, layout.ErrHeadAbsent
 	}
-	if h.Activity.Kind == layout.ActSnap && h.Activity.Session != l.session && h.Epoch == l.me.Epoch && h.Holder == l.me.Holder && h.ClaimID == l.me.ClaimID {
+	l.viewLocked(h)
+	mine := h.Epoch == l.me.Epoch && h.Holder == l.me.Holder && h.ClaimID == l.me.ClaimID
+	switch {
+	case mine && h.Activity.Kind == layout.ActSnap && h.Activity.Session != l.session:
 		if h, err = layout.RunAbort(ctx, l.st, l.me, h.Activity.Session); err != nil {
 			return layout.Head{}, layoutRemoteErr(err)
 		}
+		l.ownGen = h.Gen
+	case mine && h.Activity.Kind == layout.ActClean && h.Activity.Session != l.cleaning:
+		if h, err = layout.RunEndClean(ctx, l.st, l.me, h.Activity.Session); err != nil {
+			return layout.Head{}, layoutRemoteErr(err)
+		}
+		l.ownGen = h.Gen
 	}
 	return h, nil
 }
@@ -159,6 +193,7 @@ func (l *LayoutRemote) Put(ctx context.Context, key string, data []byte) error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.takeAbandonLocked()
 	if err := l.openSessionLocked(ctx); err != nil {
 		return err
 	}
@@ -183,6 +218,7 @@ func (l *LayoutRemote) Get(ctx context.Context, key string) ([]byte, error) {
 func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.takeAbandonLocked()
 	h, err := l.rollBackLocked(ctx)
 	if err != nil {
 		return storage.ChunkHead{}, err
@@ -190,11 +226,7 @@ func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	if h.State == layout.StateDeleting || h.State == layout.StateDeleted {
 		return storage.ChunkHead{}, storage.ErrChunkHeadDeleted
 	}
-	gen := h.Gen
-	if l.session != "" && h.Activity == (layout.Activity{Kind: layout.ActSnap, Session: l.session}) {
-		gen = l.beganFrom
-	}
-	out := storage.ChunkHead{Gen: gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, Chunks: map[uint64]storage.ChunkRef{}, State: "active"}
+	out := storage.ChunkHead{Gen: l.visible, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, Chunks: map[uint64]storage.ChunkRef{}, State: "active"}
 	if h.State == layout.StateDetached {
 		out.State = "detached"
 		out.DetachedBy = &storage.ChunkDetachedBy{Holder: h.Holder, Epoch: h.Epoch, Gen: h.Gen}
@@ -239,6 +271,7 @@ func (l *LayoutRemote) manifest(ctx context.Context, rn layout.RootName) (map[ui
 func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.takeAbandonLocked()
 	if expected.Epoch != l.me.Epoch || next.Epoch != l.me.Epoch {
 		return 0, storage.ErrChunkHeadPrecondition
 	}
@@ -249,10 +282,8 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 	if !found {
 		return 0, layout.ErrHeadAbsent
 	}
-	switch {
-	case l.session != "" && h.Activity == (layout.Activity{Kind: layout.ActSnap, Session: l.session}) && l.beganFrom == expected.Gen:
-	case l.session == "" && h.Gen == expected.Gen:
-	default:
+	l.viewLocked(h)
+	if expected.Gen != l.visible {
 		return 0, storage.ErrChunkHeadPrecondition
 	}
 	prev, nextM, err := l.manifests(ctx, h, next)
@@ -273,13 +304,30 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 		req.Snapshot, req.Meta = l.pending.name, l.pending.meta
 	}
 	got, err := layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
+	if err != nil && req.Snapshot != "" && snapshotRefusal(err) {
+		// This snapshot cannot be named; the cut still commits unnamed and
+		// the request gets the typed refusal.
+		l.snapErr, l.pending = err, nil
+		req.Snapshot, req.Meta = "", layout.SnapshotMeta{}
+		got, err = layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
+	}
 	if err != nil {
 		if errors.Is(err, layout.ErrStaleBase) {
 			return 0, storage.ErrChunkHeadPrecondition
 		}
+		if errors.Is(err, layout.ErrNotPrepared) {
+			// An upload of an ended session (a staged pre-copy): forget the
+			// engine's view so its re-read finds a newer generation and
+			// drops what it staged; the retry uploads again.
+			l.ownGen = 0
+			return 0, fmt.Errorf("%w: %w", storage.ErrChunkHeadPrecondition, err)
+		}
+		// An unknown outcome is decided by the engine's next HEAD read,
+		// which also re-derives this session from HEAD (syncSessionLocked).
 		return 0, layoutRemoteErr(err)
 	}
-	l.session, l.beganFrom, l.pending = "", 0, nil
+	l.session, l.pending, l.lastCommit = "", nil, got
+	l.ownGen, l.visible = got.Gen, got.Gen
 	return got.Gen, nil
 }
 
@@ -297,6 +345,9 @@ func (l *LayoutRemote) manifests(ctx context.Context, h layout.Head, next storag
 	}
 	nm := make(map[uint64]layout.Ref, len(next.Chunks))
 	for idx, c := range next.Chunks {
+		if c.Encoding != "full" {
+			return nil, nil, fmt.Errorf("%w: chunk %d encoding %q (only full: the stored bytes are the logical bytes)", ErrUnsupportedEncoding, idx, c.Encoding)
+		}
 		ref, err := ParseLayoutKey(c.Key)
 		if err != nil {
 			return nil, nil, err
@@ -338,6 +389,7 @@ func (l *LayoutRemote) writeRootLocked(ctx context.Context, next map[uint64]layo
 func (l *LayoutRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.takeAbandonLocked()
 	if err := l.openSessionLocked(ctx); err != nil {
 		return "", err
 	}
@@ -351,15 +403,164 @@ func (l *LayoutRemote) ListIntents(context.Context) ([]storage.ChunkIntent, erro
 // Delete is not a removal path on the layout (cleaning removes names).
 func (l *LayoutRemote) Delete(context.Context, string) error { return nil }
 
-// layoutRemoteErr maps a layout precondition to the engine's.
+// ErrUnsupportedEncoding: a chunk encoding other than full (the content
+// name hashes the stored bytes, which must be the logical bytes).
+var ErrUnsupportedEncoding = errors.New("chunkstore: unsupported chunk encoding on the layout")
+
+// snapshotRefusal reports a kernel refusal of the snapshot name alone.
+func snapshotRefusal(err error) bool {
+	return errors.Is(err, layout.ErrTooManySnapshots) || errors.Is(err, layout.ErrSnapshotExists) || errors.Is(err, layout.ErrMalformed)
+}
+
+// kernelRefusals are answers of the store (a condition failed), as opposed
+// to the store not answering.
+var kernelRefusals = []error{layout.ErrPrecondition, layout.ErrNotHolder, layout.ErrNoSession, layout.ErrBusy, layout.ErrDetached,
+	layout.ErrVolumeDeleting, layout.ErrStaleEpoch, layout.ErrNotPrepared, layout.ErrStaleBase, layout.ErrHeadAbsent,
+	layout.ErrMalformed, layout.ErrTooManySnapshots, layout.ErrSnapshotExists}
+
+func isKernelRefusal(err error) bool {
+	for _, k := range kernelRefusals {
+		if errors.Is(err, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// TakeSnapshotErr returns, and clears, why the last commit could not name
+// its snapshot (nil when it did, or none was asked).
+func (l *LayoutRemote) TakeSnapshotErr() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	err := l.snapErr
+	l.snapErr = nil
+	return err
+}
+
+// LastCommit is HEAD as this remote's last commit left it (for a stop's
+// unknown outcome, read HEAD again).
+func (l *LayoutRemote) LastCommit() layout.Head {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lastCommit
+}
+
+// Clean runs one cleaning of this holder between sessions: clean(c) opens
+// HEAD, run removes unreachable names under session c, and clean(c) ends.
+// A cut or a stop that needs HEAD meanwhile cancels run's context and
+// waits for it to end: neither waits on a cleaning nor fails busy.
+func (l *LayoutRemote) Clean(ctx context.Context, run func(ctx context.Context, me layout.HolderID, session string) error) error {
+	l.mu.Lock()
+	if l.session != "" || l.cleaning != "" {
+		l.mu.Unlock()
+		return layout.ErrBusy
+	}
+	if _, err := l.rollBackLocked(ctx); err != nil {
+		l.mu.Unlock()
+		return err
+	}
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		l.mu.Unlock()
+		return err
+	}
+	c := "c-" + hex.EncodeToString(b[:])
+	bh, err := layout.RunBeginClean(ctx, l.st, l.me, c)
+	if err != nil {
+		l.mu.Unlock()
+		return layoutRemoteErr(err)
+	}
+	l.ownGen = bh.Gen
+	cctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	l.cleaning, l.cleanCancel, l.cleanDone = c, cancel, done
+	l.mu.Unlock()
+
+	runErr := run(cctx, l.me, c)
+	eh, endErr := layout.RunEndClean(context.WithoutCancel(ctx), l.st, l.me, c)
+	cancel()
+
+	l.mu.Lock()
+	if endErr == nil {
+		l.ownGen = eh.Gen
+	}
+	l.cleaning, l.cleanCancel = "", nil
+	close(done)
+	l.mu.Unlock()
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		return runErr
+	}
+	return layoutRemoteErr(endErr)
+}
+
+// syncSessionLocked drops the in-memory session unless HEAD still shows it
+// open: a commit that applied and then lost its reply, or a session another
+// actor ended, never leaves a stale session behind.
+func (l *LayoutRemote) syncSessionLocked(h layout.Head) {
+	if l.session != "" && h.Activity != (layout.Activity{Kind: layout.ActSnap, Session: l.session}) {
+		l.session = ""
+	}
+}
+
+// viewLocked takes HEAD h as read: a generation this remote did not write
+// itself (someone else's write, or the first read) becomes the engine's
+// view; the session is re-derived from h.
+func (l *LayoutRemote) viewLocked(h layout.Head) {
+	if h.Gen != l.ownGen {
+		l.visible, l.ownGen = h.Gen, h.Gen
+	}
+	l.syncSessionLocked(h)
+}
+
+// AbortCut is the engine's notice that a cut ended without a commit. It
+// never blocks: the next call drops the session (HEAD's read then rolls
+// it back) and the pending snapshot name, which never rides onto a later
+// cut.
+func (l *LayoutRemote) AbortCut() { l.abandoned.Store(true) }
+
+func (l *LayoutRemote) takeAbandonLocked() {
+	if l.abandoned.Swap(false) {
+		l.session, l.pending = "", nil
+	}
+}
+
+// stopCleaningLocked cancels this process's open cleaning and waits for
+// it to end (it releases mu while waiting).
+func (l *LayoutRemote) stopCleaningLocked() {
+	for l.cleaning != "" {
+		cancel, done := l.cleanCancel, l.cleanDone
+		cancel()
+		l.mu.Unlock()
+		<-done
+		l.mu.Lock()
+	}
+}
+
+// layoutRemoteErr maps a kernel result to the engine's action (the seam's
+// closure table):
+//   - not the holder, a stale epoch, detached: fenced, final (no retry);
+//   - generation moved, my session gone: HEAD precondition (the engine
+//     re-reads HEAD and decides);
+//   - the volume is being deleted: HEAD deleted (the engine stops);
+//   - my own cleaning open (busy): remote unavailable (retry later; never a
+//     fence);
+//   - any other refusal is returned as it is;
+//   - the store does not answer: remote unavailable (the session is
+//     dropped locally; the next cut rolls it back).
 func layoutRemoteErr(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, layout.ErrPrecondition), errors.Is(err, layout.ErrNotHolder), errors.Is(err, layout.ErrNoSession):
+	case errors.Is(err, layout.ErrNotHolder), errors.Is(err, layout.ErrStaleEpoch), errors.Is(err, layout.ErrDetached):
+		return fmt.Errorf("%w: %w", storage.ErrChunkLayerFenced, err)
+	case errors.Is(err, layout.ErrPrecondition), errors.Is(err, layout.ErrNoSession):
 		return fmt.Errorf("%w: %w", storage.ErrChunkHeadPrecondition, err)
 	case errors.Is(err, layout.ErrVolumeDeleting):
 		return fmt.Errorf("%w: %w", storage.ErrChunkHeadDeleted, err)
+	case errors.Is(err, layout.ErrBusy):
+		return fmt.Errorf("%w: %w", storage.ErrChunkRemoteUnavailable, err)
+	case isKernelRefusal(err):
+		return err
 	}
-	return err
+	return fmt.Errorf("%w: %w", storage.ErrChunkRemoteUnavailable, err)
 }

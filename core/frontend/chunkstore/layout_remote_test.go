@@ -221,3 +221,289 @@ func TestLayoutRemote_KeysNameTheirBytes(t *testing.T) {
 		t.Fatalf("key round trip: %v", err)
 	}
 }
+
+// The seam's closure table: every kernel result maps to one engine action.
+func TestLayoutRemote_ErrorMap(t *testing.T) {
+	other := errors.New("connection refused")
+	for _, c := range []struct {
+		err  error
+		want error // nil: returned as it is
+	}{
+		{layout.ErrNotHolder, storage.ErrChunkLayerFenced},
+		{layout.ErrStaleEpoch, storage.ErrChunkLayerFenced},
+		{layout.ErrDetached, storage.ErrChunkLayerFenced},
+		{layout.ErrPrecondition, storage.ErrChunkHeadPrecondition},
+		{layout.ErrNoSession, storage.ErrChunkHeadPrecondition},
+		{layout.ErrVolumeDeleting, storage.ErrChunkHeadDeleted},
+		{layout.ErrBusy, storage.ErrChunkRemoteUnavailable},
+		{other, storage.ErrChunkRemoteUnavailable},
+		{layout.ErrNotPrepared, nil},
+		{layout.ErrTooManySnapshots, nil},
+		{layout.ErrSnapshotExists, nil},
+	} {
+		got := layoutRemoteErr(c.err)
+		if !errors.Is(got, c.err) {
+			t.Errorf("%v: mapped to %v, which no longer wraps it", c.err, got)
+		}
+		if c.want != nil && !errors.Is(got, c.want) {
+			t.Errorf("%v: mapped to %v; want %v", c.err, got, c.want)
+		}
+		for _, cls := range []error{storage.ErrChunkLayerFenced, storage.ErrChunkHeadPrecondition, storage.ErrChunkHeadDeleted, storage.ErrChunkRemoteUnavailable} {
+			if cls != c.want && errors.Is(got, cls) {
+				t.Errorf("%v: also maps to %v", c.err, cls)
+			}
+		}
+	}
+	if layoutRemoteErr(nil) != nil {
+		t.Fatal("nil mapped to an error")
+	}
+}
+
+// lostReplyStore applies the next HEAD update and then reports an error,
+// as a store whose reply was lost.
+type lostReplyStore struct {
+	sessionStore
+	armed bool
+}
+
+func (s *lostReplyStore) UpdateHead(ctx context.Context, gen uint64, next layout.Head) error {
+	err := s.sessionStore.UpdateHead(ctx, gen, next)
+	if err == nil && s.armed && next.Activity.Kind == layout.ActIdle {
+		s.armed = false
+		return errors.New("reply lost")
+	}
+	return err
+}
+
+// A commit that applied and lost its reply leaves no stale session: the
+// engine's next HEAD read settles it, and the next cut commits.
+func TestLayoutRemote_ACommitWhoseReplyIsLostDoesNotLivelock(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	lost := &lostReplyStore{sessionStore: r.st, armed: true}
+	r.st = lost
+	want := map[uint32][]byte{3: block(3)}
+	writeSync(t, s, want)
+	_, _ = l.Capture(ctx) // the commit applied, its reply lost
+	if lost.armed {
+		t.Fatal("the fault never fired")
+	}
+	want[30] = block(30)
+	writeSync(t, s, map[uint32][]byte{30: want[30]})
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatalf("the cut after a lost commit reply: %v", err)
+	}
+	if h := lh.head(); h.Activity.Kind != layout.ActIdle {
+		t.Fatalf("HEAD after the second cut: %+v", h.Activity)
+	}
+	_ = s.Close()
+	lh.readBack("b", want)
+}
+
+// Only the full encoding reaches the layout: any other is refused before a
+// commit is written.
+func TestLayoutRemote_RefusesOtherEncodings(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	r, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h0, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := block(5)
+	key := r.ChunkKey(0, layout.Sum(data))
+	if err := r.Put(ctx, key, data); err != nil {
+		t.Fatal(err)
+	}
+	next := storage.ChunkHead{Epoch: 1, RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{0: {Key: key, SHA256: layout.Sum(data), Encoding: "zstd"}}}
+	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h0.Gen, Epoch: 1}, next); !errors.Is(err, ErrUnsupportedEncoding) {
+		t.Fatalf("commit of a zstd chunk: %v; want ErrUnsupportedEncoding", err)
+	}
+	if h := lh.head(); h.Current != nil {
+		t.Fatal("a refused encoding committed a root")
+	}
+}
+
+// A snapshot name the kernel refuses (taken, here) does not stop the cut:
+// it commits unnamed and the request gets the typed refusal.
+func TestLayoutRemote_ARefusedSnapshotNameStillCommitsTheCut(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{1: block(1)})
+	r.SetSnapshot("daily", layout.SnapshotMeta{CreatedNs: 1})
+	if _, err := l.Capture(ctx); err != nil || r.TakeSnapshotErr() != nil {
+		t.Fatal(err)
+	}
+	writeSync(t, s, map[uint32][]byte{2: block(2)})
+	r.SetSnapshot("daily", layout.SnapshotMeta{CreatedNs: 2})
+	h2, err := l.Capture(ctx)
+	if err != nil {
+		t.Fatalf("cut with a taken snapshot name: %v", err)
+	}
+	if err := r.TakeSnapshotErr(); !errors.Is(err, layout.ErrSnapshotExists) {
+		t.Fatalf("snapshot refusal: %v; want ErrSnapshotExists", err)
+	}
+	if h := lh.head(); h.Position != h2 || h.Snapshots["daily"].Meta.CreatedNs != 1 {
+		t.Fatalf("HEAD after the refused name: position %d, daily %+v", h.Position, h.Snapshots["daily"])
+	}
+}
+
+// A cut while this process's own cleaning is open ends the cleaning and
+// commits (never busy); a cleaning left open by a dead process is ended by
+// the next start's first call.
+func TestLayoutRemote_ACutEndsMyOwnCleaning(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	started := make(chan struct{})
+	cleaned := make(chan error, 1)
+	go func() {
+		cleaned <- r.Clean(ctx, func(ctx context.Context, _ layout.HolderID, _ string) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+	<-started
+	writeSync(t, s, map[uint32][]byte{4: block(4)})
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatalf("cut during my own cleaning: %v", err)
+	}
+	if err := <-cleaned; err != nil {
+		t.Fatalf("the cancelled cleaning: %v", err)
+	}
+	// A dead process's cleaning: HEAD clean(c) of mine, nothing in memory.
+	st, _ := lh.cat.Store(lh.v)
+	if _, err := layout.RunBeginClean(ctx, st, lh.me, "c-dead"); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r2.GetHead(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if h := lh.head(); h.Activity.Kind != layout.ActIdle {
+		t.Fatalf("a dead cleaning after the restart's first call: %+v", h.Activity)
+	}
+}
+
+// failingCreateStore fails object creates while armed: an upload error.
+type failingCreateStore struct {
+	sessionStore
+	armed bool
+}
+
+func (s *failingCreateStore) Create(ctx context.Context, rel string, data []byte, session string) error {
+	if s.armed {
+		return errors.New("volume server unreachable")
+	}
+	return s.sessionStore.Create(ctx, rel, data, session)
+}
+
+// A named cut the engine gives up (an upload fails) leaves no name behind:
+// the next, unnamed cut commits without it, from a new session.
+func TestLayoutRemote_AnAbandonedNamedCutDropsItsName(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	fail := &failingCreateStore{sessionStore: r.st, armed: true}
+	r.st = fail
+	writeSync(t, s, map[uint32][]byte{5: block(5)})
+	r.SetSnapshot("weekly", layout.SnapshotMeta{CreatedNs: 1})
+	if _, err := l.Capture(ctx); err == nil {
+		t.Fatal("a cut whose upload failed committed")
+	}
+	fail.armed = false
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatalf("the cut after the abandoned one: %v", err)
+	}
+	h := lh.head()
+	if _, named := h.Snapshots["weekly"]; named || h.Activity.Kind != layout.ActIdle {
+		t.Fatalf("after the abandoned named cut: snapshots %v, activity %+v; want no weekly, idle", h.Snapshots, h.Activity)
+	}
+}
+
+// My session ended behind this remote's back: the remote drops it, the
+// engine re-reads HEAD after one refused cut, and the next cut begins a
+// new session and commits (no cut is refused for ever).
+func TestLayoutRemote_ASessionLostWhileAliveIsReplaced(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	want := map[uint32][]byte{6: block(6)}
+	writeSync(t, s, want)
+	if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := lh.cat.Store(lh.v)
+	if _, err := layout.RunAbort(ctx, st, lh.me, lh.head().Activity.Session); err != nil {
+		t.Fatal(err)
+	}
+	// The abort is a write the engine did not see: its first cut after it
+	// is a precondition (the engine re-reads HEAD); the next commits.
+	if _, err := l.Capture(ctx); err != nil && !errors.Is(err, storage.ErrChunkHeadPrecondition) {
+		t.Fatalf("first cut after my session was aborted behind my back: %v", err)
+	}
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatalf("cut after the re-read: %v", err)
+	}
+	if h := lh.head(); h.Activity.Kind != layout.ActIdle || h.Current == nil {
+		t.Fatalf("HEAD after the cut: %+v", h)
+	}
+	_ = s.Close()
+	lh.readBack("b", want)
+}
+
+// Uploads staged in a session that has since ended (rolled back by this
+// remote) are not prepared for the next session's commit: the commit is a
+// precondition, the engine's re-read drops what it staged, and the retry
+// uploads again and commits.
+func TestLayoutRemote_StagedUploadsOfAnEndedSessionAreRedone(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	r, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h0, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := block(8)
+	key := r.ChunkKey(0, layout.Sum(data))
+	if err := r.Put(ctx, key, data); err != nil { // staged in session s1
+		t.Fatal(err)
+	}
+	// s1 ends (the cut was abandoned); a new session opens on the next call.
+	r.AbortCut()
+	next := storage.ChunkHead{Epoch: 1, RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{0: {Key: key, SHA256: layout.Sum(data), Encoding: "full"}}}
+	_, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h0.Gen, Epoch: 1}, next)
+	if !errors.Is(err, storage.ErrChunkHeadPrecondition) {
+		t.Fatalf("commit naming an upload of an ended session: %v; want a precondition", err)
+	}
+	h1, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1.Gen == h0.Gen {
+		t.Fatal("the engine's re-read sees the same generation: it would keep what it staged")
+	}
+	if err := r.Put(ctx, key, data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h1.Gen, Epoch: 1}, next); err != nil {
+		t.Fatalf("the retry after uploading again: %v", err)
+	}
+}

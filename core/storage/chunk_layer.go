@@ -1655,7 +1655,16 @@ func (l *chunkLayerImpl) retryLeftoverIntents(ctx context.Context) {
 }
 
 // abortCut returns a failed cut's chunks to the dirty set.
+// CutAborter is told when a cut ends without a commit, so a
+// transactional remote ends that cut's session. It must not block.
+type CutAborter interface {
+	AbortCut()
+}
+
 func (l *chunkLayerImpl) abortCut(all bool) {
+	if a, ok := l.remote.(CutAborter); ok {
+		a.AbortCut()
+	}
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
 	for idx := range l.inflight {
