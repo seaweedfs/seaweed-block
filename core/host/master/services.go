@@ -1013,6 +1013,10 @@ func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.Assignme
 		EvidenceEpoch:      info.Primary.DataEpoch,
 		EvidenceFirstLsn:   info.Primary.DataFirstLSN,
 	}
+	if info.Primary.StoreID != ([16]byte{}) {
+		id := info.Primary.StoreID
+		fact.EvidenceStoreId = id[:]
+	}
 	// Populate the peer set from publisher LastPublished
 	// queries for every non-self replica slot in this volume's
 	// topology. peer_set_generation is derived

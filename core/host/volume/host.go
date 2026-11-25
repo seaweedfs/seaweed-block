@@ -175,7 +175,7 @@ type Host struct {
 	obsCli control.ObservationServiceClient
 	// probeRoles answers the promotion probe round's role fields (probe_round.go).
 	probeRoles probeRoles
-	asnCli control.AssignmentServiceClient
+	asnCli     control.AssignmentServiceClient
 
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -664,9 +664,9 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 		Reachable: true,
 		Eligible:  true,
 		// Raw identity facts; the master compares them with its own store.
-		MachineId:       h.cfg.StorageIdentity.MachineID,
-		DurableRootDev:  h.cfg.StorageIdentity.Dev,
-		DurableRootFsid: h.cfg.StorageIdentity.FSID,
+		MachineId:        h.cfg.StorageIdentity.MachineID,
+		DurableRootDev:   h.cfg.StorageIdentity.Dev,
+		DurableRootFsid:  h.cfg.StorageIdentity.FSID,
 		StoreAttestation: h.storeAttestation(),
 		Slots: []*control.HeartbeatSlot{
 			{
@@ -969,7 +969,11 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		if fr, ok := h.selfFenceFloor(); ok {
 			floor, floorErr = fr.EpochFloor()
 		}
-		if reason := checkPrimaryEvidence(fact, st, end, floor, floorErr == nil && floor > 0); reason != "" {
+		var store storage.StoreID
+		if sid, ok := rv.(interface{ LocalStoreID() storage.StoreID }); ok {
+			store = sid.LocalStoreID()
+		}
+		if reason := checkPrimaryEvidence(fact, st, end, floor, floorErr == nil && floor > 0, store); reason != "" {
 			h.refusePrimary(reason)
 			return
 		}

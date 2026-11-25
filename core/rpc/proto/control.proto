@@ -293,6 +293,9 @@ message AssignmentFact {
     uint64 evidence_durable_lsn = 11;
     uint64 evidence_epoch = 12;
     uint64 evidence_first_lsn = 13;
+    // The probed store's id (its superblock UUID, 16 bytes): the target
+    // adopts a promotion only on that same store.
+    bytes evidence_store_id = 14;
 }
 
 // PrimaryKind is how a line made its primary the primary.

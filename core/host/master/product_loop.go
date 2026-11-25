@@ -694,7 +694,7 @@ func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount in
 func promotionEvidenceFor(result PromotionProbeResult, replicaID string) adapter.PrimaryEvidence {
 	for _, c := range result.Candidates {
 		if c.ReplicaID == replicaID {
-			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN}
+			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN, StoreID: c.StoreID}
 		}
 	}
 	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}

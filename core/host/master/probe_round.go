@@ -8,6 +8,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // The promotion probe round. When the master decides a promotion it mints a
@@ -113,6 +114,10 @@ type roundEvidenceProvider struct {
 	ackProfile string
 	required   map[string]uint64
 	wait       time.Duration
+	// attested is the store the volume's primary last attested for a
+	// replica (Host.AttestedStore); a candidate answering another store, or
+	// one never attested, is not Ready.
+	attested func(volumeID, replicaID string) (storage.StoreID, bool)
 }
 
 func newRoundID() uint64 {
@@ -182,15 +187,26 @@ done:
 			continue
 		}
 		invalid := a.GetTablePresent() && !a.GetTableValid()
+		var store storage.StoreID
+		if len(a.GetStoreId()) == len(store) {
+			copy(store[:], a.GetStoreId())
+		}
+		attested := false
+		if p.attested != nil && !store.IsZero() {
+			want, ok := p.attested(volumeID, c.ReplicaID)
+			attested = ok && want == store
+		}
 		result.Candidates = append(result.Candidates, PromotionCandidateEvidence{
 			ReplicaID:        c.ReplicaID,
 			DurableLSN:       a.GetDurableEnd(),
 			LastDataEpoch:    a.GetLastDataEpoch(),
 			LastDataFirstLSN: a.GetLastDataFirstLsn(),
 			TableInvalid:     invalid,
+			StoreID:          store,
 			// A promotion target answers as a ready replica, from a store
-			// whose epoch table is present and valid.
-			Ready: a.GetReplicaReady() && a.GetTablePresent() && a.GetTableValid(),
+			// whose epoch table is present and valid, and whose id is the
+			// store its primary attested (counted toward its write ACKs).
+			Ready: a.GetReplicaReady() && a.GetTablePresent() && a.GetTableValid() && attested,
 		})
 	}
 	return result, nil
