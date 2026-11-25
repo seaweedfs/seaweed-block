@@ -1101,6 +1101,11 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 		if err != nil && ctx.Err() == nil {
 			log.Printf("durable: maintenance volume=%s: %v", volumeID, err)
 		}
+		// The holder's cleaning may be the first call to see HEAD move away
+		// (an idle volume runs no cut): its refusal latches the layer too.
+		if obs, ok := layer.(interface{ ObserveRemoteError(error) error }); ok && err != nil {
+			_ = obs.ObserveRemoteError(err)
+		}
 		// Completion-relative reset coalesces all elapsed ticks; no catch-up queue.
 		timer.Reset(interval)
 	}

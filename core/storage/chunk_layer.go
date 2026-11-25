@@ -679,6 +679,11 @@ func (l *chunkLayerImpl) latchIdentityMoved(err error) error {
 	return err
 }
 
+// ObserveRemoteError latches the layer fenced when err (from a call on the
+// volume's remote made outside the layer, such as the holder's cleaning) is
+// an identity-moved signal; it returns err unchanged.
+func (l *chunkLayerImpl) ObserveRemoteError(err error) error { return l.latchIdentityMoved(err) }
+
 func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res chunkCutResult, err error) {
 	defer func() { err = l.latchIdentityMoved(err) }()
 	done, err := l.register()
