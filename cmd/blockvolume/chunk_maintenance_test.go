@@ -82,7 +82,7 @@ func maintenanceFixture(t *testing.T) (*chunkstore.BCatalog, chunkstore.VolumeRe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := layout.Start(ctx, s, okLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true}); err != nil {
+	if _, err := layout.Start(ctx, s, okLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true, Seedable: anySeedable}); err != nil {
 		t.Fatal(err)
 	}
 	data := bytes.Repeat([]byte{9}, 4096)

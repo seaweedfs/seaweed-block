@@ -13,6 +13,9 @@ var (
 	// ErrStaleLocalRoot: the local root belongs to an earlier claim of this
 	// server (a same-host forced move published past it).
 	ErrStaleLocalRoot = errors.New("layout: local root is from an earlier claim")
+	// ErrUnseedablePosition: a fresh local root cannot seed its frontier at
+	// HEAD's position; nothing is written.
+	ErrUnseedablePosition = errors.New("layout: the local root cannot seed HEAD's position")
 )
 
 // StaleLocalRootCure is the way back a stale-root refusal names: after a
@@ -34,6 +37,10 @@ type LocalRoot struct {
 	ClaimID  string
 	Fresh    bool
 	Position uint64 // the position the local root holds synced
+	// Seedable reports whether a fresh root can seed its frontier at a
+	// HEAD position (the local store's own seed precondition). A fresh
+	// root without it is refused: the check is never skipped.
+	Seedable func(position uint64) error
 }
 
 // Start is the HEAD side of a holder's start on the line it was granted

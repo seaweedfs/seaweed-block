@@ -268,7 +268,7 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 	})
 	t.Run("LayoutStart", func(t *testing.T) {
 		st := &absentLayoutHead{}
-		if _, err := layout.Start(ctx, st, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "h"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
+		if _, err := layout.Start(ctx, st, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "h"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true, Seedable: anySeedable}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
 			t.Fatalf("start over an absent HEAD: %v, %d writes; want ErrHeadAbsent and none", err, st.updates)
 		}
 	})
