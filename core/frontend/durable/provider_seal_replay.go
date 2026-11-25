@@ -53,13 +53,7 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 	}
 	h.chunkDetach = true
 	p.stopChunkLoop(h)
-	var head storage.ChunkHead
-	var err error
-	if p.cfg.ChunkLayoutHeadFor == nil {
-		err = errors.New("durable: layout HEAD unavailable for detached proof")
-	} else {
-		head, err = p.readLayoutSeal(ctx, volumeID, h, proj)
-	}
+	head, err := p.readLayoutSeal(ctx, volumeID, h, proj)
 	if err != nil {
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w", ErrDetachOutcomeUnknown, err)
 	}
