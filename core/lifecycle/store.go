@@ -135,9 +135,6 @@ func OpenFileStore(dir string) (*FileStore, error) {
 // idempotent; changing a previously-created spec is rejected.
 func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	spec = normalizeVolumeSpec(spec)
-	if err := validateSpec(spec); err != nil {
-		return VolumeRecord{}, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.records[spec.VolumeID]; ok {
@@ -155,6 +152,9 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 			return merged, nil
 		}
 		return existing, nil
+	}
+	if err := validateSpec(spec); err != nil {
+		return VolumeRecord{}, err
 	}
 	if err := geometry.ValidateVolumeSize(spec.SizeBytes); err != nil {
 		return VolumeRecord{}, fmt.Errorf("%w: %w", ErrInvalidVolumeSpec, err)

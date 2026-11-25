@@ -70,6 +70,13 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	if stores.Deletions.Reserved(spec.VolumeID) {
 		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
 	}
+	// A retry may carry a different restore tuple. The target's durable
+	// binding decides that conflict before looking up the caller's new source
+	// snapshot, which might itself be absent.
+	if existing, ok := stores.Volumes.GetVolume(spec.VolumeID); ok &&
+		(existing.Spec.SourceVolume != spec.SourceVolume || existing.Spec.SourceSnapshot != spec.SourceSnapshot || existing.Spec.CreateRequestID != spec.CreateRequestID) {
+		return nil, status.Errorf(codes.AlreadyExists, "create volume: %s is bound to another restore request", spec.VolumeID)
+	}
 	if spec.SourceVolume != "" || spec.SourceSnapshot != "" || spec.CreateRequestID != "" {
 		if spec.SourceVolume == "" || spec.SourceSnapshot == "" || spec.CreateRequestID == "" || spec.SourceVolume == spec.VolumeID {
 			return nil, status.Error(codes.InvalidArgument, "restore needs a distinct source volume, snapshot and request id")
