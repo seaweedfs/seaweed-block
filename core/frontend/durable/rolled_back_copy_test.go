@@ -49,7 +49,7 @@ func copyRootFiles(t *testing.T, src, dst string) {
 // The durable-reopen rule: an existing root whose HEAD names this holder attaches
 // only if its local durable LSN reaches HEAD's remote_lsn. A rolled-back
 // copy of the root (a backup taken before the last cut) is refused with the
-// stale-root refusal, as a no-retry (superseded) startup outcome, with the
+// stale-root refusal, as a final no-retry startup outcome, with the
 // operator's cure; it makes no claim, never serves and is left as it was. An
 // exact copy of the root at HEAD, and the root's own restart, attach.
 func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
@@ -97,8 +97,8 @@ func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 		t.Fatalf("a rolled-back copy attached under HEAD position %d: %v; want the stale-root refusal", head.Position, err)
 	}
 	gen, ended := b.ChunkStartupOutcome("v1")
-	if !ended || !b.ChunkStartupSuperseded("v1", gen) {
-		t.Errorf("the rolled-back copy's startup: ended=%t superseded=%t, want a no-retry outcome", ended, b.ChunkStartupSuperseded("v1", gen))
+	if !ended || b.ChunkStartupSuperseded("v1", gen) {
+		t.Errorf("the rolled-back copy's startup: ended=%t superseded=%t, want a final local-root refusal (not a foreign-holder claim)", ended, b.ChunkStartupSuperseded("v1", gen))
 	}
 	if cure := b.ChunkStartupCure("v1", gen); cure != layout.StaleLocalRootCure {
 		t.Errorf("the startup end carries cure %q, want %q for the final exit line", cure, layout.StaleLocalRootCure)

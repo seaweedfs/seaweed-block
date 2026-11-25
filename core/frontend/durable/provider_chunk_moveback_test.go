@@ -229,12 +229,12 @@ func TestWALStoreChunk_MoveBackRefusedOnDeferredAttach(t *testing.T) {
 				st = s
 			}
 		}
-		if strings.Contains(st.Evidence, "remove or quarantine the local root") {
+		if strings.Contains(st.Evidence, layout.StaleLocalRootCure) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if st.Operational || !strings.Contains(st.Evidence, "remove or quarantine the local root") {
+	if st.Operational || !strings.Contains(st.Evidence, layout.StaleLocalRootCure) {
 		t.Fatalf("deferred attach of the old root: operational %t evidence %q", st.Operational, st.Evidence)
 	}
 	if after := layoutHead(t, fixture); after.Gen != before.Gen || after.Holder != before.Holder {
