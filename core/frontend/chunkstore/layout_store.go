@@ -241,6 +241,13 @@ func (s *LayoutStore) Create(ctx context.Context, rel string, raw []byte, sessio
 	e.Extended = map[string][]byte{layoutKind: []byte("object"), layoutVolume: []byte(s.id.String()), layoutSession: []byte(session), layoutMark: []byte("")}
 	err = s.f.CreateEntry(ctx, dir, e, true)
 	if errors.Is(err, ErrExists) {
+		// Exclusive refusal proves this new fid was not linked. Unknown
+		// outcomes retain it: the entry may already reference its data.
+		if d, ok := s.b.(interface {
+			DeleteBlob(context.Context, string) error
+		}); ok {
+			_ = d.DeleteBlob(ctx, fid)
+		}
 		return layout.ErrExists
 	}
 	return err
@@ -280,7 +287,7 @@ func (s *LayoutStore) Reuse(ctx context.Context, rel string, expect layout.Objec
 }
 
 func (s *LayoutStore) Mark(ctx context.Context, rel string, expect layout.ObjectMeta, mark string) error {
-	if mark == "" || expect.Mark != "" {
+	if mark == "" {
 		return layout.ErrPrecondition
 	}
 	return s.changeMeta(ctx, rel, expect, expect.Session, mark)

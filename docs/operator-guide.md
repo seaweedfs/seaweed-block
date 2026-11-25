@@ -105,7 +105,9 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 - **`--host-limit-dir`:** keep it on a local file system with free space. When it cannot be written, background cuts
   are refused (they fail closed); the seal at stop still runs.
 - **SeaweedFS space:** every cut and snapshot stores the chunks that changed since the previous one. Space comes
-  back only by GC and then a SeaweedFS vacuum (below).
+  back only by GC and then a SeaweedFS vacuum (below). An upload interrupted before its filer entry is
+  created can leave an unreferenced needle; include this crash-window overhead in space accounting.
+  Do not run volume.fsck with real deletion on a block cluster.
 
 Each volume process reports its own heartbeat slot (server, volume and replica).
 The master orders each slot against that slot's previous report. In version 1.0,
