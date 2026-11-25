@@ -155,11 +155,7 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				intents, err := remote.ListIntents(ctx)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !bytes.Equal(beforeBytes, afterBytes) || remote.Puts() != puts || len(intents) != 0 {
+				if !bytes.Equal(beforeBytes, afterBytes) || remote.Puts() != puts || remote.OpenSession() != "" {
 					t.Fatal("refused precommit publication changed remote state")
 				}
 				p.mu.Lock()

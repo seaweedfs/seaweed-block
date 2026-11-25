@@ -89,5 +89,5 @@ func TestCutRevokedMidUploadKeepsItsUploads(t *testing.T) {
 			r.bytes, dirty-2, (dirty-2)*ctChunkBytes, dirty*ctChunkBytes)
 	}
 	assertImage(t, "published image", f.imageOf(t, result.Head), w.imageAt(s.NextLSN()-1))
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
