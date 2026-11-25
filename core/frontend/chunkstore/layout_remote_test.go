@@ -587,3 +587,71 @@ func TestLayoutRemote_CleaningAfterAnAbandonedCut(t *testing.T) {
 		t.Fatalf("HEAD after the cleaning: %+v", h.Activity)
 	}
 }
+
+// AbortOpenSession settles a stop: an open session (held here, or left by
+// a dead process) is rolled back and its pending name dropped; a detached
+// HEAD of this holder reports detached; nothing open reports idle.
+func TestLayoutRemote_AbortOpenSession(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	r, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionIdle {
+		t.Fatalf("nothing open: %q %v", got, err)
+	}
+	r.SetSnapshot("x", layout.SnapshotMeta{})
+	if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionAborted || lh.head().Activity.Kind != layout.ActIdle {
+		t.Fatalf("own open session: %q %v, HEAD %+v", got, err, lh.head().Activity)
+	}
+	if r.pending != nil || r.session != "" {
+		t.Fatal("the aborted session or its pending name is still held")
+	}
+	// A dead process's session.
+	st, _ := lh.cat.Store(lh.v)
+	if _, err := layout.RunBegin(ctx, st, lh.me, "s-dead"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionAborted {
+		t.Fatalf("a dead process's session: %q %v", got, err)
+	}
+	// A detached HEAD of this holder.
+	s, l, _ := lh.attach("a", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{1: block(1)})
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := lh.head()
+	if _, err := layout.RunBegin(ctx, st, lh.me, "s-stop"); err != nil {
+		t.Fatal(err)
+	}
+	{
+		// The stop's final commit: the current image, detached.
+		m := map[uint64]layout.Ref{}
+		img, _ := layout.NewReader("/blocks", lh.v.Dir(), st.Fetch)
+		im, _ := img.Open(ctx, *h.Current)
+		for _, sh := range im.Shards() {
+			seg, _, _ := im.Segment(ctx, sh)
+			for i, ref := range seg.Chunks {
+				m[i] = ref
+			}
+		}
+		root, segs, _ := layout.Build(m)
+		rn, rb, _ := layout.NameRoot(root)
+		for n, b := range segs {
+			_ = layout.EnsureObject(ctx, st, n.Path(), b, "s-stop")
+		}
+		_ = layout.EnsureObject(ctx, st, rn.Path(), rb, "s-stop")
+		if _, err := layout.RunCommit(ctx, st, st, lh.v.Name, lh.me, layout.CommitRequest{Session: "s-stop", Prev: m, Next: m, Position: h.Position, State: layout.StateDetached}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionDetached {
+		t.Fatalf("a detached HEAD: %q %v", got, err)
+	}
+}

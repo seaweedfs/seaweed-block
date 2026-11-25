@@ -458,6 +458,46 @@ func (l *LayoutRemote) TakeSnapshotErr() error {
 	return err
 }
 
+// The outcomes of AbortOpenSession.
+const (
+	SessionDetached = "detached" // HEAD is this holder's detached commit: the stop is done
+	SessionAborted  = "aborted"  // an open session of this holder was rolled back
+	SessionIdle     = "idle"     // nothing of this holder was open
+)
+
+// AbortOpenSession settles this holder's open transaction before a stop
+// resumes serving or retries: this process's own cleaning is ended, and a
+// session of this holder that HEAD shows open (held here or left by a dead
+// process) is rolled back, with its pending snapshot name dropped. It
+// reports what HEAD then says, from one HEAD read under the remote's lock.
+func (l *LayoutRemote) AbortOpenSession(ctx context.Context) (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.takeAbandonLocked()
+	l.stopCleaningLocked()
+	h, found, err := l.st.ReadHead(ctx)
+	if err != nil {
+		return "", layoutRemoteErr(err)
+	}
+	if !found {
+		return "", layout.ErrHeadAbsent
+	}
+	l.viewLocked(h)
+	mine := h.Epoch == l.me.Epoch && h.Holder == l.me.Holder && h.ClaimID == l.me.ClaimID
+	switch {
+	case mine && h.State == layout.StateDetached:
+		return SessionDetached, nil
+	case mine && h.Activity.Kind == layout.ActSnap:
+		ah, err := layout.RunAbort(ctx, l.st, l.me, h.Activity.Session)
+		if err != nil {
+			return "", layoutRemoteErr(err)
+		}
+		l.session, l.pending, l.ownGen = "", nil, ah.Gen
+		return SessionAborted, nil
+	}
+	return SessionIdle, nil
+}
+
 // ReadHead reads the volume's HEAD as the kernel holds it (a stop's
 // unknown outcome is decided from it: detached at my epoch and position).
 func (l *LayoutRemote) ReadHead(ctx context.Context) (layout.Head, error) {
