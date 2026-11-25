@@ -261,7 +261,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		// ready): the decision is read from a fencing round, never from the
 		// plain answers, so no write the old primary gets acknowledged after
 		// a survivor answered can be missing from the target.
-		if len(allowed) > 0 && (!currentAcceptable || (result.CurrentKnown && !result.Current.Ready)) {
+		if (len(allowed) > 0 || emptyVolumeSurvivors(result, ok)) && (!currentAcceptable || (result.CurrentKnown && !result.Current.Ready)) {
 			result, allowed = h.fencedDecision(vol.VolumeID, vol.Authority, result, len(candidates))
 			if len(allowed) == 0 {
 				// The fencing round ended without a publication: survivors may
@@ -378,7 +378,10 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 			continue
 		}
 		holders = append(holders, c.ReplicaID)
-		if c.Ready && (fenced.SyncAckLSN == 0 || c.DurableLSN >= fenced.SyncAckLSN) && c.DurableLSN > 0 {
+		// highest == 0: N-K+1 fenced answers intersect every acknowledgement
+		// set and none holds an entry, so nothing was ever acknowledged (an
+		// empty volume whose primary was lost): a ready survivor may take it.
+		if c.Ready && (fenced.SyncAckLSN == 0 || c.DurableLSN >= fenced.SyncAckLSN) && (c.DurableLSN > 0 || highest == 0) {
 			allowed[c.ReplicaID] = true
 		}
 	}
@@ -387,6 +390,24 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 		h.recordVolumeWaitingEvent(volumeID, ops.ReasonHighestEndNotReady, fmt.Sprintf("the highest fenced end %d is held by %v, not ready for primary", highest, holders))
 	}
 	return fenced, allowed
+}
+
+// emptyVolumeSurvivors: the plain round saw a ready replica and every answer
+// at end 0 with no required frontier. promotionAllowedReplicas never allows
+// an end-0 candidate (no data is no evidence); only a fencing round can show
+// that nothing was acknowledged, so this case goes to the fence.
+func emptyVolumeSurvivors(result PromotionProbeResult, ok bool) bool {
+	if !ok || !isKnownAckProfile(result.AckProfile) || result.SyncAckLSN != 0 {
+		return false
+	}
+	ready := false
+	for _, c := range result.Candidates {
+		if c.DurableLSN != 0 {
+			return false
+		}
+		ready = ready || c.Ready
+	}
+	return ready
 }
 
 func (h *Host) recordVolumeWaitingEvent(volumeID, reason, message string) {

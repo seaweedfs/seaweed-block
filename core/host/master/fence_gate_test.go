@@ -133,6 +133,39 @@ func TestPromotionGate_DecidesOnTheFencingRound(t *testing.T) {
 	}
 }
 
+// An empty replicated volume whose primary was lost: every fenced end is 0,
+// so nothing was acknowledged, and a ready survivor takes the line. With one
+// survivor silent the same volume waits (two are needed to prove it).
+func TestPromotionGate_EmptyVolumePrimaryLost(t *testing.T) {
+	plain := PromotionProbeResult{AckProfile: "sync_quorum", Candidates: []PromotionCandidateEvidence{
+		{ReplicaID: "r2", Ready: true}, {ReplicaID: "r3", Ready: true},
+	}}
+	for name, c := range map[string]struct {
+		fenced func(authority.AuthorityBasis, []PromotionCandidateEvidence) (PromotionProbeResult, error)
+		want   int
+	}{
+		"both fenced at end 0": {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, Floor: 2}), 2},
+		"one fenced":           {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2}), 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
+			defer closeTestMaster(t, h)
+			h.SetPromotionEvidenceProvider(&fenceProbe{plain: plain, fenced: c.fenced})
+			snap := rf3DeadPrimary()
+			h.applyPromotionEvidenceGate(&snap)
+			got := allowedSlots(snap)
+			if len(got) != c.want {
+				t.Fatalf("allowed %v; want %d", got, c.want)
+			}
+			for r, ev := range got {
+				if ev.FencedEpoch != 2 || ev.DurableLSN != 0 {
+					t.Fatalf("%s evidence %+v; want end 0 fenced at 2", r, ev)
+				}
+			}
+		})
+	}
+}
+
 // A fencing round that publishes nothing leaves survivors refusing the
 // primary at e: the gate continues the line's own primary at e+1 when it
 // answers ready (a PROMOTION with its own evidence), else the volume waits

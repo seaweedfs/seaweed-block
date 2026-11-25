@@ -120,3 +120,18 @@ func TestPlainRoundRaisesNothing(t *testing.T) {
 		t.Fatalf("plain round: answered=%t fences=%v answer=%+v", ok, ln.fences, a)
 	}
 }
+
+// A replica that fenced itself still answers ready: readiness comes from its
+// assignment lines and engine projection (StatusServer.ProbeRoles), never
+// from the floor, so a fencing round cannot make every target unqualified.
+func TestFencedReplicaStillAnswersReady(t *testing.T) {
+	h, _, ev := fenceHost(t)
+	h.SetProbeRoleSource(func() (bool, bool) { return true, false })
+	a, ok := h.roundAnswer(&control.ProbeRound{VolumeId: "v1", ReplicaId: "r2", RoundId: 11, FenceEpoch: 4, ExpectedStoreId: ev.id[:]})
+	if !ok || a.GetFloor() != 4 {
+		t.Fatalf("fence not answered at floor 4: %+v ok=%t", a, ok)
+	}
+	if !a.GetReplicaReady() {
+		t.Fatalf("a fenced replica answered not ready: %+v", a)
+	}
+}
