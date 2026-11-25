@@ -206,7 +206,19 @@ func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.Workspace
 	} else if !ok {
 		return nil, status.Error(codes.FailedPrecondition, "workspace ACK: server identity does not match the current holder")
 	}
-	if err := s.host.Publisher().AckWorkspaceRevocation(ctx, id.GetVolumeId(), authority.WorkspaceRevokeAck{ReplicaID: id.GetReplicaId(), Epoch: id.GetEpoch(), HeadGen: q.GetHeadGen()}); err != nil {
+	// The holder ACK proves its local drain. Read the store-owned stop here:
+	// detached at this epoch is stable, but operator metadata may advance gen.
+	if s.host.cfg.WorkspaceHeadReader == nil {
+		return nil, status.Error(codes.Unavailable, "workspace ACK: detached HEAD reader unavailable")
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	head, err := s.host.cfg.WorkspaceHeadReader(readCtx, id.GetVolumeId())
+	cancel()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "workspace ACK: read detached HEAD: %v", err)
+	}
+	holder := id.GetServerId() + "/" + id.GetReplicaId()
+	if err := s.host.Publisher().AckWorkspaceRevocation(ctx, id.GetVolumeId(), authority.WorkspaceRevokeAck{ReplicaID: id.GetReplicaId(), Epoch: id.GetEpoch(), HeadGen: q.GetHeadGen(), Holder: holder}, head); err != nil {
 		return nil, workspaceError(err)
 	}
 	if err := s.host.reconcileWorkspaceBindings(); err != nil {

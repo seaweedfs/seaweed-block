@@ -142,7 +142,7 @@ func TestWorkspacePausedGranteeRefusedAtAttach(t *testing.T) {
 	if err != nil || detached.Head.State != storage.ChunkHeadDetached {
 		t.Fatalf("detach: %+v %v", detached.Head, err)
 	}
-	if err := p.AckWorkspaceRevocation(ctx, "v", authority.WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: detached.Head.Gen}); err != nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", authority.WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: detached.Head.Gen, Holder: detached.Head.Holder}, authority.WorkspaceHead{Detached: true, Epoch: 1, Holder: detached.Head.Holder, RemoteLSN: detached.H}); err != nil {
 		t.Fatal(err)
 	}
 	// The lease reply's validity is measured on the real clock: keep the

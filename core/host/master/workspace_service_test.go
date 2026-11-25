@@ -39,11 +39,13 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	// The HEAD the master reads for vol-a: held by node-a/r2 at epoch 1,
 	// detached once the holder's final cut is in.
 	var detached atomic.Bool
+	var generation atomic.Uint64
+	generation.Store(9)
 	reader := func(_ context.Context, vol string) (authority.WorkspaceHead, error) {
 		if vol != "vol-a" {
 			return authority.WorkspaceHead{}, fmt.Errorf("no HEAD for %s", vol)
 		}
-		return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r2", RemoteLSN: 42, Detached: detached.Load()}, nil
+		return authority.WorkspaceHead{Gen: generation.Load(), Epoch: 1, Holder: "node-a/r2", RemoteLSN: 42, Detached: detached.Load()}, nil
 	}
 	authDir, lifeDir := t.TempDir(), t.TempDir()
 	cfg := Config{AuthorityStoreDir: authDir, LifecycleStoreDir: lifeDir, Listen: "127.0.0.1:0", WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume, WorkspaceHeadReader: reader}
@@ -96,6 +98,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	}
 	// The stop/ACK path keeps its production timeout. Resolve a lost reply
 	// from the master's exact ACK, never from elapsed time or the stop alone.
+	detached.Store(true)
 	if err := g.Refresh(ctx); status.Code(err) != codes.DeadlineExceeded {
 		t.Fatalf("expected unknown ACK reply, got %v", err)
 	}
@@ -110,6 +113,7 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 	if g.Projection().Healthy || stops != 1 {
 		t.Fatal("revoked frontend remained admitted")
 	}
+	detached.Store(false) // malformed/live store evidence must still refuse
 	if _, err := client.MoveWorkspace(ctx, q); err == nil {
 		t.Fatal("ACK without detached HEAD accepted")
 	}
@@ -139,11 +143,12 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 		t.Fatal("refusal consumed ACK or wrote a move", unchanged, err)
 	}
 	q.TargetReplicaId = "r2"
+	generation.Store(10) // operator metadata changed after the recorded ACK
 	grant, err := client.MoveWorkspace(ctx, q)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !grant.Issued || grant.NewEpoch != 2 || grant.HeadGen != 9 || grant.RemoteLsn != 42 || grant.OldHost != "node-a" || grant.NewHost != "node-b" {
+	if !grant.Issued || grant.NewEpoch != 2 || grant.HeadGen != 10 || grant.RemoteLsn != 42 || grant.OldHost != "node-a" || grant.NewHost != "node-b" {
 		t.Fatal(grant)
 	}
 	delivered, err := stream.Recv()

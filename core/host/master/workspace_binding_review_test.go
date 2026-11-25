@@ -245,6 +245,9 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			arrived, release := make(chan struct{}), make(chan struct{})
 			h, c, ctx := reviewBindingHostWithReader(t, func(ctx context.Context, vol string) (authority.WorkspaceHead, error) {
+				if vol == "ack" {
+					return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", Detached: true}, nil
+				}
 				close(arrived)
 				select {
 				case <-release:

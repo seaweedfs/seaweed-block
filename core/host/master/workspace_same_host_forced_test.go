@@ -53,8 +53,10 @@ func TestWorkspaceSameHostSuccessorLockProbe(t *testing.T) {
 func TestWorkspaceRPCSameHostForcedRecoveryRecordsLoss(t *testing.T) {
 	var nowNS atomic.Int64
 	nowNS.Store(time.Now().UnixNano())
+	var observed atomic.Pointer[authority.WorkspaceHead]
+	observed.Store(&authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42})
 	h, conn, ctx := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
-		return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42}, nil
+		return *observed.Load(), nil
 	}, func(h *Host) {
 		authority.WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) })(h.Publisher())
 	})
@@ -161,6 +163,9 @@ func TestWorkspaceRPCSameHostForcedRecoveryRecordsLoss(t *testing.T) {
 	if _, err := ws.RevokeWorkspace(ctx, id); err != nil {
 		t.Fatal(err)
 	}
+	// The successor's ACK requires its own stopped image, not the live
+	// predecessor HEAD used to exercise forced recovery above.
+	observed.Store(&authority.WorkspaceHead{Gen: 10, Epoch: grant.NewEpoch, Holder: "node-a/r1", RemoteLSN: 42, Detached: true})
 	if _, err := ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 10}); err != nil {
 		t.Fatal(err)
 	}
