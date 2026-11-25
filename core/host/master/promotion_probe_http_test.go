@@ -1,7 +1,13 @@
 package master
 
+// A test-only promotion evidence provider that reads the replicas' HTTP
+// status. Production evidence comes only from the probe round
+// (NewRoundPromotionEvidenceProvider); this stays for the tests that drive
+// the gate from a workload plan.
+
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -10,6 +16,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -22,6 +30,11 @@ type WorkloadPlanPromotionProbeConfig struct {
 	RequiredLSNByVolume map[string]uint64
 	ExternalStatus      bool
 	HTTPClient          *http.Client
+	// Attested is the store the volume's primary last attested for a
+	// replica (Host.AttestedStore). A candidate whose probed store differs,
+	// or that was never attested, is not Ready; nil attests nothing, so no
+	// candidate is Ready.
+	Attested func(volumeID, replicaID string) (storage.StoreID, bool)
 }
 
 func NewWorkloadPlanPromotionEvidenceProvider(plans []lifecycle.BlockVolumeWorkloadPlan, cfg WorkloadPlanPromotionProbeConfig) PromotionEvidenceProvider {
@@ -58,6 +71,7 @@ func NewWorkloadPlanPromotionEvidenceProvider(plans []lifecycle.BlockVolumeWorkl
 		required:   cloneRequiredLSNMap(cfg.RequiredLSNByVolume),
 		status:     statusAddrs,
 		client:     httpClient,
+		attested:   cfg.Attested,
 	}
 }
 
@@ -66,6 +80,7 @@ type workloadPlanPromotionEvidenceProvider struct {
 	required   map[string]uint64
 	status     map[string]map[string]string
 	client     *http.Client
+	attested   func(volumeID, replicaID string) (storage.StoreID, bool)
 }
 
 func (p *workloadPlanPromotionEvidenceProvider) ProbePromotionCandidates(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, error) {
@@ -127,15 +142,36 @@ func (p *workloadPlanPromotionEvidenceProvider) probeCandidate(volumeID, replica
 			best = st
 		}
 	}
-	return PromotionCandidateEvidence{
-		ReplicaID: replicaID,
-		ProbeAddr: statusAddr,
-		Ready: local.VolumeID == volumeID &&
-			local.ReplicaID == replicaID &&
-			strings.EqualFold(local.ReplicationRole, "replica_ready") &&
-			best.FrontierKnown,
+	ev := PromotionCandidateEvidence{
+		ReplicaID:  replicaID,
+		ProbeAddr:  statusAddr,
 		DurableLSN: best.DurableLSN,
-	}, nil
+	}
+	if b, err := hex.DecodeString(best.StoreID); err == nil && len(b) == len(ev.StoreID) {
+		copy(ev.StoreID[:], b)
+	}
+	// The candidate's epoch-table row and table validity come from the
+	// authenticated probe round, not from /status (loopback-only under
+	// mutual TLS); until then the evidence carries none.
+	ev.Ready = local.VolumeID == volumeID &&
+		local.ReplicaID == replicaID &&
+		strings.EqualFold(local.ReplicationRole, "replica_ready") &&
+		best.FrontierKnown &&
+		!ev.TableInvalid &&
+		p.storeAttested(volumeID, replicaID, ev.StoreID)
+	return ev, nil
+}
+
+// storeAttested reports whether probed is the store the volume's primary
+// last attested for replicaID: a store the primary never counted toward its
+// write ACKs (never attested, dropped, or a replacement with a new
+// superblock) is not a survivor, whatever its own report says.
+func (p *workloadPlanPromotionEvidenceProvider) storeAttested(volumeID, replicaID string, probed storage.StoreID) bool {
+	if p.attested == nil || probed.IsZero() {
+		return false
+	}
+	want, ok := p.attested(volumeID, replicaID)
+	return ok && want == probed
 }
 
 func (p *workloadPlanPromotionEvidenceProvider) probeCurrent(volumeID, replicaID, statusAddr string) (PromotionCandidateEvidence, error) {
@@ -211,12 +247,4 @@ func isLocalhostOrLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-func cloneRequiredLSNMap(in map[string]uint64) map[string]uint64 {
-	out := make(map[string]uint64, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }

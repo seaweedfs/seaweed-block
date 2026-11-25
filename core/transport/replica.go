@@ -3,6 +3,7 @@ package transport
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -637,6 +638,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					AchievedLSN:      frontier,
 					LastDataEpoch:    r.epochs.LastDataRowAt(frontier).Epoch,
 					LastDataFirstLSN: r.epochs.LastDataRowAt(frontier).FirstLSN,
+					StoreID:          storage.StoreIDOf(r.store),
 				})
 				replyType, reply = MsgBarrierResp, resp
 				return true
@@ -690,6 +692,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					AchievedLSN:      frontier,
 					LastDataEpoch:    r.epochs.LastDataRowAt(frontier).Epoch,
 					LastDataFirstLSN: r.epochs.LastDataRowAt(frontier).FirstLSN,
+					StoreID:          storage.StoreIDOf(r.store),
 				})
 				replyType, reply = MsgBarrierResp, resp
 
@@ -784,9 +787,62 @@ func (r *ReplicaListener) FenceAsPrimary(epoch uint64) error {
 }
 
 func (r *ReplicaListener) fenceAndDrain(epoch uint64) error {
+	return r.floorAndDrain(epoch, true)
+}
+
+// FenceFloor is this replica's half of a fencing round (the ack fence): its
+// promise that nothing below epoch is applied or acknowledged any more,
+// durable before it returns. Order: the floor in memory first (every new
+// frame below epoch is refused at once), then the drain of every mutation
+// admitted before it (none of them applies or ACKs after the promise), then
+// the floor persisted. A drain timeout or a persist error is returned and the
+// caller must not answer the round (no promise was made); frames below epoch
+// stay refused. The role is unchanged: a line re-issued at epoch to the same
+// primary (a failed round's heal) is admitted by AdmitAsReplica as usual.
+// A listener in the primary role refuses the fence (ErrFencePrimary) and
+// changes nothing: the primary serves its epoch, and a floor above it would
+// fence the volume's own writes; whatever the master sends, the node
+// decides this itself.
+func (r *ReplicaListener) FenceFloor(epoch uint64) error {
+	if err := r.floorAndDrain(epoch, false); err != nil {
+		return err
+	}
+	return r.raiseFloor(epoch)
+}
+
+// ErrFenceBelowFloor: a primary role below this replica's floor.
+var ErrFenceBelowFloor = errors.New("replica listener: a primary role below the epoch floor")
+
+// ErrFencePrimary: a fencing round reached the volume's primary.
+var ErrFencePrimary = errors.New("replica listener: a fencing round never fences the primary")
+
+// DurableFloor is the floor persisted in the volume's floor record (in
+// memory for a listener without one): the epoch below which this replica
+// has promised to apply and acknowledge nothing.
+func (r *ReplicaListener) DurableFloor() uint64 {
+	r.floorMu.Lock()
+	defer r.floorMu.Unlock()
+	return r.persisted
+}
+
+// floorAndDrain raises the in-memory floor to epoch (and, for a primary
+// fence, refuses every mutation), then waits until no mutation admitted
+// before it is still in flight.
+func (r *ReplicaListener) floorAndDrain(epoch uint64, primary bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.primary = true
+	if primary && epoch < r.epochFloor {
+		// the floor is a promise to take nothing below it: a primary role
+		// at a lower epoch is a stale line
+		return fmt.Errorf("%w: primary at epoch %d under floor %d", ErrFenceBelowFloor, epoch, r.epochFloor)
+	}
+	if primary {
+		r.primary = true
+	} else if r.primary {
+		// checked under the lock that raises the floor: a concurrent
+		// FenceAsPrimary cannot slip between the check and the raise
+		return fmt.Errorf("%w at epoch %d", ErrFencePrimary, epoch)
+	}
 	if epoch > r.epochFloor {
 		r.epochFloor = epoch
 	}
@@ -810,7 +866,7 @@ func (r *ReplicaListener) fenceAndDrain(epoch uint64) error {
 		drained.Wait()
 	}
 	if r.inFlight > 0 {
-		return fmt.Errorf("replica listener: %d replication mutation(s) still in flight %v after fencing as primary at epoch %d", r.inFlight, timeout, epoch)
+		return fmt.Errorf("replica listener: %d replication mutation(s) still in flight %v after fencing at epoch %d", r.inFlight, timeout, epoch)
 	}
 	return nil
 }

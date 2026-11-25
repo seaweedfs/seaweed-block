@@ -2,8 +2,11 @@ package authority
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 func TestFailbackAuthorityRuntime_ReassignsThroughPublisher(t *testing.T) {
@@ -17,7 +20,7 @@ func TestFailbackAuthorityRuntime_ReassignsThroughPublisher(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("bind current: %v", err)
 	}
-	result, err := (FailbackAuthorityRuntime{Publisher: pub}).ExecuteFailback(context.Background(), validAuthorityFailbackRequest())
+	result, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate}).ExecuteFailback(context.Background(), validAuthorityFailbackRequest())
 	if err != nil {
 		t.Fatalf("execute failback: %v", err)
 	}
@@ -46,7 +49,7 @@ func TestFailbackAuthorityRuntime_RejectsStaleExpectedCurrent(t *testing.T) {
 	}
 	req := validAuthorityFailbackRequest()
 	req.ExpectedCurrentEpoch = 99
-	_, err := (FailbackAuthorityRuntime{Publisher: pub}).ExecuteFailback(context.Background(), req)
+	_, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate}).ExecuteFailback(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "stale expected current line") {
 		t.Fatalf("err=%v", err)
 	}
@@ -60,7 +63,7 @@ func TestFailbackAuthorityRuntime_RequiresTerminalPreconditions(t *testing.T) {
 	pub := NewPublisher(NewStaticDirective(nil))
 	req := validAuthorityFailbackRequest()
 	req.AckEligible = false
-	_, err := (FailbackAuthorityRuntime{Publisher: pub}).ExecuteFailback(context.Background(), req)
+	_, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate}).ExecuteFailback(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "terminal failback preconditions") {
 		t.Fatalf("err=%v", err)
 	}
@@ -82,5 +85,39 @@ func validAuthorityFailbackRequest() FailbackRuntimeRequest {
 		DurableFrontierCovered:       true,
 		NoCrossVolumeIdentityChange:  true,
 		EvidenceRefs:                 []string{"failback-target"},
+	}
+}
+
+// allowGate stands in for the master's planned-move decision: the target is
+// allowed with the probe round's evidence.
+func allowGate(volumeID, target string) (adapter.PrimaryEvidence, error) {
+	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1, Basis: adapter.BasisPlanned}, nil
+}
+
+// A failback is a primary change: with no gate, or a gate that refuses (the
+// target not in every acknowledgement set, not caught up), nothing is
+// published.
+func TestFailbackAuthorityRuntime_PublishesNothingWithoutTheGatesEvidence(t *testing.T) {
+	for name, rt := range map[string]func(*Publisher) FailbackAuthorityRuntime{
+		"no gate": func(p *Publisher) FailbackAuthorityRuntime { return FailbackAuthorityRuntime{Publisher: p} },
+		"gate refuses": func(p *Publisher) FailbackAuthorityRuntime {
+			return FailbackAuthorityRuntime{Publisher: p, Gate: func(string, string) (adapter.PrimaryEvidence, error) {
+				return adapter.PrimaryEvidence{}, errors.New("not caught up")
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pub := NewPublisher(NewStaticDirective(nil))
+			if err := pub.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r2", DataAddr: "data-r2", CtrlAddr: "ctrl-r2", Intent: IntentBind}); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := pub.VolumeAuthorityLine("v1")
+			if _, err := rt(pub).ExecuteFailback(context.Background(), validAuthorityFailbackRequest()); err == nil {
+				t.Fatal("a failback without the gate's evidence was executed")
+			}
+			if after, _ := pub.VolumeAuthorityLine("v1"); after != before {
+				t.Fatalf("the line moved without the gate's evidence: %+v -> %+v", before, after)
+			}
+		})
 	}
 }

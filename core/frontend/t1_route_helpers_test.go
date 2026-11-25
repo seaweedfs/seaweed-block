@@ -3,12 +3,13 @@
 // route builder used by t1_route_test.go.
 //
 // Route wired here:
-//   StaticDirective ->
-//   authority.Publisher ->
-//   authority.Bridge (per-replica subscription) ->
-//   adapter.VolumeReplicaAdapter (real, with HealthyPathExecutor) ->
-//   volume.AdapterProjectionView ->
-//   frontend.Provider.
+//
+//	StaticDirective ->
+//	authority.Publisher ->
+//	authority.Bridge (per-replica subscription) ->
+//	adapter.VolumeReplicaAdapter (real, with HealthyPathExecutor) ->
+//	volume.AdapterProjectionView ->
+//	frontend.Provider.
 //
 // Readiness source: volume.AdapterProjectionView reads
 // (*VolumeReplicaAdapter).Projection() -> engine.ReplicaProjection
@@ -40,12 +41,12 @@ type t1Route struct {
 	pub *authority.Publisher
 	dir *authority.StaticDirective
 
-	mu       sync.Mutex
-	slots    map[string]*replicaSlot // replicaID -> slot
-	current  string                  // current primary replicaID
-	cancel   context.CancelFunc
-	runDone  chan struct{}
-	volCtx   context.Context
+	mu      sync.Mutex
+	slots   map[string]*replicaSlot // replicaID -> slot
+	current string                  // current primary replicaID
+	cancel  context.CancelFunc
+	runDone chan struct{}
+	volCtx  context.Context
 }
 
 // replicaSlot holds one replica's real adapter + AdapterProjectionView.
@@ -148,6 +149,8 @@ func (r *t1Route) reassignReplica(replicaID, dataAddr, ctrlAddr string) {
 		DataAddr:  dataAddr,
 		CtrlAddr:  ctrlAddr,
 		Intent:    authority.IntentReassign,
+		// The test is the decider here: a primary change carries its kind.
+		Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned},
 	})
 }
 

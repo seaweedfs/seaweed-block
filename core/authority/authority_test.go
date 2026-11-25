@@ -188,7 +188,7 @@ func TestPublisher_Reassign_BumpsEpochAndResetsEndpointVersion(t *testing.T) {
 	if err := pub.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r1",
 		DataAddr: "d2", CtrlAddr: "c2",
-		Intent: IntentReassign,
+		Intent: IntentReassign, Evidence: testPromotion,
 	}); err != nil {
 		t.Fatalf("Reassign: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestPublisher_Reassign_RejectsUnboundKey(t *testing.T) {
 	err := pub.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r1",
 		DataAddr: "d", CtrlAddr: "c",
-		Intent: IntentReassign,
+		Intent: IntentReassign, Evidence: testPromotion,
 	})
 	if !errors.Is(err, ErrReassignNotBound) {
 		t.Fatalf("want ErrReassignNotBound, got %v", err)
@@ -409,7 +409,7 @@ func TestPublisher_DeliveryConvergesToLatestOnSlowConsumer(t *testing.T) {
 	if err := pub.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r1",
 		DataAddr: "d3", CtrlAddr: "c3",
-		Intent: IntentReassign,
+		Intent: IntentReassign, Evidence: testPromotion,
 	}); err != nil {
 		t.Fatalf("Reassign: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestPublisher_LateSubscriberReceivesLatestUnderConcurrentPublish(t *testing
 			_ = pub.apply(AssignmentAsk{
 				VolumeID: "v1", ReplicaID: "r1",
 				DataAddr: "d", CtrlAddr: "c",
-				Intent: IntentReassign,
+				Intent: IntentReassign, Evidence: testPromotion,
 			})
 		}()
 
@@ -620,8 +620,8 @@ func TestPublisher_Run_LogsAndContinuesOnRejectedAsk(t *testing.T) {
 	// ask must still be processed. This is the "continue on reject"
 	// Run semantic.
 	dir := NewStaticDirective([]AssignmentAsk{
-		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentReassign}, // rejected
-		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind},     // accepted
+		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentReassign, Evidence: testPromotion}, // rejected
+		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind},                              // accepted
 	})
 	pub := NewPublisher(dir)
 	ch, cancelSub := pub.Subscribe("v1", "r1")

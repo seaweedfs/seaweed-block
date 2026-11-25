@@ -146,6 +146,27 @@ func TestRecoveryWatchdog_MasterUnhealthyFailsOverToQualifiedPeer(t *testing.T) 
 	}
 }
 
+// The lagging r3 holds a higher end than the ready r2 (it may be the only
+// holder of an acknowledged write): the fencing round promotes nobody, and
+// the volume waits for it.
+func TestRecoveryWatchdog_MasterWaitsWhenALaggingReplicaHoldsTheHighestEnd(t *testing.T) {
+	h, svc := watchdogMaster(t)
+	defer closeTestMaster(t, h)
+	h.SetPromotionEvidenceProvider(&switchProbe{r3End: 80})
+
+	reportRF3(t, svc, wireSlot{"r1-b", false, "recovery_timeout"}, wireSlot{"r2-a", true, ""}, wireSlot{"r3-a", false, ""})
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if line, _ := h.Publisher().VolumeAuthorityLine("vol-rf3"); line.ReplicaID != "r1" || line.Epoch != 1 {
+		t.Fatalf("promoted below a lagging replica's higher end: line=%+v", line)
+	}
+	if !timelineHasEvent(timelineEvents(t, svc), "volume_blocked", "highest_end_not_ready") {
+		t.Fatalf("the wait is not visible in the timeline")
+	}
+}
+
 // A running primary that was ready and later reports not ready on the
 // same incarnation (no unhealthy reason) follows the normal failover
 // rules: no boot grace for that incarnation, so it fails over to the

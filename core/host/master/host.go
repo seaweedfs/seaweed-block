@@ -122,7 +122,10 @@ type LifecycleStores struct {
 // Host is the composed master-side block product daemon. Lifecycle
 // is: New -> Start -> (serve requests) -> Close.
 type Host struct {
+	probeHub            *probeHub   // the promotion probe round (probe_round.go)
+	probeSlots          slotServers // replica -> server, for the round
 	cfg                 Config
+	attest              *storeAttestations // primaries' attested write-ACK stores
 	healthMu            sync.Mutex // orders replica health events with their accepted heartbeats (#128 rule 6)
 	log                 *log.Logger
 	boot                *bootstrap.DurableAuthorityBootstrap
@@ -143,6 +146,10 @@ type Host struct {
 	events          *eventRing
 	promotionMu     sync.RWMutex
 	promotionProber PromotionEvidenceProvider
+	// fencePending: volume -> the epoch a fencing round fenced survivors at
+	// without a line being published there. Until the line reaches it, those
+	// survivors refuse the primary, so the gate keeps trying to heal it.
+	fencePending map[string]uint64
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 
@@ -235,12 +242,13 @@ func New(cfg Config) (*Host, error) {
 	ctrl := authority.NewTopologyController(ctrlCfg, holder)
 
 	h := &Host{
-		cfg:     cfg,
-		log:     lg,
-		ctrl:    ctrl,
-		topo:    cfg.Topology,
-		events:  newEventRing(1024),
-		journal: newJournalIsolation(storeident.Identity{}), // sampled once the store exists
+		probeHub: newProbeHub(),
+		cfg:      cfg,
+		log:      lg,
+		ctrl:     ctrl,
+		topo:     cfg.Topology,
+		events:   newEventRing(1024),
+		journal:  newJournalIsolation(storeident.Identity{}), // sampled once the store exists
 	}
 
 	boot, err := bootstrap.BootstrapWithOptions(cfg.AuthorityStoreDir, ctrl, bootstrap.Options{
@@ -256,6 +264,9 @@ func New(cfg Config) (*Host, error) {
 	// now, or a first start would compare against an unknown device forever.
 	// An unknown identity (stat error, unsupported platform) never matches.
 	h.journal.setSelf(storeident.Of(cfg.AuthorityStoreDir))
+	if h.attest, err = loadStoreAttestations(cfg.AuthorityStoreDir); err != nil {
+		return nil, fmt.Errorf("master.New: %w", err)
+	}
 
 	var sink authority.ControllerSink = ctrl
 	if len(cfg.Topology.Volumes) == 0 {
@@ -424,7 +435,7 @@ func (h *Host) Publisher() *authority.Publisher {
 // the live Publisher. Callers still need an explicit policy gate before using
 // it; constructing the runtime does not execute failback.
 func (h *Host) FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime {
-	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher()}
+	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher(), Gate: h.plannedMoveEvidence}
 }
 
 // Controller exposes the controller for tests.

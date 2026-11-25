@@ -235,6 +235,35 @@ func (v *ReplicationVolume) SetEpochTable(t *transport.EpochTable) {
 	v.mu.Unlock()
 }
 
+// EpochTableStatus is the volume's epoch table as the promotion probe reads it.
+type EpochTableStatus struct {
+	Rows    []transport.EpochRow
+	Invalid bool // a recovery left the table without a known history
+	Present bool // the volume keeps a table at all
+}
+
+// EpochTableStatus reports the volume's epoch table.
+func (v *ReplicationVolume) EpochTableStatus() EpochTableStatus {
+	v.mu.Lock()
+	t := v.epochs
+	v.mu.Unlock()
+	if t == nil {
+		return EpochTableStatus{}
+	}
+	return EpochTableStatus{Rows: t.Rows(), Invalid: t.Invalid(), Present: true}
+}
+
+// LocalPrimaryEvidence is this volume's epoch table and durable end, as a
+// primary line's target checks them before adopting the role.
+func (v *ReplicationVolume) LocalPrimaryEvidence() (EpochTableStatus, uint64, error) {
+	// Sync first, then read the table: a row appended in between is then
+	// read with an end that already covers it (never an old row with a
+	// newer end).
+	end, err := v.store.Sync()
+	st := v.EpochTableStatus()
+	return st, end, err
+}
+
 // reconcilePeer asks the peer for its (last data epoch, end) in a barrier
 // to this node's frontier and answers from the epoch table: in sync, diverged
 // (entries this primary never had), or neither (behind, or no answer).
@@ -1078,6 +1107,27 @@ func replicationDurationNanos(d time.Duration) uint64 {
 		return 1
 	}
 	return uint64(d.Nanoseconds())
+}
+
+// LocalStoreID is the id of the store this volume replicates from (zero
+// when the store carries none).
+func (v *ReplicationVolume) LocalStoreID() storage.StoreID { return storage.StoreIDOf(v.store) }
+
+// AttestedStores is the primary's attestation of its write-ACK set: each
+// Healthy peer with the store its last barrier reported (replica id ->
+// store id). A peer that is not Healthy, or has not answered a barrier
+// since it became Healthy, is absent: the master never takes it as a
+// survivor on this primary's word.
+func (v *ReplicationVolume) AttestedStores() map[string]storage.StoreID {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := map[string]storage.StoreID{}
+	for id, peer := range v.peers {
+		if sid, ok := peer.AttestedStore(); ok {
+			out[id] = sid
+		}
+	}
+	return out
 }
 
 // PeerStatuses returns a stable, sorted diagnostic snapshot of all

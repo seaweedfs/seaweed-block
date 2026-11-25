@@ -330,6 +330,12 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 	if err := s.host.ingestHeartbeatRecordingHealth(msg); err != nil {
 		return nil, fmt.Errorf("ingest: %w", err)
 	}
+	// A primary's attestation of its write-ACK stores. Only the holder of
+	// the volume's current line is taken; a failed write fails the report,
+	// so the primary sends it again with its next heartbeat.
+	if err := s.host.ingestStoreAttestation(r.GetServerId(), r.GetStoreAttestation()); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
 	return &control.HeartbeatAck{
 		AcceptedAt: timestamppb.Now(),
 		Sequence:   s.seq.Add(1),
@@ -995,13 +1001,21 @@ func (h *Host) ingestHeartbeatRecordingHealth(msg authority.HeartbeatMessage) er
 // assignmentFact encodes one captured publication at the stream boundary.
 func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.AssignmentFact {
 	fact := &control.AssignmentFact{
-		VolumeId:        info.VolumeID,
-		ReplicaId:       info.ReplicaID,
-		ServerId:        s.host.workspaceLineOwner(authority.PublishedLine{ReplicaID: info.ReplicaID, Epoch: info.Epoch, IssuedHost: info.ServerID, OwnerFromMove: info.OwnerFromMove}, info.VolumeID, info.ReplicaID, info.Epoch),
-		Epoch:           info.Epoch,
-		EndpointVersion: info.EndpointVersion,
-		DataAddr:        info.DataAddr,
-		CtrlAddr:        info.CtrlAddr,
+		VolumeId:           info.VolumeID,
+		ReplicaId:          info.ReplicaID,
+		ServerId:           s.host.workspaceLineOwner(authority.PublishedLine{ReplicaID: info.ReplicaID, Epoch: info.Epoch, IssuedHost: info.ServerID, OwnerFromMove: info.OwnerFromMove}, info.VolumeID, info.ReplicaID, info.Epoch),
+		Epoch:              info.Epoch,
+		EndpointVersion:    info.EndpointVersion,
+		DataAddr:           info.DataAddr,
+		CtrlAddr:           info.CtrlAddr,
+		PrimaryKind:        control.PrimaryKind(info.Primary.Kind),
+		EvidenceDurableLsn: info.Primary.DurableLSN,
+		EvidenceEpoch:      info.Primary.DataEpoch,
+		EvidenceFirstLsn:   info.Primary.DataFirstLSN,
+	}
+	if info.Primary.StoreID != ([16]byte{}) {
+		id := info.Primary.StoreID
+		fact.EvidenceStoreId = id[:]
 	}
 	// Populate the peer set from publisher LastPublished
 	// queries for every non-self replica slot in this volume's

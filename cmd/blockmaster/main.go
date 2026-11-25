@@ -259,6 +259,9 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 1
 	}
+	// Every promotion decides on the probe round's answers: each candidate
+	// answers a fresh round over its authenticated node stream.
+	h.SetPromotionEvidenceProvider(h.NewRoundPromotionEvidenceProvider(f.launcherReplicationAck, nil))
 	if len(clusterImport.Volumes) > 0 {
 		if err := importLifecycleVolumes(h, clusterImport.Volumes); err != nil {
 			fmt.Fprintln(os.Stderr, "blockmaster:", err)
@@ -454,12 +457,6 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	})
 	if err != nil {
 		return err
-	}
-	if f.launcherStatus {
-		h.SetPromotionEvidenceProvider(master.NewWorkloadPlanPromotionEvidenceProvider(result.Plans, master.WorkloadPlanPromotionProbeConfig{
-			AckProfile:     f.launcherReplicationAck,
-			ExternalStatus: f.launcherExternalStatus,
-		}))
 	}
 	if f.launcherManifestDir == "" && !f.launcherKubernetesApply {
 		return nil

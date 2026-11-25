@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // ServerObservation is one server's cluster-visible readiness for
@@ -26,9 +28,17 @@ type ReplicaCandidate struct {
 	CtrlAddr        string
 	Reachable       bool
 	ReadyForPrimary bool
-	Eligible        bool
-	Withdrawn       bool
-	EvidenceScore   uint64
+	// PromotionEvidence is what the promotion gate probed on this replica
+	// when it allowed it (kind PROMOTION); a reassign to it carries this to
+	// the target. A replica without it is never promoted.
+	PromotionEvidence adapter.PrimaryEvidence
+	// PlannedMoveAllowed: the gate also allows a move to this replica while
+	// the current primary is alive (the planned-move guard of the volume's
+	// ack profile and replica count held). A rebalance needs it.
+	PlannedMoveAllowed bool
+	Eligible           bool
+	Withdrawn          bool
+	EvidenceScore      uint64
 	// Incarnation identifies the reporting volume process; it changes
 	// on every process start. Empty from older volume binaries.
 	Incarnation string

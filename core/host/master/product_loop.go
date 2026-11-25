@@ -5,6 +5,9 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/seaweedfs/seaweed-block/core/storage"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/ops"
@@ -26,11 +29,34 @@ type PromotionCandidateEvidence struct {
 	Ready      bool
 	DurableLSN uint64
 	ProbeAddr  string
+	// LastDataEpoch and LastDataFirstLSN are the candidate's epoch-table row
+	// at DurableLSN (zero: no table, or no row): the promotion line carries
+	// them, and the target adopts only if its own row at that LSN is the same.
+	LastDataEpoch    uint64
+	LastDataFirstLSN uint64
+	// TableInvalid: a recovery left the candidate's table without a known
+	// history; such a candidate is never Ready (never a promotion survivor).
+	TableInvalid bool
+	// TableValid: the candidate's evidence was read, on a present and valid
+	// epoch table. Only such an answer is evidence: one whose table is
+	// absent or could not be read says nothing about its end.
+	TableValid bool
+	// StoreID is the candidate's probed store (its superblock UUID). A
+	// candidate is Ready only when it equals the store the volume's primary
+	// last attested for it (Host.AttestedStore): a replaced store, or one
+	// never attested, is not a survivor.
+	StoreID storage.StoreID
+	// Floor is the candidate's durable epoch floor when it answered; in a
+	// fencing round it is counted only at the round's FencedEpoch.
+	Floor uint64
 }
 
 type PromotionProbeResult struct {
-	AckProfile string
-	SyncAckLSN uint64
+	// FencedEpoch: this is a fencing round's result at that epoch (0: a plain
+	// probe).
+	FencedEpoch uint64
+	AckProfile  string
+	SyncAckLSN  uint64
 	// SyncAckKnown reports that SyncAckLSN is a known required
 	// acknowledgement frontier, which may be zero. A nonzero SyncAckLSN
 	// is always a known frontier; a zero SyncAckLSN without SyncAckKnown
@@ -43,6 +69,11 @@ type PromotionProbeResult struct {
 
 type PromotionEvidenceProvider interface {
 	ProbePromotionCandidates(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, error)
+	// FencePromotionCandidates runs the fencing round of a decision to
+	// replace the primary of line current: survivors (ready in the plain
+	// round, with their probed store) make current.Epoch+1 their durable
+	// floor, then answer. The result's FencedEpoch is current.Epoch+1.
+	FencePromotionCandidates(volumeID string, current authority.AuthorityBasis, survivors []PromotionCandidateEvidence) (PromotionProbeResult, error)
 }
 
 func (h *Host) SetPromotionEvidenceProvider(p PromotionEvidenceProvider) {
@@ -96,7 +127,10 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 			result.SkippedUnverified++
 			continue
 		}
-		if h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
+		// A fenced reassign is minted only at its fenced epoch (a second
+		// application is refused there), so it is never "already current":
+		// the heal of a failed fencing round names the current replica.
+		if ask.Evidence.FencedEpoch == 0 && h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
 			result.SkippedCurrent++
 			continue
 		}
@@ -204,7 +238,9 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 	}
 	for vi := range snap.Volumes {
 		vol := &snap.Volumes[vi]
-		if len(vol.Slots) < 3 || !vol.Authority.Assigned {
+		h.noteSlotServers(vol.VolumeID, vol.Slots)
+		// Every replicated volume (RF2 and RF3) decides a promotion here.
+		if len(vol.Slots) < 2 || !vol.Authority.Assigned {
 			continue
 		}
 		currentIdx := replicaIndex(vol.Slots, vol.Authority.ReplicaID)
@@ -212,6 +248,15 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 			continue
 		}
 		currentAcceptable := candidateAcceptableForPromotionGate(vol.Slots[currentIdx], serverIndex)
+		// A fencing round fenced survivors above this line and nothing was
+		// published: they refuse the primary at its epoch (and may no longer
+		// look ready), so heal before anything else while it is acceptable.
+		if pend := h.pendingFence(vol.VolumeID, vol.Authority.Epoch); pend && currentAcceptable {
+			if heal, ok := h.healAfterFailedFence(vol.VolumeID, vol.Authority); ok {
+				directAsks = append(directAsks, heal)
+				continue
+			}
+		}
 		candidates := make([]authority.ReplicaCandidate, 0, len(vol.Slots)-1)
 		readyCandidate := false
 		for _, slot := range vol.Slots {
@@ -228,6 +273,35 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		probeCount++
 		result, ok := h.probePromotionCandidatesCurrent(vol.VolumeID, vol.Authority, candidates)
 		allowed := promotionAllowedReplicas(result, ok, len(candidates), h.freshPromotionPeers(vol.VolumeID, candidates))
+		// Replacing the primary (it is not acceptable, or answered not
+		// ready): the decision is read from a fencing round, never from the
+		// plain answers, so no write the old primary gets acknowledged after
+		// a survivor answered can be missing from the target.
+		// A primary in its boot grace is not replaced, so no fencing round
+		// cuts it off from its replicas while it starts.
+		replacing := (!currentAcceptable || (result.CurrentKnown && !result.Current.Ready)) &&
+			!h.primaryBootGraceHoldsNow(vol.VolumeID, vol.Authority.ReplicaID)
+		// A survivor answering above the line was fenced by a round that
+		// published nothing (e.g. before a master restart): heal.
+		if ok && !replacing && floorAboveLine(result, vol.Authority.Epoch) {
+			if heal, healed := h.healAfterFailedFence(vol.VolumeID, vol.Authority); healed {
+				directAsks = append(directAsks, heal)
+			}
+		}
+		if (len(allowed) > 0 || emptyVolumeSurvivors(result, ok)) && replacing {
+			result, allowed = h.fencedDecision(vol.VolumeID, vol.Authority, result, len(candidates))
+			if len(allowed) == 0 {
+				h.noteFencePending(vol.VolumeID, vol.Authority.Epoch+1)
+				// The fencing round ended without a publication: survivors may
+				// now refuse the primary at e. Continue that primary at e+1 if
+				// it answers ready, else the volume waits (visibly).
+				if heal, ok := h.healAfterFailedFence(vol.VolumeID, vol.Authority); ok {
+					directAsks = append(directAsks, heal)
+				} else {
+					h.recordVolumeBlockedEvent(vol.VolumeID, ops.ReasonFenceRoundIncomplete)
+				}
+			}
+		}
 		if ok {
 			h.log.Printf("blockmaster: promotion gate volume=%s current=%s current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
 				vol.VolumeID, vol.Authority.ReplicaID, result.CurrentKnown, result.Current.Ready, result.AckProfile, result.SyncAckLSN, result.Candidates, allowed)
@@ -244,9 +318,13 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 			}
 			if allowed[slot.ReplicaID] {
 				slot.ReadyForPrimary = true
+				slot.PromotionEvidence = promotionEvidenceFor(result, slot.ReplicaID)
+				slot.PlannedMoveAllowed = plannedMoveAllowed(result.AckProfile, len(vol.Slots)) == nil
 				enabledCandidate = true
 			} else {
 				slot.ReadyForPrimary = false
+				slot.PromotionEvidence = adapter.PrimaryEvidence{}
+				slot.PlannedMoveAllowed = false
 			}
 		}
 		// After the (blocking) probe, judge the current primary from its
@@ -266,6 +344,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 					DataAddr:  target.DataAddr,
 					CtrlAddr:  target.CtrlAddr,
 					Intent:    authority.IntentReassign,
+					Evidence:  promotionEvidenceFor(result, target.ReplicaID),
 				})
 			}
 		}
@@ -275,6 +354,154 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		}
 	}
 	return probeCount, blockedCount, directAsks
+}
+
+// fencedDecision runs the fencing round for every replica that answered the
+// plain round, ready or not, and decides on its answers alone. An answer
+// counts when it made the line's next epoch its durable floor (a higher
+// floor was fenced by a newer decision), from the reference store, on a
+// valid epoch table: a lagging replica counts, since it may be the only
+// holder of an acknowledged write. At least unknownFrontierSurvivorsNeeded
+// must count. The target holds the highest counted end and is ready; when
+// only a replica that is not ready holds it, nothing is promoted (a lower
+// ready one would drop what only that replica has) and the volume waits.
+func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis, plain PromotionProbeResult, peerCount int) (PromotionProbeResult, map[string]bool) {
+	h.promotionMu.RLock()
+	prober := h.promotionProber
+	h.promotionMu.RUnlock()
+	var survivors []PromotionCandidateEvidence
+	for _, c := range plain.Candidates {
+		if c.ReplicaID != "" && c.ProbeAddr != "no answer" {
+			survivors = append(survivors, c)
+		}
+	}
+	fenced, err := prober.FencePromotionCandidates(volumeID, current, survivors)
+	if err != nil || fenced.FencedEpoch != current.Epoch+1 {
+		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d failed: %v", volumeID, current.Epoch+1, err)
+		return plain, map[string]bool{}
+	}
+	fenced.AckProfile, fenced.SyncAckLSN, fenced.SyncAckKnown = plain.AckProfile, plain.SyncAckLSN, plain.SyncAckKnown
+	fenced.CurrentKnown, fenced.Current = plain.CurrentKnown, plain.Current
+	counted := map[string]bool{}
+	var highest uint64
+	for i := range fenced.Candidates {
+		c := &fenced.Candidates[i]
+		if c.ReplicaID != "" && c.Floor == fenced.FencedEpoch && c.TableValid {
+			counted[c.ReplicaID] = true
+			if c.DurableLSN > highest {
+				highest = c.DurableLSN
+			}
+		} else {
+			c.Ready = false
+		}
+	}
+	if need := unknownFrontierSurvivorsNeeded(plain.AckProfile, peerCount); len(counted) < need {
+		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d: %d fenced survivors, need %d; nothing published", volumeID, fenced.FencedEpoch, len(counted), need)
+		return fenced, map[string]bool{}
+	}
+	allowed := map[string]bool{}
+	var holders []string
+	for _, c := range fenced.Candidates {
+		if !counted[c.ReplicaID] || c.DurableLSN != highest {
+			continue
+		}
+		holders = append(holders, c.ReplicaID)
+		// highest == 0: N-K+1 fenced answers intersect every acknowledgement
+		// set and none holds an entry, so nothing was ever acknowledged (an
+		// empty volume whose primary was lost): a ready survivor may take it.
+		if c.Ready && (fenced.SyncAckLSN == 0 || c.DurableLSN >= fenced.SyncAckLSN) && (c.DurableLSN > 0 || highest == 0) {
+			allowed[c.ReplicaID] = true
+		}
+	}
+	if len(allowed) == 0 {
+		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d: the highest fenced end %d is held by %v, none ready; waiting for it", volumeID, fenced.FencedEpoch, highest, holders)
+		h.recordVolumeWaitingEvent(volumeID, ops.ReasonHighestEndNotReady, fmt.Sprintf("the highest fenced end %d is held by %v, not ready for primary", highest, holders))
+	}
+	return fenced, allowed
+}
+
+// emptyVolumeSurvivors: the plain round saw a ready replica and every answer
+// at end 0 with no required frontier. promotionAllowedReplicas never allows
+// an end-0 candidate (no data is no evidence); only a fencing round can show
+// that nothing was acknowledged, so this case goes to the fence.
+func emptyVolumeSurvivors(result PromotionProbeResult, ok bool) bool {
+	if !ok || !isKnownAckProfile(result.AckProfile) || result.SyncAckLSN != 0 {
+		return false
+	}
+	ready := false
+	for _, c := range result.Candidates {
+		if c.DurableLSN != 0 {
+			return false
+		}
+		ready = ready || c.Ready
+	}
+	return ready
+}
+
+func floorAboveLine(result PromotionProbeResult, lineEpoch uint64) bool {
+	for _, c := range result.Candidates {
+		if c.Floor > lineEpoch {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) noteFencePending(volumeID string, epoch uint64) {
+	h.promotionMu.Lock()
+	defer h.promotionMu.Unlock()
+	if h.fencePending == nil {
+		h.fencePending = map[string]uint64{}
+	}
+	if epoch > h.fencePending[volumeID] {
+		h.fencePending[volumeID] = epoch
+	}
+}
+
+// pendingFence reports a fencing round above the line at lineEpoch that has
+// not been followed by a line; one the line has reached is forgotten.
+func (h *Host) pendingFence(volumeID string, lineEpoch uint64) bool {
+	h.promotionMu.Lock()
+	defer h.promotionMu.Unlock()
+	e, ok := h.fencePending[volumeID]
+	if ok && lineEpoch >= e {
+		delete(h.fencePending, volumeID)
+		return false
+	}
+	return ok
+}
+
+func (h *Host) recordVolumeWaitingEvent(volumeID, reason, message string) {
+	h.events.append(ops.ClusterEvent{VolumeID: volumeID, Type: "volume_blocked", Severity: "warning", Reason: reason, Message: message})
+}
+
+// healAfterFailedFence continues the line's own primary at e+1 after a
+// fencing round that published nothing, on that primary's answer to a round
+// opened for the heal (a plain one: it needs no fence against itself). The
+// current primary holds every write it acknowledged, so continuing it at e+1
+// loses nothing; the replicas, at floor e+1 already or later, rejoin by
+// reconciliation against its table. Its line is a PROMOTION whose evidence
+// is that primary's own answer; the target check is the usual one.
+func (h *Host) healAfterFailedFence(volumeID string, current authority.AuthorityBasis) (authority.AssignmentAsk, bool) {
+	h.promotionMu.RLock()
+	prober := h.promotionProber
+	h.promotionMu.RUnlock()
+	res, err := prober.ProbePromotionCandidates(volumeID, current, nil)
+	c := res.Current
+	if err != nil || !res.CurrentKnown || c.ReplicaID != current.ReplicaID || !c.Ready || !c.TableValid || c.StoreID.IsZero() {
+		h.log.Printf("blockmaster: promotion gate volume=%s heal: primary %s did not answer ready (%v); waiting", volumeID, current.ReplicaID, err)
+		return authority.AssignmentAsk{}, false
+	}
+	h.log.Printf("blockmaster: promotion gate volume=%s heal: continuing %s at epoch %d", volumeID, current.ReplicaID, current.Epoch+1)
+	return authority.AssignmentAsk{
+		VolumeID:  volumeID,
+		ReplicaID: current.ReplicaID,
+		DataAddr:  current.DataAddr,
+		CtrlAddr:  current.CtrlAddr,
+		Intent:    authority.IntentReassign,
+		Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN,
+			StoreID: c.StoreID, FencedEpoch: current.Epoch + 1, Basis: adapter.BasisHeal},
+	}, true
 }
 
 func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.PlacementIntent, report authority.SupportabilityReport, supported map[string]bool) (int, int, []authority.AssignmentAsk) {
@@ -297,7 +524,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		// and every start counts toward flap history (#128). The
 		// promotion rules below are unchanged.
 		h.recordCurrentBootFact(placement.VolumeID)
-		if len(placement.Slots) < 3 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
+		if len(placement.Slots) < 2 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
 			continue
 		}
 		current, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID)
@@ -353,6 +580,18 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, current.ReplicaID)
 				continue
 			}
+			// One decision function: the failover is read from a fencing
+			// round here too, never from the plain answers.
+			result, allowed = h.fencedDecision(vol.VolumeID, current, result, len(candidates))
+			if len(allowed) == 0 {
+				h.noteFencePending(vol.VolumeID, current.Epoch+1)
+				if heal, healed := h.healAfterFailedFence(vol.VolumeID, current); healed {
+					directAsks = append(directAsks, heal)
+				} else {
+					h.recordVolumeBlockedEvent(vol.VolumeID, ops.ReasonFenceRoundIncomplete)
+				}
+				continue
+			}
 			if target, ok := chooseAllowedPromotionTarget(vol, result, allowed); ok {
 				h.log.Printf("blockmaster: promotion gate unsupported volume=%s direct_reassign=%s current=%s", vol.VolumeID, target.ReplicaID, current.ReplicaID)
 				directAsks = append(directAsks, authority.AssignmentAsk{
@@ -361,6 +600,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 					DataAddr:  target.DataAddr,
 					CtrlAddr:  target.CtrlAddr,
 					Intent:    authority.IntentReassign,
+					Evidence:  promotionEvidenceFor(result, target.ReplicaID),
 				})
 			}
 			continue
@@ -666,6 +906,21 @@ func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount in
 		}
 	}
 	return allowed
+}
+
+// promotionEvidenceFor is the line's evidence for promoting replicaID: what
+// this tick's probe saw on it (its durable LSN and its epoch-table row there).
+func promotionEvidenceFor(result PromotionProbeResult, replicaID string) adapter.PrimaryEvidence {
+	for _, c := range result.Candidates {
+		if c.ReplicaID == replicaID {
+			ev := adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN, StoreID: c.StoreID, FencedEpoch: result.FencedEpoch}
+			if result.FencedEpoch != 0 {
+				ev.Basis = adapter.BasisFenced
+			}
+			return ev
+		}
+	}
+	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}
 }
 
 func chooseAllowedPromotionTarget(vol authority.VolumeTopologySnapshot, result PromotionProbeResult, allowed map[string]bool) (authority.ReplicaCandidate, bool) {

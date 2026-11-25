@@ -181,7 +181,7 @@ func TestWorkspaceForcedMoveRequiresExplicitForceAndLeaseExpiry(t *testing.T) {
 		t.Fatal("implicit forced move")
 	}
 	req.Force = true
-	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "new", DataAddr: "nd", CtrlAddr: "nc", Intent: IntentReassign}); err == nil {
+	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "new", DataAddr: "nd", CtrlAddr: "nc", Intent: IntentReassign, Evidence: testPromotion}); err == nil {
 		t.Fatal("ordinary failover bypassed move")
 	}
 	// Reload uses a full-TTL conservative barrier before admitting forced moves.

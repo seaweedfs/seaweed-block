@@ -29,6 +29,12 @@ service ObservationService {
     // Ack is diagnostic only.
     rpc ReportHeartbeat(HeartbeatReport) returns (HeartbeatAck);
 
+    // A replica's answer to the master's promotion probe round (see
+    // ProbeRound). Only an answer carrying the round id the master minted for
+    // this decision counts; nothing else a replica says is promotion
+    // evidence. Under mutual TLS the caller's node id must be server_id.
+    rpc AnswerProbe(ProbeAnswer) returns (ProbeAck);
+
     // Node/CSI observation event. This appends an operator timeline event only;
     // it MUST NOT mutate lifecycle, authority, placement, Kubernetes, or
     // replica state.
@@ -59,6 +65,12 @@ service AssignmentService {
     // order, while RefreshEndpoint (same Epoch, higher
     // EndpointVersion) still flows through.
     rpc SubscribeAssignments(SubscribeRequest) returns (stream AssignmentFact);
+
+    // Server-streaming. The master sends a ProbeRound for a volume whose
+    // replica runs on this node when it decides a promotion; the node
+    // answers each by AnswerProbe. A round carries no authority. Under
+    // mutual TLS the caller's node id must be server_id.
+    rpc SubscribeProbeRounds(ProbeRoundSubscription) returns (stream ProbeRound);
 }
 
 // EvidenceService — operator read-only projection + evidence.
@@ -127,6 +139,29 @@ message HeartbeatReport {
     // first). 0 means unknown (older reporters, platforms without statfs):
     // the master then compares machine_id and durable_root_dev only.
     uint64 durable_root_fsid = 8;
+    // store_attestation is sent by a volume's primary only: the stores of
+    // the replicas that count toward its write ACKs. The master takes it as
+    // the reference a promotion's probed store must match, and only from
+    // the server that holds the volume's current primary line at that
+    // epoch. A replica's own report of its store never sets it.
+    StoreAttestation store_attestation = 9;
+}
+
+// StoreAttestation is a primary's attestation of its write-ACK set at one
+// epoch: every replica in it with the store id (the store's superblock
+// UUID) of the store that answered its barriers, the primary's own store
+// included. A replica absent from it is not a survivor on this primary's
+// word.
+message StoreAttestation {
+    string volume_id = 1;
+    string replica_id = 2; // the primary's own replica id
+    uint64 epoch = 3;      // the primary line's epoch
+    repeated AttestedStore stores = 4;
+}
+
+message AttestedStore {
+    string replica_id = 1;
+    bytes store_id = 2; // 16 bytes
 }
 
 // HeartbeatSlot — per-replica slot fact. local_role_claim is the
@@ -246,6 +281,34 @@ message AssignmentFact {
 
     // Required holder identity. Empty (pre-release master) is never adopted.
     string server_id = 9;
+
+    // primary_kind says how this line made its primary the primary. The
+    // target checks it before adopting the role: a PROMOTION carries the
+    // evidence the master probed on the target (its durable LSN and its
+    // epoch-table row at that LSN), and the target adopts only if its own
+    // store still shows it. UNSPECIFIED (a pre-release master) is never
+    // adopted by a replicated volume's target that holds data at an epoch it
+    // has no row for.
+    PrimaryKind primary_kind = 10;
+    uint64 evidence_durable_lsn = 11;
+    uint64 evidence_epoch = 12;
+    uint64 evidence_first_lsn = 13;
+    // The probed store's id (its superblock UUID, 16 bytes): the target
+    // adopts a promotion only on that same store.
+    bytes evidence_store_id = 14;
+}
+
+// PrimaryKind is how a line made its primary the primary.
+enum PrimaryKind {
+    PRIMARY_KIND_UNSPECIFIED = 0;
+    // The volume's first primary: the target holds no data.
+    PRIMARY_KIND_BOOTSTRAP = 1;
+    // A replica promoted on the master's probed evidence (automatic
+    // promotion, failover, failback, a planned move).
+    PRIMARY_KIND_PROMOTION = 2;
+    // The operator's forced promotion: no evidence; the lost range is
+    // reported and the target's epoch table restarts at this epoch.
+    PRIMARY_KIND_FORCED = 3;
 }
 
 message StatusRequest {
@@ -475,3 +538,49 @@ message FailbackResponse {
     bool no_cross_volume_identity_change = 6;
     repeated string evidence_refs = 7;
 }
+
+
+// ProbeRoundSubscription opens a node's probe round stream.
+message ProbeRoundSubscription {
+    string server_id = 1;
+}
+
+// ProbeRound asks the node's replica of volume_id for its promotion evidence
+// now. round_id is fresh per decision; an answer counts only for it.
+message ProbeRound {
+    string volume_id = 1;
+    string replica_id = 2;
+    uint64 round_id = 3;
+    // A fencing round (fence_epoch > 0): a replica whose store is
+    // expected_store_id makes its epoch floor fence_epoch durable FIRST, then
+    // answers (its answer is the promise: it refuses frames and acks at a
+    // lower epoch from then on). A replica on another store raises nothing
+    // and answers its own store id. 0: a plain probe, no fence.
+    uint64 fence_epoch = 4;
+    bytes expected_store_id = 5;
+}
+
+// ProbeAnswer is one replica's promotion evidence for one round.
+message ProbeAnswer {
+    string server_id = 1;
+    string volume_id = 2;
+    string replica_id = 3;
+    uint64 round_id = 4;
+    // The store's identity (its superblock UUID); empty = none.
+    bytes store_id = 5;
+    // The store's durable end (R) and its epoch-table row there.
+    uint64 durable_end = 6;
+    uint64 last_data_epoch = 7;
+    uint64 last_data_first_lsn = 8;
+    bool table_present = 9;
+    bool table_valid = 10;
+    // The replica's role as it sees it: a replica ready to be promoted, or a
+    // primary that serves.
+    bool replica_ready = 11;
+    bool primary_ready = 12;
+    // The replica's durable epoch floor when it answered (after a fencing
+    // round's raise). Above the round's fence_epoch: superseded, not counted.
+    uint64 floor = 13;
+}
+
+message ProbeAck {}

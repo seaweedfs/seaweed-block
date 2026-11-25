@@ -54,7 +54,7 @@ func (f *fakeStatus) serve(t *testing.T) int {
 			_ = json.NewEncoder(w).Encode(body)
 		case "/status/durable":
 			_ = json.NewEncoder(w).Encode(map[string]any{"Volumes": []map[string]any{{
-				"VolumeID": "vol-rf3", "ReplicaID": f.replicaID, "FrontierKnown": true, "DurableLSN": 70,
+				"VolumeID": "vol-rf3", "ReplicaID": f.replicaID, "StoreID": testStoreHex, "FrontierKnown": true, "DurableLSN": 70,
 			}}})
 		default:
 			http.NotFound(w, r)
@@ -97,6 +97,7 @@ func useProductionProbe(t *testing.T, h *Host) (r1, r2 *fakeStatus) {
 	// it covers (#181): r2 reports durable 70.
 	h.SetPromotionEvidenceProvider(NewWorkloadPlanPromotionEvidenceProvider(plans, WorkloadPlanPromotionProbeConfig{
 		AckProfile:          "sync-quorum",
+		Attested:            attestEvery(testStoreID),
 		RequiredLSNByVolume: map[string]uint64{"vol-rf3": 70},
 	}))
 	return r1, r2

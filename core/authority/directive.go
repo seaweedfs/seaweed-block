@@ -5,17 +5,20 @@
 // (VolumeID, ReplicaID).
 //
 // Three boundaries hold:
-//   1. The authority package owns publication of assignment truth.
-//   2. The authority package does NOT own failover policy.
-//   3. Engine and adapter remain consumers, not producers, of
-//      assignment truth.
+//  1. The authority package owns publication of assignment truth.
+//  2. The authority package does NOT own failover policy.
+//  3. Engine and adapter remain consumers, not producers, of
+//     assignment truth.
 package authority
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // AskIntent is the only control knob a Directive has. The publisher
@@ -67,6 +70,48 @@ type AssignmentAsk struct {
 	DataAddr  string
 	CtrlAddr  string
 	Intent    AskIntent
+	// Evidence is the kind and probed evidence a reassign carries to its
+	// target (a bind is always a bootstrap); see adapter.PrimaryEvidence. It
+	// is a probe fact about the target, never an authority fact.
+	Evidence adapter.PrimaryEvidence
+}
+
+// ErrReassignWithoutKind: a primary change was asked without a kind (no
+// promotion-gate evidence, not a forced move); the publisher mints no line.
+var ErrReassignWithoutKind = errors.New("authority: a reassign needs a primary kind (promotion evidence or a forced move)")
+
+// ErrFenceSuperseded: a primary change decided on a fencing round at epoch
+// e+1 arrived after the volume's line left e; the publisher mints nothing.
+var ErrFenceSuperseded = errors.New("authority: the fencing round's epoch is no longer the next epoch of the line")
+
+// ErrPromotionUnfenced: a promotion carried neither a fencing round's epoch
+// nor the planned-move mark; the publisher mints nothing.
+var ErrPromotionUnfenced = errors.New("authority: a promotion needs a fencing round's decision or a guarded planned move")
+
+// promotionBasisHolds checks a promotion's basis against the epoch it is
+// minted at; for a heal, the target must be the replica the line names now.
+func promotionBasisHolds(ask AssignmentAsk, epoch uint64, state map[subKey]assignmentState, lineEpoch uint64) error {
+	ev := ask.Evidence
+	switch ev.Basis {
+	case adapter.BasisFenced:
+		if ev.FencedEpoch != epoch {
+			return fmt.Errorf("fenced at %d, minted at %d", ev.FencedEpoch, epoch)
+		}
+	case adapter.BasisPlanned:
+		if ev.FencedEpoch != 0 {
+			return fmt.Errorf("a planned move carries no fenced epoch (%d)", ev.FencedEpoch)
+		}
+	case adapter.BasisHeal:
+		if ev.FencedEpoch != epoch {
+			return fmt.Errorf("heal fenced at %d, minted at %d", ev.FencedEpoch, epoch)
+		}
+		if cur, ok := state[subKey{volumeID: ask.VolumeID, replicaID: ask.ReplicaID}]; !ok || !cur.present || cur.info.Epoch != lineEpoch {
+			return fmt.Errorf("a heal continues the line's own primary; %s is not it", ask.ReplicaID)
+		}
+	default:
+		return fmt.Errorf("no basis")
+	}
+	return nil
 }
 
 // Directive is the input side of the authority route. A Directive

@@ -20,6 +20,8 @@ var masterRules = map[string]auth.Rule{
 	control.ObservationService_ReportClusterEvent_FullMethodName: {Min: auth.RoleOperator},
 
 	control.AssignmentService_SubscribeAssignments_FullMethodName: {Node: true},
+	control.AssignmentService_SubscribeProbeRounds_FullMethodName: {Node: true},
+	control.ObservationService_AnswerProbe_FullMethodName:         {Node: true},
 
 	control.EvidenceService_QueryVolumeStatus_FullMethodName: {Min: auth.RoleViewer, Node: true},
 

@@ -44,7 +44,7 @@ func TestDurableAuthority_ReloadReproducesCurrentLine(t *testing.T) {
 	if err := pubA.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r2",
 		DataAddr: "d2", CtrlAddr: "c2",
-		Intent: IntentReassign,
+		Intent: IntentReassign, Evidence: testPromotion,
 	}); err != nil {
 		t.Fatalf("apply Reassign: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestDurableAuthority_StalePreFailoverRecordRejectedOnReload(t *testing.T) {
 	_ = pubA.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r2",
 		DataAddr: "d2", CtrlAddr: "c2",
-		Intent: IntentReassign,
+		Intent: IntentReassign, Evidence: testPromotion,
 	})
 	_ = storeA.Close()
 
@@ -129,8 +129,8 @@ func TestDurableAuthority_PublisherAdvancesFromReloaded(t *testing.T) {
 	storeA, _ := NewFileAuthorityStore(dir)
 	pubA := NewPublisher(NewStaticDirective(nil), WithStore(storeA))
 	_ = pubA.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d1", CtrlAddr: "c1", Intent: IntentBind})
-	_ = pubA.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign})
-	_ = pubA.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r3", DataAddr: "d3", CtrlAddr: "c3", Intent: IntentReassign})
+	_ = pubA.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign, Evidence: testPromotion})
+	_ = pubA.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r3", DataAddr: "d3", CtrlAddr: "c3", Intent: IntentReassign, Evidence: testPromotion})
 	_ = storeA.Close()
 
 	// Phase 2: restart. Continue advancing. The next Reassign
@@ -141,7 +141,7 @@ func TestDurableAuthority_PublisherAdvancesFromReloaded(t *testing.T) {
 	if err := pubB.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r1",
 		DataAddr: "d1-new", CtrlAddr: "c1-new",
-		Intent: IntentReassign,
+		Intent: IntentReassign, Evidence: testPromotion,
 	}); err != nil {
 		t.Fatalf("post-restart Reassign: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestDurableAuthority_ControllerSeesReloadedLineAtBoot(t *testing.T) {
 	_ = pubA.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r2",
 		DataAddr: "d2", CtrlAddr: "c2",
-		Intent: IntentReassign,
+		Intent: IntentReassign, Evidence: testPromotion,
 	})
 	_ = storeA.Close()
 

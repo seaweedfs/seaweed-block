@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // ============================================================
@@ -48,6 +50,10 @@ type DurableRecord struct {
 	// checksum of pre-workspace records. Authority itself remains non-expiring;
 	// the lease gates serving, never authorizes an epoch by itself.
 	Workspace *WorkspaceState `json:",omitempty"`
+	// Primary is the line's kind and promotion evidence, so a replayed line
+	// carries what the first publication carried. Omitting nil preserves the
+	// checksum of records written before it.
+	Primary *adapter.PrimaryEvidence `json:",omitempty"`
 }
 
 // AuthorityStore is the narrow durable-authority interface. The
