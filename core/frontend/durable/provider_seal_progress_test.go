@@ -135,15 +135,17 @@ func TestPlainSealDeadlineRetryUploadsOnlyRemainingChunks(t *testing.T) {
 	// The kernel requires a Put in the new session, but the content-named
 	// filer entry is reused by a conditional metadata update, not a blob PUT.
 	c.blobs.Lock()
-	physicalChunks := 0
+	physical := map[[32]byte]int{}
 	for _, raw := range c.blobs.blobs {
-		if len(raw) == chunkBytes {
-			physicalChunks++
-		}
+		physical[sha256.Sum256(raw)]++
 	}
 	c.blobs.Unlock()
-	if physicalChunks != chunks {
-		t.Fatalf("physical payload uploads=%d want=%d", physicalChunks, chunks)
+	for i := 0; i < chunks; i++ {
+		raw := make([]byte, chunkBytes)
+		copy(raw, block(byte(0x40+i)))
+		if n := physical[sha256.Sum256(raw)]; n != 1 {
+			t.Fatalf("physical payload upload for chunk %d occurred %d times, want one", i, n)
+		}
 	}
 	committed, err := remote.GetHead(parent)
 	if err != nil {
