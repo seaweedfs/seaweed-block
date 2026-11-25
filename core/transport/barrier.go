@@ -17,8 +17,9 @@ import (
 // Reason is populated by higher-layer aggregation (DurabilityCoordinator)
 // and is empty on successful Barrier returns.
 type BarrierAck struct {
-	Lineage     RecoveryLineage
-	AchievedLSN uint64
+	Lineage       RecoveryLineage
+	AchievedLSN   uint64
+	LastDataEpoch uint64 // the replica's last epoch-table row; 0 = no table (see BarrierResponse)
 	Success     bool
 	Reason      string
 }
@@ -40,29 +41,39 @@ var ErrBarrierLineageMismatch = errors.New("transport: barrier: response lineage
 // on cached primary-side assumptions (architect round-21 uniform
 // rule, INV-REPL-LINEAGE-BORNE-ON-BARRIER-ACK).
 //
-// Wire (post-T4b-1): [32B lineage][8B achievedLSN] — 40 bytes.
+// Wire: [32B lineage][8B achievedLSN][8B lastDataEpoch] — 48 bytes. A
+// 40-byte response (a replica from before the epoch table) decodes with
+// LastDataEpoch 0, which the primary reads as "no table".
 // Lineage field order inside the 32B slab is strictly
 // SessionID, Epoch, EndpointVersion, frontierHint (matches
 // EncodeLineage). Any deviation MUST be rejected at decode.
 type BarrierResponse struct {
 	Lineage     RecoveryLineage
 	AchievedLSN uint64
+	// LastDataEpoch is the epoch of the replica's last epoch-table row (the
+	// epoch of its entries at AchievedLSN); 0 = no table. An entry's
+	// identity is (epoch, LSN): a length alone says nothing.
+	LastDataEpoch uint64
 }
 
 // barrierRespSize is the exact byte length of a valid encoded
 // BarrierResponse. Short, over-long, or field-misordered payloads
 // are rejected by DecodeBarrierResp and MUST NOT contribute to
 // correctness decisions (round-21 rule).
-const barrierRespSize = 40
+const barrierRespSize = 48
+
+// barrierRespV0Size is the response of a replica from before the epoch table.
+const barrierRespV0Size = 40
 
 // EncodeBarrierResp serializes a barrier response.
 // Wire: [32B lineage (SessionID, Epoch, EndpointVersion, frontierHint)]
 //
-//	[8B achievedLSN]
+//	[8B achievedLSN][8B lastDataEpoch]
 func EncodeBarrierResp(r BarrierResponse) []byte {
 	buf := make([]byte, barrierRespSize)
 	copy(buf[0:32], EncodeLineage(r.Lineage))
 	binary.BigEndian.PutUint64(buf[32:40], r.AchievedLSN)
+	binary.BigEndian.PutUint64(buf[40:48], r.LastDataEpoch)
 	return buf
 }
 
@@ -77,9 +88,9 @@ func EncodeBarrierResp(r BarrierResponse) []byte {
 // Callers MUST treat any error return as "no valid ack" and MUST NOT
 // fabricate a frontier or count the ack toward durability.
 func DecodeBarrierResp(buf []byte) (BarrierResponse, error) {
-	if len(buf) < barrierRespSize {
-		return BarrierResponse{}, fmt.Errorf("transport: short barrier response: %d bytes, want %d",
-			len(buf), barrierRespSize)
+	if len(buf) < barrierRespV0Size || (len(buf) > barrierRespV0Size && len(buf) < barrierRespSize) {
+		return BarrierResponse{}, fmt.Errorf("transport: short barrier response: %d bytes, want %d (or %d from a replica without the epoch table)",
+			len(buf), barrierRespSize, barrierRespV0Size)
 	}
 	lineage, err := DecodeLineage(buf[0:32])
 	if err != nil {
@@ -94,10 +105,14 @@ func DecodeBarrierResp(buf []byte) (BarrierResponse, error) {
 		return BarrierResponse{}, fmt.Errorf("transport: barrier response has zero-valued lineage field (sessionID=%d epoch=%d endpointVersion=%d frontierHint=%d)",
 			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, lineage.EffectiveFrontierHint())
 	}
-	return BarrierResponse{
+	resp := BarrierResponse{
 		Lineage:     lineage,
 		AchievedLSN: binary.BigEndian.Uint64(buf[32:40]),
-	}, nil
+	}
+	if len(buf) >= barrierRespSize {
+		resp.LastDataEpoch = binary.BigEndian.Uint64(buf[40:48])
+	}
+	return resp, nil
 }
 
 // sendBarrierReq writes a MsgBarrierReq frame on conn carrying the

@@ -567,8 +567,9 @@ func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, front
 
 	return BarrierAck{
 		Lineage:     resp.Lineage,
-		AchievedLSN: resp.AchievedLSN,
-		Success:     true,
+		AchievedLSN:   resp.AchievedLSN,
+		LastDataEpoch: resp.LastDataEpoch,
+		Success:       true,
 	}, nil
 }
 

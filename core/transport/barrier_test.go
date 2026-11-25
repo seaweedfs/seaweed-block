@@ -84,8 +84,12 @@ func TestBarrierResp_FullLineageEcho_RoundTrip(t *testing.T) {
 //
 // Required test per mini-plan §2 T4b-1.
 func TestBarrierResp_ShortPayload_Rejected(t *testing.T) {
-	// Loop covers every short length from 0 through 39 (barrierRespSize-1).
+	// Every length below the full response except the 40-byte response of
+	// a replica from before the epoch table (TestT4b6 decodes that one).
 	for n := 0; n < barrierRespSize; n++ {
+		if n == barrierRespV0Size {
+			continue
+		}
 		t.Run("", func(t *testing.T) {
 			buf := make([]byte, n)
 			// Populate with a valid-looking prefix so the test fails
