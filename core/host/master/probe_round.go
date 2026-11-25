@@ -3,6 +3,7 @@ package master
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"log"
 	"sync"
 	"time"
 
@@ -250,6 +251,7 @@ done:
 			want, ok := p.attested(volumeID, c.ReplicaID)
 			attested = ok && want == store
 		}
+		log.Printf("DEBUG round cand=%s replica_ready=%t present=%t valid=%t attested=%t store=%x", c.ReplicaID, a.GetReplicaReady(), a.GetTablePresent(), a.GetTableValid(), attested, store[:4])
 		result.Candidates = append(result.Candidates, PromotionCandidateEvidence{
 			ReplicaID:        c.ReplicaID,
 			DurableLSN:       a.GetDurableEnd(),
