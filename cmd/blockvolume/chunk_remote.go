@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	defaultChunkPath = "/swblock/chunks"
+	defaultChunkPath = chunkstore.DefaultChunkPath
 	// Periodic HEAD publication bounds the host-loss recovery point. Scheduled
 	// named snapshots are set by --chunk-snapshot-schedule.
 	defaultChunkCaptureInterval     = 0

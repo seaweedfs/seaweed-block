@@ -63,6 +63,10 @@ type flags struct {
 	workspaceMaxClockSkew                 time.Duration
 	workspaceRPC                          bool
 	workspaceHEADBase                     string
+	chunkFiler                            string
+	chunkPath                             string
+	chunkCollection                       string
+	chunkReplication                      string
 	frontendPublicationRuntimeHTTP        bool
 	frontendPublicationRuntimeListen      string
 	strictJournalIsolation                bool
@@ -122,6 +126,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.DurationVar(&f.workspaceMaxClockSkew, "workspace-max-clock-skew", 20*time.Second, "maximum workspace clock skew; host lease shortens by half, forced moves wait the full bound")
 	fs.BoolVar(&f.workspaceRPC, "workspace-rpc", false, "enable RF1 workspace lease/revocation/move RPCs")
 	fs.StringVar(&f.workspaceHEADBase, "workspace-head-base-url", "", "filer HTTP base containing <name>-<layout-id-prefix>/HEAD; required with --workspace-rpc")
+	chunkstore.RegisterSWFSFlags(fs, &f.chunkFiler, &f.chunkPath, &f.chunkCollection, &f.chunkReplication)
 	fs.BoolVar(&f.frontendPublicationRuntimeHTTP, "frontend-publication-runtime-http", false, "enable disabled-by-default frontend publication HTTP runtime; confirms post-failback authority publication only")
 	fs.StringVar(&f.frontendPublicationRuntimeListen, "frontend-publication-runtime-listen", "127.0.0.1:9334", "HTTP listen address for --frontend-publication-runtime-http")
 	fs.BoolVar(&f.strictJournalIsolation, "strict-journal-isolation", false, "refuse new work on nodes whose durable root shares the authority store's file system (one journal): their heartbeats are refused until they serve a volume, and no placement or move targets them; off = alarm only")
