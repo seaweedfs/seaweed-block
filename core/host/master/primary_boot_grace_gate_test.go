@@ -65,6 +65,7 @@ func ingestRF3Incarnations(t *testing.T, h *Host, r1, r2, r3 rf3Slot) {
 type switchProbe struct {
 	mu           sync.Mutex
 	r3End        uint64
+	fenceSilent  bool // no survivor answers the fencing round
 	currentReady bool
 	// currentUnknown: the current primary did not answer (status GET
 	// refused or timed out), so CurrentKnown is false.
@@ -241,6 +242,33 @@ func TestUnsupportedPathNeverReassignsOnAnUnansweredPrimary(t *testing.T) {
 	expectLineStaysR1(t, h, "status probe of the current primary timed out")
 	unsupportedTick(t, h, readySlot("r1-a"))
 	expectLineStaysR1(t, h, "still unanswered on the next tick")
+}
+
+// The unsupported path decides a failover on a fencing round too: with the
+// round unanswered nothing is published, however ready the survivor looked
+// in the plain round; answered, the line carries the fenced epoch.
+func TestUnsupportedPathFailsOverOnlyOnAFencingRound(t *testing.T) {
+	ineligible := restarting
+	ineligible.eligible = false
+	t.Run("fencing round unanswered", func(t *testing.T) {
+		h := newBootGraceMaster(t, Config{})
+		defer closeTestMaster(t, h)
+		p := probeOf(t, h)
+		p.mu.Lock()
+		p.fenceSilent = true
+		p.mu.Unlock()
+		unsupportedTick(t, h, ineligible)
+		expectLineStaysR1(t, h, "the survivors did not answer the fencing round")
+	})
+	t.Run("fencing round answered", func(t *testing.T) {
+		h := newBootGraceMaster(t, Config{})
+		defer closeTestMaster(t, h)
+		unsupportedTick(t, h, ineligible)
+		expectFailoverToR2(t, h, "fenced survivors")
+		if info, _ := h.Publisher().LastPublished("vol-rf3", "r2"); info.Primary.FencedEpoch != 2 {
+			t.Fatalf("failover line evidence %+v; want fenced at 2", info.Primary)
+		}
+	})
 }
 
 // An explicit unhealthy current primary gets no grace on this path.

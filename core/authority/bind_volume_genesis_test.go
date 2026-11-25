@@ -3,6 +3,8 @@ package authority
 import (
 	"errors"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // #183: Bind is genesis for the volume. These cover the branches around
@@ -143,5 +145,28 @@ func TestPublisher_AFencedDecisionIsMintedOnlyAtItsFencedEpoch(t *testing.T) {
 	ask.Evidence.FencedEpoch = 2
 	if err := pub.apply(ask); err != nil {
 		t.Fatalf("a decision fenced at the next epoch: %v", err)
+	}
+}
+
+// A promotion is minted only on a fencing round's decision or as a guarded
+// planned move: one with neither (a decision read from a plain round) is
+// refused, so no path can skip the fence.
+func TestPublisher_AnUnfencedPromotionIsRefused(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil))
+	if err := pub.apply(bindAsk("v1", "r1")); err != nil {
+		t.Fatal(err)
+	}
+	ask := bindAsk("v1", "r2")
+	ask.Intent = IntentReassign
+	ask.Evidence = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 9}
+	if err := pub.apply(ask); !errors.Is(err, ErrPromotionUnfenced) {
+		t.Fatalf("an unfenced, unplanned promotion: %v; want ErrPromotionUnfenced", err)
+	}
+	if line, _ := pub.VolumeAuthorityLine("v1"); line.ReplicaID != "r1" || line.Epoch != 1 {
+		t.Fatalf("the line moved: %+v", line)
+	}
+	ask.Evidence.Planned = true
+	if err := pub.apply(ask); err != nil {
+		t.Fatalf("a guarded planned move: %v", err)
 	}
 }

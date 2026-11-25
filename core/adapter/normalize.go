@@ -62,6 +62,10 @@ type PrimaryEvidence struct {
 	// answering (a fencing round); the line is minted only at this epoch.
 	// 0: no fencing round (a planned move).
 	FencedEpoch uint64
+	// Planned: a guarded planned move (the target in every acknowledgement
+	// set while the current primary is alive), the one promotion minted
+	// without a fencing round.
+	Planned bool
 }
 
 // ProbeResult is the outcome of a transport probe.

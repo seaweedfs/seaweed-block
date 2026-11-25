@@ -83,6 +83,10 @@ var ErrReassignWithoutKind = errors.New("authority: a reassign needs a primary k
 // e+1 arrived after the volume's line left e; the publisher mints nothing.
 var ErrFenceSuperseded = errors.New("authority: the fencing round's epoch is no longer the next epoch of the line")
 
+// ErrPromotionUnfenced: a promotion carried neither a fencing round's epoch
+// nor the planned-move mark; the publisher mints nothing.
+var ErrPromotionUnfenced = errors.New("authority: a promotion needs a fencing round's decision or a guarded planned move")
+
 // Directive is the input side of the authority route. A Directive
 // emits one AssignmentAsk at a time. The publisher's Run loop calls
 // Next repeatedly until ctx cancellation.
