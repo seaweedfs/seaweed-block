@@ -933,6 +933,9 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// Step (2c): identity install only after replication is live.
 	// SOLE permitted decode path. See subscribe.go.
 	info := decodeAssignmentFact(fact)
+	h.selfFenceMu.Lock()
+	wasPrimary := h.selfRole == selfRolePrimary
+	h.selfFenceMu.Unlock()
 	// G2: fence our own replica listener at this epoch before the adapter
 	// can turn Healthy and the frontend serves IO, so a deposed primary that
 	// still reaches us cannot get its writes applied (or counted) here.
@@ -942,6 +945,19 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		h.log.Printf("blockvolume: volume %s could not fence its own replica listener at epoch %d: %v — NOT applying to adapter (fail-closed)",
 			h.cfg.VolumeID, info.Epoch, err)
 		return
+	}
+	// A node taking the primary role from another role holds entries it
+	// applied as a replica, which never passed its own ship order: move the
+	// ship cursor to the store's next LSN before it serves, or its first
+	// write waits for an LSN that never comes. Its listener is fenced as
+	// primary now (no replicated entry lands any more) and the frontend is
+	// not serving yet (no local write is pending).
+	if r, ok := rv.(interface{ RebaseShipToStore() error }); ok && rv != nil && !wasPrimary {
+		if err := r.RebaseShipToStore(); err != nil {
+			h.log.Printf("blockvolume: volume %s could not move its ship order to the store at epoch %d: %v — NOT applying to adapter (fail-closed)",
+				h.cfg.VolumeID, info.Epoch, err)
+			return
+		}
 	}
 	if h.cfg.RF1Only != "" && !h.admitRF1(fact.Epoch) {
 		h.log.Printf("blockvolume: volume %s RF1 assignment at epoch %d overtaken by a newer refusal — NOT applying to adapter",

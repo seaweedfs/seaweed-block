@@ -734,6 +734,12 @@ func (v *ReplicationVolume) enqueueLocalWrite(w LocalWrite) (*orderedLocalWrite,
 	return req, nil
 }
 
+// RebaseShipToStore moves the ship order to the store's next LSN, for a
+// node taking the primary role after applying entries as a replica.
+func (v *ReplicationVolume) RebaseShipToStore() error {
+	return v.RebaseShipLSN(v.store.NextLSN())
+}
+
 // RebaseShipLSN moves the next LSN to ship forward to lsn. The volume
 // orders writes from the store's next LSN, captured when it was built; a
 // restored host's frontier seed (its WAL continues at HEAD.remote_lsn+1)
