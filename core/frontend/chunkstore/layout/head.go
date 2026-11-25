@@ -41,10 +41,12 @@ type Dependent struct {
 	Root     RootName
 }
 
-// Snapshot is one named snapshot: its root and the restore targets that
+// Snapshot is one named snapshot: its root, the position of the commit
+// that named it (the cut LSN of its image), and the restore targets that
 // still name its chunks, ordered by target id.
 type Snapshot struct {
 	Root       RootName
+	Position   uint64
 	Meta       SnapshotMeta
 	Dependents []Dependent
 }
@@ -165,6 +167,7 @@ type headDoc struct {
 
 type snapDoc struct {
 	Root       string            `json:"root"`
+	Position   uint64            `json:"position,omitempty"`
 	CreatedNs  int64             `json:"created_ns,omitempty"`
 	Class      string            `json:"class,omitempty"`
 	ExpiresNs  int64             `json:"expires_ns,omitempty"`
@@ -287,7 +290,7 @@ func (h Head) Encode() ([]byte, error) {
 	if len(h.Snapshots) > 0 {
 		d.Snapshots = map[string]snapDoc{}
 		for n, s := range h.Snapshots {
-			sd := snapDoc{Root: s.Root.String(), CreatedNs: s.Meta.CreatedNs, Class: s.Meta.Class, ExpiresNs: s.Meta.ExpiresNs}
+			sd := snapDoc{Root: s.Root.String(), Position: s.Position, CreatedNs: s.Meta.CreatedNs, Class: s.Meta.Class, ExpiresNs: s.Meta.ExpiresNs}
 			if len(s.Meta.Labels) > 0 {
 				sd.Labels = s.Meta.Labels
 			}
@@ -338,7 +341,7 @@ func DecodeHead(b []byte, gen uint64, volume VolumeID) (Head, error) {
 			if err != nil {
 				return Head{}, err
 			}
-			snap := Snapshot{Root: rn, Meta: SnapshotMeta{CreatedNs: s.CreatedNs, Class: s.Class, ExpiresNs: s.ExpiresNs, Labels: s.Labels}}
+			snap := Snapshot{Root: rn, Position: s.Position, Meta: SnapshotMeta{CreatedNs: s.CreatedNs, Class: s.Class, ExpiresNs: s.ExpiresNs, Labels: s.Labels}}
 			for _, dep := range s.Dependents {
 				tid, err := ParseVolumeID(dep.TargetID)
 				if err != nil {
@@ -435,7 +438,7 @@ func (h Head) clone() Head {
 	if h.Snapshots != nil {
 		c.Snapshots = make(map[string]Snapshot, len(h.Snapshots))
 		for n, s := range h.Snapshots {
-			c.Snapshots[n] = Snapshot{Root: s.Root, Meta: s.Meta.clone(), Dependents: append([]Dependent(nil), s.Dependents...)}
+			c.Snapshots[n] = Snapshot{Root: s.Root, Position: s.Position, Meta: s.Meta.clone(), Dependents: append([]Dependent(nil), s.Dependents...)}
 		}
 	}
 	return c
