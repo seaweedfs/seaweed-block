@@ -29,6 +29,12 @@ service ObservationService {
     // Ack is diagnostic only.
     rpc ReportHeartbeat(HeartbeatReport) returns (HeartbeatAck);
 
+    // A replica's answer to the master's promotion probe round (see
+    // ProbeRound). Only an answer carrying the round id the master minted for
+    // this decision counts; nothing else a replica says is promotion
+    // evidence. Under mutual TLS the caller's node id must be server_id.
+    rpc AnswerProbe(ProbeAnswer) returns (ProbeAck);
+
     // Node/CSI observation event. This appends an operator timeline event only;
     // it MUST NOT mutate lifecycle, authority, placement, Kubernetes, or
     // replica state.
@@ -59,6 +65,12 @@ service AssignmentService {
     // order, while RefreshEndpoint (same Epoch, higher
     // EndpointVersion) still flows through.
     rpc SubscribeAssignments(SubscribeRequest) returns (stream AssignmentFact);
+
+    // Server-streaming. The master sends a ProbeRound for a volume whose
+    // replica runs on this node when it decides a promotion; the node
+    // answers each by AnswerProbe. A round carries no authority. Under
+    // mutual TLS the caller's node id must be server_id.
+    rpc SubscribeProbeRounds(ProbeRoundSubscription) returns (stream ProbeRound);
 }
 
 // EvidenceService — operator read-only projection + evidence.
@@ -500,3 +512,39 @@ message FailbackResponse {
     bool no_cross_volume_identity_change = 6;
     repeated string evidence_refs = 7;
 }
+
+
+// ProbeRoundSubscription opens a node's probe round stream.
+message ProbeRoundSubscription {
+    string server_id = 1;
+}
+
+// ProbeRound asks the node's replica of volume_id for its promotion evidence
+// now. round_id is fresh per decision; an answer counts only for it.
+message ProbeRound {
+    string volume_id = 1;
+    string replica_id = 2;
+    uint64 round_id = 3;
+}
+
+// ProbeAnswer is one replica's promotion evidence for one round.
+message ProbeAnswer {
+    string server_id = 1;
+    string volume_id = 2;
+    string replica_id = 3;
+    uint64 round_id = 4;
+    // The store's identity (its superblock UUID); empty = none.
+    bytes store_id = 5;
+    // The store's durable end (R) and its epoch-table row there.
+    uint64 durable_end = 6;
+    uint64 last_data_epoch = 7;
+    uint64 last_data_first_lsn = 8;
+    bool table_present = 9;
+    bool table_valid = 10;
+    // The replica's role as it sees it: a replica ready to be promoted, or a
+    // primary that serves.
+    bool replica_ready = 11;
+    bool primary_ready = 12;
+}
+
+message ProbeAck {}
