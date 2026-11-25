@@ -538,6 +538,9 @@ func (h *Host) runRoleRetry(ctx context.Context) {
 			continue
 		}
 		role, epoch := h.selfRole, h.selfEpoch
+		// Re-applied directly, not through fenceSelfWithPeers: the desired
+		// role is unchanged, and shipPrepared was already cleared when this
+		// replica role was first taken there.
 		err := applySelfRoleWithPeers(h.selfFence, role, epoch, h.selfHasPeers)
 		h.latchRoleAdmission(role, epoch, err)
 		h.selfFenceMu.Unlock()
