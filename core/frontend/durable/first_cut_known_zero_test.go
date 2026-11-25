@@ -15,14 +15,15 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // fcutChunks is chunkProvider's chunk count: pcBlocks blocks of pcChunkBlocks.
 const fcutChunks = pcBlocks / pcChunkBlocks
 
-func fcutProvider(t *testing.T, root string, remote storage.ChunkRemote) *durable.DurableProvider {
-	return chunkProvider(t, root, remote, v1View(), 0)
+func fcutProvider(t *testing.T, root string, fixture *testutil.LayoutFixture, view *stubView) *durable.DurableProvider {
+	return layoutChunkProvider(t, root, fixture, view, 0)
 }
 
 // fcutCheckpointedPast waits until the store's checkpoint has moved past
@@ -70,26 +71,6 @@ func fcutWrite(t *testing.T, ctx context.Context, p *durable.DurableProvider, lb
 	return data
 }
 
-// fcutHeadBlock reads block lba from the published HEAD (zero if its chunk
-// is not named).
-func fcutHeadBlock(t *testing.T, ctx context.Context, remote *storage.MemChunkRemote, lba int) []byte {
-	t.Helper()
-	head, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ref, ok := head.Chunks[uint64(lba/pcChunkBlocks)]
-	if !ok {
-		return make([]byte, 4096)
-	}
-	c, err := remote.Get(ctx, ref.Key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := (lba % pcChunkBlocks) * 4096
-	return c[off : off+4096]
-}
-
 // TestRedFirstCutOfAFreshVolumeScansOnlyWrittenChunks: a store created
 // empty against a HEAD never claimed, with two chunks written (one of them
 // already checkpointed out of the WAL), has two first-cut candidates, and
@@ -98,8 +79,8 @@ func fcutHeadBlock(t *testing.T, ctx context.Context, remote *storage.MemChunkRe
 func TestRedFirstCutOfAFreshVolumeScansOnlyWrittenChunks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	p := fcutProvider(t, t.TempDir(), remote)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := fcutProvider(t, t.TempDir(), fixture, v1View())
 	st := fcutOpen(t, ctx, p)
 	cp0 := st.(*storage.WALStore).CheckpointLSN()
 	a := fcutWrite(t, ctx, p, pcChunkBlocks*1+1, 0x31) // chunk 1, checkpointed below
@@ -114,7 +95,7 @@ func TestRedFirstCutOfAFreshVolumeScansOnlyWrittenChunks(t *testing.T) {
 	if got := fcutStats(t, p).LastCut.CandidateChunks; got != 2 {
 		t.Errorf("first cut: %d candidate chunks; want 2", got)
 	}
-	if !bytes.Equal(fcutHeadBlock(t, ctx, remote, pcChunkBlocks*1+1), a) || !bytes.Equal(fcutHeadBlock(t, ctx, remote, pcChunkBlocks*9+3), b) {
+	if !bytes.Equal(layoutHeadBlock(t, fixture, pcChunkBlocks*1+1), a) || !bytes.Equal(layoutHeadBlock(t, fixture, pcChunkBlocks*9+3), b) {
 		t.Fatal("the first cut did not publish both written blocks")
 	}
 }
@@ -127,16 +108,16 @@ func TestRedFirstCutOfAFreshVolumeScansOnlyWrittenChunks(t *testing.T) {
 func TestFirstCutAgainstAClaimedHeadCertifiesUnnamedChunks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	first := fcutProvider(t, t.TempDir(), remote)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	first := fcutProvider(t, t.TempDir(), fixture, v1View())
 	fcutOpen(t, ctx, first)
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if head, err := remote.GetHead(ctx); err != nil || head.Gen == 0 || len(head.Chunks) != 0 {
-		t.Fatalf("setup: HEAD %+v %v; want a claimed HEAD naming no chunk", head, err)
+	if head := layoutHead(t, fixture); head.Gen <= 1 || head.Current != nil {
+		t.Fatalf("setup: HEAD %+v; want a claimed HEAD naming no chunk", head)
 	}
-	p := fcutProvider(t, t.TempDir(), remote)
+	p := fcutProvider(t, t.TempDir(), fixture, viewAs("rB", 4))
 	fcutOpen(t, ctx, p)
 	if got := fcutStats(t, p).DirtyChunks; got != 0 {
 		t.Fatalf("fresh store against a claimed HEAD naming nothing: %d candidate chunks; want 0", got)
@@ -150,8 +131,8 @@ func TestFirstCutAgainstAClaimedHeadCertifiesUnnamedChunks(t *testing.T) {
 func TestFirstCutOfARestoreTargetKeepsItsHydrationPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	first := fcutProvider(t, t.TempDir(), remote)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	first := fcutProvider(t, t.TempDir(), fixture, v1View())
 	fcutOpen(t, ctx, first)
 	a := fcutWrite(t, ctx, first, pcChunkBlocks*3, 0x33)
 	b := fcutWrite(t, ctx, first, pcChunkBlocks*7, 0x37)
@@ -161,7 +142,7 @@ func TestFirstCutOfARestoreTargetKeepsItsHydrationPath(t *testing.T) {
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p := fcutProvider(t, t.TempDir(), remote)
+	p := fcutProvider(t, t.TempDir(), fixture, viewAs("rB", 4))
 	fcutOpen(t, ctx, p)
 	if s := fcutStats(t, p); s.AbsentChunks != 2 || s.DirtyChunks != 0 {
 		t.Fatalf("restore target: %d absent, %d candidate chunks; want 2 absent and 0 candidates", s.AbsentChunks, s.DirtyChunks)
@@ -180,10 +161,9 @@ func TestFirstCutOfARestoreTargetKeepsItsHydrationPath(t *testing.T) {
 // store whose marker says none ever did.
 func TestExplicitWALStoreRefusesAFreshChunkRoot(t *testing.T) {
 	root := t.TempDir()
-	p := fcutProvider(t, root, storage.NewMemChunkRemote())
-	if _, err := p.EnsureStorage("v1"); err != nil {
-		t.Fatal(err)
-	}
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := fcutProvider(t, root, fixture, v1View())
+	fcutOpen(t, context.Background(), p)
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
