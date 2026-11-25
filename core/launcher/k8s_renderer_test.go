@@ -767,10 +767,17 @@ func TestK8sRenderer_MasterTLSMountsTheServersNodeSecret(t *testing.T) {
 		t.Fatalf("without a prefix the manifest must carry no master TLS: %v\n%s", err, plain[0].YAML)
 	}
 
-	bad := sampleWorkloadPlan()
-	bad.Replicas[0].ServerID = "Node_A"
-	if _, err := RenderBlockVolumeDeployments(bad, K8sRenderConfig{MasterAddr: "m:9333", MasterTLSSecretPrefix: "sw-block-node-tls"}); err == nil || !strings.Contains(err.Error(), "not a valid Kubernetes name") {
-		t.Fatalf("server id Node_A: %v, want refused", err)
+	for _, id := range []string{"Node_A", "a..b", "a.-b", "a-.b", "a.", strings.Repeat("a", 64)} {
+		bad := sampleWorkloadPlan()
+		bad.Replicas[0].ServerID = id
+		if _, err := RenderBlockVolumeDeployments(bad, K8sRenderConfig{MasterAddr: "m:9333", MasterTLSSecretPrefix: "sw-block-node-tls"}); err == nil || !strings.Contains(err.Error(), "not a valid Kubernetes name") {
+			t.Fatalf("server id %q: %v, want refused", id, err)
+		}
+	}
+	good := sampleWorkloadPlan()
+	good.Replicas[0].ServerID = "node-a.rack1"
+	if _, err := RenderBlockVolumeDeployments(good, K8sRenderConfig{MasterAddr: "m:9333", MasterTLSSecretPrefix: "sw-block-node-tls"}); err != nil {
+		t.Fatalf("server id node-a.rack1: %v, want accepted", err)
 	}
 	if _, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
 		MasterAddr: "m:9333", MasterTLSSecretPrefix: "sw-block-node-tls",

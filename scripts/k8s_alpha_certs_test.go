@@ -66,11 +66,69 @@ func TestK8sAlphaCertsAreAcceptedByBlockmaster(t *testing.T) {
 	if err := leaf.VerifyHostname("blockmaster.kube-system.svc.cluster.local"); err != nil {
 		t.Fatalf("master certificate does not name the Service the clients dial: %v", err)
 	}
-	cmd = exec.Command("bash", filepath.Join(repoRoot(t), "scripts", "k8s-alpha-certs.sh"), "kube-system", t.TempDir(), "Node_A")
-	cmd.Env = append(os.Environ(), "SW_BLOCK_TLS_APPLY=0")
-	if b, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(b), "cannot name a Kubernetes Secret") {
-		t.Fatalf("server id Node_A: %v\n%s, want refused", err, b)
+	for _, id := range []string{"Node_A", "a..b", "a.-b", "a-.b", "a.", strings.Repeat("a", 64)} {
+		if b, err := runCerts(t, t.TempDir(), id); err == nil || !strings.Contains(string(b), "cannot name a Kubernetes Secret") {
+			t.Fatalf("server id %q: %v\n%s, want refused", id, err, b)
+		}
 	}
+
+	// a later run with one new id keeps the earlier ids in the role file
+	if b, err := runCerts(t, out, "node-c"); err != nil {
+		t.Fatalf("second run: %v\n%s", err, b)
+	}
+	roles, err := os.ReadFile(filepath.Join(out, "roles"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"node-a", "node-b", "node-c"} {
+		if !strings.Contains(string(roles), " node "+id+"\n") {
+			t.Fatalf("role file after adding node-c lacks %s:\n%s", id, roles)
+		}
+	}
+
+	// a regenerated CA reissues every leaf: node-a's certificate is replaced
+	// by one the new CA signed, and the role file names the new one
+	before, err := os.ReadFile(filepath.Join(out, "node-node-a.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"ca.crt", "ca.key"} {
+		if err := os.Remove(filepath.Join(out, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b, err := runCerts(t, out, "node-a"); err != nil {
+		t.Fatalf("run with a new CA: %v\n%s", err, b)
+	}
+	after, err := os.ReadFile(filepath.Join(out, "node-node-a.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) == string(before) {
+		t.Fatal("node-a's certificate signed by the old CA was kept after the CA was regenerated")
+	}
+	table, err = auth.LoadRoleFile(filepath.Join(out, "roles"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a = auth.NewAuthenticator(table, nil)
+	for _, c := range []struct{ name, role, id string }{{"node-node-a", "node", "node-a"}, {"node-node-b", "node", "node-b"}, {"csi-node", "viewer", "sw-block-csi-node"}} {
+		client := link.TLSFiles{Cert: filepath.Join(out, c.name+".crt"), Key: filepath.Join(out, c.name+".key"), CA: filepath.Join(out, "ca.crt")}
+		p, err := handshake(t, master, client, a)
+		if err != nil {
+			t.Fatalf("%s after the CA was regenerated: %v", c.name, err)
+		}
+		if string(p.Role) != c.role || p.ID != c.id {
+			t.Fatalf("%s authenticated as %s %s, want %s %s", c.name, p.Role, p.ID, c.role, c.id)
+		}
+	}
+}
+
+func runCerts(t *testing.T, out string, ids ...string) ([]byte, error) {
+	t.Helper()
+	cmd := exec.Command("bash", append([]string{filepath.Join(repoRoot(t), "scripts", "k8s-alpha-certs.sh"), "kube-system", out}, ids...)...)
+	cmd.Env = append(os.Environ(), "SW_BLOCK_TLS_APPLY=0")
+	return cmd.CombinedOutput()
 }
 
 // handshake runs one mutual-TLS gRPC call from client to a server with the

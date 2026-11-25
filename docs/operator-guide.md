@@ -55,8 +55,8 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
 `blockmaster` authenticates every gRPC call with mutual TLS when it starts with all four of `--tls-cert`,
 `--tls-key`, `--tls-client-ca` and `--role-file`. Without them it is in development mode: plaintext, loopback only,
-and it logs `UNAUTHENTICATED CONTROL API on <addr> (development mode)` once a minute. `--insecure-external-bind`
-cannot be combined with mutual TLS.
+and it logs `UNAUTHENTICATED CONTROL API on <addr> (development mode)` once a minute. **Upgrading:** `--insecure-external-bind`
+is refused at start; drop it, and give a blockmaster that listens off-host the four mutual-TLS flags.
 
 **Who may call.** The role file has one line per certificate: `sha256:<hex fingerprint> <role> <id>`. The role is
 `viewer`, `operator`, `admin` (people and tools; each includes the one before it) or `node` (a volume host; its id is

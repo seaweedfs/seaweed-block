@@ -8,6 +8,9 @@
 # docs/operator-guide.md, "Authenticate the control API").
 #
 # usage: scripts/k8s-alpha-certs.sh NAMESPACE OUT_DIR SERVER_ID...
+#   Server ids issued into OUT_DIR by an earlier run stay in the role file and
+#   are applied again (delete OUT_DIR/node-ID.crt to drop one). A leaf that no
+#   longer verifies against OUT_DIR's CA (the CA was regenerated) is reissued.
 #   SW_BLOCK_TLS_SECRET_PREFIX   node Secret prefix (default sw-block-node-tls)
 #   SW_BLOCK_TLS_APPLY=0         write the files only, apply nothing
 set -euo pipefail
@@ -29,10 +32,14 @@ if [[ ! -s "$OUT/ca.crt" || ! -s "$OUT/ca.key" ]]; then
     -subj "/CN=sw-block alpha CA" -keyout "$OUT/ca.key" -out "$OUT/ca.crt" 2>/dev/null
 fi
 
-# issue NAME CN [SAN]: NAME.crt/NAME.key signed by the CA (reused when present)
+# issue NAME CN [SAN]: NAME.crt/NAME.key signed by the CA (reused when present
+# and still signed by this CA)
 issue() {
   local name="$1" cn="$2" san="${3:-}"
-  [[ -s "$OUT/$name.crt" && -s "$OUT/$name.key" ]] && return 0
+  if [[ -s "$OUT/$name.crt" && -s "$OUT/$name.key" ]] &&
+    openssl verify -CAfile "$OUT/ca.crt" "$OUT/$name.crt" >/dev/null 2>&1; then
+    return 0
+  fi
   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$cn" \
     -keyout "$OUT/$name.key" -out "$OUT/$name.csr" 2>/dev/null
   local ext="$OUT/$name.ext"
@@ -58,11 +65,21 @@ for c in "${CLIENTS[@]}"; do
   issue "${c%%:*}" "sw-block-${c%%:*}"
   echo "$(fingerprint "$OUT/${c%%:*}.crt") ${c##*:} sw-block-${c%%:*}" >>"$OUT/roles"
 done
-for id in "$@"; do
-  if ! [[ "$id" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
-    echo "server id $id cannot name a Kubernetes Secret (lowercase letters, digits, '-' and '.')" >&2
+IDS=("$@")
+for f in "$OUT"/node-*.crt; do
+  [[ -e "$f" ]] || continue
+  old="${f##*/node-}"
+  old="${old%.crt}"
+  [[ " ${IDS[*]} " == *" $old "* ]] || IDS+=("$old")
+done
+# a DNS subdomain: dot-separated labels of 1-63 [a-z0-9-], alphanumeric at both ends
+LABEL='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+for id in "${IDS[@]}"; do
+  if ! [[ "$id" =~ ^$LABEL(\.$LABEL)*$ ]] || ((${#PREFIX} + 1 + ${#id} > 253)); then
+    echo "server id $id cannot name a Kubernetes Secret (dot-separated labels of lowercase letters, digits and '-')" >&2
     exit 2
   fi
+  # node certificates are client-only (a host dials blockmaster), so no subjectAltName
   issue "node-$id" "$id"
   echo "$(fingerprint "$OUT/node-$id.crt") node $id" >>"$OUT/roles"
 done
@@ -79,7 +96,7 @@ apply_tls sw-block-master-tls master
 for c in "${CLIENTS[@]}"; do
   apply_tls "sw-block-${c%%:*}-tls" "${c%%:*}"
 done
-for id in "$@"; do
+for id in "${IDS[@]}"; do
   apply_tls "$PREFIX-$id" "node-$id"
 done
 kubectl -n "$NS" create secret generic sw-block-roles --from-file=roles="$OUT/roles" \

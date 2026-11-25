@@ -197,15 +197,25 @@ func masterTLSSecretName(prefix, serverID string) (string, error) {
 	return name, nil
 }
 
+// dnsSubdomain reports whether s is a DNS subdomain: dot-separated labels,
+// each 1 to 63 lowercase letters, digits and '-', starting and ending with a
+// letter or digit (so "a..b" and "a.-b" are refused).
 func dnsSubdomain(s string) bool {
-	for i, c := range s {
-		alnum := c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
-		edge := i == 0 || i == len(s)-1
-		if !alnum && (edge || c != '-' && c != '.') {
+	if s == "" {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" || len(label) > 63 {
 			return false
 		}
+		for i, c := range label {
+			alnum := c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+			if !alnum && (i == 0 || i == len(label)-1 || c != '-') {
+				return false
+			}
+		}
 	}
-	return s != ""
+	return true
 }
 
 func stateVolume(cfg K8sRenderConfig) volume {
