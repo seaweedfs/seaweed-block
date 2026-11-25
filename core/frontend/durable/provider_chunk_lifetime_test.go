@@ -185,14 +185,6 @@ func seededLayoutFixture(t *testing.T) *testutil.LayoutFixture {
 	return fixture
 }
 
-// Kept for callers in the adjacent takeover fixture until that file joins
-// the B migration. The provider tests below use seededLayoutFixture.
-func seededRemote(t *testing.T) *storage.MemChunkRemote {
-	t.Helper()
-	t.Fatal("takeover_read_ready_test.go must migrate its seeded remote to the B fixture")
-	return nil
-}
-
 func nextSeededView() *stubView {
 	return newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
 }

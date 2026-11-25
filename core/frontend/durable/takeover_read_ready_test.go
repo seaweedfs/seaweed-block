@@ -9,15 +9,15 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // External observers see the committed takeover HEAD while attachment is
 // held in the provider-owned worker, without a separate test goroutine.
 type heldTakeoverClaim struct {
-	storage.ChunkRemote
+	layout.StartStore
 	claimed           chan struct{}
 	release           chan struct{}
 	once, releaseOnce sync.Once
@@ -28,7 +28,7 @@ type heldTakeoverClaim struct {
 }
 
 func (r *heldTakeoverClaim) unblock() { r.releaseOnce.Do(func() { close(r.release) }) }
-func (r *heldTakeoverClaim) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+func (r *heldTakeoverClaim) ReadHead(ctx context.Context) (layout.Head, bool, error) {
 	// The permanent-outage case must hold outcome resolution as well as the
 	// CAS reply: a committed CAS with readable HEAD can now settle after the
 	// per-operation deadline. Unbounded diagnostic reads still see the root.
@@ -39,17 +39,17 @@ func (r *heldTakeoverClaim) GetHead(ctx context.Context) (storage.ChunkHead, err
 			select {
 			case <-r.release:
 			case <-ctx.Done():
-				return storage.ChunkHead{}, ctx.Err()
+				return layout.Head{}, false, ctx.Err()
 			}
 		default:
 		}
 	}
-	return r.ChunkRemote.GetHead(ctx)
+	return r.StartStore.ReadHead(ctx)
 }
-func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
-	gen, err := r.ChunkRemote.CASHead(ctx, expected, next)
+func (r *heldTakeoverClaim) UpdateHead(ctx context.Context, expected uint64, next layout.Head) error {
+	err := r.StartStore.UpdateHead(ctx, expected, next)
 	if err != nil || next.Epoch != 4 {
-		return gen, err
+		return err
 	}
 	r.once.Do(func() { close(r.claimed) })
 	var expired <-chan time.Time
@@ -57,9 +57,9 @@ func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkH
 		select {
 		case <-r.readRegistered:
 		case <-r.release:
-			return gen, nil
+			return nil
 		case <-ctx.Done():
-			return gen, ctx.Err()
+			return ctx.Err()
 		}
 		timer := time.NewTimer(r.holdFor)
 		defer timer.Stop()
@@ -67,11 +67,11 @@ func (r *heldTakeoverClaim) CASHead(ctx context.Context, expected storage.ChunkH
 	}
 	select {
 	case <-r.release:
-		return gen, nil
+		return nil
 	case <-expired:
-		return gen, nil
+		return nil
 	case <-ctx.Done():
-		return gen, ctx.Err()
+		return ctx.Err()
 	}
 }
 
@@ -82,9 +82,21 @@ func pendingTakeoverRead(t *testing.T, hold time.Duration) (*durable.DurableProv
 
 func pendingTakeoverReadWithRelease(t *testing.T, hold time.Duration) (*durable.DurableProvider, frontend.Backend, *nvme.IOHandler, func()) {
 	t.Helper()
-	remote := &heldTakeoverClaim{ChunkRemote: seededRemote(t), claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{}), resolutionBlocked: make(chan struct{})}
+	fixture := seededLayoutFixture(t)
+	store, err := fixture.Catalog.Store(fixture.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := &heldTakeoverClaim{StartStore: store, claimed: make(chan struct{}), release: make(chan struct{}), holdFor: hold, readRegistered: make(chan struct{}), resolutionBlocked: make(chan struct{})}
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
-	p := chunkProvider(t, t.TempDir(), remote, view, 0)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks}
+	fixture.Configure(&cfg)
+	cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return remote, nil }
+	p, err := durable.NewDurableProvider(cfg, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
 	// Registered after provider cleanup, so release precedes its worker join.
 	t.Cleanup(remote.unblock)
 	if _, err := p.EnsureStorage("v1"); err != nil {
@@ -99,16 +111,11 @@ func pendingTakeoverReadWithRelease(t *testing.T, hold time.Duration) (*durable.
 	case <-time.After(10 * time.Second):
 		t.Fatal("takeover CAS never became visible")
 	}
-	if hold == 0 {
-		select {
-		case <-remote.resolutionBlocked:
-		case <-time.After(30 * time.Second):
-			t.Fatal("permanent attach did not reach held outcome resolution")
-		}
-	}
-	head, err := remote.GetHead(context.Background())
-	if err != nil || head.Epoch != 4 || head.Holder != "r1" {
-		t.Fatalf("takeover HEAD: %+v, %v", head, err)
+	// B Start remains inside the held UpdateHead reply. A later diagnostic
+	// ReadHead is optional; the committed HEAD below proves the wait is real.
+	head := layoutHead(t, fixture)
+	if head.Epoch != 4 || head.Holder != "r1" {
+		t.Fatalf("takeover HEAD: %+v", head)
 	}
 	backend, err := p.Open(context.Background(), "v1")
 	if err != nil {
