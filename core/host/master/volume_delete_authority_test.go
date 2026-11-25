@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestVolumeDeleteAuthorityReservationSurvivesRestart(t *testing.T) {
@@ -23,11 +26,11 @@ func TestVolumeDeleteAuthorityReservationSurvivesRestart(t *testing.T) {
 		stop()
 		t.Fatal("unreserved proof succeeded")
 	}
-	if err := a.Reserve(ctx); err != nil {
+	if _, err := client.ReserveVolumeDeletion(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "delete-v"}); err != nil {
 		stop()
 		t.Fatal(err)
 	}
-	if err := a.Reserve(ctx); err != nil {
+	if _, err := client.ReserveVolumeDeletion(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "delete-v"}); err != nil {
 		stop()
 		t.Fatal("replay", err)
 	}
@@ -35,14 +38,18 @@ func TestVolumeDeleteAuthorityReservationSurvivesRestart(t *testing.T) {
 		stop()
 		t.Fatalf("abort reopened reservation: %v", err)
 	}
-	if err := a.NoLiveLease(ctx); err != nil {
+	if _, err := client.CheckVolumeDeletionLease(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "delete-v"}); err != nil {
 		stop()
 		t.Fatal(err)
 	}
+	if _, err := client.AbortVolumeDeleting(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "delete-v"}); status.Code(err) != codes.FailedPrecondition {
+		stop()
+		t.Fatalf("RPC abort reopened committed reservation: %v", err)
+	}
 	stop()
-	loaded, lc, closeLoaded := hostOn(t, authDir, lifecycleDir)
+	_, lc, closeLoaded := hostOn(t, authDir, lifecycleDir)
 	defer closeLoaded()
-	if err := loaded.VolumeDeleteAuthority("v", "delete-v").NoLiveLease(ctx); err != nil {
+	if _, err := lc.CheckVolumeDeletionLease(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "delete-v"}); err != nil {
 		t.Fatal("reloaded exclusion missing", err)
 	}
 	if _, err := lc.CreateVolume(ctx, createReq("v")); err == nil {

@@ -95,6 +95,11 @@ service LifecycleService {
     // created again. AbortVolumeDeleting gives a token back (the
     // reservation goes with its last token); CommitVolumeDeleting makes it
     // permanent (never given back).
+    // The layout delete's permanent reservation and authoritative lease proof.
+    // Reserve commits before excluding every positive lease writer; it is never
+    // aborted. Check refuses until all persisted lease barriers have passed.
+    rpc ReserveVolumeDeletion(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
+    rpc CheckVolumeDeletionLease(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
     rpc MarkVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
     rpc AbortVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
     rpc CommitVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);

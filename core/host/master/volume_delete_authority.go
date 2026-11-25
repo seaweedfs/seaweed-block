@@ -3,6 +3,11 @@ package master
 import (
 	"context"
 	"errors"
+
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // VolumeDeleteAuthority binds the layout delete's two authority operations
@@ -37,4 +42,32 @@ func (a *volumeDeleteAuthority) NoLiveLease(ctx context.Context) error {
 		return errors.New("workspace delete: committed reservation required")
 	}
 	return a.host.Publisher().NoLiveWorkspaceLease(ctx, a.volume)
+}
+
+// ReserveVolumeDeletion exposes the same committed reservation used by startup
+// and every positive lease writer. It does not reuse abortable admission.
+func (s *services) ReserveVolumeDeletion(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	if req.GetVolumeId() == "" || req.GetToken() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and token are required")
+	}
+	if err := s.host.VolumeDeleteAuthority(req.GetVolumeId(), req.GetToken()).Reserve(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil, workspaceError(ctx.Err())
+		}
+		return nil, status.Errorf(codes.Unavailable, "reserve volume deletion: %v", err)
+	}
+	_, known := s.host.lifecycle.Volumes.GetVolume(req.GetVolumeId())
+	return &control.MarkVolumeDeletingResponse{Known: known, State: lifecycle.ReservationCommitted}, nil
+}
+
+// CheckVolumeDeletionLease reads the master's authoritative barrier at the
+// delete's CAS boundary, including granted-but-unclaimed lines.
+func (s *services) CheckVolumeDeletionLease(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	if req.GetVolumeId() == "" || req.GetToken() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and token are required")
+	}
+	if err := s.host.VolumeDeleteAuthority(req.GetVolumeId(), req.GetToken()).NoLiveLease(ctx); err != nil {
+		return nil, workspaceError(err)
+	}
+	return &control.MarkVolumeDeletingResponse{State: lifecycle.ReservationCommitted}, nil
 }

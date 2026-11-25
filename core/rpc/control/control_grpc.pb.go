@@ -665,12 +665,14 @@ var ClusterEvidenceService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	LifecycleService_CreateVolume_FullMethodName         = "/seaweedfs.block.control.LifecycleService/CreateVolume"
-	LifecycleService_GetVolume_FullMethodName            = "/seaweedfs.block.control.LifecycleService/GetVolume"
-	LifecycleService_DeleteVolume_FullMethodName         = "/seaweedfs.block.control.LifecycleService/DeleteVolume"
-	LifecycleService_MarkVolumeDeleting_FullMethodName   = "/seaweedfs.block.control.LifecycleService/MarkVolumeDeleting"
-	LifecycleService_AbortVolumeDeleting_FullMethodName  = "/seaweedfs.block.control.LifecycleService/AbortVolumeDeleting"
-	LifecycleService_CommitVolumeDeleting_FullMethodName = "/seaweedfs.block.control.LifecycleService/CommitVolumeDeleting"
+	LifecycleService_CreateVolume_FullMethodName             = "/seaweedfs.block.control.LifecycleService/CreateVolume"
+	LifecycleService_GetVolume_FullMethodName                = "/seaweedfs.block.control.LifecycleService/GetVolume"
+	LifecycleService_DeleteVolume_FullMethodName             = "/seaweedfs.block.control.LifecycleService/DeleteVolume"
+	LifecycleService_ReserveVolumeDeletion_FullMethodName    = "/seaweedfs.block.control.LifecycleService/ReserveVolumeDeletion"
+	LifecycleService_CheckVolumeDeletionLease_FullMethodName = "/seaweedfs.block.control.LifecycleService/CheckVolumeDeletionLease"
+	LifecycleService_MarkVolumeDeleting_FullMethodName       = "/seaweedfs.block.control.LifecycleService/MarkVolumeDeleting"
+	LifecycleService_AbortVolumeDeleting_FullMethodName      = "/seaweedfs.block.control.LifecycleService/AbortVolumeDeleting"
+	LifecycleService_CommitVolumeDeleting_FullMethodName     = "/seaweedfs.block.control.LifecycleService/CommitVolumeDeleting"
 )
 
 // LifecycleServiceClient is the client API for LifecycleService service.
@@ -690,6 +692,11 @@ type LifecycleServiceClient interface {
 	// created again. AbortVolumeDeleting gives a token back (the
 	// reservation goes with its last token); CommitVolumeDeleting makes it
 	// permanent (never given back).
+	// The layout delete's permanent reservation and authoritative lease proof.
+	// Reserve commits before excluding every positive lease writer; it is never
+	// aborted. Check refuses until all persisted lease barriers have passed.
+	ReserveVolumeDeletion(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error)
+	CheckVolumeDeletionLease(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error)
 	MarkVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error)
 	AbortVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error)
 	CommitVolumeDeleting(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error)
@@ -724,6 +731,24 @@ func (c *lifecycleServiceClient) GetVolume(ctx context.Context, in *GetLifecycle
 func (c *lifecycleServiceClient) DeleteVolume(ctx context.Context, in *DeleteVolumeRequest, opts ...grpc.CallOption) (*DeleteVolumeResponse, error) {
 	out := new(DeleteVolumeResponse)
 	err := c.cc.Invoke(ctx, LifecycleService_DeleteVolume_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *lifecycleServiceClient) ReserveVolumeDeletion(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error) {
+	out := new(MarkVolumeDeletingResponse)
+	err := c.cc.Invoke(ctx, LifecycleService_ReserveVolumeDeletion_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *lifecycleServiceClient) CheckVolumeDeletionLease(ctx context.Context, in *MarkVolumeDeletingRequest, opts ...grpc.CallOption) (*MarkVolumeDeletingResponse, error) {
+	out := new(MarkVolumeDeletingResponse)
+	err := c.cc.Invoke(ctx, LifecycleService_CheckVolumeDeletionLease_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -774,6 +799,11 @@ type LifecycleServiceServer interface {
 	// created again. AbortVolumeDeleting gives a token back (the
 	// reservation goes with its last token); CommitVolumeDeleting makes it
 	// permanent (never given back).
+	// The layout delete's permanent reservation and authoritative lease proof.
+	// Reserve commits before excluding every positive lease writer; it is never
+	// aborted. Check refuses until all persisted lease barriers have passed.
+	ReserveVolumeDeletion(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error)
+	CheckVolumeDeletionLease(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error)
 	MarkVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error)
 	AbortVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error)
 	CommitVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error)
@@ -792,6 +822,12 @@ func (UnimplementedLifecycleServiceServer) GetVolume(context.Context, *GetLifecy
 }
 func (UnimplementedLifecycleServiceServer) DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteVolume not implemented")
+}
+func (UnimplementedLifecycleServiceServer) ReserveVolumeDeletion(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReserveVolumeDeletion not implemented")
+}
+func (UnimplementedLifecycleServiceServer) CheckVolumeDeletionLease(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CheckVolumeDeletionLease not implemented")
 }
 func (UnimplementedLifecycleServiceServer) MarkVolumeDeleting(context.Context, *MarkVolumeDeletingRequest) (*MarkVolumeDeletingResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MarkVolumeDeleting not implemented")
@@ -869,6 +905,42 @@ func _LifecycleService_DeleteVolume_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LifecycleService_ReserveVolumeDeletion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkVolumeDeletingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LifecycleServiceServer).ReserveVolumeDeletion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LifecycleService_ReserveVolumeDeletion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LifecycleServiceServer).ReserveVolumeDeletion(ctx, req.(*MarkVolumeDeletingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LifecycleService_CheckVolumeDeletionLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkVolumeDeletingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LifecycleServiceServer).CheckVolumeDeletionLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LifecycleService_CheckVolumeDeletionLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LifecycleServiceServer).CheckVolumeDeletionLease(ctx, req.(*MarkVolumeDeletingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _LifecycleService_MarkVolumeDeleting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MarkVolumeDeletingRequest)
 	if err := dec(in); err != nil {
@@ -941,6 +1013,14 @@ var LifecycleService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteVolume",
 			Handler:    _LifecycleService_DeleteVolume_Handler,
+		},
+		{
+			MethodName: "ReserveVolumeDeletion",
+			Handler:    _LifecycleService_ReserveVolumeDeletion_Handler,
+		},
+		{
+			MethodName: "CheckVolumeDeletionLease",
+			Handler:    _LifecycleService_CheckVolumeDeletionLease_Handler,
 		},
 		{
 			MethodName: "MarkVolumeDeleting",

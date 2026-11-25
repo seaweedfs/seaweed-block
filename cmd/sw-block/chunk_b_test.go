@@ -177,15 +177,31 @@ func TestOpsChunk_CatalogCommands(t *testing.T) {
 // held is set, records every call.
 type fakeLifecycle struct {
 	control.UnimplementedLifecycleServiceServer
-	mu    sync.Mutex
-	held  bool
-	calls []string
+	mu        sync.Mutex
+	held      bool
+	leaseLive bool
+	calls     []string
 }
 
 func (f *fakeLifecycle) record(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, name)
+}
+
+func (f *fakeLifecycle) ReserveVolumeDeletion(_ context.Context, r *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	f.record("reserve")
+	if f.held {
+		return nil, status.Error(codes.FailedPrecondition, "reservation unavailable")
+	}
+	return &control.MarkVolumeDeletingResponse{Known: true, State: "committed"}, nil
+}
+func (f *fakeLifecycle) CheckVolumeDeletionLease(_ context.Context, r *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+	f.record("check-lease")
+	if f.leaseLive {
+		return nil, status.Error(codes.FailedPrecondition, "live lease horizon has not passed")
+	}
+	return &control.MarkVolumeDeletingResponse{State: "committed"}, nil
 }
 
 func (f *fakeLifecycle) MarkVolumeDeleting(_ context.Context, r *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
@@ -221,8 +237,7 @@ func startFakeLifecycle(t *testing.T, f *fakeLifecycle) string {
 
 // volume-delete: refused while the master holds the volume (nothing
 // written); a volume whose snapshot has a dependent is refused and the
-// admission given back; a restore target deletes, releases its source and
-// the admission is committed.
+// permanent reservation retained; a restore target deletes and releases its source.
 func TestOpsChunk_VolumeDeleteOnTheLayout(t *testing.T) {
 	store := newMemChunkStore()
 	useMemChunkStore(t, store)
@@ -238,15 +253,15 @@ func TestOpsChunk_VolumeDeleteOnTheLayout(t *testing.T) {
 		code, out, _ := runChunk(cliArgs("volume-delete", volArgs("volume", v), []string{"--master", addr, "--request-id", "r1"})...)
 		return code, out
 	}
-	if code, out := del(tgt); code != chunkExitFailed || chunkErrorOut(t, out).Code != "not_admitted" || strings.Join(lc.calls, ",") != "mark" {
+	if code, out := del(tgt); code != chunkExitFailed || chunkErrorOut(t, out).Code != "not_admitted" || strings.Join(lc.calls, ",") != "reserve" {
 		t.Fatalf("delete of a held volume: %d %q calls %v", code, out, lc.calls)
 	}
 	lc.held, lc.calls = false, nil
-	if code, out := del(src); code != chunkExitFailed || chunkErrorOut(t, out).Code != "snapshot_has_dependents" || strings.Join(lc.calls, ",") != "mark,abort" {
+	if code, out := del(src); code != chunkExitFailed || chunkErrorOut(t, out).Code != "snapshot_has_dependents" || strings.Join(lc.calls, ",") != "reserve" {
 		t.Fatalf("delete of a depended-on source: %d %q calls %v", code, out, lc.calls)
 	}
 	lc.calls = nil
-	if code, out := del(tgt); code != 0 || !strings.Contains(out, `"state":"deleted"`) || strings.Join(lc.calls, ",") != "mark,commit" {
+	if code, out := del(tgt); code != 0 || !strings.Contains(out, `"state":"deleted"`) || strings.Join(lc.calls, ",") != "reserve,check-lease" {
 		t.Fatalf("delete of the target: %d %q calls %v", code, out, lc.calls)
 	}
 	if code, out, _ := runChunk(cliArgs("snapshot-delete", volArgs("volume", src), []string{"--name", "daily"})...); code != 0 {
@@ -364,5 +379,25 @@ func TestOpsChunk_Retain(t *testing.T) {
 	}
 	if code, out, _ := runChunk(cliArgs("retain", volArgs("volume", v), []string{"--set-policy", "--keep-newest", "-1"})...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "invalid_policy" {
 		t.Fatalf("negative policy: %d %q", code, out)
+	}
+}
+
+func TestOpsChunkVolumeDeleteRequiresTheMastersLeaseProof(t *testing.T) {
+	store := newMemChunkStore()
+	useMemChunkStore(t, store)
+	v := cliVolume(t, store, "leased", "daily")
+	lc := &fakeLifecycle{leaseLive: true}
+	addr := startFakeLifecycle(t, lc)
+	code, out, _ := runChunk(cliArgs("volume-delete", volArgs("volume", v), []string{"--master", addr, "--request-id", "delete-v"})...)
+	if code == 0 {
+		t.Fatalf("deleted a volume with live lease: %q calls=%v", out, lc.calls)
+	}
+	if got := strings.Join(lc.calls, ","); got != "reserve,check-lease" {
+		t.Fatalf("authority path=%s", got)
+	}
+	cat, _ := chunkstore.NewBCatalog(store, store, defaultChunkPathCLI)
+	h, found, err := cat.ReadHead(context.Background(), v)
+	if err != nil || !found || h.State != layout.StateLive {
+		t.Fatalf("HEAD changed despite refused proof: %+v %v %v", h, found, err)
 	}
 }
