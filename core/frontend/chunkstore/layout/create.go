@@ -93,6 +93,11 @@ func createVolume(ctx context.Context, st NewVolumeStore, v Volume, current *Roo
 			// the operator released this target and tombstoned it first
 			return Head{}, fmt.Errorf("%w: HEAD of %s is %s", ErrVolumeDeleting, v.ID, got.State)
 		}
+		if current != nil && (got.Current == nil || *got.Current != *current) {
+			// another create (an empty volume) got there first, or the
+			// target has moved on since: refuse rather than report a restore
+			return Head{}, fmt.Errorf("%w: %s was created without the restored image", ErrExists, v.ID)
+		}
 		return got, nil
 	}
 	return h, nil

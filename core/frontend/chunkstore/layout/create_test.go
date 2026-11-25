@@ -193,6 +193,13 @@ func TestCreateTarget(t *testing.T) {
 	if err != nil || copied == nil || got.Current == nil || *got.Current != *copied || *copied != src.h.Snapshots["daily"].Root {
 		t.Fatalf("CreateTarget: %+v %v", got, err)
 	}
+	empty := newMemNewVolume()
+	if _, err := CreateVolume(ctx, empty, v); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateTarget(ctx, src, r, "daily", empty, v, func(context.Context, RootName) error { return nil }); !errors.Is(err, ErrExists) {
+		t.Fatalf("CreateTarget over an empty volume created first: %v; want ErrExists", err)
+	}
 	tomb := newMemNewVolume()
 	tomb.memHead.h = &Head{VolumeID: v.ID, Activity: Activity{Kind: ActIdle}, State: StateDeleted, Gen: 1}
 	if _, err := CreateTarget(ctx, src, r, "daily", tomb, v, func(context.Context, RootName) error { return nil }); !errors.Is(err, ErrVolumeDeleting) {
