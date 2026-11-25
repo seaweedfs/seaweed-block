@@ -19,6 +19,7 @@ import (
 //	open      session s held; HEAD snap(s)
 //	abandoned session s held, the engine's AbortCut notice taken; HEAD snap(s)
 //	pending   no session, a snapshot name set; HEAD idle
+//	births-pending commit reply lost, HEAD idle, engine birth refs cached only in this adapter
 //	dead      no session, nothing read yet; HEAD snap(d) of this holder (a dead process's)
 //
 // The other in-memory pieces (visible/ownGen/seen/forceView, cleaning,
@@ -55,6 +56,11 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 			"CASHead": {act: layout.ActIdle, named: true}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle, named: true},
 		},
+		"births-pending": {
+			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActIdle}, "Put": {act: layout.ActIdle},
+			"CASHead": {err: "precondition", act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
+			"CommitPendingSnapshot": {act: layout.ActIdle},
+		},
 		"dead": {
 			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {err: "precondition", act: layout.ActSnap}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
@@ -84,6 +90,26 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 			r.AbortCut()
 		case "pending":
 			r.SetSnapshot("p", layout.SnapshotMeta{CreatedNs: 1})
+		case "births-pending":
+			if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+				t.Fatal(err)
+			}
+			data := block(9)
+			key := r.ChunkKey(0, layout.Sum(data))
+			if err := r.Put(ctx, key, data); err != nil {
+				t.Fatal(err)
+			}
+			lost := &lostReplyStore{sessionStore: r.st, armed: true}
+			r.st = lost
+			_, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: r.visible, Epoch: lh.me.Epoch}, storage.ChunkHead{
+				Epoch: lh.me.Epoch, RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{
+					0: {Key: key, SHA256: layout.Sum(data), Encoding: "full", BirthLSN: 1},
+				},
+			})
+			if err == nil || lost.armed || len(r.pendingRefs) != 1 {
+				t.Fatalf("lost reply did not leave births pending: err=%v armed=%t refs=%d", err, lost.armed, len(r.pendingRefs))
+			}
+			r.st = lost.sessionStore
 		case "dead":
 			st, _ := lh.cat.Store(lh.v)
 			if _, err := layout.RunBegin(ctx, st, lh.me, "s-dead"); err != nil {

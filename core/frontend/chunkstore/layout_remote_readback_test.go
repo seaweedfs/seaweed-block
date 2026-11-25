@@ -238,6 +238,54 @@ func TestLayoutRemote_ReusedChunkBirthAfterLostCommitReply(t *testing.T) {
 	lh.readBack("reader", map[uint32][]byte{1: block(1), 9: block(9)})
 }
 
+// A new adapter has no pending birth cache. Hold the engine's unresolved
+// proposal while replacing its adapter, as a crash/reopen would do to that
+// adapter state; the durable proposal must still settle as the same image.
+type replacedLayoutRemote struct{ *LayoutRemote }
+
+func TestLayoutRemote_LostCommitReplyRestartKeepsSameProposal(t *testing.T) {
+	t.Skip("red control: adapter birth cache is lost on restart; enable when the engine compares durable proposal identity and image")
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, err := storage.CreateWALStoreWithOptions(lh.dir+"/active", lrBlocks, 4096, storage.WALStoreOptions{ChunkBlocks: lrChunkBlocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	remote, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped := &replacedLayoutRemote{LayoutRemote: remote}
+	layer, err := storage.AttachChunkLayer(s, swapped, storage.ChunkLayerConfig{ChunkBlocks: lrChunkBlocks, Epoch: lh.me.Epoch, Holder: lh.me.Holder, FreshFromHead: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSync(t, s, map[uint32][]byte{1: block(1)})
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lost := &lostReplyStore{sessionStore: remote.st, armed: true}
+	remote.st = lost
+	writeSync(t, s, map[uint32][]byte{9: block(9)})
+	_, _ = layer.Capture(ctx)
+	if lost.armed {
+		t.Fatal("the commit reply was not lost")
+	}
+	newRemote, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped.LayoutRemote = newRemote
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatalf("same proposal after restart and lost reply fenced: %v", err)
+	}
+	lh.readBack("reader", map[uint32][]byte{1: block(1), 9: block(9)})
+}
+
 type pauseCleanEndStore struct {
 	sessionStore
 	persisted chan struct{}
