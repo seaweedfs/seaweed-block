@@ -11,12 +11,14 @@ import (
 	"testing"
 )
 
-// The epoch table has exactly three writers: the replica's note of a shipped
-// entry's epoch before the apply, the primary's note at role adoption, and
-// the rebuild-done replacement. A fourth writer is a new way for the table to
-// disagree with the data it describes; it fails here until it is reviewed
-// and listed.
+// The epoch table's writers: the replica's note of a shipped entry's epoch
+// before the apply, the primary's note at role adoption, the rebuild-done
+// replacement, and the trim at load of rows above the recovered store's next
+// LSN (a lost tail; a node that truncates drops rows past its new end). Any
+// other writer is a new way for the table to disagree with the data it
+// describes; it fails here until it is reviewed and listed.
 var epochTableWriters = []string{
+	"cmd/blockvolume/replication_ingress.go: func newReplicationIngress .TrimAbove",
 	"cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Note",
 	"core/transport/replica.go: func handleConn .Note",
 	"core/transport/replica.go: func handleConn .Replace",
@@ -69,7 +71,7 @@ func writesIn(f *ast.File, rel string) []string {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || (sel.Sel.Name != "Note" && sel.Sel.Name != "Replace") {
+			if !ok || (sel.Sel.Name != "Note" && sel.Sel.Name != "Replace" && sel.Sel.Name != "TrimAbove") {
 				return true
 			}
 			var recv string
@@ -88,7 +90,7 @@ func writesIn(f *ast.File, rel string) []string {
 	return out
 }
 
-func TestEpochTableHasExactlyThreeWriters(t *testing.T) {
+func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 	got := epochWrites(t, filepath.Join("..", ".."))
 	want := append([]string(nil), epochTableWriters...)
 	sort.Strings(want)
@@ -116,8 +118,8 @@ func TestEpochTableHasExactlyThreeWriters(t *testing.T) {
 		})
 	}
 	sort.Strings(persisters)
-	if strings.Join(persisters, ",") != "Note,Replace" {
-		t.Fatalf("methods reaching persistLocked: %v; want Note, Replace", persisters)
+	if strings.Join(persisters, ",") != "Note,Replace,TrimAbove" {
+		t.Fatalf("methods reaching persistLocked: %v; want Note, Replace, TrimAbove", persisters)
 	}
 }
 

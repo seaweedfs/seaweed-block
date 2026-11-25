@@ -21,8 +21,22 @@ import (
 
 const epochTableSchema = "seaweed-block.epoch-table/v1"
 
-// epochTableMaxBytes bounds the record read; a row is under 60 bytes.
+// epochTableMaxBytes bounds the record read.
 const epochTableMaxBytes = 64 << 10
+
+// EpochTableMaxRows bounds the table: every write keeps the newest rows
+// only, so the record always fits the read bound (a row is at most 62
+// bytes of JSON). An epoch whose row was dropped is unknown to SharedEnd,
+// which reads as diverged: a rebuild, never a wrong count.
+const EpochTableMaxRows = 512
+
+// newestRows keeps the last EpochTableMaxRows rows.
+func newestRows(rows []EpochRow) []EpochRow {
+	if len(rows) > EpochTableMaxRows {
+		return rows[len(rows)-EpochTableMaxRows:]
+	}
+	return rows
+}
 
 // EpochRow is one epoch's first LSN.
 type EpochRow struct {
@@ -126,7 +140,7 @@ func (t *EpochTable) Note(epoch, firstLSN uint64) error {
 			return fmt.Errorf("epoch table: epoch %d starts at lsn %d, below epoch %d's %d", epoch, firstLSN, last.Epoch, last.FirstLSN)
 		}
 	}
-	next := append(append([]EpochRow(nil), t.rows...), EpochRow{Epoch: epoch, FirstLSN: firstLSN})
+	next := newestRows(append(append([]EpochRow(nil), t.rows...), EpochRow{Epoch: epoch, FirstLSN: firstLSN}))
 	if err := t.persistLocked(next); err != nil {
 		return err
 	}
@@ -141,11 +155,33 @@ func (t *EpochTable) Replace(rows []EpochRow) error {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	next := append([]EpochRow(nil), rows...)
+	next := newestRows(append([]EpochRow(nil), rows...))
 	if err := t.persistLocked(next); err != nil {
 		return err
 	}
 	t.rows = next
+	return nil
+}
+
+// TrimAbove drops the rows whose first LSN is above next, the store's next
+// LSN after its recovery, durably. Such a row names entries the store does
+// not hold (a tail lost before it was synced); kept, it would attribute the
+// entries written later at those LSNs to the previous epoch. The next Note
+// of that epoch appends it again at its real first LSN.
+func (t *EpochTable) TrimAbove(next uint64) error {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	keep := RowsThrough(t.rows, next)
+	if len(keep) == len(t.rows) {
+		return nil
+	}
+	if err := t.persistLocked(keep); err != nil {
+		return err
+	}
+	t.rows = keep
 	return nil
 }
 
@@ -224,6 +260,9 @@ func DecodeEpochRows(buf []byte) ([]EpochRow, error) {
 		return nil, errors.New("epoch rows: short")
 	}
 	n := binary.BigEndian.Uint32(buf[0:4])
+	if n > EpochTableMaxRows {
+		return nil, fmt.Errorf("epoch rows: %d rows, at most %d", n, EpochTableMaxRows)
+	}
 	if uint64(len(buf)) != 4+16*uint64(n) {
 		return nil, fmt.Errorf("epoch rows: %d bytes for %d rows", len(buf), n)
 	}

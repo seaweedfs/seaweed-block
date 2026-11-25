@@ -41,6 +41,10 @@ func newReplicationIngress(f flags, store storage.LogicalStorage) *replicationIn
 		floorPath: replicaFloorPath(f), dualLane: f.recoveryMode == "dual-lane"}
 	r.rf1Only = rf1Only(f)
 	r.epochs, r.epochsErr = transport.LoadEpochTable(epochTablePath(f), f.volumeID)
+	if r.epochsErr == nil {
+		// Rows above the recovered store's next LSN name a lost tail.
+		r.epochsErr = r.epochs.TrimAbove(store.NextLSN())
+	}
 	return r
 }
 
