@@ -28,40 +28,47 @@ import (
 func TestLayoutRemote_StateByCallTable(t *testing.T) {
 	ctx := context.Background()
 	type outcome struct {
-		err     string // "", "precondition"
+		err     string // "", "precondition", "busy"
 		act     string // HEAD activity kind after the call
 		named   bool   // the pending name is in HEAD after the call
 		settled string // AbortOpenSession's answer, when the call is it
 	}
 	// Abort is the engine's non-blocking notice: it writes nothing, so HEAD
 	// is what the state left; the next HEAD read ends the session.
-	calls := []string{"GetHead", "Begin", "Put", "CASHead", "Abort", "AbortOpenSession", "CommitPendingSnapshot"}
+	// Clean is the cleaning (maintenance) tick: it ends a given-up session
+	// (abandoned, dead) before it cleans, and is refused while one is held.
+	calls := []string{"GetHead", "Begin", "Put", "CASHead", "Abort", "Clean", "AbortOpenSession", "CommitPendingSnapshot"}
 	table := map[string]map[string]outcome{
 		"idle": {
+			"Clean":   {act: layout.ActIdle},
 			"Abort":   {act: layout.ActIdle},
 			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle},
 		},
 		"open": {
+			"Clean":   {err: "busy", act: layout.ActSnap},
 			"Abort":   {act: layout.ActSnap},
 			"GetHead": {act: layout.ActSnap}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
 			"CommitPendingSnapshot": {act: layout.ActSnap},
 		},
 		"abandoned": {
+			"Clean":   {act: layout.ActIdle},
 			"Abort":   {act: layout.ActSnap},
 			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
 			"CommitPendingSnapshot": {act: layout.ActSnap},
 		},
 		"pending": {
+			"Clean":   {act: layout.ActIdle},
 			"Abort":   {act: layout.ActIdle},
 			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle, named: true}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle, named: true},
 		},
 		"dead": {
+			"Clean":   {act: layout.ActIdle},
 			"Abort":   {act: layout.ActSnap},
 			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {err: "precondition", act: layout.ActSnap}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
@@ -124,6 +131,8 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 					}()
 				case "Abort":
 					r.Abort()
+				case "Clean":
+					err = r.Clean(ctx, func(context.Context, layout.HolderID, string) error { return nil })
 				case "AbortOpenSession":
 					settled, err = r.AbortOpenSession(ctx)
 				case "CommitPendingSnapshot":
@@ -137,6 +146,10 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 				case "precondition":
 					if !errors.Is(err, storage.ErrChunkHeadPrecondition) {
 						t.Fatalf("%s x %s: %v; want a precondition", state, call, err)
+					}
+				case "busy":
+					if !errors.Is(err, layout.ErrBusy) {
+						t.Fatalf("%s x %s: %v; want busy", state, call, err)
 					}
 				}
 				h := lh.head()
