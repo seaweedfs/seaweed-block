@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -267,9 +268,15 @@ func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
 				t.Fatalf("startup overrode the pending real drain: %+v", out)
 			default:
 			}
-			// The B HEAD proof is covered by TestWorkspaceLayoutDetachedProof.
-			// Here the resource owner supplies that proof to the real lease worker.
-			request.reply <- workspaceStopResult{gen: 1}
+			// The real proof reader supplies the generation to the real lease
+			// worker; a constant here would not join the two safety checks.
+			me := layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
+			st := layoutProofStore{h: layout.Head{Gen: 1, Epoch: 1, Holder: "s/r", ClaimID: "k", State: layout.StateDetached, Activity: layout.Activity{Kind: layout.ActIdle}}, found: true}
+			gen, proofErr := workspaceLayoutDetachedGeneration(request.ctx, st, request.id, me)
+			if proofErr != nil {
+				t.Fatal(proofErr)
+			}
+			request.reply <- workspaceStopResult{gen: gen}
 			finishWorkspaceLease(e, f, h, leaseDone)
 			doneConsumed = true
 			out := <-e.decision

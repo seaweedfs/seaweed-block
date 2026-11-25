@@ -60,7 +60,7 @@ func workspaceLayoutDetachedGeneration(ctx context.Context, st layout.HeadStore,
 	if !found {
 		return 0, layout.ErrHeadAbsent
 	}
-	if h.State != layout.StateDetached || h.Epoch != me.Epoch || h.Holder != me.Holder || h.ClaimID != me.ClaimID {
+	if h.State != layout.StateDetached || h.Activity.Kind != layout.ActIdle || h.Epoch != me.Epoch || h.Holder != me.Holder || h.ClaimID != me.ClaimID {
 		return 0, fmt.Errorf("workspace: no detached proof for the attached claim")
 	}
 	return h.Gen, nil
