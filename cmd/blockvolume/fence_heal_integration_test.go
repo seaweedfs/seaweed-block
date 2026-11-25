@@ -97,9 +97,8 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	if data, err := os.ReadFile(master.log); err == nil {
 		n, last := 0, ""
-		for _, l := range strings.Split(string(data), "
-") {
-			if strings.Contains(l, "DEBUG attest") {
+		for _, l := range strings.Fields(strings.ReplaceAll(string(data), " ", "_")) {
+			if strings.Contains(l, "DEBUG_attest") {
 				n++
 				last = l
 			}
