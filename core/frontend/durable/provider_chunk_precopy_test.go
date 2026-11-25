@@ -284,7 +284,9 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 		// Releasing the owner does not erase a slow sample. Admission must
 		// still refuse a tail-bound point; a small stalled tail can now declare
 		// the retained fixed-cost exception instead of recopying indefinitely.
-		if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen || r.Precopy.Estimate <= 1200*time.Millisecond || (r.Precopy.Reason != "tail_too_large" && r.Precopy.Reason != "barrier_over_budget" && r.Precopy.Reason != "freeze_budget_exceeded") {
+		unknownRate := r.Precopy.Reason == "samples_unknown" && r.Precopy.RateSamples == 0
+		overBudget := r.Precopy.Estimate > 1200*time.Millisecond && (r.Precopy.Reason == "tail_too_large" || r.Precopy.Reason == "barrier_over_budget" || r.Precopy.Reason == "freeze_budget_exceeded")
+		if r.Precopy.Frozen || !(unknownRate && errors.Is(err, storage.ErrPrecopyUnknown) || overBudget && errors.Is(err, storage.ErrPrecopyNotConverged)) {
 			t.Fatalf("post-release retry violated measured admission: report=%+v err=%v", r.Precopy, err)
 		}
 		if delay > 0 && r.Precopy.Fixed < delay {
@@ -305,6 +307,15 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 	}
 	if started, resumed := k.calls(); len(started) != 2 || len(resumed) != resumedCount {
 		t.Fatalf("retry hooks: started=%v resumed=%v", started, resumed)
+	}
+	if err != nil {
+		for lba, want := range map[int64][]byte{1: block(0x8a), 2: block(0x9b)} {
+			buf := make([]byte, 4096)
+			if n, readErr := b.Read(ctx, lba*4096, buf); readErr != nil || n != len(buf) || !bytes.Equal(buf, want) {
+				t.Fatalf("refused retry stopped serving block %d: n=%d err=%v", lba, n, readErr)
+			}
+		}
+		return
 	}
 	if !bytes.Equal(layoutHeadBlock(t, fixture, 1), block(0x8a)) || !bytes.Equal(layoutHeadBlock(t, fixture, 2), block(0x9b)) {
 		t.Fatal("retry lost admitted bytes")
