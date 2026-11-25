@@ -131,15 +131,26 @@ phases:
         timeout: 20m
         env.GATE_DIR: "{{ scratch_root }}/{{ run_id }}"
         env.GATE_GO: "{{ go_bin }}"
+        env.GATE_TESTS: "{{ tests }}"
         cmd: |
           set -eu
           d="$GATE_DIR"
           export PATH="$GATE_GO:$PATH"
           cd "$d/source"
           for b in blockmaster blockvolume sw-block; do go build -o "$d/bin/$b" "./cmd/$b"; done
-          go test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/blockvolume.test" ./cmd/blockvolume
-          go test -c -tags 'subprocess chunkstore_integration systemd_integration' -o "$d/bin/blockvolume-systemd.test" ./cmd/blockvolume
-          go test -c -tags 'chunkstore_integration' -o "$d/bin/chunkstore.test" ./core/frontend/chunkstore
+          # Only the test binaries the selected entries run: a package that
+          # no selected entry uses cannot fail the build of the others.
+          bv=0 sd=0 cs=0
+          for t in $GATE_TESTS; do
+            case "$t" in
+              systemd) sd=1 ;;
+              catalog) cs=1 ;;
+              *) bv=1 ;;
+            esac
+          done
+          [ "$bv" = 0 ] || go test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/blockvolume.test" ./cmd/blockvolume
+          [ "$sd" = 0 ] || go test -c -tags 'subprocess chunkstore_integration systemd_integration' -o "$d/bin/blockvolume-systemd.test" ./cmd/blockvolume
+          [ "$cs" = 0 ] || go test -c -tags 'chunkstore_integration' -o "$d/bin/chunkstore.test" ./core/frontend/chunkstore
           sha256sum "$d/bin/"* > "$d/evidence/binaries.sha256"
 
   - name: run_tests
