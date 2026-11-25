@@ -125,12 +125,16 @@ func (h Head) check() error {
 	default:
 		return fmt.Errorf("%w: activity %q", ErrMalformed, h.Activity.Kind)
 	}
-	// A deleted HEAD written as a tombstone for a restore target never
-	// created has no holder; every other HEAD has an epoch, a holder and
-	// the claim id of its claim.
-	if h.State != StateDeleted || h.Holder != "" {
-		if h.Epoch == 0 || h.Holder == "" {
-			return fmt.Errorf("%w: HEAD without epoch or holder", ErrMalformed)
+	// A HEAD no one has claimed yet (a new volume or restore target, or a
+	// tombstone) has epoch 0, no holder, no claim id and no activity; a
+	// claimed HEAD has an epoch, a holder and the claim id of its claim.
+	if h.Holder == "" {
+		if h.Epoch != 0 || h.ClaimID != "" || h.Activity.Kind != ActIdle {
+			return fmt.Errorf("%w: HEAD without a holder has epoch %d, claim id %q, activity %s", ErrMalformed, h.Epoch, h.ClaimID, h.Activity.Kind)
+		}
+	} else {
+		if h.Epoch == 0 {
+			return fmt.Errorf("%w: HEAD holder %q without an epoch", ErrMalformed, h.Holder)
 		}
 		if h.ClaimID == "" {
 			return fmt.Errorf("%w: HEAD holder %q without a claim id", ErrMalformed, h.Holder)
@@ -270,7 +274,7 @@ type HolderID struct {
 }
 
 func (h Head) heldBy(me HolderID) bool {
-	return h.Epoch == me.Epoch && h.Holder == me.Holder && h.ClaimID == me.ClaimID
+	return h.Holder != "" && h.Epoch == me.Epoch && h.Holder == me.Holder && h.ClaimID == me.ClaimID
 }
 
 // holderErr is the refusal of a holder transition: the volume is being

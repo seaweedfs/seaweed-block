@@ -45,6 +45,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
 	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
 	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":       "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
+	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":             "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                          "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":             "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
@@ -279,6 +280,12 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatalf("add dependent over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, st.updates)
 		}
 	})
+	t.Run("LayoutCreate", func(t *testing.T) {
+		st := &existsButAbsent{}
+		if _, err := layout.CreateVolume(ctx, st, layout.Volume{ID: layout.VolumeID{1}, Name: "v", Format: layout.VolumeFormat}); !errors.Is(err, layout.ErrIdentity) {
+			t.Fatalf("create whose HEAD create found one that then reads absent: %v; want ErrIdentity", err)
+		}
+	})
 	t.Run("LayoutRemoval", func(t *testing.T) {
 		r, err := layout.NewReader("/swblock/chunks", "v1", func(context.Context, string) ([]byte, bool, error) { return nil, false, nil })
 		if err != nil {
@@ -409,3 +416,16 @@ func (p *presentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) err
 type okClaimLease struct{}
 
 func (okClaimLease) OldLeaseEnded(context.Context, uint64) error { return nil }
+
+// existsButAbsent: VOLUME is created; the HEAD create reports one exists,
+// yet HEAD then reads absent (removed in between).
+type existsButAbsent struct{}
+
+func (existsButAbsent) ReadHead(context.Context) (layout.Head, bool, error) {
+	return layout.Head{}, false, nil
+}
+func (existsButAbsent) CreateHead(context.Context, layout.Head) error           { return layout.ErrExists }
+func (existsButAbsent) CreateVolumeRecord(context.Context, layout.Volume) error { return nil }
+func (existsButAbsent) ReadVolumeRecord(context.Context) (layout.Volume, bool, error) {
+	return layout.Volume{}, false, nil
+}
