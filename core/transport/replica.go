@@ -361,6 +361,11 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			}
 			return nil
 		}
+		// The base's history arrives only with the done frame: the table is
+		// invalid from before the first base byte until that replace.
+		if err := r.epochs.Invalidate(); err != nil {
+			return err
+		}
 		var id [16]byte
 		for id == ([16]byte{}) {
 			if _, err := rand.Read(id[:]); err != nil {
@@ -411,6 +416,13 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				if !admit(lineage) {
 					log.Printf("replica: reject stale recovery lane start session=%d epoch=%d endpointVersion=%d",
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					return true
+				}
+				// The lane ships history whose epochs arrive only at its
+				// final barrier: invalid from before its first entry until
+				// that replace.
+				if err := r.epochs.Invalidate(); err != nil {
+					log.Printf("replica: recovery lane epoch table: %v", err)
 					return true
 				}
 				lane = mutationLaneRecovery
@@ -786,6 +798,14 @@ func (r *ReplicaListener) EnterDualLane(epoch uint64) (func(), error) {
 	if err := r.raiseFloor(epoch); err != nil {
 		r.endMutationFrame()
 		return nil, fmt.Errorf("replica: dual-lane epoch %d: %w", epoch, err)
+	}
+	// A dual-lane session applies history (base and WAL) whose epochs the
+	// table cannot name: invalid before its first byte. Its completion does
+	// not carry rows yet, so the table stays invalid: the replica reconciles
+	// as diverged and is rebuilt, never counted.
+	if err := r.epochs.Invalidate(); err != nil {
+		r.endMutationFrame()
+		return nil, fmt.Errorf("replica: dual-lane epoch %d: epoch table: %w", epoch, err)
 	}
 	return r.endMutationFrame, nil
 }

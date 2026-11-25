@@ -2,6 +2,7 @@ package transport
 
 import (
 	"go/ast"
+	"go/build"
 	"go/importer"
 	"go/parser"
 	"go/token"
@@ -22,9 +23,13 @@ import (
 var epochTableWriters = []string{
 	"cmd/blockvolume/replication_ingress.go: func newReplicationIngress .TrimAbove",
 	"cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Note",
-	"core/transport/replica.go: func handleConn .Note",    // live-lane entry, before the apply
-	"core/transport/replica.go: func handleConn .Replace", // rebuild done
-	"core/transport/replica.go: func handleConn .Replace", // catch-up's final barrier
+	"cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Replace", // promoted over an invalid table: exactly [(e, next LSN)]
+	"core/transport/replica.go: func EnterDualLane .Invalidate",               // dual-lane session: before its first byte
+	"core/transport/replica.go: func handleConn .Invalidate", // rebuild: before the first base byte
+	"core/transport/replica.go: func handleConn .Invalidate", // catch-up: at the recovery lane start
+	"core/transport/replica.go: func handleConn .Note",       // live-lane entry, before the apply
+	"core/transport/replica.go: func handleConn .Replace",    // rebuild done
+	"core/transport/replica.go: func handleConn .Replace",    // catch-up's final barrier
 }
 
 // epochWrites lists the non-test calls of Note, Replace or TrimAbove whose
@@ -45,6 +50,11 @@ func epochWrites(t *testing.T, root string) []string {
 			return nil
 		}
 		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			// Only the files of this build (GOOS, GOARCH, tags), as the
+			// compiler sees them.
+			if ok, err := build.Default.MatchFile(filepath.Dir(path), filepath.Base(path)); err != nil || !ok {
+				return err
+			}
 			dirs[filepath.Dir(path)] = append(dirs[filepath.Dir(path)], path)
 		}
 		return nil
@@ -75,8 +85,14 @@ func epochWrites(t *testing.T, root string) []string {
 			continue
 		}
 		info := &types.Info{Selections: map[*ast.SelectorExpr]*types.Selection{}}
-		conf := types.Config{Importer: imp, Error: func(error) {}}
+		var typeErrs []error
+		conf := types.Config{Importer: imp, Error: func(err error) { typeErrs = append(typeErrs, err) }}
 		_, _ = conf.Check(dir, fset, files, info)
+		// The census is authoritative only over fully type-checked code: an
+		// error could hide a selection, so it fails rather than undercounts.
+		if len(typeErrs) > 0 {
+			t.Fatalf("census cannot type-check %s: %v", rel, typeErrs[0])
+		}
 		for _, f := range files {
 			name := filepath.ToSlash(mustRel(root, fset.Position(f.Pos()).Filename))
 			out = append(out, typedWritesIn(f, name, info)...)
@@ -129,7 +145,7 @@ func typedWritesIn(f *ast.File, rel string, info *types.Info) []string {
 	return out
 }
 
-var epochWriter = map[string]bool{"Note": true, "Replace": true, "TrimAbove": true}
+var epochWriter = map[string]bool{"Note": true, "Replace": true, "TrimAbove": true, "Invalidate": true}
 
 func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 	got := epochWrites(t, filepath.Join("..", ".."))
@@ -159,8 +175,8 @@ func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 		})
 	}
 	sort.Strings(persisters)
-	if strings.Join(persisters, ",") != "Note,Replace,TrimAbove" {
-		t.Fatalf("methods reaching persistLocked: %v; want Note, Replace, TrimAbove", persisters)
+	if strings.Join(persisters, ",") != "Invalidate,Note,Replace,TrimAbove" {
+		t.Fatalf("methods reaching persistLocked: %v; want Invalidate, Note, Replace, TrimAbove", persisters)
 	}
 }
 

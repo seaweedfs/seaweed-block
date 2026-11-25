@@ -48,6 +48,11 @@ type epochTableRecord struct {
 	Schema   string     `json:"schema"`
 	VolumeID string     `json:"volume_id"`
 	Rows     []EpochRow `json:"rows"`
+	// Invalid: a recovery (catch-up or rebuild) began applying history
+	// whose epochs arrive only at its end. Until that end replaces the
+	// table, the store's data has no known history: no last data row, no
+	// note; it reconciles as diverged at every crash point.
+	Invalid bool `json:"invalid,omitempty"`
 }
 
 // EpochTable is the durable table of one volume. The zero path keeps it in
@@ -55,8 +60,9 @@ type epochTableRecord struct {
 type EpochTable struct {
 	path, volumeID string
 
-	mu   sync.Mutex
-	rows []EpochRow
+	mu      sync.Mutex
+	rows    []EpochRow
+	invalid bool
 }
 
 // LoadEpochTable reads the table at path; a missing record is an empty table.
@@ -98,7 +104,7 @@ func LoadEpochTable(path, volumeID string) (*EpochTable, error) {
 	if err := checkEpochRows(rec.Rows); err != nil {
 		return nil, err
 	}
-	t.rows = rec.Rows
+	t.rows, t.invalid = rec.Rows, rec.Invalid
 	return t, nil
 }
 
@@ -129,6 +135,9 @@ func (t *EpochTable) Note(epoch, firstLSN uint64) error {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.invalid {
+		return errors.New("epoch table: invalid until the recovery in progress replaces it")
+	}
 	if n := len(t.rows); n > 0 {
 		last := t.rows[n-1]
 		switch {
@@ -141,10 +150,30 @@ func (t *EpochTable) Note(epoch, firstLSN uint64) error {
 		}
 	}
 	next := newestRows(append(append([]EpochRow(nil), t.rows...), EpochRow{Epoch: epoch, FirstLSN: firstLSN}))
-	if err := t.persistLocked(next); err != nil {
+	if err := t.persistLocked(next, false); err != nil {
 		return err
 	}
 	t.rows = next
+	return nil
+}
+
+// Invalidate durably marks the table invalid, before a recovery applies
+// any history (a catch-up's lane start, a rebuild's first base block): the
+// history's epochs arrive only at the recovery's end, and until Replace
+// installs them the data must read as diverged, whatever crashes between.
+func (t *EpochTable) Invalidate() error {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.invalid {
+		return nil
+	}
+	if err := t.persistLocked(nil, true); err != nil {
+		return err
+	}
+	t.rows, t.invalid = nil, true
 	return nil
 }
 
@@ -156,10 +185,10 @@ func (t *EpochTable) Replace(rows []EpochRow) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	next := newestRows(append([]EpochRow(nil), rows...))
-	if err := t.persistLocked(next); err != nil {
+	if err := t.persistLocked(next, false); err != nil {
 		return err
 	}
-	t.rows = next
+	t.rows, t.invalid = next, false
 	return nil
 }
 
@@ -175,21 +204,21 @@ func (t *EpochTable) TrimAbove(next uint64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	keep := RowsThrough(t.rows, next)
-	if len(keep) == len(t.rows) {
+	if t.invalid || len(keep) == len(t.rows) {
 		return nil
 	}
-	if err := t.persistLocked(keep); err != nil {
+	if err := t.persistLocked(keep, false); err != nil {
 		return err
 	}
 	t.rows = keep
 	return nil
 }
 
-func (t *EpochTable) persistLocked(rows []EpochRow) error {
+func (t *EpochTable) persistLocked(rows []EpochRow, invalid bool) error {
 	if t.path == "" {
 		return nil
 	}
-	body, _ := json.Marshal(epochTableRecord{Schema: epochTableSchema, VolumeID: t.volumeID, Rows: rows})
+	body, _ := json.Marshal(epochTableRecord{Schema: epochTableSchema, VolumeID: t.volumeID, Rows: rows, Invalid: invalid})
 	tmp := t.path + ".tmp"
 	if err := floorFS.writeSynced(tmp, append(body, '\n')); err != nil {
 		_ = floorFS.remove(tmp)
@@ -212,6 +241,16 @@ func (r *ReplicaListener) SetEpochTable(t *EpochTable) { r.epochs = t }
 // SetEpochTable installs the primary's epoch table on the executor, whose
 // rebuild-done frame then carries its rows.
 func (e *BlockExecutor) SetEpochTable(t *EpochTable) { e.epochs = t }
+
+// Invalid reports whether a recovery left the table without a known history.
+func (t *EpochTable) Invalid() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.invalid
+}
 
 // LastEpoch is the epoch of the last row; 0 = no rows.
 func (t *EpochTable) LastEpoch() uint64 {
@@ -238,6 +277,9 @@ func (t *EpochTable) LastDataRowAt(end uint64) EpochRow {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.invalid {
+		return EpochRow{} // history unknown: data without a table reconciles as diverged
+	}
 	for i := len(t.rows) - 1; i >= 0; i-- {
 		if t.rows[i].FirstLSN <= end {
 			return t.rows[i]

@@ -60,6 +60,15 @@ func (r *replicationIngress) notePrimaryEpoch(epoch uint64) error {
 	if r.epochsErr != nil {
 		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
 	}
+	if r.epochs.Invalid() {
+		// Promoted (forced) over a store whose history is unknown: the table
+		// becomes exactly this epoch from the next LSN, so every survivor
+		// that rejoins holds an epoch this table never had and is rebuilt.
+		if err := r.epochs.Replace([]transport.EpochRow{{Epoch: epoch, FirstLSN: r.store.NextLSN()}}); err != nil {
+			return fmt.Errorf("volume %s epoch table: %w", r.volumeID, err)
+		}
+		return nil
+	}
 	if err := r.epochs.Note(epoch, r.store.NextLSN()); err != nil {
 		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, err)
 	}
