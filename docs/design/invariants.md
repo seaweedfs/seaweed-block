@@ -525,9 +525,9 @@ stateDiagram-v2
   idle --> snap: Begin(s)
   snap --> idle: Abort(s)
   snap --> idle: Commit(s, root)
-  idle --> idle: Claim(e)
-  snap --> idle: Claim(e), s void
-  clean --> idle: Claim(e), c void
+  idle --> idle: Claim(e, claim id)
+  snap --> idle: Claim(e, claim id), s void
+  clean --> idle: Claim(e, claim id), c void
   idle --> clean: BeginClean(c)
   clean --> idle: EndClean(c)
   clean --> clean: RemoveUnreachable(shard)
@@ -540,7 +540,7 @@ stateDiagram-v2
 | idle | snap(s) | caller is the holder at HEAD's epoch (epoch and server); HEAD present; snap(s) again is a replay, any other activity is refused | head.go `Head.Begin`, `runTransition` | `INV-SNAPK-HEAD-WRITE-001`, `INV-SNAPK-BEGIN-001` |
 | snap(s) | idle | holder at HEAD's epoch; activity is snap(s); over idle it succeeds without a write and means only that no activity remains | head.go `Head.Abort` | `INV-SNAPK-ABORT-001` |
 | snap(s) | idle, current = root | holder at HEAD's epoch; activity is snap(s); the previous manifest builds to HEAD's current root; the new own chunks, every segment and the root are present | commit.go `Head.Commit`, `RunCommit` | `INV-SNAPK-COMMIT-REACH-001`, `INV-SNAPK-TXN-INTERRUPT-001` |
-| any | idle at epoch e | e above HEAD's epoch (the same epoch and server is a replay); every older holder's lease has ended, checked after the read and before the update | claim.go `Head.Claim`, `RunClaim` (`LeaseWait.OldLeaseEnded`) | `INV-SNAPK-CLAIM-LEASE-001` |
+| any | idle at epoch e, claim id k | e above HEAD's epoch (the same epoch, server and claim id is a replay; the same epoch and server with another claim id is refused); every older holder's lease has ended, checked after the read and before the update | claim.go `Head.Claim`, `RunClaim` (`LeaseWait.OldLeaseEnded`) | `INV-SNAPK-CLAIM-LEASE-001`, `INV-SNAPK-CLAIM-ID-001` |
 | idle | clean(c) | holder at HEAD's epoch; activity idle (clean(c) again is a replay) | clean.go `Head.BeginClean` | `INV-SNAPK-CLEAN-EXCL-001` |
 | clean(c) | idle | holder at HEAD's epoch; activity clean(c); over idle it succeeds without a write | clean.go `Head.EndClean` | `INV-SNAPK-CLEAN-EXCL-001` |
 | clean(c) | clean(c), names removed | holder at HEAD's epoch with clean(c) open (HEAD read once, after BeginClean); a name is deleted only if no root in HEAD (current or snapshot) names it in this volume's pool; each removal is a mark conditional on the plan's metadata, then a delete conditional on that mark | remove.go `RemoveUnreachable` | `INV-SNAPK-REMOVE-MARK-001` |
