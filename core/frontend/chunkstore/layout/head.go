@@ -121,6 +121,9 @@ func (h Head) check() error {
 	if h.Epoch == 0 || h.Holder == "" {
 		return fmt.Errorf("%w: HEAD without epoch or holder", ErrMalformed)
 	}
+	if h.ClaimID == "" {
+		return fmt.Errorf("%w: HEAD holder %q without a claim id", ErrMalformed, h.Holder)
+	}
 	if len(h.Snapshots) > MaxSnapshots {
 		return fmt.Errorf("%w: %d snapshots, at most %d", ErrMalformed, len(h.Snapshots), MaxSnapshots)
 	}
@@ -174,9 +177,15 @@ func (h Head) Encode() ([]byte, error) {
 	return json.Marshal(d)
 }
 
-// DecodeHead parses canonical HEAD bytes; unknown fields and non-canonical
-// bytes are refused.
-func DecodeHead(b []byte, gen uint64) (Head, error) {
+// DecodeHead parses canonical HEAD bytes for the volume whose VOLUME
+// record carries volume; unknown fields and non-canonical bytes are
+// refused, and so is a HEAD of another volume id (ErrIdentity): one left
+// by an interrupted delete, or created late by an old restore, under a
+// name since given to another volume. Every reader of HEAD decodes here.
+func DecodeHead(b []byte, gen uint64, volume VolumeID) (Head, error) {
+	if volume.IsZero() {
+		return Head{}, errors.New("layout: DecodeHead needs the volume's id from its VOLUME")
+	}
 	var d headDoc
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -223,6 +232,9 @@ func DecodeHead(b []byte, gen uint64) (Head, error) {
 	}
 	if !bytes.Equal(again, b) {
 		return Head{}, fmt.Errorf("%w: HEAD bytes are not canonical", ErrMalformed)
+	}
+	if h.VolumeID != volume {
+		return Head{}, fmt.Errorf("%w: HEAD carries volume id %s, VOLUME has %s", ErrIdentity, h.VolumeID, volume)
 	}
 	return h, nil
 }
