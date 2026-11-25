@@ -65,7 +65,7 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 		b.args = []string{"--volume-lock-dir-test-only", lockDir, "--master", h.masterAddr, "--server-id", b.id, "--volume-id", "v1",
 			"--replica-id", fmt.Sprintf("r%d", i+1), "--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 			"--durable-root", b.root, "--durable-impl", "walstore", "--durable-blocks", "65536", "--durable-blocksize", "4096",
-			"--heartbeat-interval", "200ms", "--t1-readiness", "--degraded-probe-interval", "1s", "--replication-ack", "sync-quorum",
+			"--heartbeat-interval", "200ms", "--t1-readiness", "--replication-ack", "sync-quorum",
 			"--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}
 		b.d = h.start(t, "blockvolume-"+b.id, bins.volume, b.args...)
 		// Registered after the daemon's own cleanup, so it runs first: a
