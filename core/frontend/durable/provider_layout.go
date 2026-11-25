@@ -63,6 +63,21 @@ func (p *DurableProvider) LayoutHolder(ctx context.Context, volume string) (layo
 	return h.layoutHolder, nil
 }
 
+// LayoutRemote returns the single runtime cached by a successful attachment.
+// Callers must not construct another remote for the same attachment.
+func (p *DurableProvider) LayoutRemote(ctx context.Context, volume string) (storage.ChunkRemote, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.volumes[volume]
+	if p.closed || h == nil || h.chunk == nil || h.layoutHolder.ClaimID == "" || h.layoutRemote == nil {
+		return nil, ErrNotChunkVolume
+	}
+	return h.layoutRemote, nil
+}
+
 type layoutBoundRemote struct {
 	*closeBoundRemote
 	keyer storage.ChunkKeyer
