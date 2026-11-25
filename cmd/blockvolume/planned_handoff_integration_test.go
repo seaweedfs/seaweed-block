@@ -185,6 +185,8 @@ type handoffEnv struct {
 	// A crash test restarts exactly this owned master with the same stores.
 	masterProcess *daemon
 	masterArgs    []string
+	// tls, when set, runs every process with mutual TLS (procedure_tls_harness_test.go).
+	tls *procedureTLS
 }
 
 // bvHost is one host's blockvolume: its server id, endpoints, local root
@@ -211,6 +213,17 @@ func startHandoffEnv(t *testing.T, n int, masterArgs ...string) *handoffEnv {
 // target, for example).
 func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...string) *handoffEnv {
 	t.Helper()
+	var tlsCfg map[string]time.Time
+	if procedureTLSOn() {
+		tlsCfg = map[string]time.Time{}
+	}
+	return startHandoffEnvTLS(t, n, targets, tlsCfg, masterArgs...)
+}
+
+// startHandoffEnvTLS is startHandoffEnvWith with mutual TLS when tlsNotAfter
+// is non-nil (it overrides chosen node certificates' expiry).
+func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, masterArgs ...string) *handoffEnv {
+	t.Helper()
 	h := newPlannedHandoffHarness(t)
 	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
 	must, _ := fatalOn(t)
@@ -224,6 +237,15 @@ func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...st
 		env.hosts[id] = bvHost{id: id, data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t), root: filepath.Join(h.dir, "vol-"+id), volume: v}
 	}
 	cluster, chunkPath := env.cluster, env.chunkPath
+	if tlsNotAfter != nil {
+		servers := make([]string, 0, len(env.hosts))
+		for _, b := range env.hosts {
+			servers = append(servers, b.id)
+		}
+		env.tls = newProcedureTLS(t, h.dir, servers, tlsNotAfter)
+		h.cliEnv = env.tls.cliEnv("admin")
+		masterArgs = append(env.tls.masterArgs(), masterArgs...)
+	}
 
 	// 1. The cluster spec.
 	var nodes, volumes strings.Builder
@@ -290,7 +312,15 @@ func (env *handoffEnv) volArgsFor(b bvHost) []string {
 		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
 		"--durable-blocks", "65536", "--durable-blocksize", "4096",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--chunk-control-endpoint",
-		"--workspace-lease", "--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}, env.volExtra...)
+		"--workspace-lease", "--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}, append(env.tlsVolumeArgs(server), env.volExtra...)...)
+}
+
+// tlsVolumeArgs is server's node identity when the env runs with mutual TLS.
+func (env *handoffEnv) tlsVolumeArgs(server string) []string {
+	if env.tls == nil {
+		return nil
+	}
+	return env.tls.volumeArgs(server)
 }
 
 func fatalOn(t *testing.T) (func(error), func(uint64, error) uint64) {
@@ -318,6 +348,9 @@ type plannedHandoffHarness struct {
 	t       *testing.T
 	logMu   sync.Mutex
 	logDone bool
+	// cliEnv is added to every sw-block command's environment (its master
+	// TLS identity when the env runs with mutual TLS).
+	cliEnv []string
 }
 
 func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
@@ -559,6 +592,9 @@ func (h *plannedHandoffHarness) run(t *testing.T, args ...string) (string, strin
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.cli, args...)
 	cmd.Dir = h.dir
+	if len(h.cliEnv) > 0 {
+		cmd.Env = append(os.Environ(), h.cliEnv...)
+	}
 	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

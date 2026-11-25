@@ -9,6 +9,10 @@ import (
 
 var ErrWorkspaceDeleteReserved = errors.New("workspace: deletion is committed")
 
+// ErrWorkspaceDeleteRefused means the early reservation check refused before
+// calling persist. Context and persistence errors never carry this sentinel.
+var ErrWorkspaceDeleteRefused = errors.New("workspace: deletion refused before persistence")
+
 func (p *Publisher) beforeWorkspaceGrantLock(site string) {
 	if p.testBeforeGrantLock != nil {
 		p.testBeforeGrantLock(site)
@@ -37,7 +41,7 @@ func (p *Publisher) ReserveWorkspaceDeletion(ctx context.Context, volume string,
 	// check at the delete's HEAD update do); it stops an outage by mistake.
 	if persist != nil {
 		if err := p.liveLeaseLocked(volume); err != nil {
-			return fmt.Errorf("workspace delete refused: %w", err)
+			return fmt.Errorf("%w: %w", ErrWorkspaceDeleteRefused, err)
 		}
 	}
 	if persist != nil {

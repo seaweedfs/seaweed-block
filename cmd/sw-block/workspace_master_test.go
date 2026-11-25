@@ -21,6 +21,10 @@ import (
 // seedForcedVolume makes r1 on node-a the holder of vol-f at epoch 1 (lease
 // renewed once) with a prepared target binding on node-b.
 func seedForcedVolume(t *testing.T, h *master.Host) {
+	seedForcedVolumeLease(t, h, true)
+}
+
+func seedForcedVolumeLease(t *testing.T, h *master.Host, renew bool) {
 	t.Helper()
 	conn, err := grpc.NewClient(h.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -63,6 +67,9 @@ func seedForcedVolume(t *testing.T, h *master.Host) {
 		if time.Now().After(deadline) {
 			t.Fatal("no authority line for vol-f")
 		}
+	}
+	if !renew {
+		return
 	}
 	if _, err := ws.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-f", ReplicaId: "r1", Epoch: 1}); err != nil {
 		t.Fatal(err)

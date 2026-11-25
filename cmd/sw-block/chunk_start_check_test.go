@@ -38,7 +38,6 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 		"release":         append(append(append([]string{"ops", "chunk", "release"}, src...), tgt...), filer...),
 		"retain":          append(append([]string{"ops", "chunk", "retain", "--volume", "v1"}, id...), filer...),
 		"volume-delete":   append(append([]string{"ops", "chunk", "volume-delete", "--volume", "v1", "--master", "m:1", "--request-id", "r"}, id...), filer...),
-		"gc --apply":      append([]string{"ops", "chunk", "gc", "--master", "m:1", "--apply"}, filer...),
 	}
 	for name, args := range writing {
 		before := checks
@@ -55,7 +54,6 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 		"snapshots":        append(append([]string{"ops", "chunk", "snapshots", "--volume", "v1"}, id...), filer...),
 		"show":             append(append([]string{"ops", "chunk", "show", "--volume", "v1"}, id...), filer...),
 		"usage":            append(append([]string{"ops", "chunk", "usage", "--volume", "v1"}, id...), filer...),
-		"gc (read-only)":   append([]string{"ops", "chunk", "gc", "--master", "m:1"}, filer...),
 		"retain --dry-run": append(append([]string{"ops", "chunk", "retain", "--volume", "v1", "--dry-run"}, id...), filer...),
 	}
 	for name, args := range readOnly {
@@ -84,7 +82,6 @@ func TestOpsChunk_StartCheckIsBoundedByTheTimeout(t *testing.T) {
 	filer := []string{"--chunk-filer", "filer:18888", "--timeout", "200ms"}
 	for name, args := range map[string][]string{
 		"snapshot-delete": append([]string{"ops", "chunk", "snapshot-delete", "--volume", "v1", "--master", "m:1", "--name", "s1"}, filer...),
-		"gc --apply":      append([]string{"ops", "chunk", "gc", "--master", "m:1", "--apply"}, filer...),
 	} {
 		done := make(chan struct{})
 		var out, errb bytes.Buffer

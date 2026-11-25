@@ -503,21 +503,16 @@ sw-block ops chunk snapshot --volume v1 --name before-upgrade --status-addr STAT
 
 Space comes back in two steps. Neither is immediate.
 
-1. **GC deletes the chunks**, after the grace. The grace is `sw-block ops chunk gc --grace`, **1 hour by default**.
-   - A deleted snapshot keeps its chunks rooted for the grace after the delete.
-   - A chunk is then reclaimed only once two complete GC marks, at least the grace apart, have both seen it unreferenced.
-   - With the default grace, a deleted snapshot's unreferenced chunks are reclaimed about **2 hours** after the delete. Chunks still referenced by another snapshot, fork or restore remain live. That needs a GC pass at least 1 hour after the delete and another at least 1 hour after that.
-   - Automatic GC is off by default (`--chunk-maintenance-gc`), so run the passes yourself:
+1. **The holder's cleaning deletes the chunks.**
+   - Cleaning runs only on the volume server that holds the volume, in its maintenance pass (`--chunk-maintenance-interval`, hourly by default), and only with `--chunk-maintenance-gc`. It is off by default. There is no operator command.
+   - A pass removes the volume's own chunks that no root in HEAD names: not the current image, not a snapshot. A chunk that a restore target still names stays, because the source's snapshot keeps it while the target depends on it.
+   - A deleted snapshot's unshared chunks are therefore removed by the first pass after the delete. A pass waits while a snapshot is being taken, and a server that no longer holds the volume removes nothing.
 
    ```bash
    sw-block ops chunk snapshot-delete --volume v1 --name sched-20261120T031204Z --chunk-filer FILER
-   # one hour or more later, and again one hour or more after that:
-   sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
+   # with --chunk-maintenance-gc on the holder, the next maintenance pass removes the chunks only it named;
+   # each pass logs "maintenance volume=... removed=N"
    ```
-
-   - Each pass prints its `Candidates`, `Reclaimed` and `failed_deletes`.
-   - A chunk shows as a candidate in the first pass that sees it and is reclaimed in a later pass.
-   - Without `--apply`, a pass is read-only.
 2. **SeaweedFS vacuum compacts the volume files.** Reclaimed chunks are deleted needles.
    - SeaweedFS counts them at once in `DeletedByteCount`.
    - The disk space returns only when SeaweedFS vacuums those volumes, which runs asynchronously.
@@ -561,7 +556,7 @@ therefore see every chunk of every volume and snapshot as unreferenced.
   without regard to what refers to them.
 - `filer.sync`, `filer.backup` and `filer.replicate` copy file chunk lists. They do **not** copy a walstore-chunk
   volume: the copied records would point at needles that do not exist on the target.
-- Space is returned only by the two steps above (`sw-block ops chunk gc`, then a SeaweedFS vacuum). `volume.vacuum`
+- Space is returned only by the two steps above (the holder's cleaning, then a SeaweedFS vacuum). `volume.vacuum`
   is safe: it compacts needles that were already deleted.
 
 ### Forking a snapshot into a new volume
@@ -605,10 +600,9 @@ Prerequisites: `v1` is serving, its only snapshot is `seed`, and the standalone 
    ```bash
    sw-block ops chunk verify --volume template-holder --all-snapshots --depth data --timeout 2m --chunk-filer FILER
    sw-block ops chunk verify --volume consumer --all-snapshots --depth data --timeout 2m --chunk-filer FILER
-   sw-block ops chunk gc --chunk-filer FILER --master MASTER --apply
    ```
 
-   Read back the known data again and repeat both verify commands after the pass. This immediate pass is not a reclamation measurement: its default grace has not elapsed. Continue namespace-wide GC as described above for unused objects; attached-volume maintenance alone does not collect a deleted source's namespace.
+   Read back the known data again and repeat both verify commands after the holder's next maintenance pass. Each holder cleans only its own volume; the objects of a deleted volume are removed by the volume delete itself.
 
 Keep `template-holder/template-v1` while it is offered for new consumers. Retiring that snapshot later does not delete objects still referenced by existing consumers. Deleting the holder volume itself still requires the ordinary seal/revoke/ACK and snapshot-deletion procedure; do not remove its backing filer directory or object bindings by hand.
 

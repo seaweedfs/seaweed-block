@@ -38,7 +38,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		ref, err = vol.ref("volume")
 		return err
 	}, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
-		conn, err := link.Dial(c.master)
+		conn, err := link.DialMasterFromEnv(c.master)
 		if err != nil {
 			return nil, err
 		}
