@@ -134,6 +134,76 @@ func TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory(t *testing.T) {
 
 }
 
+type lostLayoutDetachAnswer struct {
+	*chunkstore.LayoutRemote
+	lose bool
+}
+
+func (r *lostLayoutDetachAnswer) CASHead(ctx context.Context, version storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	gen, err := r.LayoutRemote.CASHead(ctx, version, next)
+	if err == nil && r.lose && next.State == storage.ChunkHeadDetached {
+		return 0, errors.New("fixture: detached commit reply lost")
+	}
+	return gen, err
+}
+
+func (r *lostLayoutDetachAnswer) AbortOpenSession(ctx context.Context) (string, error) {
+	if r.lose {
+		return "", errors.New("fixture: settlement read unavailable")
+	}
+	return r.LayoutRemote.AbortOpenSession(ctx)
+}
+
+func TestLayoutPlainDetachLostReplyRestartReplaysProof(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c := newLayoutCase(t, 64, 4)
+	root := t.TempDir()
+	first := c.provider(t, root, v1View(), "s/r1", func(cfg *durable.ProviderConfig) {
+		cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			r, err := chunkstore.NewLayoutRemote(c.cat, c.ref, me)
+			if err != nil {
+				return nil, err
+			}
+			return &lostLayoutDetachAnswer{LayoutRemote: r, lose: true}, nil
+		}
+	})
+	ws := openRecovered(t, first)
+	if _, err := ws.Write(0, bytes.Repeat([]byte{'Z'}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := first.DetachVolumePlain(ctx, "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
+		t.Fatalf("committed seal with lost reply was decided without proof: %v", err)
+	}
+	sealed := c.head(t)
+	if sealed.State != layout.StateDetached {
+		t.Fatalf("lost reply did not commit: %+v", sealed)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := c.provider(t, root, v1View(), "s/r1", nil)
+	if _, err := restarted.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrDetached) {
+		t.Fatalf("same epoch served after seal: %v", err)
+	}
+	replay, last, err := restarted.DetachVolumePlain(ctx, "v1")
+	if err != nil || replay.Head.Gen != sealed.Gen || replay.H != sealed.Position || last != sealed.Position {
+		t.Fatalf("replay did not return the committed B proof: %+v last=%d err=%v", replay, last, err)
+	}
+	if got := c.head(t); got.Gen != sealed.Gen || got.State != layout.StateDetached {
+		t.Fatalf("replay wrote HEAD: %+v", got)
+	}
+	if !bytes.Equal(c.block(t, 0), bytes.Repeat([]byte{'Z'}, 4096)) {
+		t.Fatal("replay lost the acknowledged write")
+	}
+}
+
 func TestPlainDetachRefusesLegacyHeadProof(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
