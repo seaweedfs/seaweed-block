@@ -551,6 +551,13 @@ message ProbeRound {
     string volume_id = 1;
     string replica_id = 2;
     uint64 round_id = 3;
+    // A fencing round (fence_epoch > 0): a replica whose store is
+    // expected_store_id makes its epoch floor fence_epoch durable FIRST, then
+    // answers (its answer is the promise: it refuses frames and acks at a
+    // lower epoch from then on). A replica on another store raises nothing
+    // and answers its own store id. 0: a plain probe, no fence.
+    uint64 fence_epoch = 4;
+    bytes expected_store_id = 5;
 }
 
 // ProbeAnswer is one replica's promotion evidence for one round.
@@ -571,6 +578,9 @@ message ProbeAnswer {
     // primary that serves.
     bool replica_ready = 11;
     bool primary_ready = 12;
+    // The replica's durable epoch floor when it answered (after a fencing
+    // round's raise). Above the round's fence_epoch: superseded, not counted.
+    uint64 floor = 13;
 }
 
 message ProbeAck {}
