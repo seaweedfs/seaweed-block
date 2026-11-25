@@ -436,14 +436,14 @@ func handoffAddress(t *testing.T) string {
 		if handoffPorts.used[p] {
 			continue
 		}
-		addr := fmt.Sprintf("127.0.0.1:%d", p)
+		addr := fmt.Sprintf("%s:%d", testListenHost(), p)
 		if ln, err := net.Listen("tcp", addr); err == nil {
 			ln.Close()
 			handoffPorts.used[p] = true
 			return addr
 		}
 	}
-	t.Fatal("no free loopback port below the ephemeral range")
+	t.Fatal("no free port below the ephemeral range on " + testListenHost())
 	return ""
 }
 

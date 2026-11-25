@@ -780,6 +780,9 @@ func runVolume(f flags, exits *processExit) int {
 		err := geometryErr
 		if err == nil {
 			dp, err = durable.NewDurableProvider(cfg, h.ProjectionView())
+			if err == nil {
+				applyBuildTagHold(dp) // a no-op except in a kzhold (test-only) build
+			}
 		}
 		if chunkErr != nil {
 			err = chunkErr
