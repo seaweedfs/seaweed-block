@@ -30,12 +30,38 @@ func TestDeleteCannotProveNoLeaseFromASkippedAuthorityRecord(t *testing.T) {
 	}
 }
 
+// A delete of a volume still served is refused before anything is
+// persisted, and the holder keeps renewing: a mistaken delete is not an
+// outage. Once the lease has lapsed the reservation commits.
+func TestDeleteOfALiveVolumeIsRefusedBeforePersisting(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClock()
+	p := newLeasePublisher(t, &deleteGrantStore{}, 30*time.Second, c)
+	bindAndGrant(t, p, "v", "r")
+	persisted := false
+	if err := p.ReserveWorkspaceDeletion(ctx, "v", func() error { persisted = true; return nil }); err == nil || !strings.Contains(err.Error(), "live until") || persisted {
+		t.Fatalf("reserve of a live volume: %v (persisted %t); want refused, nothing persisted", err, persisted)
+	}
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err != nil {
+		t.Fatalf("the holder's renewal after a refused delete: %v", err)
+	}
+	c.at(1000)
+	if err := p.ReserveWorkspaceDeletion(ctx, "v", func() error { persisted = true; return nil }); err != nil || !persisted {
+		t.Fatalf("reserve after the lease lapsed: %v (persisted %t)", err, persisted)
+	}
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err == nil {
+		t.Fatal("a committed delete extended a holder lease")
+	}
+}
+
+// A committed reservation reloaded at startup (persist nil) while a lease
+// record exists stops every grant and waits for the whole lease.
 func TestCommittedDeleteStopsGrantsAndWaitsForTheWholeLease(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClock()
 	p := newLeasePublisher(t, &deleteGrantStore{}, 30*time.Second, c)
 	bindAndGrant(t, p, "v", "r")
-	if err := p.ReserveWorkspaceDeletion(ctx, "v", func() error { return nil }); err != nil {
+	if err := p.ReserveWorkspaceDeletion(ctx, "v", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err == nil {
@@ -70,7 +96,8 @@ func TestDeleteReservationMustBeDurableBeforeItCanProveNoLease(t *testing.T) {
 func TestDeleteReservationPersistenceDoesNotBlockLiveRenewal(t *testing.T) {
 	c := newTestClock()
 	p := newLeasePublisher(t, &deleteGrantStore{}, 30*time.Second, c)
-	bindAndGrant(t, p, "v", "r")
+	// Another volume's holder renews while v's reservation is on disk.
+	bindAndGrant(t, p, "w", "r")
 	entered, release, reserved := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	go func() {
 		reserved <- p.ReserveWorkspaceDeletion(context.Background(), "v", func() error {
@@ -81,7 +108,7 @@ func TestDeleteReservationPersistenceDoesNotBlockLiveRenewal(t *testing.T) {
 	}()
 	<-entered
 	renewed := make(chan error, 1)
-	go func() { _, err := p.RenewWorkspaceLease(context.Background(), "v", "r", 1); renewed <- err }()
+	go func() { _, err := p.RenewWorkspaceLease(context.Background(), "w", "r", 1); renewed <- err }()
 	select {
 	case err := <-renewed:
 		close(release)
@@ -149,10 +176,13 @@ func TestDeleteReservationClosesPausedGrantWriters(t *testing.T) {
 			case err := <-done:
 				t.Fatalf("request did not reach %s boundary: %v", site, err)
 			}
+			// The delete is admitted once the old lease has lapsed (a live one
+			// refuses it early); the paused writer must still be closed.
+			c.at(100)
 			if err := p.ReserveWorkspaceDeletion(ctx, "v", func() error { return nil }); err != nil {
+				close(resume)
 				t.Fatal(err)
 			}
-			c.at(100)
 			if err := p.NoLiveWorkspaceLease(ctx, "v"); err != nil {
 				t.Fatal(err)
 			}
@@ -180,6 +210,7 @@ func TestDeleteReservationReplayAndRestart(t *testing.T) {
 	bindAndGrant(t, p, "v", "r")
 	writes := 0
 	persist := func() error { writes++; return nil }
+	c.at(70) // the lease has lapsed: a live one refuses the delete early
 	if err := p.ReserveWorkspaceDeletion(ctx, "v", persist); err != nil {
 		t.Fatal(err)
 	}

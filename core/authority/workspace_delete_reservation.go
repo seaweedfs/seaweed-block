@@ -31,6 +31,15 @@ func (p *Publisher) ReserveWorkspaceDeletion(ctx context.Context, volume string,
 	if p.deleteReserved[volume] {
 		return nil
 	}
+	// An operator's delete of a volume still served is refused before the
+	// irreversible step: nothing is persisted while a lease is live now.
+	// This decides nothing for safety (the closed grant writers and the
+	// check at the delete's HEAD update do); it stops an outage by mistake.
+	if persist != nil {
+		if err := p.liveLeaseLocked(volume); err != nil {
+			return fmt.Errorf("workspace delete refused: %w", err)
+		}
+	}
 	if persist != nil {
 		if err := persist(); err != nil {
 			return err
@@ -55,6 +64,12 @@ func (p *Publisher) NoLiveWorkspaceLease(ctx context.Context, volume string) err
 	if !p.deleteReserved[volume] {
 		return errors.New("workspace delete: committed reservation required")
 	}
+	return p.liveLeaseLocked(volume)
+}
+
+// liveLeaseLocked reports a lease of volume that may still be live (or
+// that cannot be proven absent). Caller holds mu.
+func (p *Publisher) liveLeaseLocked(volume string) error {
 	// A skipped authority record is not evidence that its lease never existed.
 	// Until recovery identifies it, do not certify absence from a partial load.
 	if len(p.loadErrs) != 0 {
