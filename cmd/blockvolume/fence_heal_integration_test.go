@@ -23,9 +23,15 @@ import (
 // so it does not answer: one fenced survivor, two needed, nothing is
 // published, and r1 does not answer the heal. When r1 resumes, the master
 // continues it at epoch 2 on its own evidence; a write after that reads back
-// with the one before it, and once r3 can persist again both replicas serve
-// r1 at epoch 2 (healthy peers of the primary).
-func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
+// with the one before it.
+func TestFencingRoundHealContinuesThePrimary(t *testing.T) { fencingRoundHeal(t, false) }
+
+// TestFencingRoundSurvivorRejoins is the same scenario carried one step
+// further: once r3 can persist again, both replicas serve r1 at epoch 2
+// (healthy peers of the primary).
+func TestFencingRoundSurvivorRejoins(t *testing.T) { fencingRoundHeal(t, true) }
+
+func fencingRoundHeal(t *testing.T, rejoin bool) {
 	if isWindows() {
 		t.Skip("SIGSTOP and directory permissions: Linux only")
 	}
@@ -139,6 +145,9 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 	}
 	c.close()
 
+	if !rejoin {
+		return
+	}
 	// 5. r3 can persist again: both replicas rejoin r1 at epoch 2.
 	if err := os.Chmod(r3.root, 0o755); err != nil {
 		t.Fatal(err)
