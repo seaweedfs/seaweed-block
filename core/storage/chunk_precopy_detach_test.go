@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -194,6 +195,89 @@ func assertPrecopyMeasuredRefusal(t *testing.T, report PrecopyReport, err error)
 			!(report.Reason == "freeze_budget_exceeded" && report.Estimate > precopyFreezeLimit)) {
 		t.Fatalf("not a valid measured over-budget refusal: report=%+v err=%v", report, err)
 	}
+}
+
+func TestPrecopyDetachSustainedWrapFlushAndFreshRestore(t *testing.T) {
+	makeStore := func(name string) *WALStore {
+		s, err := createMappedWALStoreV3ForTest(filepath.Join(t.TempDir(), name), ctNumBlocks, ctBlockSize, v3TestWAL, WModeStrict, ctChunkBlocks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.DisableAutoFlushForRecoveryTest()
+		s.SetRecoveryRetentionLSNs(0)
+		t.Cleanup(func() { closeBounded(t, s) })
+		return s
+	}
+	s := makeStore("old")
+	f := newFakeChunkRemote()
+	cfg := ctConfig(1)
+	cfg.FreshFromHead = true
+	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
+	if _, err := l.Cut(ctTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	want := make([]byte, ctNumBlocks*ctBlockSize)
+	written := 0
+	for i := 0; written <= 2*int(s.sb.WALSize); i++ {
+		lba := uint32(i % ctNumBlocks)
+		data := makeBlock(ctBlockSize, byte(i%250+1))
+		if _, err := s.Write(lba, data); err != nil {
+			t.Fatal(err)
+		}
+		copy(want[int(lba)*ctBlockSize:], data)
+		written += len(data)
+		if i%4 == 3 {
+			mustSyncFlush(t, s)
+		}
+		if i%16 == 15 {
+			if _, err := l.Cut(ctTimeout(t)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mustSyncFlush(t, s)
+	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(f.imageOf(t, r.Head), want) {
+		t.Fatal("sustained writes/Flush detached the wrong image")
+	}
+	fresh := makeStore("new")
+	next := ctConfig(2)
+	next.Holder = "host-b"
+	next.FreshFromHead = true
+	next.RestoreChunkBytes = ctChunkBytes
+	next.PrepareRestore = func(h ChunkHead) error { return fresh.SeedChunkFrontier(h.RemoteLSN) }
+	// layout.Start owns the epoch transition in the B path. Publish the
+	// successor HEAD here so this engine test still checks sustained writes,
+	// detach and lazy fresh readback without calling the removed flat claim.
+	oldHead, err := f.GetHead(ctTimeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.PrepareRestore(oldHead); err != nil {
+		t.Fatal(err)
+	}
+	h := copyHead(oldHead)
+	h.Epoch, h.Holder, h.State, h.DetachedBy = next.Epoch, next.Holder, ChunkHeadActive, nil
+	gen, err := f.CASHead(ctTimeout(t), ChunkHeadVersion{Gen: oldHead.Gen, Epoch: oldHead.Epoch}, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Gen = gen
+	next.RestoreGuard = &ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}
+	mustAttach(t, fresh, f, next)
+	for lba := uint32(0); lba < ctNumBlocks; lba++ {
+		got, err := fresh.Read(lba)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want[int(lba)*ctBlockSize:int(lba+1)*ctBlockSize]) {
+			t.Fatalf("fresh restore LBA %d differs", lba)
+		}
+	}
+	t.Logf("wrote %d bytes > WAL %d with periodic Flush; fresh host exact readback", written, s.sb.WALSize)
 }
 
 func TestPrecopyDetachCanceledBarrierNeverStopsFrontend(t *testing.T) {
