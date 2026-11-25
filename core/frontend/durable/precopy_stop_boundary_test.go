@@ -7,11 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type stopBoundaryRemote struct {
-	storage.ChunkRemote
+	*chunkstore.LayoutRemote
 	entered chan time.Time
 	release chan struct{}
 }
@@ -25,12 +29,28 @@ func (r *stopBoundaryRemote) CASHead(ctx context.Context, expected storage.Chunk
 			return 0, ctx.Err()
 		}
 	}
-	return r.ChunkRemote.CASHead(ctx, expected, next)
+	return r.LayoutRemote.CASHead(ctx, expected, next)
 }
 
 func TestPrecopyStopIOReturnTimestampPrecedesFinalPublication(t *testing.T) {
-	r := &stopBoundaryRemote{ChunkRemote: storage.NewMemChunkRemote(), entered: make(chan time.Time, 1), release: make(chan struct{})}
-	p := precopyProvider(t, r, &parkView{stubView: v1View()})
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	r := &stopBoundaryRemote{entered: make(chan time.Time, 1), release: make(chan struct{})}
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkDetachPrecopy: true}
+	fixture.Configure(&cfg)
+	cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+		inner, err := chunkstore.NewLayoutRemote(fixture.Catalog, fixture.Ref, me)
+		if err != nil {
+			return nil, err
+		}
+		r.LayoutRemote = inner
+		return r, nil
+	}
+	var err error
+	p, err := durable.NewDurableProvider(cfg, &parkView{stubView: v1View()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {

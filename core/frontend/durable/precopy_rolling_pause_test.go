@@ -6,28 +6,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
-type precopyRollingHeldRemote struct {
-	*storage.MemChunkRemote
-	entered, release chan struct{}
-	once             sync.Once
-}
-
-func (r *precopyRollingHeldRemote) Put(ctx context.Context, key string, data []byte) error {
-	r.once.Do(func() { close(r.entered) })
-	select {
-	case <-r.release:
-		return r.MemChunkRemote.Put(ctx, key, data)
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 func TestPrecopyRollingUploadReopensTentativeAdmission(t *testing.T) {
-	r := &precopyRollingHeldRemote{MemChunkRemote: storage.NewMemChunkRemote(), entered: make(chan struct{}), release: make(chan struct{})}
-	p := precopyProvider(t, r, &parkView{stubView: v1View()})
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var upload sync.Once
+	fixture.Blobs.PutHook = func(ctx context.Context) error {
+		upload.Do(func() { close(entered) })
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	p := precopyBProvider(t, fixture, &parkView{stubView: v1View()}, nil)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
@@ -38,7 +33,7 @@ func TestPrecopyRollingUploadReopensTentativeAdmission(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	var once sync.Once
-	unpark := func() { once.Do(func() { close(r.release) }) }
+	unpark := func() { once.Do(func() { close(release) }) }
 	done := make(chan struct{})
 	var cutErr error
 	t.Cleanup(func() {
@@ -52,7 +47,7 @@ func TestPrecopyRollingUploadReopensTentativeAdmission(t *testing.T) {
 	})
 	go func() { defer close(done); _, _, cutErr = p.DetachVolume(ctx, "v1") }()
 	select {
-	case <-r.entered:
+	case <-entered:
 	case <-ctx.Done():
 		t.Fatal("cold rolling cut never uploaded")
 	}
@@ -72,7 +67,7 @@ func TestPrecopyRollingUploadReopensTentativeAdmission(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("rolling rounds did not converge")
 	}
-	if headBlock(t, r.MemChunkRemote, 80)[0] != 0x6d {
+	if layoutHeadBlock(t, fixture, 80)[0] != 0x6d {
 		t.Fatal("later admitted write missing from final image")
 	}
 }
