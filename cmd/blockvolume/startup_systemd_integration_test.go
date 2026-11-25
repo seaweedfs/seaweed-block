@@ -152,6 +152,12 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	gap1Systemctl(t, "kill", "--signal=KILL", "--kill-who=main", bootstrap)
 	waitGAP1(t, "bootstrap still running", 10*time.Second, func() bool { return gap1Unit(t, bootstrap)["MainPID"] == "0" })
+	// HEAD as the killed holder left it (no process can move it now).
+	ref := chunkstore.VolumeRef{Name: volume, ID: layoutID}
+	atKill := layoutHead(t, cluster, base, ref)
+	if atKill.Holder != "s1/r1" || atKill.ClaimID == "" || atKill.State != layout.StateLive {
+		t.Fatalf("HEAD at the kill: %+v; want live, held by s1/r1 under a claim", atKill)
+	}
 	// QueryWorkspace is read-only. These real binaries and this test share
 	// one WSL kernel wall clock. Use the reported MASTER expiry timestamp,
 	// not ValidForNs (which ends half a skew earlier and could renew live).
@@ -210,10 +216,20 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		}
 		return true
 	})
-	after, err := gap1ReadHead(t, remote)
-	if err != nil || after.Gen <= before.Gen || after.Holder != before.Holder || after.Epoch != before.Epoch {
-		t.Fatalf("return did not claim HEAD: before%+v after%+v err%v", before, after, err)
+	// The holder returns with its own claim at the same epoch: over an idle
+	// HEAD it resumes with no HEAD write; a session of its claim left open at
+	// the kill is aborted (a HEAD write) before it serves.
+	after := layoutHead(t, cluster, base, ref)
+	if after.Holder != atKill.Holder || after.Epoch != atKill.Epoch || after.ClaimID != atKill.ClaimID || after.State != layout.StateLive || after.Activity.Kind != layout.ActIdle {
+		t.Fatalf("return did not resume its claim: at kill %+v, after %+v", atKill, after)
 	}
+	switch {
+	case atKill.Activity.Kind == layout.ActIdle && after.Gen != atKill.Gen:
+		t.Fatalf("return over an idle HEAD wrote it: gen %d -> %d", atKill.Gen, after.Gen)
+	case atKill.Activity.Kind != layout.ActIdle && after.Gen <= atKill.Gen:
+		t.Fatalf("return left the open %s session %q: gen %d -> %d", atKill.Activity.Kind, atKill.Activity.Session, atKill.Gen, after.Gen)
+	}
+	t.Logf("return resumed claim %s at epoch %d: activity at kill %s, gen %d -> %d", after.ClaimID, after.Epoch, atKill.Activity.Kind, atKill.Gen, after.Gen)
 	returned := gap1ConnectNVMe(t, nvmeAddr, "nqn.2026-11.test:"+stem)
 	returned.readExact(t, 8, want)
 	returned.writeFlush(t, 9, want)

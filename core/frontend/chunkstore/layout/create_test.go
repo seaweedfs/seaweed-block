@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -141,6 +142,40 @@ func TestCreateVolume(t *testing.T) {
 	other.vol = &Volume{ID: idFor("x"), Name: "v1", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}
 	if _, err := CreateVolume(ctx, other, v); !errors.Is(err, ErrIdentity) || other.memHead.h != nil {
 		t.Fatalf("CreateVolume over another id's VOLUME: %v; want ErrIdentity, no HEAD", err)
+	}
+}
+
+// Creating a volume whose HEAD exists returns that HEAD unchanged while it is
+// live or detached (a clean stop before a move: the target's attach check
+// creates, then Start claims), and refuses it while deleting or deleted.
+func TestCreateVolume_OverAnExistingHeadByState(t *testing.T) {
+	ctx := context.Background()
+	v := Volume{ID: idFor("v1"), Name: "v1", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}
+	for _, state := range []string{StateLive, StateDetached, StateDeleting, StateDeleted} {
+		st := newMemNewVolume()
+		h, err := CreateVolume(ctx, st, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held := h.clone()
+		// a real detached HEAD names its committed image
+		img := RootName{Hash: Sum([]byte("image"))}
+		held.Epoch, held.Holder, held.ClaimID, held.State, held.Current = 2, "a/r1", "k", state, &img
+		st.memHead.h = &held
+		got, err := CreateVolume(ctx, st, v)
+		switch state {
+		case StateLive, StateDetached:
+			if err != nil || got.State != state || got.ClaimID != "k" || got.Epoch != 2 {
+				t.Fatalf("create over a %s HEAD: %+v %v; want that HEAD unchanged", state, got, err)
+			}
+		default:
+			if !errors.Is(err, ErrVolumeDeleting) {
+				t.Fatalf("create over a %s HEAD: %v; want ErrVolumeDeleting", state, err)
+			}
+		}
+		if !reflect.DeepEqual(*st.memHead.h, held) {
+			t.Fatalf("create over a %s HEAD wrote it: %+v", state, *st.memHead.h)
+		}
 	}
 }
 

@@ -106,8 +106,10 @@ func createVolume(ctx context.Context, st NewVolumeStore, v Volume, current *Roo
 		if !found || got.VolumeID != v.ID {
 			return Head{}, fmt.Errorf("%w: HEAD of %s, not %s", ErrIdentity, got.VolumeID, v.ID)
 		}
-		if got.State != StateLive {
-			// the operator released this target and tombstoned it first
+		if got.State == StateDeleting || got.State == StateDeleted {
+			// the volume is being deleted, or the operator released this
+			// target and tombstoned it first; a detached HEAD (a clean stop
+			// before a move) is the volume's, for Start to claim
 			return Head{}, fmt.Errorf("%w: HEAD of %s is %s", ErrVolumeDeleting, v.ID, got.State)
 		}
 		if current != nil && (got.Current == nil || *got.Current != *current) {

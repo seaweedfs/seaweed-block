@@ -216,9 +216,18 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 				t.Fatal("NVMe frontend still accepts after shutdown")
 			}
 			if !enabled {
-				head, e := remote.GetHead(context.Background())
-				if e != nil || head.Gen != 0 {
-					t.Fatal("unleased binary changed HEAD", head, e)
+				// No claim was ever made: HEAD is absent, or the unclaimed
+				// HEAD the create wrote (no holder, epoch 0).
+				cl := cluster.client(t, base)
+				cat, e := chunkstore.NewBCatalog(cl, cl, base)
+				if e != nil {
+					t.Fatal(e)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				head, found, e := cat.ReadHead(ctx, chunkstore.VolumeRef{Name: "vol-a", ID: layoutID})
+				cancel()
+				if e != nil || found && (head.Holder != "" || head.Epoch != 0 || head.ClaimID != "") {
+					t.Fatal("unleased binary changed HEAD", head, found, e)
 				}
 			}
 		})

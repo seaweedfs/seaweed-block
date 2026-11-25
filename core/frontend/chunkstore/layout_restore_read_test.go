@@ -2,6 +2,8 @@ package chunkstore
 
 import (
 	"context"
+	"path"
+	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
@@ -72,4 +74,17 @@ func TestLayoutRemote_RestoreTargetReadsItsSource(t *testing.T) {
 	}
 	tgt.readBack("t-after", changed)
 	src.readBack("src-after", want)
+
+	// A chunk the target names in the source's pool that is gone is an
+	// error on a fresh target host, never zeros.
+	c0, err := img.Chunk(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(src.cat.f.(*fakeFiler).entries, path.Join("/blocks", src.v.Dir(), c0.Ref.Chunk.Path()))
+	s3, _, _ := tgt.attach("t-gone", true, true)
+	defer s3.Close()
+	if got, err := s3.Read(0); err == nil || !strings.Contains(err.Error(), "object missing") {
+		t.Fatalf("block 0 with its source chunk gone: %x... %v; want the missing-object error", got[:min(2, len(got))], err)
+	}
 }
