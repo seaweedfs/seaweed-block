@@ -353,11 +353,11 @@ func TestWALStoreChunk_LineageDriftRefusesCapture(t *testing.T) {
 	}
 	for name, drift := range cases {
 		t.Run(name, func(t *testing.T) {
-			remote := storage.NewMemChunkRemote()
+			fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 			view := v1View()
-			p := chunkProvider(t, t.TempDir(), remote, view, 0)
+			p := layoutChunkProvider(t, t.TempDir(), fixture, view, 0)
 			s := openRecovered(t, p)
-			claimed := freshV1Claim(t, remote)
+			claimed := layoutHead(t, fixture)
 			if _, err := s.Write(1, block(1)); err != nil {
 				t.Fatal(err)
 			}
@@ -367,18 +367,18 @@ func TestWALStoreChunk_LineageDriftRefusesCapture(t *testing.T) {
 				view.set(proj)
 			}
 			_, err := p.CaptureVolume(context.Background(), "v1")
-			head, _ := remote.GetHead(context.Background())
+			head := layoutHead(t, fixture)
 			if drift == nil {
-				if err != nil || head.Gen != claimed.Gen+1 {
-					t.Fatalf("capture under the attach lineage: %v (HEAD gen %d)", err, head.Gen)
+				if err != nil || head.Current == nil || head.Position <= claimed.Position {
+					t.Fatalf("capture under the attach lineage: %v (HEAD %+v)", err, head)
 				}
 				return
 			}
 			if !errors.Is(err, storage.ErrChunkCaptureRefused) {
 				t.Fatalf("capture after %s drift: %v; want refused", name, err)
 			}
-			if head.Gen != claimed.Gen || remote.Puts() != 0 {
-				t.Fatalf("capture after %s drift published: HEAD gen %d, %d chunks stored", name, head.Gen, remote.Puts())
+			if head.Current != nil || head.Position != claimed.Position || fixture.Blobs.Puts() != 0 {
+				t.Fatalf("capture after %s drift published: HEAD %+v, %d blobs stored", name, head, fixture.Blobs.Puts())
 			}
 		})
 	}
@@ -614,9 +614,9 @@ func TestWALStoreChunk_LayerOutlivesRecoveryContext(t *testing.T) {
 // layer to epoch 0: once the projection carries the assignment, the
 // volume publishes under it.
 func TestWALStoreChunk_AttachWaitsForMasterAuthority(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"}) // pre-assignment
-	p := chunkProvider(t, t.TempDir(), remote, view, 0)
+	p := layoutChunkProvider(t, t.TempDir(), fixture, view, 0)
 	s, err := p.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -624,17 +624,14 @@ func TestWALStoreChunk_AttachWaitsForMasterAuthority(t *testing.T) {
 	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
 		t.Fatalf("RecoverVolume before assignment: %v", err)
 	}
-	if _, err := s.Write(1, block(1)); err != nil {
-		t.Fatal(err)
-	}
 	// Healthy but with no master-assigned epoch is not authority either.
 	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1"}))
 	time.Sleep(150 * time.Millisecond)
 	if _, err := p.CaptureVolume(context.Background(), "v1"); err == nil {
 		t.Fatal("capture succeeded under a healthy projection with epoch 0")
 	}
-	if head, _ := remote.GetHead(context.Background()); head.Gen != 0 {
-		t.Fatalf("published under epoch 0: HEAD gen %d epoch %d", head.Gen, head.Epoch)
+	if head := layoutHead(t, fixture); head.Epoch != 0 || head.Current != nil {
+		t.Fatalf("published under epoch 0: HEAD %+v", head)
 	}
 	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
 	deadline := time.Now().Add(10 * time.Second)
@@ -648,7 +645,13 @@ func TestWALStoreChunk_AttachWaitsForMasterAuthority(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if head, _ := remote.GetHead(context.Background()); head.Epoch != 4 {
+	if _, err := s.Write(1, block(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if head := layoutHead(t, fixture); head.Epoch != 4 || head.Current == nil {
 		t.Fatalf("HEAD epoch %d, want the assigned 4", head.Epoch)
 	}
 }
