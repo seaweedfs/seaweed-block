@@ -80,6 +80,19 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
   readOnly: true
 {{- end -}}
 
+{{/* The CSI node and the status operator only read: refuse a Secret named
+     like an admin client's or blockmaster's own (the chart sees names, not
+     roles; the role file decides the role). */}}
+{{- define "seaweed-block.readOnlyClientSecrets" -}}
+{{- $s := .Values.tls.clientSecrets -}}
+{{- if eq $s.csiNode $s.csiController $s.failbackExecutor .Values.tls.masterSecret -}}
+{{- fail (printf "tls.clientSecrets.csiNode %q is the CSI controller's, the failback executor's or blockmaster's Secret: the node plugin never mounts an admin key" $s.csiNode) -}}
+{{- end -}}
+{{- if eq $s.operatorStatus $s.csiController $s.failbackExecutor .Values.tls.masterSecret -}}
+{{- fail (printf "tls.clientSecrets.operatorStatus %q is the CSI controller's, the failback executor's or blockmaster's Secret: the status operator never mounts an admin key" $s.operatorStatus) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "seaweed-block.masterTLSClientVolume" -}}
 - name: master-tls
   secret:

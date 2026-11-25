@@ -153,6 +153,17 @@ func chartValues(t *testing.T, root string) map[string]any {
 // Helm functions the chart's client templates use.
 func renderChart(t *testing.T, root, tpl string, vals map[string]any) string {
 	t.Helper()
+	out, err := renderChartErr(t, root, tpl, vals)
+	if err != nil {
+		t.Fatalf("render %s: %v", tpl, err)
+	}
+	return out
+}
+
+// renderChartErr is renderChart returning the render's error (a template's
+// fail).
+func renderChartErr(t *testing.T, root, tpl string, vals map[string]any) (string, error) {
+	t.Helper()
 	dir := filepath.Join(root, "charts", "seaweed-block", "templates")
 	tm := template.New(tpl).Option("missingkey=zero")
 	tm.Funcs(template.FuncMap{
@@ -203,9 +214,35 @@ func renderChart(t *testing.T, root, tpl string, vals map[string]any) string {
 	}
 	var buf bytes.Buffer
 	if err := tm.ExecuteTemplate(&buf, tpl, data); err != nil {
-		t.Fatalf("render %s: %v", tpl, err)
+		return "", err
 	}
-	return strings.ReplaceAll(buf.String(), "<no value>", "")
+	return strings.ReplaceAll(buf.String(), "<no value>", ""), nil
+}
+
+// The chart knows a Secret's name, not its role: it refuses a read-only
+// client's Secret named like the CSI controller's, the failback executor's
+// or blockmaster's own.
+func TestChartRefusesAnAdminSecretForAReadOnlyClient(t *testing.T) {
+	root := repoRoot(t)
+	for _, c := range []struct{ client, like string }{
+		{"csiNode", "csiController"}, {"csiNode", "failbackExecutor"}, {"csiNode", "master"},
+		{"operatorStatus", "csiController"}, {"operatorStatus", "failbackExecutor"}, {"operatorStatus", "master"},
+	} {
+		vals := chartValues(t, root)
+		vals["operatorStatus"].(map[string]any)["create"] = true
+		tls := vals["tls"].(map[string]any)
+		secrets := tls["clientSecrets"].(map[string]any)
+		if c.like == "master" {
+			secrets[c.client] = tls["masterSecret"]
+		} else {
+			secrets[c.client] = secrets[c.like]
+		}
+		for _, tpl := range []string{"csi-node.yaml", "operator-status.yaml"} {
+			if _, err := renderChartErr(t, root, tpl, vals); err == nil || !strings.Contains(err.Error(), "never mounts an admin key") {
+				t.Errorf("%s with tls.clientSecrets.%s = the %s Secret: %v, want refused", tpl, c.client, c.like, err)
+			}
+		}
+	}
 }
 
 func helmString(v any) string {

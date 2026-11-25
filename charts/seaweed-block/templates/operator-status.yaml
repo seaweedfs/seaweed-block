@@ -1,4 +1,5 @@
 {{- if .Values.operatorStatus.create }}
+{{- include "seaweed-block.readOnlyClientSecrets" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

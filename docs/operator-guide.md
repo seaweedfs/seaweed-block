@@ -98,7 +98,9 @@ The volume's own HTTP routes (`/status`, chunk routes) are not authenticated and
 
 **In Kubernetes** each in-cluster client has its own certificate and Secret, with the least role its calls need:
 the CSI node and the status operator are `viewer`; the CSI controller (it deletes volumes) and the failback executor
-are `admin`. The CSI controller's key is an admin key: guard its Secret like an operator's admin key.
+are `admin`. The CSI controller's key is an admin key: guard its Secret like an operator's admin key. The CSI
+node's certificate must have the viewer role; check the role file (the chart refuses a CSI node or status Secret
+named like an admin client's or blockmaster's, but it cannot see a certificate's role).
 `scripts/k8s-alpha-certs.sh` issues all four for a trial.
 
 ## Size a host
