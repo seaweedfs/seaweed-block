@@ -90,6 +90,7 @@ type Config struct {
 	// Restore creation reads the source VOLUME's immutable geometry before
 	// persisting the target, then replays CreateTarget using that record.
 	LayoutReadVolume   func(context.Context, lifecycle.VolumeSpec) (layout.Volume, error)
+	LayoutReadHead     func(context.Context, lifecycle.VolumeSpec) (layout.Head, error)
 	LayoutCreateTarget func(context.Context, lifecycle.VolumeSpec, lifecycle.VolumeSpec, string) error
 
 	// FrontendPublicationRuntimeHTTP enables the frontend publication runtime
