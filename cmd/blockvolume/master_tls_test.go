@@ -15,9 +15,9 @@ func TestMasterTLSFlags(t *testing.T) {
 	ca := authtest.NewCA(t, "ca")
 	dir := t.TempDir()
 	caPath := ca.WriteCA(t, dir)
-	good, goodKey := ca.Issue(t, "m02", time.Now().Add(time.Hour)).WriteFiles(t, dir, "m02") // --server-id=m02 in the base args
+	good, goodKey := ca.Issue(t, "node-b", time.Now().Add(time.Hour)).WriteFiles(t, dir, "node-b")
 	other, otherKey := ca.Issue(t, "s9", time.Now().Add(time.Hour)).WriteFiles(t, dir, "s9")
-	base := phase150RequiredBlockvolumeArgs()
+	base := append(phase150RequiredBlockvolumeArgs(), "--server-id=node-b") // the last --server-id wins
 	for _, c := range []struct {
 		name string
 		args []string
@@ -25,7 +25,7 @@ func TestMasterTLSFlags(t *testing.T) {
 	}{
 		{"no TLS (development mode)", nil, ""},
 		{"CN equals --server-id", []string{"--master-tls-cert", good, "--master-tls-key", goodKey, "--master-ca", caPath}, ""},
-		{"CN differs from --server-id", []string{"--master-tls-cert", other, "--master-tls-key", otherKey, "--master-ca", caPath}, `CN="s9" but --server-id is "m02"`},
+		{"CN differs from --server-id", []string{"--master-tls-cert", other, "--master-tls-key", otherKey, "--master-ca", caPath}, `CN="s9" but --server-id is "node-b"`},
 		{"no CA", []string{"--master-tls-cert", good, "--master-tls-key", goodKey}, "a certificate, its key and a CA"},
 		{"with --allow-external-status-bind", []string{"--master-tls-cert", good, "--master-tls-key", goodKey, "--master-ca", caPath, "--allow-external-status-bind"}, "cannot be combined"},
 	} {
