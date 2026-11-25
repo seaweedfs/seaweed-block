@@ -7,16 +7,21 @@
 # with exit code 0. A test that is skipped, renamed, or not compiled in by its
 # tags prints no such line, so it fails the entry.
 #
+# Parameters never enter shell source: every value reaches the commands as an
+# environment variable (the runner single-quotes env.* params), and each is
+# validated before use. The verified product commit and weed digest are
+# recorded in result.json (emit_provenance) whether or not the entries pass.
+#
 # Entries (select with -env tests="..."):
 #   move         TestIntegrationWorkspaceLayoutMove (clean and forced move)
 #   lease        TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown
 #   systemd      TestSystemdExpiredStartupExits75ThenRegrantServes
-#                (needs a user systemd instance on the host)
+#                (system systemd; run as a user allowed to systemd-run)
 #   catalog      TestIntegration_CatalogRestoreAndDelete
 #   cutover-e2e  TestCutoverWriteSnapshotKillRestartRestore (write, snapshot,
 #                kill, restart, restore)
 #
-# Expected invocation (on the Linux host, as the user that owns systemd):
+# Expected invocation (on the Linux host):
 #   swblock run \
 #     -env product_repo=/path/to/seaweed-block -env head=<40-hex commit> \
 #     -env weed_binary=/path/to/weed -env weed_sha256=<sha256> \
@@ -47,41 +52,63 @@ phases:
       - action: exec
         node: host
         timeout: 2m
+        env.GATE_RUN: "{{ run_id }}"
+        env.GATE_ROOT: "{{ scratch_root }}"
+        env.GATE_HEAD: "{{ head }}"
+        env.GATE_TESTS: "{{ tests }}"
+        env.GATE_REPO: "{{ product_repo }}"
+        env.GATE_WEED: "{{ weed_binary }}"
+        env.GATE_WEED_SHA: "{{ weed_sha256 }}"
+        env.GATE_GO: "{{ go_bin }}"
+        save_as: pinned
         cmd: |
-          set -eu
-          head='{{ head }}'
-          case "$head" in
-            *[!0-9a-f]*|'') echo 'head must be a full lowercase hexadecimal commit' >&2; exit 2 ;;
-          esac
-          test ${#head} -eq 40 || { echo 'head must be 40 characters' >&2; exit 2; }
-          for t in {{ tests }}; do
-            case "$t" in
-              move|lease|systemd|catalog|cutover-e2e) ;;
-              *) echo "unknown entry: $t" >&2; exit 2 ;;
-            esac
+          set -euf
+          fail() { echo "$1" >&2; exit 2; }
+          case "$GATE_HEAD" in *[!0-9a-f]*|'') fail 'head must be a full lowercase hexadecimal commit' ;; esac
+          [ ${#GATE_HEAD} -eq 40 ] || fail 'head must be 40 characters'
+          case "$GATE_WEED_SHA" in *[!0-9a-f]*|'') fail 'weed_sha256 must be lowercase hexadecimal' ;; esac
+          [ ${#GATE_WEED_SHA} -eq 64 ] || fail 'weed_sha256 must be 64 characters'
+          case "$GATE_RUN" in *[!0-9A-Za-z_-]*|'') fail 'run_id has unexpected characters' ;; esac
+          case "$GATE_ROOT" in /*) ;; *) fail 'scratch_root must be absolute' ;; esac
+          case "$GATE_ROOT" in *[!0-9A-Za-z_./-]*|*..*) fail 'scratch_root has unexpected characters' ;; esac
+          case "$GATE_TESTS" in *[!0-9a-z\ -]*|'') fail 'tests must be entry names separated by spaces' ;; esac
+          for t in $GATE_TESTS; do
+            case "$t" in move|lease|systemd|catalog|cutover-e2e) ;; *) fail "unknown entry: $t" ;; esac
           done
-          test -n '{{ weed_sha256 }}' || { echo 'weed_sha256 is required' >&2; exit 2; }
-          printf '%s  %s\n' '{{ weed_sha256 }}' '{{ weed_binary }}' | sha256sum -c -
-          d='{{ scratch_root }}/{{ run_id }}'
-          test ! -e "$d"
+          [ -x "$GATE_GO/go" ] || fail 'go_bin/go is not executable'
+          [ -f "$GATE_WEED" ] || fail 'weed_binary is not a file'
+          [ "$(sha256sum < "$GATE_WEED" | cut -d' ' -f1)" = "$GATE_WEED_SHA" ] || fail 'weed_binary does not match weed_sha256'
+          [ "$(git -C "$GATE_REPO" rev-parse --verify "$GATE_HEAD^{commit}")" = "$GATE_HEAD" ] || fail 'head is not that commit in product_repo'
+          d="$GATE_ROOT/$GATE_RUN"
+          [ ! -e "$d" ] || fail 'run directory already exists'
           mkdir -p "$d/source" "$d/bin" "$d/tmp" "$d/evidence"
-          touch "$d/.layout-gate-owned"
-          git -C '{{ product_repo }}' cat-file -e "$head^{commit}"
-          git -C '{{ product_repo }}' archive "$head" | tar -xf - -C "$d/source"
-          git -C '{{ product_repo }}' rev-parse "$head^{commit}" > "$d/evidence/product.sha"
-          printf '%s  %s\n' '{{ weed_sha256 }}' '{{ weed_binary }}' > "$d/evidence/weed.sha256"
-          '{{ go_bin }}/go' version > "$d/evidence/go.version"
-          printf '%s\n' {{ tests }} > "$d/evidence/selected.txt"
+          : > "$d/.layout-gate-owned"
+          git -C "$GATE_REPO" archive "$GATE_HEAD" | tar -xf - -C "$d/source"
+          printf '%s\n' "$GATE_HEAD" > "$d/evidence/product.sha"
+          printf '%s  weed\n' "$GATE_WEED_SHA" > "$d/evidence/weed.sha256"
+          "$GATE_GO/go" version > "$d/evidence/go.version"
+          printf '%s\n' $GATE_TESTS > "$d/evidence/selected.txt"
+          printf '%s %s\n' "$GATE_HEAD" "$GATE_WEED_SHA"
+      # Pins, recorded before any entry runs; gate_pass stays 0 unless run_tests passes.
+      - action: emit_provenance
+        product: seaweed-block
+        tested_sha: "{{ head }}"
+        gate_pass: "0"
+        gate_status: "pinned"
+        __weed_sha256: "{{ weed_sha256 }}"
+        __entries: "{{ tests }}"
 
   - name: build
     actions:
       - action: exec
         node: host
         timeout: 20m
+        env.GATE_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.GATE_GO: "{{ go_bin }}"
         cmd: |
           set -eu
-          d='{{ scratch_root }}/{{ run_id }}'
-          export PATH='{{ go_bin }}':"$PATH"
+          d="$GATE_DIR"
+          export PATH="$GATE_GO:$PATH"
           cd "$d/source"
           for b in blockmaster blockvolume sw-block; do go build -o "$d/bin/$b" "./cmd/$b"; done
           go test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/blockvolume.test" ./cmd/blockvolume
@@ -94,12 +121,18 @@ phases:
       - action: exec
         node: host
         timeout: 95m
+        env.GATE_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.GATE_GO: "{{ go_bin }}"
+        env.GATE_WEED: "{{ weed_binary }}"
+        env.GATE_TESTS: "{{ tests }}"
+        receipt_path: "{{ bundle_dir }}/run_tests.receipt.json"
         cmd: |
-          d='{{ scratch_root }}/{{ run_id }}'
-          export PATH='{{ go_bin }}':"$PATH" TMPDIR="$d/tmp" CHUNKSTORE_WEED='{{ weed_binary }}' SWBLOCK_TEST_BINS="$d/bin"
+          set -f
+          d="$GATE_DIR"
+          export PATH="$GATE_GO:$PATH" TMPDIR="$d/tmp" CHUNKSTORE_WEED="$GATE_WEED" SWBLOCK_TEST_BINS="$d/bin"
           : > "$d/evidence/verdicts.txt"
           failed=0
-          for t in {{ tests }}; do
+          for t in $GATE_TESTS; do
             extra=
             case "$t" in
               move)        pkg=cmd/blockvolume bin=blockvolume.test name=TestIntegrationWorkspaceLayoutMove to=14m ;;
@@ -116,20 +149,19 @@ phases:
               echo "PASS $t $name" >> "$d/evidence/verdicts.txt"
             else
               echo "FAIL $t $name rc=$rc" >> "$d/evidence/verdicts.txt"
-              tail -40 "$log"
+              tail -40 "$log" >&2
               failed=1
             fi
           done
-          cat "$d/evidence/verdicts.txt"
+          cat "$d/evidence/verdicts.txt" >&2
           exit "$failed"
-
-  - name: final_asserts
-    actions:
-      # units the systemd entry starts do not run inside the run directory:
-      # match them by the chunk paths these tests use
-      - action: assert_no_processes
-        node: host
-        pattern: "blockvolume .*--chunk-path /(workspace-move|workspace-lease|gap1)-"
+      - action: emit_provenance
+        product: seaweed-block
+        tested_sha: "{{ head }}"
+        gate_pass: "1"
+        gate_status: "ok"
+        __weed_sha256: "{{ weed_sha256 }}"
+        __entries: "{{ tests }}"
 
   - name: collect
     always: true
@@ -140,22 +172,46 @@ phases:
         name: "layout-gate"
         ignore_error: true
 
-  - name: teardown
+  # Always runs and ends with the zero-residue assertion: no process whose cwd,
+  # executable or command line is inside this run's directory (the tests build
+  # and start every binary there, systemd units included), and no gap1-* unit.
+  # The run directory is removed only after that holds.
+  - name: cleanup
     always: true
     actions:
-      # only processes started inside this run's directory: the host may run
-      # other people's volumes
       - action: exec
         node: host
-        timeout: 2m
+        timeout: 3m
+        env.GATE_RUN: "{{ run_id }}"
+        env.GATE_ROOT: "{{ scratch_root }}"
+        receipt_path: "{{ bundle_dir }}/cleanup.receipt.json"
         cmd: |
-          d='{{ scratch_root }}/{{ run_id }}'
-          test -f "$d/.layout-gate-owned" || exit 0
-          test "${d#'{{ scratch_root }}/'}" != "$d" || exit 2
-          for p in /proc/[0-9]*; do
-            cwd=$(readlink "$p/cwd" 2>/dev/null || true)
-            case "$cwd" in
-              "$d"/*) echo "owned process still running: ${p##*/}" >&2; exit 1 ;;
-            esac
+          set -u
+          case "$GATE_RUN" in *[!0-9A-Za-z_-]*|'') echo 'run_id has unexpected characters' >&2; exit 2 ;; esac
+          case "$GATE_ROOT" in /*) ;; *) echo 'scratch_root must be absolute' >&2; exit 2 ;; esac
+          d="$GATE_ROOT/$GATE_RUN"
+          [ -f "$d/.layout-gate-owned" ] || { [ ! -e "$d" ] && exit 0; echo "not owned: $d" >&2; exit 2; }
+          residue() {
+            n=0
+            for p in /proc/[0-9]*; do
+              [ "${p##*/}" = "$$" ] && continue
+              cwd=$(readlink "$p/cwd" 2>/dev/null || true)
+              exe=$(readlink "$p/exe" 2>/dev/null || true)
+              cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null || true)
+              case "$cwd|$exe|$cmd" in *"$d"/*) echo "residue process ${p##*/}: $exe" >&2; n=$((n + 1)) ;; esac
+            done
+            if command -v systemctl >/dev/null 2>&1; then
+              units=$(systemctl list-units --all --plain --no-legend 'gap1-*' 2>/dev/null | awk '{print $1}')
+              [ -z "$units" ] || { echo "residue units: $units" >&2; n=$((n + 1)); }
+            fi
+            [ "$n" -eq 0 ]
+          }
+          i=0
+          until residue; do
+            i=$((i + 1))
+            [ "$i" -lt 30 ] || { echo "residue remains after 60s; run directory kept: $d" >&2; exit 1; }
+            sleep 2
           done
           rm -rf -- "$d"
+          [ ! -e "$d" ] || { echo "run directory not removed: $d" >&2; exit 1; }
+          echo "zero residue: $d"
