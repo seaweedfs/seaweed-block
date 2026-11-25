@@ -1464,6 +1464,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	}
 	switch {
 	case serr != nil:
+		h.backend.SetOperational(false, "chunk detach settlement waiting for filer: "+serr.Error())
 		p.retryUnknownDetach(volumeID, h, layer, resumed)
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w (settle: %w)", ErrDetachOutcomeUnknown, err, serr)
 	case how == storage.DetachApplied:
@@ -1540,6 +1541,10 @@ func (p *DurableProvider) retryUnknownDetach(volumeID string, h *volHandle, laye
 				}
 				h.attachMu.Unlock()
 				return
+			}
+			if err != nil {
+				h.backend.SetOperational(false, "chunk detach settlement waiting for filer: "+err.Error())
+				log.Printf("durable: unknown stop of volume=%s waiting for filer: %v", volumeID, err)
 			}
 			h.attachMu.Unlock()
 			backoff = min(backoff*2, 2*time.Second)

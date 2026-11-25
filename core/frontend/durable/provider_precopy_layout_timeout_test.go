@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,12 +28,16 @@ type appliedDetachWithoutReply struct {
 	unavailable atomic.Bool
 	stallSettle atomic.Bool
 	abortCalls  atomic.Int32
+	pendingWant storage.ChunkHeadVersion
+	pendingNext storage.ChunkHead
+	pending     bool
 }
 
 func (r *appliedDetachWithoutReply) CASHead(ctx context.Context, want storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	if !r.hold || next.State != storage.ChunkHeadDetached {
 		return r.LayoutRemote.CASHead(ctx, want, next)
 	}
+	r.pendingWant, r.pendingNext, r.pending = want, next, true
 	if r.apply {
 		if _, err := r.LayoutRemote.CASHead(ctx, want, next); err != nil {
 			return 0, err
@@ -148,6 +153,10 @@ func TestPrecopyUnknownStopAutomaticallyResumesAfterFilerRecovers(t *testing.T) 
 	if _, _, err := p.DetachVolume(ctx, "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
 		t.Fatalf("filer unavailable at settlement: %v; want unknown", err)
 	}
+	statuses := p.DurableStatuses()
+	if len(statuses) != 1 || statuses[0].Operational || !strings.Contains(statuses[0].Evidence, "waiting for filer") {
+		t.Fatalf("unknown stop must visibly wait for filer: %+v", statuses)
+	}
 	if _, err := b.Write(ctx, 8192, block(0x9a)); !errors.Is(err, frontend.ErrNotReady) {
 		t.Fatalf("unknown stop resumed writes before proof: %v", err)
 	}
@@ -190,6 +199,41 @@ func TestPrecopyUnknownAppliedStopAutomaticallyStaysDetached(t *testing.T) {
 	}
 	if _, err := b.Write(ctx, 8192, block(0x9a)); !errors.Is(err, frontend.ErrNotReady) {
 		t.Fatalf("applied stop resumed guest writes: %v", err)
+	}
+}
+
+// The stop commit arrives after the five-second freeze deadline, but before
+// the retry can abort its session. The old holder must never resume writes.
+func TestPrecopyCommitAfterFreezeDeadlineBeforeSettlementAbortStaysStopped(t *testing.T) {
+	ctx := context.Background()
+	p, b, remote := precopyLayoutTimeoutFixture(t, nil, 5*time.Second)
+	remote.hold = true
+	remote.stallSettle.Store(true)
+	started := time.Now()
+	if _, _, err := p.DetachVolume(ctx, "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
+		t.Fatalf("stop with delayed commit: %v; want unknown", err)
+	}
+	if time.Since(started) < 5*time.Second || !remote.pending {
+		t.Fatalf("commit was not held beyond freeze deadline: elapsed=%s pending=%v", time.Since(started), remote.pending)
+	}
+	if _, err := remote.LayoutRemote.CASHead(ctx, remote.pendingWant, remote.pendingNext); err != nil {
+		t.Fatalf("late commit before settlement abort: %v", err)
+	}
+	remote.stallSettle.Store(false)
+	until := time.After(3 * time.Second)
+	for remote.abortCalls.Load() < 2 {
+		select {
+		case <-until:
+			t.Fatal("late commit was not settled automatically")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	head, err := remote.ReadHead(ctx)
+	if err != nil || head.State != layout.StateDetached {
+		t.Fatalf("late commit HEAD: %+v %v", head, err)
+	}
+	if _, err := b.Write(ctx, 8192, block(0x9a)); !errors.Is(err, frontend.ErrNotReady) {
+		t.Fatalf("guest write resumed after late commit: %v", err)
 	}
 }
 
