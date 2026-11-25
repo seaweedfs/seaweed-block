@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
@@ -28,18 +27,19 @@ var snapshotLocks sync.Map // volume -> *sync.Mutex
 // nothing to publish, the current image is named by a commit of its own.
 // A replay of a name already in HEAD returns the facts recorded there. A
 // name or facts the kernel refuses is the typed refusal; the cut itself
-// still commits unnamed.
-func (p *DurableProvider) SnapshotVolume(ctx context.Context, volumeID, name string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
+// still commits unnamed. It returns HEAD with the name recorded
+// (chunkstore.SnapshotInfoFromHead makes the request's answer).
+func (p *DurableProvider) SnapshotVolume(ctx context.Context, volumeID, name string, meta layout.SnapshotMeta) (layout.Head, error) {
 	if err := layout.CheckSnapshot(name, meta); err != nil {
-		return chunkstore.SnapshotInfo{}, err
+		return layout.Head{}, err
 	}
 	r, err := p.LayoutRemote(ctx, volumeID)
 	if err != nil {
-		return chunkstore.SnapshotInfo{}, err
+		return layout.Head{}, err
 	}
 	sr, ok := r.(layoutSnapshotter)
 	if !ok {
-		return chunkstore.SnapshotInfo{}, fmt.Errorf("durable: the remote of %s is not a layout runtime", volumeID)
+		return layout.Head{}, fmt.Errorf("durable: the remote of %s is not a layout runtime", volumeID)
 	}
 	mu, _ := snapshotLocks.LoadOrStore(volumeID, &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
@@ -47,36 +47,26 @@ func (p *DurableProvider) SnapshotVolume(ctx context.Context, volumeID, name str
 
 	h, err := sr.ReadHead(ctx)
 	if err != nil {
-		return chunkstore.SnapshotInfo{}, err
+		return layout.Head{}, err
 	}
 	if _, ok := h.Snapshots[name]; ok {
-		return snapshotInfo(volumeID, name, h), nil
+		return h, nil
 	}
 	sr.SetSnapshot(name, meta)
 	if _, err := p.CutVolume(ctx, volumeID, 0); err != nil {
-		return chunkstore.SnapshotInfo{}, err
+		return layout.Head{}, err
 	}
 	if err := sr.TakeSnapshotErr(); err != nil {
-		return chunkstore.SnapshotInfo{}, err
+		return layout.Head{}, err
 	}
 	if err := sr.CommitPendingSnapshot(ctx); err != nil {
-		return chunkstore.SnapshotInfo{}, err
+		return layout.Head{}, err
 	}
 	if h, err = sr.ReadHead(ctx); err != nil {
-		return chunkstore.SnapshotInfo{}, err
+		return layout.Head{}, err
 	}
 	if _, ok := h.Snapshots[name]; !ok {
-		return chunkstore.SnapshotInfo{}, fmt.Errorf("durable: snapshot %q of %s is not in HEAD after its commit", name, volumeID)
+		return layout.Head{}, fmt.Errorf("durable: snapshot %q of %s is not in HEAD after its commit", name, volumeID)
 	}
-	return snapshotInfo(volumeID, name, h), nil
-}
-
-// snapshotInfo is the request's answer from HEAD's record of the name.
-func snapshotInfo(volumeID, name string, h layout.Head) chunkstore.SnapshotInfo {
-	s := h.Snapshots[name]
-	return chunkstore.SnapshotInfo{
-		VolumeID: volumeID, Name: name, Root: s.Root.String(), Dependents: s.Dependents,
-		HeadGen: h.Gen, HeadEpoch: h.Epoch, CutLSN: h.Position, State: chunkstore.SnapActive,
-		Class: s.Meta.Class, CreatedNs: s.Meta.CreatedNs, ExpiresAtNs: s.Meta.ExpiresNs, Labels: s.Meta.Labels,
-	}
+	return h, nil
 }

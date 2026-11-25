@@ -666,7 +666,7 @@ func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkS
 		return chunkstore.SnapshotInfo{}, &chunkstore.CatalogError{Code: chunkstore.CodeInvalidLabel, Message: fmt.Sprintf("snapshot has %d labels; at most %d", len(req.Labels), layout.MaxSnapshotLabels)}
 	}
 	p, ok := c.p.(interface {
-		SnapshotVolume(context.Context, string, string, layout.SnapshotMeta) (chunkstore.SnapshotInfo, error)
+		SnapshotVolume(context.Context, string, string, layout.SnapshotMeta) (layout.Head, error)
 	})
 	if !ok {
 		return chunkstore.SnapshotInfo{}, errors.New("chunk snapshot data path is not configured")
@@ -674,7 +674,11 @@ func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkS
 	// Sample once for this capture. The provider carries this value unchanged in
 	// CommitRequest.Meta; a replay returns the facts already recorded in HEAD.
 	meta := layout.SnapshotMeta{CreatedNs: time.Now().UnixNano(), Class: req.Class, ExpiresNs: req.ExpiresAtNs, Labels: maps.Clone(req.Labels)}
-	return p.SnapshotVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, req.Name, meta)
+	h, err := p.SnapshotVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, req.Name, meta)
+	if err != nil {
+		return chunkstore.SnapshotInfo{}, err
+	}
+	return chunkstore.SnapshotInfoFromHead(volumeID, req.Name, h), nil
 }
 
 func (c *chunkControl) ListSnapshots(ctx context.Context, volumeID string, opts chunkstore.ListOptions) ([]chunkstore.SnapshotInfo, string, error) {

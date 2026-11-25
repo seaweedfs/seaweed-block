@@ -65,16 +65,17 @@ func TestLayoutProviderSnapshotVolume(t *testing.T) {
 		return h
 	}
 	meta := layout.SnapshotMeta{CreatedNs: 11, Class: layout.ClassSemantic, Labels: map[string]string{"k": "v"}}
-	info, err := p.SnapshotVolume(ctx, "v1", "daily", meta)
+	hd, err := p.SnapshotVolume(ctx, "v1", "daily", meta)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
+	info := chunkstore.SnapshotInfoFromHead("v1", "daily", hd)
 	h := head()
 	sn, ok := h.Snapshots["daily"]
 	if !ok || sn.Meta.CreatedNs != 11 || sn.Meta.Labels["k"] != "v" || info.Name != "daily" || info.CreatedNs != 11 || info.CutLSN != h.Position || info.Root != sn.Root.String() {
 		t.Fatalf("snapshot daily: info %+v, HEAD %+v", info, sn)
 	}
-	if again, err := p.SnapshotVolume(ctx, "v1", "daily", layout.SnapshotMeta{CreatedNs: 99}); err != nil || again.CreatedNs != 11 {
+	if again, err := p.SnapshotVolume(ctx, "v1", "daily", layout.SnapshotMeta{CreatedNs: 99}); err != nil || again.Snapshots["daily"].Meta.CreatedNs != 11 {
 		t.Fatalf("replay: %+v %v; want the recorded facts", again, err)
 	}
 	// Nothing new written: the name still lands on the current image.
@@ -87,5 +88,26 @@ func TestLayoutProviderSnapshotVolume(t *testing.T) {
 	}
 	if _, err := p.SnapshotVolume(ctx, "v1", strings.Repeat("n", layout.MaxSnapshotNameBytes+1), layout.SnapshotMeta{}); !errors.Is(err, layout.ErrMalformed) {
 		t.Fatalf("too-long name: %v; want ErrMalformed", err)
+	}
+	// The cap: snapshots up to it are named; past it, the cut still commits
+	// (new data reaches HEAD, unnamed) and the request gets the typed error.
+	for i := len(head().Snapshots); i < layout.MaxSnapshots; i++ {
+		if _, err := p.SnapshotVolume(ctx, "v1", "s"+string(rune('a'+i)), layout.SnapshotMeta{CreatedNs: int64(20 + i)}); err != nil {
+			t.Fatalf("snapshot %d: %v", i+1, err)
+		}
+	}
+	before := head()
+	if _, err = ws.Write(1, bytes.Repeat([]byte{'B'}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ws.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.SnapshotVolume(ctx, "v1", "over", layout.SnapshotMeta{CreatedNs: 50}); !errors.Is(err, layout.ErrTooManySnapshots) {
+		t.Fatalf("snapshot past the cap: %v; want ErrTooManySnapshots", err)
+	}
+	after := head()
+	if _, named := after.Snapshots["over"]; named || after.Position <= before.Position || *after.Current == *before.Current {
+		t.Fatalf("past the cap: named %t, position %d -> %d; want the cut committed unnamed", named, before.Position, after.Position)
 	}
 }

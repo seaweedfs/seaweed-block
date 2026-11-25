@@ -493,8 +493,10 @@ func (l *LayoutRemote) CommitPendingSnapshot(ctx context.Context) error {
 		}
 		return layoutRemoteErr(err)
 	}
+	// The image is the one the engine already holds (same root and
+	// position): an own write that leaves the engine's view where it is.
 	l.session, l.pending, l.lastCommit = "", nil, got
-	l.ownGen, l.visible, l.seen = got.Gen, got.Gen, imageOf(got)
+	l.ownGen = got.Gen
 	return nil
 }
 

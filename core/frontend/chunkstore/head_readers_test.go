@@ -57,6 +57,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
 	"core/frontend/chunkstore/layout_remote.go AbortOpenSession -> ReadHead":         "refuses ErrHeadAbsent, aborts nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go CommitPendingSnapshot -> ReadHead":    "refuses ErrHeadAbsent, commits nothing (probe LayoutRemote)",
+	"core/frontend/durable/provider_layout_snapshot.go SnapshotVolume -> ReadHead":   "the layout remote's HEAD read: refuses ErrHeadAbsent, names nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                  "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                 "refuses ErrHeadAbsent (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":           "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",

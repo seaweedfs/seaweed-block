@@ -743,12 +743,16 @@ func runVolume(f flags, exits *processExit) int {
 				cfg.ChunkSnapshotPeriod = f.chunk.snapshotSchedule.period
 				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(func(ctx context.Context, name, snapshot string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
 					p, ok := any(dp).(interface {
-						SnapshotVolume(context.Context, string, string, layout.SnapshotMeta) (chunkstore.SnapshotInfo, error)
+						SnapshotVolume(context.Context, string, string, layout.SnapshotMeta) (layout.Head, error)
 					})
 					if !ok {
 						return chunkstore.SnapshotInfo{}, errors.New("chunk snapshot data path is not configured")
 					}
-					return p.SnapshotVolume(ctx, name, snapshot, meta)
+					h, err := p.SnapshotVolume(ctx, name, snapshot, meta)
+					if err != nil {
+						return chunkstore.SnapshotInfo{}, err
+					}
+					return chunkstore.SnapshotInfoFromHead(name, snapshot, h), nil
 				}, f.chunk.snapshotSchedule.keep)
 			}
 			cfg.ChunkDetachPrecopy = f.chunk.detachPrecopy
