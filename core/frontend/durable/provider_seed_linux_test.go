@@ -4,7 +4,6 @@ package durable_test
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
