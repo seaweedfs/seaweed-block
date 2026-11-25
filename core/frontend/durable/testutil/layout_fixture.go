@@ -52,6 +52,12 @@ func (b *MemoryBlobs) Get(ctx context.Context, id string) ([]byte, error) {
 	return copyV, nil
 }
 
+func (b *MemoryBlobs) Puts() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.next
+}
+
 // LayoutFixture creates one B VOLUME and HEAD, retaining them across provider
 // restarts. Tests can inspect Catalog and Ref instead of a legacy ChunkHead.
 type LayoutFixture struct {
