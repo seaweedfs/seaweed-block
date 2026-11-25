@@ -35,13 +35,47 @@ func (g grantedLayoutLine) OldLeaseEnded(ctx context.Context, epoch uint64) erro
 	return nil
 }
 
+// startPath is the step a local root takes after its layout claim.
+type startPath int
+
+const (
+	startContinue   startPath = iota // a non-fresh root continues from its own local data
+	startSeed                        // a fresh root seeds its frontier at HEAD's position
+	startAttachBase                  // a fresh root keeps its completed local BASE
+)
+
+// startRoot is what the start decision reads of the local store.
+type startRoot interface {
+	InstalledBaseLSN() (uint64, bool)
+	CanSeedChunkFrontier(uint64) error
+}
+
+// canStartFrom is the one decision for the step a local root takes after its
+// claim on HEAD h, with the refusal that step would give. Start asks it before
+// the claim (LocalRoot.CanStartFrom) for the refusal; the attach asks it after
+// the claim for the path. A completed local BASE is kept, refused only when
+// HEAD is past it; another fresh root seeds at HEAD's position, refused when
+// the store cannot (the seed's own precondition); a non-fresh root continues.
+func canStartFrom(ws startRoot, fresh bool, h layout.Head) (startPath, error) {
+	if !fresh {
+		return startContinue, nil
+	}
+	if base, complete := ws.InstalledBaseLSN(); complete {
+		if h.Position > base {
+			return startAttachBase, errors.New("durable: completed BASE behind layout HEAD")
+		}
+		return startAttachBase, nil
+	}
+	return startSeed, ws.CanSeedChunkFrontier(h.Position)
+}
+
 func startLayoutRoot(ctx context.Context, ws *storage.WALStore, st layout.StartStore, line layout.HolderID) (layout.Head, error) {
 	id, fresh, ok := ws.LayoutIdentity()
 	if !ok {
 		return layout.Head{}, errors.New("durable: legacy root has no layout identity; recreate it")
 	}
 	position, _, _ := ws.Boundaries()
-	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: uint64(ws.NumBlocks()) * uint64(ws.BlockSize()), BlockSize: uint32(ws.BlockSize()), ChunkBytes: uint64(ws.ChunkBlocks()) * uint64(ws.BlockSize())}, ClaimID: id, Fresh: fresh, Position: position, Seedable: ws.CanSeedChunkFrontier})
+	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: uint64(ws.NumBlocks()) * uint64(ws.BlockSize()), BlockSize: uint32(ws.BlockSize()), ChunkBytes: uint64(ws.ChunkBlocks()) * uint64(ws.BlockSize())}, ClaimID: id, Fresh: fresh, Position: position, CanStartFrom: func(h layout.Head) error { _, err := canStartFrom(ws, fresh, h); return err }})
 	if err != nil {
 		if errors.Is(err, layout.ErrNotHolder) || errors.Is(err, layout.ErrStaleEpoch) || errors.Is(err, layout.ErrPrecondition) {
 			// A HEAD held by another holder at our granted epoch, or any

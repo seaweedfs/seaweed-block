@@ -13,9 +13,9 @@ var (
 	// ErrStaleLocalRoot: the local root belongs to an earlier claim of this
 	// server (a same-host forced move published past it).
 	ErrStaleLocalRoot = errors.New("layout: local root is from an earlier claim")
-	// ErrUnseedablePosition: a fresh local root cannot seed its frontier at
-	// HEAD's position; nothing is written.
-	ErrUnseedablePosition = errors.New("layout: the local root cannot seed HEAD's position")
+	// ErrCannotStartFrom: the step the local root takes after its claim
+	// could not succeed on this HEAD; nothing is written.
+	ErrCannotStartFrom = errors.New("layout: the local root cannot start from this HEAD")
 )
 
 // StaleLocalRootCure is the way back a stale-root refusal names: after a
@@ -37,10 +37,12 @@ type LocalRoot struct {
 	ClaimID  string
 	Fresh    bool
 	Position uint64 // the position the local root holds synced
-	// Seedable reports whether a fresh root can seed its frontier at a
-	// HEAD position (the local store's own seed precondition). A fresh
-	// root without it is refused: the check is never skipped.
-	Seedable func(position uint64) error
+	// CanStartFrom answers, before the claim, whether the step the local
+	// root takes after it (seed at HEAD's position, attach a completed
+	// base, or nothing) can succeed on this HEAD: nil, or the refusal that
+	// step would give. A fresh root without it is refused: the question is
+	// never skipped.
+	CanStartFrom func(h Head) error
 }
 
 // Start is the HEAD side of a holder's start on the line it was granted
@@ -139,15 +141,17 @@ func startCheck(h Head, line HolderID, local LocalRoot) error {
 	}(); err != nil {
 		return err
 	}
-	// A fresh root seeds its frontier at HEAD's position once it starts:
-	// refused here, before any claim, when its store cannot take it (a
-	// deleting volume is refused by the claim as such).
-	if local.Fresh && h.State != StateDeleting && h.State != StateDeleted {
-		if local.Seedable == nil {
-			return fmt.Errorf("%w: a fresh local root must say which positions it can seed", ErrUnseedablePosition)
+	// One question before any claim: can the step this root takes after it
+	// succeed on this HEAD? (A deleting volume is refused by the claim as
+	// such.) A fresh root must ask it.
+	if h.State != StateDeleting && h.State != StateDeleted {
+		if local.CanStartFrom == nil && local.Fresh {
+			return fmt.Errorf("%w: a fresh local root must say whether it can start from HEAD", ErrCannotStartFrom)
 		}
-		if err := local.Seedable(h.Position); err != nil {
-			return fmt.Errorf("%w: HEAD position %d: %w", ErrUnseedablePosition, h.Position, err)
+		if local.CanStartFrom != nil {
+			if err := local.CanStartFrom(h); err != nil {
+				return fmt.Errorf("%w: HEAD position %d: %w", ErrCannotStartFrom, h.Position, err)
+			}
 		}
 	}
 	return nil
