@@ -23,7 +23,7 @@ func TestEpochTable_OnlyTheMarksOwnerCompletes(t *testing.T) {
 	if err != nil || b == a || b == 0 {
 		t.Fatalf("tokens a=%d b=%d err=%v; want two distinct random tokens", a, b, err)
 	}
-	if err := tb.CompleteRecovery([]EpochRow{{Epoch: 1, FirstLSN: 1}}, a); !errors.Is(err, ErrNotRecoveryOwner) {
+	if err := tb.CompleteRecovery([]EpochRow{{Epoch: 1, FirstLSN: 1}}, a, true); !errors.Is(err, ErrNotRecoveryOwner) {
 		t.Fatalf("A's late completion over B's mark: %v; want ErrNotRecoveryOwner", err)
 	}
 	if !tb.Invalid() {
@@ -33,16 +33,16 @@ func TestEpochTable_OnlyTheMarksOwnerCompletes(t *testing.T) {
 	if !reloaded.Invalid() {
 		t.Fatal("after a reload the table is valid")
 	}
-	if err := reloaded.CompleteRecovery([]EpochRow{{Epoch: 1, FirstLSN: 1}}, a); !errors.Is(err, ErrNotRecoveryOwner) {
+	if err := reloaded.CompleteRecovery([]EpochRow{{Epoch: 1, FirstLSN: 1}}, a, true); !errors.Is(err, ErrNotRecoveryOwner) {
 		t.Fatal("after a reload A's token was accepted")
 	}
-	if err := reloaded.CompleteRecovery([]EpochRow{{Epoch: 1, FirstLSN: 1}, {Epoch: 2, FirstLSN: 6}}, b); err != nil {
+	if err := reloaded.CompleteRecovery([]EpochRow{{Epoch: 1, FirstLSN: 1}, {Epoch: 2, FirstLSN: 6}}, b, true); err != nil {
 		t.Fatalf("B's own completion: %v", err)
 	}
 	if reloaded.Invalid() || len(reloaded.Rows()) != 2 {
 		t.Fatalf("after B's completion: invalid %t rows %v", reloaded.Invalid(), reloaded.Rows())
 	}
-	if err := reloaded.CompleteRecovery(nil, b); !errors.Is(err, ErrNotRecoveryOwner) {
+	if err := reloaded.CompleteRecovery(nil, b, true); !errors.Is(err, ErrNotRecoveryOwner) {
 		t.Fatal("a second completion of a valid table was accepted")
 	}
 	c, err := reloaded.Invalidate()
@@ -50,7 +50,7 @@ func TestEpochTable_OnlyTheMarksOwnerCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tok := range []uint64{0, b} {
-		if err := reloaded.CompleteRecovery(nil, tok); !errors.Is(err, ErrNotRecoveryOwner) {
+		if err := reloaded.CompleteRecovery(nil, tok, true); !errors.Is(err, ErrNotRecoveryOwner) {
 			t.Fatalf("completion with token %d cleared recovery %d's mark", tok, c)
 		}
 	}
@@ -112,5 +112,38 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not reached")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The apply fence: an ownership change waits for an in-flight apply of the
+// old owner to settle, and an apply of the old owner that starts after the
+// change is refused without running.
+func TestEpochTable_OwnershipChangeWaitsForInFlightAppliesAndRefusesLaterOnes(t *testing.T) {
+	tb, _ := LoadEpochTable("", "v1")
+	a, _ := tb.Invalidate()
+	entered, release := make(chan struct{}), make(chan struct{})
+	applied := make(chan error, 1)
+	go func() {
+		applied <- tb.ApplyUnder(a, func() error { close(entered); <-release; return nil })
+	}()
+	<-entered
+	changed := make(chan uint64, 1)
+	go func() { b, _ := tb.Invalidate(); changed <- b }()
+	select {
+	case <-changed:
+		t.Fatal("the ownership change did not wait for the in-flight apply")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-applied; err != nil {
+		t.Fatalf("the in-flight apply under its own mark: %v", err)
+	}
+	b := <-changed
+	ran := false
+	if err := tb.ApplyUnder(a, func() error { ran = true; return nil }); !errors.Is(err, ErrNotRecoveryOwner) || ran {
+		t.Fatalf("an apply of the old owner after the change: err %v ran %t; want refused, not run", err, ran)
+	}
+	if err := tb.ApplyUnder(b, func() error { return nil }); err != nil {
+		t.Fatalf("the new owner's apply: %v", err)
 	}
 }

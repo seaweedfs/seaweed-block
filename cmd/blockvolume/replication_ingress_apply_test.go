@@ -17,6 +17,11 @@ func TestReplicationIngressSharesApplyVersionsAcrossSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(r.Stop)
+	// This replica's history is epoch 1: a live entry of an epoch the table
+	// has no row for is accepted only at the store's next LSN.
+	if err := r.EpochTable().Replace([]transport.EpochRow{{Epoch: 1, FirstLSN: 1}}); err != nil {
+		t.Fatal(err)
+	}
 	want := bytes.Repeat([]byte{0xBB}, 4096)
 	ship := func(session, lsn uint64, data []byte, recovery bool) {
 		c, err := net.DialTimeout("tcp", r.listener.Addr(), 2*time.Second)

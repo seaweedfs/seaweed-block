@@ -74,7 +74,17 @@ type DualLaneGate interface {
 // token, after the data is synced and before the barrier is answered.
 type EpochRecoveryGate interface {
 	BeginEpochRecovery() (token uint64, err error)
+	ApplyUnderEpochToken(token uint64, fn func() error) error
 	CompleteEpochRecovery(token uint64, rows []byte, end uint64) error
+}
+
+// applyUnder runs one apply of this session's data under the epoch table's
+// fence (only while the session owns the mark), or directly without one.
+func (r *Receiver) applyUnder(fn func() error) error {
+	if eg, ok := r.gate.(EpochRecoveryGate); ok {
+		return eg.ApplyUnderEpochToken(r.epochToken, fn)
+	}
+	return fn()
 }
 
 func (r *Receiver) enterFrame() (func(), error) {
@@ -234,7 +244,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if gateErr != nil {
 				return 0, gateErr
 			}
-			_, applyErr := r.session.ApplyBaseBlock(lba, data)
+			applyErr := r.applyUnder(func() error { _, e := r.session.ApplyBaseBlock(lba, data); return e })
 			release()
 			if applyErr != nil {
 				log.Printf("g7-debug: Receiver.Run ApplyBaseBlock err lba=%d err=%v", lba, applyErr)
@@ -273,7 +283,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if gateErr != nil {
 				return 0, gateErr
 			}
-			applyErr := r.session.ApplyWALEntry(kind, lba, data, lsn)
+			applyErr := r.applyUnder(func() error { return r.session.ApplyWALEntry(kind, lba, data, lsn) })
 			release()
 			if applyErr != nil {
 				log.Printf("g7-debug: Receiver.Run ApplyWALEntry err lsn=%d err=%v", lsn, applyErr)
@@ -301,7 +311,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			// The completion (and the frontier advance) is a mutation too: it
 			// stays inside the counted section, so a fence cannot return while
 			// it is pending. Its error propagates (DESIGN 8.2 step 4).
-			doneErr := r.session.MarkBaseComplete()
+			doneErr := r.applyUnder(r.session.MarkBaseComplete)
 			release()
 			if doneErr != nil {
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply, doneErr)

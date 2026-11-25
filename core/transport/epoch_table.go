@@ -57,7 +57,16 @@ type epochTableRecord struct {
 	// Owner is the recovery that holds the invalid mark (the last one to
 	// start); only its completion may make the table valid again.
 	Owner uint64 `json:"owner,omitempty"`
+	// TookOverInvalid: the owner took the mark over a table that was
+	// already invalid (another recovery's data may be in the store), so
+	// only a full base install (rebuild) may make it valid again.
+	TookOverInvalid bool `json:"took_over_invalid,omitempty"`
 }
+
+// ErrCatchUpOverInvalid: a catch-up that took the mark over an already
+// invalid table cannot vouch for the store (an older recovery's entry may sit
+// on any block); only a rebuild makes the table valid.
+var ErrCatchUpOverInvalid = errors.New("epoch table: a catch-up that took over an invalid table cannot complete; a rebuild is needed")
 
 // ErrNotRecoveryOwner: a recovery's completion found the invalid mark held
 // by a newer recovery; it must not make the table valid over that one's data.
@@ -68,10 +77,18 @@ var ErrNotRecoveryOwner = errors.New("epoch table: a newer recovery holds the in
 type EpochTable struct {
 	path, volumeID string
 
-	mu      sync.Mutex
-	rows    []EpochRow
-	invalid bool
-	owner   uint64
+	// applyMu fences recovery applies against ownership changes: every
+	// recovery-data apply holds it shared (ApplyUnder); Invalidate,
+	// CompleteRecovery and Replace hold it exclusive, so a change of the
+	// mark's owner waits for every in-flight older apply to settle, and an
+	// apply that starts after it sees the new owner and is refused.
+	applyMu sync.RWMutex
+
+	mu       sync.Mutex
+	rows     []EpochRow
+	invalid  bool
+	owner    uint64
+	tookOver bool
 }
 
 // LoadEpochTable reads the table at path; a missing record is an empty table.
@@ -113,7 +130,7 @@ func LoadEpochTable(path, volumeID string) (*EpochTable, error) {
 	if err := checkEpochRows(rec.Rows); err != nil {
 		return nil, err
 	}
-	t.rows, t.invalid, t.owner = rec.Rows, rec.Invalid, rec.Owner
+	t.rows, t.invalid, t.owner, t.tookOver = rec.Rows, rec.Invalid, rec.Owner, rec.TookOverInvalid
 	return t, nil
 }
 
@@ -159,7 +176,7 @@ func (t *EpochTable) Note(epoch, firstLSN uint64) error {
 		}
 	}
 	next := newestRows(append(append([]EpochRow(nil), t.rows...), EpochRow{Epoch: epoch, FirstLSN: firstLSN}))
-	if err := t.persistLocked(next, false, 0); err != nil {
+	if err := t.persistLocked(next, false, 0, false); err != nil {
 		return err
 	}
 	t.rows = next
@@ -174,9 +191,22 @@ func (t *EpochTable) Note(epoch, firstLSN uint64) error {
 // the mark over (the newest bulk apply owns the table); the token of a
 // recovery that died is never presented again, so after a reload the table
 // stays invalid until a new recovery completes under its own token.
-func (t *EpochTable) Invalidate() (token uint64, err error) {
+func (t *EpochTable) Invalidate() (token uint64, err error) { return t.InvalidateIf(nil) }
+
+// InvalidateIf is Invalidate with a precondition checked under the exclusive
+// apply fence, after every in-flight recovery apply settled: an error from
+// check refuses the takeover and changes nothing (a catch-up's start checks
+// the store's durable end against the LSN it starts from).
+func (t *EpochTable) InvalidateIf(check func() error) (token uint64, err error) {
 	if t == nil {
 		return 0, nil
+	}
+	t.applyMu.Lock()
+	defer t.applyMu.Unlock()
+	if check != nil {
+		if err := check(); err != nil {
+			return 0, err
+		}
 	}
 	var b [8]byte
 	for token == 0 {
@@ -187,20 +217,19 @@ func (t *EpochTable) Invalidate() (token uint64, err error) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if err := t.persistLocked(nil, true, token); err != nil {
+	tookOver := t.invalid
+	if err := t.persistLocked(nil, true, token, tookOver); err != nil {
 		return 0, err
 	}
-	t.rows, t.invalid, t.owner = nil, true, token
+	t.rows, t.invalid, t.owner, t.tookOver = nil, true, token, tookOver
 	return token, nil
 }
-
-
 
 // CompleteRecovery makes rows the table and the table valid, at the end of
 // the recovery that holds token once its data is synced: only while the
 // table is invalid and token is still its owner, checked and written under
 // one lock (ErrNotRecoveryOwner otherwise; nothing written).
-func (t *EpochTable) CompleteRecovery(rows []EpochRow, owner uint64) error {
+func (t *EpochTable) CompleteRecovery(rows []EpochRow, owner uint64, fullBase bool) error {
 	if t == nil {
 		return nil
 	}
@@ -210,16 +239,21 @@ func (t *EpochTable) CompleteRecovery(rows []EpochRow, owner uint64) error {
 	if err := checkEpochRows(rows); err != nil {
 		return err
 	}
+	t.applyMu.Lock()
+	defer t.applyMu.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.invalid || t.owner != owner {
 		return fmt.Errorf("%w (recovery %d, mark held by %d, invalid %t)", ErrNotRecoveryOwner, owner, t.owner, t.invalid)
 	}
+	if t.tookOver && !fullBase {
+		return ErrCatchUpOverInvalid
+	}
 	next := newestRows(append([]EpochRow(nil), rows...))
-	if err := t.persistLocked(next, false, 0); err != nil {
+	if err := t.persistLocked(next, false, 0, false); err != nil {
 		return err
 	}
-	t.rows, t.invalid, t.owner = next, false, 0
+	t.rows, t.invalid, t.owner, t.tookOver = next, false, 0, false
 	return nil
 }
 
@@ -231,14 +265,35 @@ func (t *EpochTable) Replace(rows []EpochRow) error {
 	if err := checkEpochRows(rows); err != nil {
 		return err
 	}
+	t.applyMu.Lock()
+	defer t.applyMu.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	next := newestRows(append([]EpochRow(nil), rows...))
-	if err := t.persistLocked(next, false, 0); err != nil {
+	if err := t.persistLocked(next, false, 0, false); err != nil {
 		return err
 	}
-	t.rows, t.invalid, t.owner = next, false, 0
+	t.rows, t.invalid, t.owner, t.tookOver = next, false, 0, false
 	return nil
+}
+
+// ApplyUnder runs fn, one apply of a recovery's data, only while token owns
+// the table's invalid mark, holding the apply fence shared across fn: an
+// ownership change waits for it, and once the owner changed it is refused
+// (ErrNotRecoveryOwner; fn does not run). With no table it just runs fn.
+func (t *EpochTable) ApplyUnder(token uint64, fn func() error) error {
+	if t == nil {
+		return fn()
+	}
+	t.applyMu.RLock()
+	defer t.applyMu.RUnlock()
+	t.mu.Lock()
+	owned := token != 0 && t.invalid && t.owner == token
+	t.mu.Unlock()
+	if !owned {
+		return fmt.Errorf("%w (recovery apply under token %d)", ErrNotRecoveryOwner, token)
+	}
+	return fn()
 }
 
 // TrimAbove drops the rows whose first LSN is above next, the store's next
@@ -256,18 +311,18 @@ func (t *EpochTable) TrimAbove(next uint64) error {
 	if t.invalid || len(keep) == len(t.rows) {
 		return nil
 	}
-	if err := t.persistLocked(keep, false, 0); err != nil {
+	if err := t.persistLocked(keep, false, 0, false); err != nil {
 		return err
 	}
 	t.rows = keep
 	return nil
 }
 
-func (t *EpochTable) persistLocked(rows []EpochRow, invalid bool, owner uint64) error {
+func (t *EpochTable) persistLocked(rows []EpochRow, invalid bool, owner uint64, tookOver bool) error {
 	if t.path == "" {
 		return nil
 	}
-	body, _ := json.Marshal(epochTableRecord{Schema: epochTableSchema, VolumeID: t.volumeID, Rows: rows, Invalid: invalid, Owner: owner})
+	body, _ := json.Marshal(epochTableRecord{Schema: epochTableSchema, VolumeID: t.volumeID, Rows: rows, Invalid: invalid, Owner: owner, TookOverInvalid: tookOver})
 	tmp := t.path + ".tmp"
 	if err := floorFS.writeSynced(tmp, append(body, '\n')); err != nil {
 		_ = floorFS.remove(tmp)
@@ -290,6 +345,17 @@ func (r *ReplicaListener) SetEpochTable(t *EpochTable) { r.epochs = t }
 // SetEpochTable installs the primary's epoch table on the executor, whose
 // rebuild-done frame then carries its rows.
 func (e *BlockExecutor) SetEpochTable(t *EpochTable) { e.epochs = t }
+
+// AppendsAt reports whether noting epoch would append a new row (a live
+// entry of an epoch the table has no row for yet).
+func (t *EpochTable) AppendsAt(epoch uint64) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.invalid && (len(t.rows) == 0 || epoch > t.rows[len(t.rows)-1].Epoch)
+}
 
 // Invalid reports whether a recovery left the table without a known history.
 func (t *EpochTable) Invalid() bool {

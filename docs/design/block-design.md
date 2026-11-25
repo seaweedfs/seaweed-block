@@ -320,12 +320,12 @@ stateDiagram-v2
   [*] --> Valid
   Valid --> Valid: live entry of a new epoch, row noted before the apply; primary role adopted at the next LSN; load drops rows above the next LSN
   Valid --> Invalid: catch-up lane start, rebuild's first base byte, or dual-lane SessionStart (Invalidate, new token)
-  Invalid --> Invalid: another recovery starts (new token takes the mark); a completion with another token is refused
+  Invalid --> Invalid: another recovery starts (new token takes the mark, marked "took over invalid"); a completion with another token, or a catch-up's that took over an invalid table, is refused
   Invalid --> Valid: the token's recovery synced its data, then its final barrier or rebuild-done (dual-lane too) installs the primary's rows cut at its end
   Invalid --> Valid: primary role adopted over it: exactly [(epoch, next LSN)]
 ```
 
-While invalid the volume reports no last data epoch: it reconciles as diverged, is never counted and is rebuilt, and no live entry is noted. The unconditional reset happens only at primary adoption, after the fence: a primary refuses every inbound recovery frame (`admitMutation`, `EnterDualLane`), so no recovery's data lands under it.
+While invalid the volume reports no last data epoch: it reconciles as diverged, is never counted and is rebuilt, and no live entry is noted. Every recovery-data apply runs under the table's apply fence (shared) and only while its token owns the mark; a change of owner takes the fence exclusive, so it waits for in-flight applies to settle and later ones of the old owner are refused. A catch-up states the LSN it starts after and takes the mark only if the durable end is exactly that LSN; a live entry of a new epoch is accepted only at the store's next LSN. The unconditional reset happens only at primary adoption, after the fence: a primary refuses every inbound recovery frame (`admitMutation`, `EnterDualLane`), so no recovery's data lands under it.
 
 **Invariants.**
 
