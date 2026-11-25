@@ -281,3 +281,27 @@ func TestLayoutStoreRecreatedVolumeRefusesOldDelete(t *testing.T) {
 		t.Fatal("new volume image lost", found, err)
 	}
 }
+
+func TestLayoutStoreDeleteNeverRemovesControlRecords(t *testing.T) {
+	s, f, _ := layoutStoreFixture(t)
+	ctx := context.Background()
+	for _, name := range []string{"HEAD", "VOLUME"} {
+		if err := f.CreateEntry(ctx, s.root, &filerpb.Entry{Name: name, Content: []byte("keep")}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rel := range []string{"HEAD", "VOLUME", ".", "pool", "pool/0", "seg", "root", "../other/HEAD"} {
+		if err := s.DeleteMarked(ctx, rel, "clean"); !errors.Is(err, layout.ErrMalformed) {
+			t.Fatalf("marked deletion of %q: %v", rel, err)
+		}
+		if err := s.DeleteOfVolume(ctx, rel, s.id); !errors.Is(err, layout.ErrMalformed) {
+			t.Fatalf("volume deletion of %q: %v", rel, err)
+		}
+	}
+	for _, name := range []string{"HEAD", "VOLUME"} {
+		got, err := f.LookupEntry(ctx, s.root, name)
+		if err != nil || string(got.Content) != "keep" {
+			t.Fatal("control record changed", name, err)
+		}
+	}
+}

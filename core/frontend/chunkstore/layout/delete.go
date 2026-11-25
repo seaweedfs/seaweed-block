@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // HEAD states: a live volume, one being deleted, one deleted.
@@ -138,6 +139,11 @@ func DeleteVolume(ctx context.Context, st HeadStore, gone HolderGone, id VolumeI
 	if gone == nil || os == nil {
 		return errors.New("layout: delete needs a holder check and an object store")
 	}
+	for _, rel := range objects {
+		if !isObjectPath(rel) {
+			return fmt.Errorf("%w: %q is not a pool, segment or root object; HEAD, VOLUME and the directory stay", ErrMalformed, rel)
+		}
+	}
 	if err := gone.NoHolder(ctx); err != nil {
 		return fmt.Errorf("%w: %v", ErrHolderActive, err)
 	}
@@ -166,12 +172,13 @@ func DeleteVolume(ctx context.Context, st HeadStore, gone HolderGone, id VolumeI
 // exists and is deleted or no longer names the source, read first: its
 // HEAD is deleting or deleted; its directory's VOLUME carries another id;
 // or its HEAD is live and no root in it (current or snapshot) names a
-// chunk of the source. A target never created (no VOLUME, no HEAD) first
-// gets a deleted HEAD written exclusively in its never-reused directory,
-// so the restore that registered it can never create it later, and is
-// then released. A live target that still names the source, one being
-// created (VOLUME without HEAD), and one whose HEAD appeared before the
-// tombstone are refused (ErrTargetLive); the source is not written then.
+// chunk of the source. A target without HEAD (never created, or a restore
+// that died between its VOLUME and its HEAD) first gets a deleted HEAD
+// written exclusively in its never-reused directory, so the restore that
+// registered it can never create it later, and is then released. A live
+// target that still names the source, and one whose HEAD appeared before
+// the tombstone, are refused (ErrTargetLive); the source is not written
+// then.
 func OperatorReleaseDependent(ctx context.Context, source HeadStore, target TargetStore, r *Reader, targetID VolumeID) (Head, error) {
 	sh, found, err := source.ReadHead(ctx)
 	if err != nil {
@@ -192,11 +199,12 @@ func OperatorReleaseDependent(ctx context.Context, source HeadStore, target Targ
 	switch {
 	case hasHead && (th.State == StateDeleting || th.State == StateDeleted):
 	case hasVolume && id != targetID:
-	case !hasVolume && !hasHead:
-		// Never created: a deleted HEAD written exclusively in the target's
+	case !hasHead:
+		// No HEAD (never created, or a restore that died between its VOLUME
+		// and its HEAD): a deleted HEAD written exclusively in the target's
 		// never-reused directory makes sure the restore can never create it
 		// later; only then is the dependent released. If a HEAD appeared
-		// first, the restore got there: refused, re-run decides.
+		// first, the restore got there: refused, a re-run decides.
 		tomb := Head{VolumeID: targetID, Activity: Activity{Kind: ActIdle}, State: StateDeleted}
 		if err := target.CreateDeletedHead(ctx, tomb); err != nil {
 			if errors.Is(err, ErrExists) {
@@ -204,7 +212,7 @@ func OperatorReleaseDependent(ctx context.Context, source HeadStore, target Targ
 			}
 			return Head{}, err
 		}
-	case hasVolume && hasHead:
+	default:
 		names, err := namesVolume(ctx, r, th, sh.VolumeID)
 		if err != nil {
 			return Head{}, err
@@ -212,8 +220,6 @@ func OperatorReleaseDependent(ctx context.Context, source HeadStore, target Targ
 		if names {
 			return Head{}, fmt.Errorf("%w: %s still names chunks of the source", ErrTargetLive, r.vol)
 		}
-	default:
-		return Head{}, fmt.Errorf("%w: %s is being created", ErrTargetLive, r.vol)
 	}
 	return RunReleaseDependent(ctx, source, targetID)
 }
@@ -247,4 +253,16 @@ func namesVolume(ctx context.Context, r *Reader, h Head, owner VolumeID) (bool, 
 		}
 	}
 	return false, nil
+}
+
+// isObjectPath reports whether rel names a content-named object of the
+// volume (a chunk, a segment or a root): the only entries a volume delete
+// removes. HEAD (which stays, deleted), VOLUME and the directory are not.
+func isObjectPath(rel string) bool {
+	for _, dir := range []string{PoolDir + "/", SegDir + "/", RootDir + "/"} {
+		if strings.HasPrefix(rel, dir) && len(rel) > len(dir) && !strings.Contains(rel, "..") {
+			return true
+		}
+	}
+	return false
 }
