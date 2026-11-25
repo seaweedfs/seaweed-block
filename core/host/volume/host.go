@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -170,6 +171,11 @@ type Host struct {
 	// storesAwaited: the primary fact's (awaited<<32 | initial) replica
 	// store count (ReplicaStoresAwaited).
 	storesAwaited atomic.Uint64
+	// roleRetry: the last replica role call failed with an error a retry
+	// may outlast (a floor that could not be persisted); runRoleRetry
+	// re-applies the current role until it succeeds or is refused for good.
+	// Under selfFenceMu.
+	roleRetry bool
 	// RF1Only admission state, one unit under rf1Mu (field access only, no
 	// calls): the highest refused epoch with its reason ("" = cleared), and the
 	// highest epoch an RF1 fact was admitted at. A clear removes only the
@@ -472,6 +478,7 @@ func (h *Host) SetSelfFence(f selfFencer) error {
 // latch (projection not Healthy); a success clears it. Caller holds
 // selfFenceMu.
 func (h *Host) latchRoleAdmission(role selfRole, epoch uint64, err error) {
+	h.roleRetry = role == selfRoleReplica && err != nil && !errors.Is(err, ErrRoleRefused)
 	if role == selfRoleNone {
 		return
 	}
@@ -480,6 +487,49 @@ func (h *Host) latchRoleAdmission(role selfRole, epoch uint64, err error) {
 		return
 	}
 	h.roleAdmissionFailed.Store("")
+}
+
+// ErrRoleRefused marks a role call refused for good (the listener is closed,
+// or the volume refuses replica peers): retrying cannot succeed, so the
+// latch stays with its reason and no retry runs.
+var ErrRoleRefused = errors.New("role refused")
+
+// roleRetryMin and roleRetryMax bound the backoff between retries of a
+// failed replica role call.
+var roleRetryMin, roleRetryMax = 250 * time.Millisecond, 10 * time.Second
+
+// runRoleRetry re-applies a failed replica role call with backoff, so a
+// replica whose floor could not be persisted (a full or read-only disk)
+// rejoins once it can, with no operator: the latch clears on success and
+// the primary's probe of degraded peers finds it ready again.
+func (h *Host) runRoleRetry(ctx context.Context) {
+	defer h.wg.Done()
+	delay := roleRetryMin
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		h.selfFenceMu.Lock()
+		if !h.roleRetry || h.selfFence == nil || h.selfRole != selfRoleReplica {
+			h.selfFenceMu.Unlock()
+			delay = roleRetryMin
+			continue
+		}
+		role, epoch := h.selfRole, h.selfEpoch
+		err := applySelfRoleWithPeers(h.selfFence, role, epoch, h.selfHasPeers)
+		h.latchRoleAdmission(role, epoch, err)
+		h.selfFenceMu.Unlock()
+		if err == nil {
+			h.log.Printf("blockvolume: replica role at epoch %d admitted on retry", epoch)
+			delay = roleRetryMin
+			continue
+		}
+		if delay *= 2; delay > roleRetryMax {
+			delay = roleRetryMax
+		}
+	}
 }
 
 // RoleAdmissionFailure reports the G1 admission latch: whether the last role
@@ -617,10 +667,11 @@ func (h *Host) Start() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 
-	h.wg.Add(3)
+	h.wg.Add(4)
 	go h.runHeartbeat(ctx)
 	go h.runSubscribe(ctx)
 	go h.runProbeRounds(ctx)
+	go h.runRoleRetry(ctx)
 	return ctx
 }
 
