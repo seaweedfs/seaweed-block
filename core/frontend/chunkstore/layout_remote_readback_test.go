@@ -2,7 +2,9 @@ package chunkstore
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -76,11 +78,16 @@ func TestLayoutRemote_OperatorHEADWriteBetweenCommitAndReadback(t *testing.T) {
 			if _, err := layer.Capture(ctx); err != nil {
 				t.Fatal(err)
 			}
-			writeSync(t, s, map[uint32][]byte{3: block(3)})
 			r.change = func(ctx context.Context) error { return tc.change(ctx, lh) }
 			r.armed = true
+			if _, err := s.Write(3, block(3)); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := layer.Capture(ctx); err != nil {
 				t.Fatalf("cut after operator HEAD write: %v", err)
+			}
+			if r.armed {
+				t.Fatal("operator write was not injected after the commit")
 			}
 			writeSync(t, s, map[uint32][]byte{4: block(4)})
 			if _, err := layer.Capture(ctx); err != nil {
@@ -111,4 +118,75 @@ func TestLayoutRemote_ReusedChunkBirthDoesNotFenceNoopCut(t *testing.T) {
 		t.Fatalf("no-op cut fenced the same holder after reusing a chunk: %v", err)
 	}
 	lh.readBack("reader", map[uint32][]byte{1: block(1), 9: block(9)})
+}
+
+type pauseCleanEndStore struct {
+	sessionStore
+	persisted chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func (s *pauseCleanEndStore) UpdateHead(ctx context.Context, gen uint64, next layout.Head) error {
+	if err := s.sessionStore.UpdateHead(ctx, gen, next); err != nil {
+		return err
+	}
+	if next.Activity.Kind == layout.ActIdle {
+		var waitErr error
+		s.once.Do(func() {
+			close(s.persisted)
+			select {
+			case <-s.release:
+			case <-ctx.Done():
+				waitErr = ctx.Err()
+			}
+		})
+		return waitErr
+	}
+	return nil
+}
+
+// The clean-end HEAD write can become visible before Clean has reacquired
+// the adapter mutex to record its generation. A read in that gap must keep
+// the holder's engine view, and the next cut must still succeed.
+func TestLayoutRemote_CleanEndBetweenCommitAndReadback(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, layer, remote := lh.attach("active", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{2: block(2)})
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := remote.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &pauseCleanEndStore{sessionStore: remote.st, persisted: make(chan struct{}), release: make(chan struct{})}
+	remote.st = st
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(st.release) }) }
+	defer release()
+	done := make(chan error, 1)
+	go func() { done <- remote.Clean(ctx, func(context.Context, layout.HolderID, string) error { return nil }) }()
+	select {
+	case <-st.persisted:
+	case err := <-done:
+		t.Fatalf("clean ended before its HEAD write was observed: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("clean end did not reach the persisted HEAD write")
+	}
+	mid, err := remote.GetHead(ctx)
+	if err != nil || mid.Gen != before.Gen {
+		t.Fatalf("clean end changed the engine view: gen %d -> %d, err=%v", before.Gen, mid.Gen, err)
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	writeSync(t, s, map[uint32][]byte{9: block(9)})
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatalf("next cut after clean end: %v", err)
+	}
+	lh.readBack("reader", map[uint32][]byte{2: block(2), 9: block(9)})
 }
