@@ -44,11 +44,12 @@ func startLayoutRoot(ctx context.Context, ws *storage.WALStore, st layout.StartS
 	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: uint64(ws.NumBlocks()) * uint64(ws.BlockSize()), BlockSize: uint32(ws.BlockSize()), ChunkBytes: uint64(ws.ChunkBlocks()) * uint64(ws.BlockSize())}, ClaimID: id, Fresh: fresh, Position: position})
 	if err != nil {
 		if errors.Is(err, layout.ErrNotHolder) || errors.Is(err, layout.ErrStaleEpoch) || errors.Is(err, layout.ErrPrecondition) {
-			// A HEAD at or beyond our granted epoch is a final refusal,
-			// including one that moved during the claim. Below the grant,
-			// Start may still claim normally.
+			// A HEAD held by another holder at our granted epoch, or any
+			// HEAD above it, is a final refusal. A stale local root keeps
+			// its own cure even when that root cannot claim this HEAD.
 			observed, found, readErr := st.ReadHead(ctx)
-			if readErr == nil && found && observed.Epoch >= line.Epoch {
+			if readErr == nil && found && !errors.Is(err, layout.ErrStaleLocalRoot) &&
+				(observed.Epoch > line.Epoch || observed.Epoch == line.Epoch && observed.Holder != line.Holder) {
 				err = errors.Join(err, storage.ErrChunkLayerFenced, errChunkForeignClaim)
 			}
 		}
