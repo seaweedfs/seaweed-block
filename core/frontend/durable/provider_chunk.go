@@ -1246,6 +1246,10 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	}
 	if guestFrozen && !guestFreeze.AllowOverBudget {
 		freeze = detachFreezeTarget
+	} else if precopy && !guestFrozen {
+		// Admission's five-second ceiling is also the physical final-freeze
+		// deadline; the ordinary detach timeout may be longer (20s by default).
+		freeze = min(freeze, detachFreezeTarget)
 	}
 	// One freeze budget covers the drain, the final cut AND the settlement:
 	// the cut gets three quarters, the settlement what is left. The bound is
@@ -1339,6 +1343,9 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 			stopIOBegan = h.backend.StopFlipAt()
 			h.chunkDetach = true
 			beginFreeze()
+			if trace := p.testDetachTrace; trace != nil {
+				trace("cut", settleDeadline.Add(-freeze/4))
+			}
 			return true
 		})
 		// Log only after capture releases its barrier; at most five records.

@@ -148,6 +148,47 @@ func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 	}
 }
 
+// An admitted final freeze has a physical deadline, even when its forecast
+// fitted: a remote that never completes its detach CAS must not hold guest I/O
+// until the ordinary 20-second detach timeout.
+func TestPrecopyFinalFreezeDeadlineAbortsHeldCAS(t *testing.T) {
+	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
+	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
+	openRecovered(t, p)
+	b, err := p.Open(context.Background(), "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Write(context.Background(), 4096, block(0x8a)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CutVolume(context.Background(), "v1", 0); err != nil {
+		t.Fatal(err)
+	}
+	remote.set(func(r *faultRemote) { r.casMode = "hold-detach" })
+	var cutDeadline time.Time
+	durable.SetTestDetachTrace(p, func(stage string, deadline time.Time) {
+		if stage == "cut" {
+			cutDeadline = deadline
+		}
+	})
+	started := time.Now()
+	_, _, err = p.DetachVolume(context.Background(), "v1")
+	elapsed := time.Since(started)
+	if !errors.Is(err, durable.ErrDetachAborted) {
+		t.Fatalf("held final CAS: %v; want aborted stop at the deadline", err)
+	}
+	if cutDeadline.IsZero() || cutDeadline.Sub(started) > 4*time.Second {
+		t.Fatalf("final pre-copy cut deadline is %s after call start; want <=4s of the 5s freeze bound", cutDeadline.Sub(started))
+	}
+	if elapsed > 6*time.Second {
+		t.Fatalf("guest freeze held for %s; want the 5-second bound with 1-second test slack", elapsed)
+	}
+	if _, err := b.Write(context.Background(), 8192, block(0x9a)); err != nil {
+		t.Fatalf("guest did not resume after the stop was refused: %v", err)
+	}
+}
+
 type precopyFixedSampleRemote struct {
 	*storage.MemChunkRemote
 	nextDelay atomic.Int64
