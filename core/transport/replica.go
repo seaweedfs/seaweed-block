@@ -68,6 +68,10 @@ type ReplicaListener struct {
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
 	applyHook ApplyHook // optional gate plug-in; nil = direct apply
+	// epochs is the volume's epoch table (nil = none): a shipped entry's
+	// epoch is noted durably before the entry is applied, and the barrier
+	// reply names the last data epoch at the durable end.
+	epochs *EpochTable
 
 	mu               sync.Mutex
 	activeLineage    RecoveryLineage
@@ -423,6 +427,12 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
 					return true
 				}
+				// The row first, then the entry: an entry whose epoch the
+				// table cannot name is never applied.
+				if err := r.epochs.Note(entry.Lineage.Epoch, entry.LSN); err != nil {
+					log.Printf("replica: epoch table lsn=%d epoch=%d: %v", entry.LSN, entry.Lineage.Epoch, err)
+					return true
+				}
 				// If the apply-gate is installed, route through it.
 				// Caller (this handler) decides lane; gate is lane-pure.
 				// Live-lane stale entries return error here → log +
@@ -543,8 +553,9 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// Echo the request's full lineage in the rebuild-done ack
 				// so primary-side validators can consume it.
 				resp := EncodeBarrierResp(BarrierResponse{
-					Lineage:     lineage,
-					AchievedLSN: frontier,
+					Lineage:       lineage,
+					AchievedLSN:   frontier,
+					LastDataEpoch: r.epochs.LastDataEpochAt(frontier),
 				})
 				replyType, reply = MsgBarrierResp, resp
 				return true
@@ -572,8 +583,9 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// tuple against the session it is awaiting before
 				// counting the ack toward quorum.
 				resp := EncodeBarrierResp(BarrierResponse{
-					Lineage:     lineage,
-					AchievedLSN: frontier,
+					Lineage:       lineage,
+					AchievedLSN:   frontier,
+					LastDataEpoch: r.epochs.LastDataEpochAt(frontier),
 				})
 				replyType, reply = MsgBarrierResp, resp
 

@@ -106,6 +106,9 @@ func checkEpochRows(rows []EpochRow) error {
 // the epoch of the last row is a no-op; a lower epoch is refused (no write).
 // Call it before the entry at firstLSN is acknowledged.
 func (t *EpochTable) Note(epoch, firstLSN uint64) error {
+	if t == nil {
+		return nil // no table: nothing recorded (a store from before the table)
+	}
 	if epoch == 0 || firstLSN == 0 {
 		return errors.New("epoch table: zero epoch or LSN")
 	}
@@ -165,6 +168,10 @@ func (t *EpochTable) persistLocked(rows []EpochRow) error {
 	return nil
 }
 
+// SetEpochTable installs the volume's epoch table on the listener. Call
+// before Serve.
+func (r *ReplicaListener) SetEpochTable(t *EpochTable) { r.epochs = t }
+
 // LastEpoch is the epoch of the last row; 0 = no rows.
 func (t *EpochTable) LastEpoch() uint64 {
 	t.mu.Lock()
@@ -173,6 +180,24 @@ func (t *EpochTable) LastEpoch() uint64 {
 		return 0
 	}
 	return t.rows[len(t.rows)-1].Epoch
+}
+
+// LastDataEpochAt is the epoch of the last row whose first LSN is at or
+// below end (the durable end). A row is made durable BEFORE the first entry
+// of its epoch, so a crash between the two leaves a row with no entry; it is
+// not counted here. 0 = no such row.
+func (t *EpochTable) LastDataEpochAt(end uint64) uint64 {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := len(t.rows) - 1; i >= 0; i-- {
+		if t.rows[i].FirstLSN <= end {
+			return t.rows[i].Epoch
+		}
+	}
+	return 0
 }
 
 // Rows is a copy of the table.

@@ -74,6 +74,19 @@ func TestEpochTable_InterruptEveryPersistStep(t *testing.T) {
 	}
 }
 
+// A row made durable before its first entry, with a crash between: the row
+// is not the last data epoch until the durable end reaches its first LSN.
+func TestEpochTable_LastDataEpochAtTheDurableEnd(t *testing.T) {
+	tb, _ := LoadEpochTable("", "v1")
+	_ = tb.Note(1, 1)
+	_ = tb.Note(2, 50)
+	for _, c := range []struct{ end, want uint64 }{{0, 0}, {1, 1}, {49, 1}, {50, 2}, {80, 2}} {
+		if got := tb.LastDataEpochAt(c.end); got != c.want {
+			t.Errorf("LastDataEpochAt(%d) = %d; want %d", c.end, got, c.want)
+		}
+	}
+}
+
 // SharedEnd's outcomes, one per guard.
 func TestEpochTable_SharedEnd(t *testing.T) {
 	tb, _ := LoadEpochTable("", "v1")
