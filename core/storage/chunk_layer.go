@@ -662,7 +662,25 @@ type stagedChunk struct {
 	headGen uint64
 }
 
+// latchIdentityMoved latches the layer fenced on any signal that HEAD's
+// identity moved away from this holder (another holder or epoch, another
+// claim at this epoch, a detach that needs a new grant, the volume being
+// deleted), whichever remote call observed it. Fenced is the one place
+// writes are admitted (the durable backend's ready check reads it), so from
+// this error on the layer acknowledges nothing it can no longer publish.
+func (l *chunkLayerImpl) latchIdentityMoved(err error) error {
+	if err == nil || !(errors.Is(err, errChunkLayerFenced) || errors.Is(err, errChunkHeadDeleted)) {
+		return err
+	}
+	l.stMu.Lock()
+	l.fenced = true
+	l.stMu.Unlock()
+	l.abortCOW(errChunkLayerFenced)
+	return err
+}
+
 func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res chunkCutResult, err error) {
+	defer func() { err = l.latchIdentityMoved(err) }()
 	done, err := l.register()
 	if err != nil {
 		return chunkCutResult{}, err
@@ -1149,9 +1167,10 @@ func (l *chunkLayerImpl) Detach(ctx context.Context) (chunkCutResult, error) {
 // at the same base to the non-detached base image (this holder, this epoch),
 // so whichever lands first decides and the detach can never land after a
 // successful cancel. resolvePending would re-propose the detach instead.
-func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, chunkCutResult, error) {
+func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (settled detachSettlement, result chunkCutResult, err error) {
 	l.capMu.Lock()
 	defer l.unlockCap()
+	defer func() { err = l.latchIdentityMoved(err) }()
 	if r, ok := l.storedDetach(); ok {
 		return detachApplied, r, nil
 	}
