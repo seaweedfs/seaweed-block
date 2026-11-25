@@ -126,10 +126,22 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
-	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim)) {
+	if errors.Is(err, storage.ErrChunkLayerFenced) || finalLayoutStartRefusal(err) {
 		p.endChunkStartup(h, gen, err)
 	}
 	return err == nil, err
+}
+
+// finalLayoutStartRefusal distinguishes a store's definite Start refusal
+// from an unavailable read or a conditional-write race that may be retried.
+// A detached HEAD has its separate replay-retained disposition below.
+func finalLayoutStartRefusal(err error) bool {
+	return errors.Is(err, layout.ErrStaleLocalRoot) || errors.Is(err, layout.ErrMissingLocalRoot) ||
+		errors.Is(err, layout.ErrGeometryMismatch) || errors.Is(err, layout.ErrHeadAbsent) ||
+		errors.Is(err, layout.ErrVolumeDeleting) || errors.Is(err, layout.ErrStaleEpoch) ||
+		errors.Is(err, layout.ErrNotHolder) || errors.Is(err, layout.ErrIdentity) ||
+		errors.Is(err, layout.ErrCorrupt) || errors.Is(err, layout.ErrMalformed) ||
+		errors.Is(err, layout.ErrMissing)
 }
 
 // startChunkAuthorityWait starts the authority wait of recovery gen,
@@ -269,7 +281,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		case errors.Is(err, errProviderClosed):
 			ended = "provider closed"
 			return
-		case errors.Is(err, storage.ErrChunkLayerDetached):
+		case errors.Is(err, storage.ErrChunkLayerDetached), errors.Is(err, layout.ErrDetached):
 			// INV-WS-STARTUP-RETRY-001: an assigned sealed incarnation stays
 			// non-serving for exact seal replay; restarting cannot unseal it.
 			retained = true
@@ -289,6 +301,16 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			} else {
 				p.endChunkStartup(h, gen, err)
 			}
+			return
+		case finalLayoutStartRefusal(err):
+			ended = "layout Start refused, not serving"
+			log.Printf("durable: chunk layer for volume=%s: %v (final refusal)", volumeID, err)
+			h.attachMu.Lock()
+			if p.current(h, gen) && h.chunk == nil {
+				h.backend.SetOperational(false, "chunk layer attach refused: "+err.Error())
+				p.endChunkStartup(h, gen, err)
+			}
+			h.attachMu.Unlock()
 			return
 		case errors.Is(err, errChunkNoAuthority):
 			log.Printf("durable: chunk layer attach for volume=%s: authority lost before attempt %d (projection lacks %s); waiting",
