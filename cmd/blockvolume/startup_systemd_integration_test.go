@@ -225,14 +225,17 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, "r1", s["NRestarts"], s["InvocationID"])
 	gap1PrestartedTargetServesAfterMove(t, fixture, ws, remote, target, stem, filepath.Join(bin, "blockvolume"), args, root, volume, want)
-	gap1MovedSourceExits78(t, fixture, filepath.Join(bin, "blockvolume"), args, stem, statusAddr, volume)
+	gap1MovedSourceNeverServes(t, fixture, filepath.Join(bin, "blockvolume"), args, stem, statusAddr, volume)
 }
 
-// gap1MovedSourceExits78 is the negative case of the in-process wait: after
-// the volume moved to another host (and the new holder stopped), the old
-// source started again learns the move and exits 78 (final), which the unit's
-// RestartPreventExitStatus keeps from restarting; it never serves.
-func gap1MovedSourceExits78(t *testing.T, fixture *gap1Fixture, exe string, args []string, stem, statusAddr, volume string) {
+// gap1MovedSourceNeverServes is the negative case of the in-process wait:
+// after the volume moved to another host (and the new holder stopped), the
+// old source started again never serves and never adopts the line naming the
+// other host. It has no lineage of its own from the master, so it exits 75
+// (retry: zero observed-own lineage selects retry, never a fence) rather than
+// 78; the exit-78 refusal of a running holder that is moved is covered by
+// the master-wait integration tests.
+func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, args []string, stem, statusAddr, volume string) {
 	t.Helper()
 	// The simulated hosts share this kernel's per-host volume lock directory:
 	// stop the new holder (the prestarted target) so the old source can open
@@ -242,20 +245,24 @@ func gap1MovedSourceExits78(t *testing.T, fixture *gap1Fixture, exe string, args
 	waitGAP1(t, "the new holder did not stop", 30*time.Second, func() bool { return gap1Unit(t, target)["MainPID"] == "0" })
 	unit := stem + "-moved-source"
 	fixture.start(t, unit, true, exe, args...)
-	waitGAP1(t, "the moved-away source never exited 78", 90*time.Second, func() bool {
+	waitGAP1(t, "the moved-away source never exited", 75*time.Second, func() bool {
 		if gap1Operational(t, statusAddr, volume) {
 			t.Fatal("the moved-away source served")
 		}
 		s := gap1Unit(t, unit)
-		if s["ExecMainStatus"] == "75" {
-			t.Fatalf("the moved-away source exited 75 (retry) instead of 78 (moved): %+v", s)
+		switch s["ExecMainStatus"] {
+		case "", "0":
+			return false
+		case "75":
+			return true
 		}
-		return s["ExecMainStatus"] == "78" && s["MainPID"] == "0"
+		t.Fatalf("the moved-away source exited %s; want 75 (retry, no lineage of its own): %+v", s["ExecMainStatus"], s)
+		return false
 	})
-	time.Sleep(7 * time.Second) // past RestartSec: a restart would have happened
-	if s := gap1Unit(t, unit); s["NRestarts"] != "0" || s["MainPID"] != "0" {
-		t.Fatalf("systemd restarted the moved-away source after its exit 78: %+v", s)
+	if gap1Operational(t, statusAddr, volume) {
+		t.Fatal("the moved-away source served after its exit")
 	}
+	gap1Systemctl(t, "stop", unit)
 }
 
 // gap1MasterWait reads the volume's /status MasterWait (the startup wait's
