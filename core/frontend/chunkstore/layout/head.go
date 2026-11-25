@@ -403,6 +403,13 @@ func (h Head) heldBy(me HolderID) bool {
 	return h.Holder != "" && h.Epoch == me.Epoch && h.Holder == me.Holder && h.ClaimID == me.ClaimID
 }
 
+// DetachedBy is the one detached proof: HEAD is a committed, idle detach of
+// exactly me (this epoch, holder and claim id). Missing or foreign evidence
+// never proves a detach.
+func (h Head) DetachedBy(me HolderID) bool {
+	return h.Gen != 0 && h.State == StateDetached && h.Activity.Kind == ActIdle && h.heldBy(me)
+}
+
 // holderErr is the refusal of a holder transition: the volume is being
 // deleted or is deleted (ErrVolumeDeleting), or the caller is not the
 // holder at HEAD's epoch (ErrNotHolder); nil when it may act.
