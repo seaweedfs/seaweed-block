@@ -62,7 +62,7 @@ func TestCatchUpKeepsTheHistorysEpochs(t *testing.T) {
 	// The next promotion: epoch 3 from 11 on this node; the former primary is
 	// byte-identical at epoch 1, end 10.
 	_ = theirs.Note(3, 11)
-	if _, shared := theirs.SharedEnd(1, 10); !shared {
+	if _, shared := theirs.SharedEnd(1, 1, 10); !shared {
 		t.Fatalf("an identical survivor (epoch 1, end 10) diverges from rows %v", theirs.Rows())
 	}
 }

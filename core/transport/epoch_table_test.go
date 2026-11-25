@@ -93,22 +93,23 @@ func TestEpochTable_SharedEnd(t *testing.T) {
 	_ = tb.Note(1, 1)
 	_ = tb.Note(2, 50) // the new primary's epoch starts at 50
 	for _, c := range []struct {
-		name       string
-		epoch, end uint64
-		wantEnd    uint64
-		wantShared bool
+		name              string
+		epoch, first, end uint64
+		wantEnd           uint64
+		wantShared        bool
 	}{
-		{"no data", 0, 0, 0, true},
-		{"data but no table", 0, 40, 0, false},
-		{"current epoch", 2, 70, 70, true},
-		{"old epoch, prefix", 1, 49, 49, true},
-		{"old epoch, equal length, divergent", 1, 50, 49, false},
-		{"old epoch, above, divergent", 1, 60, 49, false},
-		{"unknown epoch", 3, 10, 0, false},
+		{"no data", 0, 0, 0, 0, true},
+		{"data but no table", 0, 0, 40, 0, false},
+		{"current epoch", 2, 50, 70, 70, true},
+		{"old epoch, prefix", 1, 1, 49, 49, true},
+		{"old epoch, equal length, divergent", 1, 1, 50, 49, false},
+		{"old epoch, above, divergent", 1, 1, 60, 49, false},
+		{"unknown epoch", 3, 5, 10, 0, false},
+		{"current epoch starting elsewhere", 2, 52, 70, 49, false},
 	} {
-		end, shared := tb.SharedEnd(c.epoch, c.end)
+		end, shared := tb.SharedEnd(c.epoch, c.first, c.end)
 		if end != c.wantEnd || shared != c.wantShared {
-			t.Errorf("%s: SharedEnd(%d, %d) = (%d, %t); want (%d, %t)", c.name, c.epoch, c.end, end, shared, c.wantEnd, c.wantShared)
+			t.Errorf("%s: SharedEnd(%d, %d, %d) = (%d, %t); want (%d, %t)", c.name, c.epoch, c.first, c.end, end, shared, c.wantEnd, c.wantShared)
 		}
 	}
 }

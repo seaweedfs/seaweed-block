@@ -577,7 +577,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				resp := EncodeBarrierResp(BarrierResponse{
 					Lineage:       lineage,
 					AchievedLSN:   frontier,
-					LastDataEpoch: r.epochs.LastDataEpochAt(frontier),
+					LastDataEpoch:    r.epochs.LastDataRowAt(frontier).Epoch,
+					LastDataFirstLSN: r.epochs.LastDataRowAt(frontier).FirstLSN,
 				})
 				replyType, reply = MsgBarrierResp, resp
 				return true
@@ -627,7 +628,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				resp := EncodeBarrierResp(BarrierResponse{
 					Lineage:       lineage,
 					AchievedLSN:   frontier,
-					LastDataEpoch: r.epochs.LastDataEpochAt(frontier),
+					LastDataEpoch:    r.epochs.LastDataRowAt(frontier).Epoch,
+					LastDataFirstLSN: r.epochs.LastDataRowAt(frontier).FirstLSN,
 				})
 				replyType, reply = MsgBarrierResp, resp
 

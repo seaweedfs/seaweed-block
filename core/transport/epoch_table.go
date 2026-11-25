@@ -227,18 +227,23 @@ func (t *EpochTable) LastEpoch() uint64 {
 // below end (the durable end). A row is made durable BEFORE the first entry
 // of its epoch, so a crash between the two leaves a row with no entry; it is
 // not counted here. 0 = no such row.
-func (t *EpochTable) LastDataEpochAt(end uint64) uint64 {
+func (t *EpochTable) LastDataEpochAt(end uint64) uint64 { return t.LastDataRowAt(end).Epoch }
+
+// LastDataRowAt is the last row whose first LSN is at or below end, with that
+// first LSN; the zero row = none. The barrier reply carries both: two tables
+// can agree on an epoch number and still disagree on where it starts.
+func (t *EpochTable) LastDataRowAt(end uint64) EpochRow {
 	if t == nil {
-		return 0
+		return EpochRow{}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := len(t.rows) - 1; i >= 0; i-- {
 		if t.rows[i].FirstLSN <= end {
-			return t.rows[i].Epoch
+			return t.rows[i]
 		}
 	}
-	return 0
+	return EpochRow{}
 }
 
 // EncodeEpochRows is the wire form of rows: [4B count][count x (8B epoch,
@@ -295,17 +300,20 @@ func (t *EpochTable) Rows() []EpochRow {
 	return append([]EpochRow(nil), t.rows...)
 }
 
-// SharedEnd answers a replica that reports its last data epoch and end LSN,
-// from this (the primary's) table: the highest LSN up to which the replica's
-// entries are this table's entries. shared is false when the replica holds
-// entries this table never had (a divergent tail or an unknown epoch): it
-// must not count until it is rebuilt.
+// SharedEnd answers a replica that reports its last data row (epoch and that
+// epoch's first LSN) and its end LSN, from this (the primary's) table: the
+// highest LSN up to which the replica's entries are this table's entries.
+// shared is false when the replica holds entries this table never had (a
+// divergent tail, an unknown epoch, or the same epoch starting elsewhere):
+// it must not count until it is rebuilt.
+//   - the replica's epoch starts at another LSN here: diverged (an epoch
+//     number alone is not a history);
 //   - the replica's epoch is this table's last: in sync up to its end;
 //   - else entries below the first LSN of the next epoch here are shared: an
 //     end below it is a prefix, an end at or above it is divergent;
 //   - no row here for the replica's epoch, or a replica with data but no
 //     table (epoch 0): divergent. A replica with no data shares the empty prefix.
-func (t *EpochTable) SharedEnd(replicaEpoch, replicaEnd uint64) (end uint64, shared bool) {
+func (t *EpochTable) SharedEnd(replicaEpoch, replicaFirst, replicaEnd uint64) (end uint64, shared bool) {
 	if replicaEnd == 0 {
 		return 0, true
 	}
@@ -317,6 +325,12 @@ func (t *EpochTable) SharedEnd(replicaEpoch, replicaEnd uint64) (end uint64, sha
 	for i, r := range t.rows {
 		if r.Epoch != replicaEpoch {
 			continue
+		}
+		if r.FirstLSN != replicaFirst {
+			if lo := min(r.FirstLSN, replicaFirst); lo > 1 {
+				return lo - 1, false // the same epoch begins elsewhere: shared at most below either start
+			}
+			return 0, false
 		}
 		if i == len(t.rows)-1 {
 			return replicaEnd, true

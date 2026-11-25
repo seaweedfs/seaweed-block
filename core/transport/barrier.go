@@ -19,7 +19,8 @@ import (
 type BarrierAck struct {
 	Lineage       RecoveryLineage
 	AchievedLSN   uint64
-	LastDataEpoch uint64 // the replica's last epoch-table row; 0 = no table (see BarrierResponse)
+	LastDataEpoch    uint64 // the replica's last data row's epoch; 0 = no table (see BarrierResponse)
+	LastDataFirstLSN uint64 // that row's first LSN
 	Success     bool
 	Reason      string
 }
@@ -41,9 +42,9 @@ var ErrBarrierLineageMismatch = errors.New("transport: barrier: response lineage
 // on cached primary-side assumptions (architect round-21 uniform
 // rule, INV-REPL-LINEAGE-BORNE-ON-BARRIER-ACK).
 //
-// Wire: [32B lineage][8B achievedLSN][8B lastDataEpoch] — 48 bytes. A
-// 40-byte response (a replica from before the epoch table) decodes with
-// LastDataEpoch 0, which the primary reads as "no table".
+// Wire: [32B lineage][8B achievedLSN][8B lastDataEpoch][8B lastDataFirstLSN]
+// — 56 bytes. A 40-byte response (a replica from before the epoch table)
+// decodes with LastDataEpoch 0, which the primary reads as "no table".
 // Lineage field order inside the 32B slab is strictly
 // SessionID, Epoch, EndpointVersion, frontierHint (matches
 // EncodeLineage). Any deviation MUST be rejected at decode.
@@ -54,13 +55,16 @@ type BarrierResponse struct {
 	// epoch of its entries at AchievedLSN); 0 = no table. An entry's
 	// identity is (epoch, LSN): a length alone says nothing.
 	LastDataEpoch uint64
+	// LastDataFirstLSN is that row's first LSN: the primary requires it to
+	// equal its own first LSN for the epoch (the receiver check).
+	LastDataFirstLSN uint64
 }
 
 // barrierRespSize is the exact byte length of a valid encoded
 // BarrierResponse. Short, over-long, or field-misordered payloads
 // are rejected by DecodeBarrierResp and MUST NOT contribute to
 // correctness decisions (round-21 rule).
-const barrierRespSize = 48
+const barrierRespSize = 56
 
 // barrierRespV0Size is the response of a replica from before the epoch table.
 const barrierRespV0Size = 40
@@ -68,12 +72,13 @@ const barrierRespV0Size = 40
 // EncodeBarrierResp serializes a barrier response.
 // Wire: [32B lineage (SessionID, Epoch, EndpointVersion, frontierHint)]
 //
-//	[8B achievedLSN][8B lastDataEpoch]
+//	[8B achievedLSN][8B lastDataEpoch][8B lastDataFirstLSN]
 func EncodeBarrierResp(r BarrierResponse) []byte {
 	buf := make([]byte, barrierRespSize)
 	copy(buf[0:32], EncodeLineage(r.Lineage))
 	binary.BigEndian.PutUint64(buf[32:40], r.AchievedLSN)
 	binary.BigEndian.PutUint64(buf[40:48], r.LastDataEpoch)
+	binary.BigEndian.PutUint64(buf[48:56], r.LastDataFirstLSN)
 	return buf
 }
 
@@ -111,6 +116,7 @@ func DecodeBarrierResp(buf []byte) (BarrierResponse, error) {
 	}
 	if len(buf) >= barrierRespSize {
 		resp.LastDataEpoch = binary.BigEndian.Uint64(buf[40:48])
+		resp.LastDataFirstLSN = binary.BigEndian.Uint64(buf[48:56])
 	}
 	return resp, nil
 }

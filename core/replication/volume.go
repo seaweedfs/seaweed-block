@@ -247,7 +247,7 @@ func (v *ReplicationVolume) reconcilePeer(ctx context.Context, peer *ReplicaPeer
 	if err != nil {
 		return false, false, fmt.Sprintf("barrier: %v", err)
 	}
-	if shared, ok := v.epochs.SharedEnd(ack.LastDataEpoch, ack.AchievedLSN); !ok {
+	if shared, ok := v.epochs.SharedEnd(ack.LastDataEpoch, ack.LastDataFirstLSN, ack.AchievedLSN); !ok {
 		return false, true, fmt.Sprintf("divergent (last data epoch %d, end %d; shared up to %d)", ack.LastDataEpoch, ack.AchievedLSN, shared)
 	}
 	if ack.AchievedLSN < frontier {
@@ -584,7 +584,7 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 			continue
 		}
 		if v.epochs != nil {
-			if shared, ok := v.epochs.SharedEnd(ack.LastDataEpoch, ack.AchievedLSN); !ok {
+			if shared, ok := v.epochs.SharedEnd(ack.LastDataEpoch, ack.LastDataFirstLSN, ack.AchievedLSN); !ok {
 				markDiverged(peer, fmt.Sprintf("promotion seed barrier: divergent entries (last data epoch %d, end %d; shared up to %d)",
 					ack.LastDataEpoch, ack.AchievedLSN, shared))
 				log.Printf("replication: volume %s live cursor seed rejected peer=%s: divergent (epoch %d, end %d) shared to %d",

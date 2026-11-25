@@ -88,3 +88,15 @@ func TestPromotionSeed_EpochTableControls(t *testing.T) {
 		})
 	}
 }
+
+// The receiver check: both tables end at epoch 2, but the survivor's epoch 2
+// starts at 7 (it kept an old tail 5..6), the primary's at 5. The epoch
+// number alone reads in sync; its first LSN does not.
+func TestPromotionSeed_SameEpochStartingElsewhereIsRebuilt(t *testing.T) {
+	got := seedWithTables(t, 8,
+		[]transport.EpochRow{{Epoch: 1, FirstLSN: 1}, {Epoch: 2, FirstLSN: 7}},
+		[]transport.EpochRow{{Epoch: 1, FirstLSN: 1}, {Epoch: 2, FirstLSN: 5}})
+	if got != ReplicaNeedsRebuild {
+		t.Fatalf("peer state %s; want needs_rebuild for epoch 2 starting at 7 against 5", got)
+	}
+}

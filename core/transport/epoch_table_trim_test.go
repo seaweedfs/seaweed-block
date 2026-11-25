@@ -29,10 +29,10 @@ func TestEpochTable_TrimAboveTheRecoveredEndKeepsTheNewWritesInTheirEpoch(t *tes
 	if err := again.Note(2, 6); err != nil {
 		t.Fatal(err)
 	}
-	if _, shared := again.SharedEnd(1, 8); shared {
+	if _, shared := again.SharedEnd(1, 1, 8); shared {
 		t.Fatalf("an epoch-1 tail ending at 8 reconciles as shared with rows %v; want diverged (6..8 are epoch 2 here)", again.Rows())
 	}
-	if _, shared := again.SharedEnd(1, 5); !shared {
+	if _, shared := again.SharedEnd(1, 1, 5); !shared {
 		t.Fatalf("the shared epoch-1 prefix to 5 is not shared with rows %v", again.Rows())
 	}
 	reloaded, _ := LoadEpochTable(path, "v1")
