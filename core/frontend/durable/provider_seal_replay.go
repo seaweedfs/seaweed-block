@@ -114,7 +114,7 @@ func (p *DurableProvider) readLayoutSeal(ctx context.Context, volumeID string, h
 	if head.Epoch != me.Epoch || head.Holder != me.Holder || head.ClaimID != me.ClaimID {
 		return storage.ChunkHead{}, ErrChunkEpochStale
 	}
-	if !head.DetachedBy(me) {
+	if !layout.DetachedBy(head, me) {
 		return storage.ChunkHead{}, errors.New("durable: layout HEAD is not detached")
 	}
 	return layoutDetachResult(head).Head, nil
