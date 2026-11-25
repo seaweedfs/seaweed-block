@@ -48,6 +48,15 @@ func newReplicationIngress(f flags, store storage.LogicalStorage) *replicationIn
 	return r
 }
 
+// EpochFloor is the volume's durable epoch floor (the highest epoch it took a
+// role at), read from the floor record.
+func (r *replicationIngress) EpochFloor() (uint64, error) {
+	if r.floorPath == "" {
+		return 0, fmt.Errorf("volume %s keeps no floor record", r.volumeID)
+	}
+	return transport.LoadFloorRecord(r.floorPath, r.volumeID)
+}
+
 // EpochTable is the volume's epoch table (nil when it failed to load).
 func (r *replicationIngress) EpochTable() *transport.EpochTable { return r.epochs }
 

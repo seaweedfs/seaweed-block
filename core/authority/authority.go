@@ -549,6 +549,13 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 		next.CtrlAddr = ask.CtrlAddr
 
 	case IntentReassign:
+		// A primary change carries how it was decided (a kind, and for a
+		// promotion the gate's evidence): the mint never issues a line its
+		// target could not check.
+		if ask.Evidence.Kind == adapter.PrimaryKindUnspecified {
+			p.mu.Unlock()
+			return fmt.Errorf("%w: volume %s replica %s", ErrReassignWithoutKind, ask.VolumeID, ask.ReplicaID)
+		}
 		// Per the P14 S3 "reassign semantic" boundary note
 		// (sw-block/design/v3-phase-14-s3-reassign-semantic.md):
 		// IntentReassign is a PER-VOLUME authority advance, not a

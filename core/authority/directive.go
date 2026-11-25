@@ -75,6 +75,10 @@ type AssignmentAsk struct {
 	Evidence adapter.PrimaryEvidence
 }
 
+// ErrReassignWithoutKind: a primary change was asked without a kind (no
+// promotion-gate evidence, not a forced move); the publisher mints no line.
+var ErrReassignWithoutKind = errors.New("authority: a reassign needs a primary kind (promotion evidence or a forced move)")
+
 // Directive is the input side of the authority route. A Directive
 // emits one AssignmentAsk at a time. The publisher's Run loop calls
 // Next repeatedly until ctx cancellation.

@@ -918,7 +918,11 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 			h.refusePrimary(fmt.Sprintf("epoch %d: the local store's evidence is unreadable: %v", fact.Epoch, err))
 			return
 		}
-		if reason := checkPrimaryEvidence(fact, st, end); reason != "" {
+		floor, floorErr := uint64(0), error(nil)
+		if fr, ok := h.selfFenceFloor(); ok {
+			floor, floorErr = fr.EpochFloor()
+		}
+		if reason := checkPrimaryEvidence(fact, st, end, floor, floorErr == nil && floor > 0); reason != "" {
 			h.refusePrimary(reason)
 			return
 		}

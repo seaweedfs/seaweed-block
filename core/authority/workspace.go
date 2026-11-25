@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // WorkspaceHead is read from the configured HEAD source, never supplied as
@@ -270,7 +272,11 @@ func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest,
 	if replay {
 		return r, nil
 	}
-	err = p.applyWithWorkspaceMove(AssignmentAsk{VolumeID: req.VolumeID, ReplicaID: req.TargetReplicaID, DataAddr: req.TargetDataAddr, CtrlAddr: req.TargetCtrlAddr, Intent: IntentReassign}, &workspaceGrant{req, head})
+	kind := adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion} // a clean move: the source detached at its sealed image
+	if req.Kind == "forced" {
+		kind = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindForced}
+	}
+	err = p.applyWithWorkspaceMove(AssignmentAsk{VolumeID: req.VolumeID, ReplicaID: req.TargetReplicaID, DataAddr: req.TargetDataAddr, CtrlAddr: req.TargetCtrlAddr, Intent: IntentReassign, Evidence: kind}, &workspaceGrant{req, head})
 	if err != nil {
 		return WorkspaceMoveRecord{}, err
 	}
