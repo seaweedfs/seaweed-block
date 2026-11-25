@@ -224,21 +224,9 @@ func foreignOwners(ctx context.Context, r *layout.Reader, h layout.Head) ([]Volu
 
 // rootRefs returns every chunk reference the root names.
 func rootRefs(ctx context.Context, r *layout.Reader, rn layout.RootName) ([]layout.Ref, error) {
-	img, err := r.Open(ctx, rn)
-	if err != nil {
-		return nil, err
-	}
 	var out []layout.Ref
-	for _, sh := range img.Shards() {
-		seg, _, err := img.Segment(ctx, sh)
-		if err != nil {
-			return nil, err
-		}
-		for _, ref := range seg.Chunks {
-			out = append(out, ref)
-		}
-	}
-	return out, nil
+	err := r.EachRef(ctx, rn, layout.AllShards, func(_ uint64, ref layout.Ref) bool { out = append(out, ref); return true })
+	return out, err
 }
 
 // listObjects lists the volume's pool, segment and root entries.
