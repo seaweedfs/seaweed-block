@@ -73,11 +73,42 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		createVolumeHook(spec.VolumeID)
 	}
 	s.host.log.Printf("blockmaster: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
-	rec, err := stores.Volumes.CreateVolume(spec)
+	rec, err := s.host.createLifecycleVolume(ctx, spec)
 	if err != nil {
+		if errors.Is(err, errLayoutStoreNotReady) {
+			return nil, status.Errorf(codes.Unavailable, "create volume: created, store not ready; retry: %v", err)
+		}
 		return nil, lifecycleError("create volume", err)
 	}
 	return lifecycleVolumeResponse(rec)
+}
+
+var errLayoutStoreNotReady = errors.New("layout store not ready")
+
+// createLifecycleVolume is called under workspaceMu. A failed filer create
+// leaves the durable record not-ready; replay uses its same identity and
+// completes VOLUME/HEAD before publishing the one-way placement hint.
+func (h *Host) createLifecycleVolume(ctx context.Context, spec lifecycle.VolumeSpec) (lifecycle.VolumeRecord, error) {
+	rec, err := h.lifecycle.Volumes.CreateVolume(spec)
+	if err != nil {
+		return lifecycle.VolumeRecord{}, err
+	}
+	if h.cfg.LayoutCreateVolume == nil {
+		if h.cfg.WorkspaceRPC {
+			return lifecycle.VolumeRecord{}, fmt.Errorf("%w: master has no filer writer", errLayoutStoreNotReady)
+		}
+		return rec, nil
+	}
+	if rec.StoreReady {
+		// A missing HEAD after the volume was made ready is damage, not a
+		// half-finished create. Start checks the filer and refuses it; a
+		// CreateVolume replay must never seed an empty HEAD over its lineage.
+		return rec, nil
+	}
+	if err := h.cfg.LayoutCreateVolume(ctx, rec.Spec); err != nil {
+		return lifecycle.VolumeRecord{}, fmt.Errorf("%w: %v", errLayoutStoreNotReady, err)
+	}
+	return h.lifecycle.Volumes.MarkStoreReady(rec.Spec.VolumeID, rec.Spec.LayoutID)
 }
 
 func lifecycleVolumeResponse(rec lifecycle.VolumeRecord) (*control.CreateVolumeResponse, error) {
@@ -88,6 +119,9 @@ func lifecycleVolumeResponse(rec lifecycle.VolumeRecord) (*control.CreateVolumeR
 		VolumeId:          rec.Spec.VolumeID,
 		LayoutId:          rec.Spec.LayoutID,
 		SizeBytes:         rec.Spec.SizeBytes,
+		BlockSize:         rec.Spec.BlockSize,
+		ChunkBytes:        rec.Spec.ChunkBytes,
+		StoreReady:        rec.StoreReady,
 		ReplicationFactor: int32(rec.Spec.ReplicationFactor),
 		Protocol:          rec.Spec.Protocol,
 		FrontendTransport: rec.Spec.FrontendTransport,
@@ -234,7 +268,7 @@ func (h *Host) ImportLifecycleVolume(spec lifecycle.VolumeSpec) (imported bool, 
 	if stores.Deletions.Reserved(spec.VolumeID) {
 		return false, nil
 	}
-	if _, err := stores.Volumes.CreateVolume(spec); err != nil {
+	if _, err := h.createLifecycleVolume(context.Background(), spec); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -371,6 +405,8 @@ func lifecycleSpecFromWire(req *control.CreateVolumeRequest) lifecycle.VolumeSpe
 	return lifecycle.VolumeSpec{
 		VolumeID:          req.GetVolumeId(),
 		SizeBytes:         req.GetSizeBytes(),
+		BlockSize:         req.GetBlockSize(),
+		ChunkBytes:        req.GetChunkBytes(),
 		ReplicationFactor: int(req.GetReplicationFactor()),
 		Protocol:          req.GetProtocol(),
 		FrontendTransport: req.GetFrontendTransport(),

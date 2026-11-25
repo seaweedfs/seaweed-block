@@ -50,7 +50,7 @@ func startAuthMaster(t *testing.T) authMaster {
 	}
 	authn := auth.NewAuthenticator(table, nil)
 	authn.SetAudit(auth.NewAuditLog(io.Discard, nil)) // strict calls need an audit log
-	h, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true,
+	h, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume,
 		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
 			return authority.WorkspaceHead{Gen: 2, Epoch: 1, Holder: "node-a/r1"}, nil
 		},

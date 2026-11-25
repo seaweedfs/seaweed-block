@@ -66,7 +66,7 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 	// New placements never choose a co-located node under strict journal
 	// isolation; existing placements still verify against every node.
 	reconciled := h.reconcilePlacements(stores, nodes)
-	placements := stores.Placements.ListPlacements()
+	placements := h.readyPlacements(stores.Placements.ListPlacements())
 	verified := h.verifyPlacements(placements, nodes)
 	result := LifecycleProductTickResult{
 		ReconciledVolumes:  len(reconciled),
@@ -82,7 +82,7 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 	}
 	// A remote probe may have overlapped a placement/move/delete. Never use
 	// its captured intent after that local intent has changed.
-	if !reflect.DeepEqual(placements, stores.Placements.ListPlacements()) {
+	if !reflect.DeepEqual(placements, h.readyPlacements(stores.Placements.ListPlacements())) {
 		return result, nil
 	}
 	verified = h.verifyPlacements(placements, stores.Nodes.ListNodes())
@@ -136,6 +136,7 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 }
 
 func (h *Host) submitPlacementSnapshots(placements []lifecycle.PlacementIntent) (bool, int, int, []authority.AssignmentAsk, error) {
+	placements = h.readyPlacements(placements)
 	captured := placements
 
 	if h.obs == nil || h.ctrl == nil {

@@ -83,6 +83,9 @@ type Config struct {
 	WorkspaceMaxClockSkew time.Duration
 	WorkspaceRPC          bool
 	WorkspaceHeadReader   func(context.Context, string) (authority.WorkspaceHead, error)
+	// LayoutCreateVolume writes VOLUME then the unclaimed HEAD using the
+	// immutable identity and geometry in the persisted lifecycle record.
+	LayoutCreateVolume func(context.Context, lifecycle.VolumeSpec) error
 
 	// FrontendPublicationRuntimeHTTP enables the frontend publication runtime
 	// HTTP surface. It is disabled by default and only confirms a post-failback

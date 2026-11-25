@@ -46,14 +46,14 @@ func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
 		return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r2", RemoteLSN: 42, Detached: detached.Load()}, nil
 	}
 	authDir, lifeDir := t.TempDir(), t.TempDir()
-	cfg := Config{AuthorityStoreDir: authDir, LifecycleStoreDir: lifeDir, Listen: "127.0.0.1:0", WorkspaceRPC: true, WorkspaceHeadReader: reader}
+	cfg := Config{AuthorityStoreDir: authDir, LifecycleStoreDir: lifeDir, Listen: "127.0.0.1:0", WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume, WorkspaceHeadReader: reader}
 	h, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Start()
 	defer closeTestMaster(t, h)
-	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+	if _, err := testCreateReadyVolume(h.Lifecycle().Volumes, lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-b", DataAddr: "127.0.0.1:9201", CtrlAddr: "127.0.0.1:9101"}); err != nil {

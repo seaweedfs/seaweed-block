@@ -63,6 +63,10 @@ type flags struct {
 	workspaceMaxClockSkew                 time.Duration
 	workspaceRPC                          bool
 	workspaceHEADBase                     string
+	chunkFiler                            string
+	chunkPath                             string
+	chunkCollection                       string
+	chunkReplication                      string
 	frontendPublicationRuntimeHTTP        bool
 	frontendPublicationRuntimeListen      string
 	strictJournalIsolation                bool
@@ -122,6 +126,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.DurationVar(&f.workspaceMaxClockSkew, "workspace-max-clock-skew", 20*time.Second, "maximum workspace clock skew; host lease shortens by half, forced moves wait the full bound")
 	fs.BoolVar(&f.workspaceRPC, "workspace-rpc", false, "enable RF1 workspace lease/revocation/move RPCs")
 	fs.StringVar(&f.workspaceHEADBase, "workspace-head-base-url", "", "filer HTTP base containing <name>-<layout-id-prefix>/HEAD; required with --workspace-rpc")
+	chunkstore.RegisterSWFSFlags(fs, &f.chunkFiler, &f.chunkPath, &f.chunkCollection, &f.chunkReplication)
 	fs.BoolVar(&f.frontendPublicationRuntimeHTTP, "frontend-publication-runtime-http", false, "enable disabled-by-default frontend publication HTTP runtime; confirms post-failback authority publication only")
 	fs.StringVar(&f.frontendPublicationRuntimeListen, "frontend-publication-runtime-listen", "127.0.0.1:9334", "HTTP listen address for --frontend-publication-runtime-http")
 	fs.BoolVar(&f.strictJournalIsolation, "strict-journal-isolation", false, "refuse new work on nodes whose durable root shares the authority store's file system (one journal): their heartbeats are refused until they serve a volume, and no placement or move targets them; off = alarm only")
@@ -228,6 +233,18 @@ func run(f flags) int {
 		return 1
 	}
 	cfg.Auth, cfg.ServerOptions = authn, serverOpts
+	if f.workspaceRPC {
+		cat, client, err := chunkstore.DialBCatalog(context.Background(), chunkstore.SWFSConfig{
+			FilerGRPC: f.chunkFiler, Collection: f.chunkCollection,
+			Replication: f.chunkReplication, AssignPath: f.chunkPath,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster: layout filer:", err)
+			return 1
+		}
+		defer client.Close()
+		cfg.LayoutCreateVolume = layoutVolumeCreator(cat)
+	}
 	if authn != nil {
 		if days, until, err := certDaysLeft(f.auth.tlsCert, f.auth.tlsKey, time.Now()); err == nil {
 			fmt.Fprintln(os.Stderr, fmt.Sprintf("blockmaster: mutual TLS on; role file %s; own certificate expires %s (%d days)", f.auth.roleFile, until.UTC().Format(time.RFC3339), days))

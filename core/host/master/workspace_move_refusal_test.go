@@ -42,7 +42,7 @@ func (s *syncBuffer) String() string {
 // on that node).
 func TestWorkspaceMoveRefusalNamesTheMissingPrecondition(t *testing.T) {
 	logs := &syncBuffer{}
-	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true,
+	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume,
 		Logger: log.New(logs, "", 0),
 		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
 			return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, Detached: true}, nil
@@ -153,7 +153,7 @@ func (b *blockingWriter) Write(p []byte) (int, error) {
 // writer is blocked, another workspace RPC still gets the lock.
 func TestWorkspaceMoveRefusalLogsOutsideTheWorkspaceLock(t *testing.T) {
 	w := &blockingWriter{marker: "MoveWorkspace refused", entered: make(chan struct{}), release: make(chan struct{})}
-	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, Logger: log.New(w, "", 0),
+	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume, Logger: log.New(w, "", 0),
 		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) { return authority.WorkspaceHead{}, nil }})
 	if err != nil {
 		t.Fatal(err)

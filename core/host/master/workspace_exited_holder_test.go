@@ -38,7 +38,7 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 		return authority.WorkspaceHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN, Detached: h.State == storage.ChunkHeadDetached}, nil
 	}
 	const skew = 100 * time.Millisecond
-	m, err := New(Config{WorkspaceMaxClockSkew: skew, Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, WorkspaceHeadReader: reader})
+	m, err := New(Config{WorkspaceMaxClockSkew: skew, Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume, WorkspaceHeadReader: reader})
 	if err != nil {
 		t.Fatal(err)
 	}

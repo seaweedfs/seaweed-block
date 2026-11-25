@@ -38,6 +38,8 @@ type VolumeSpec struct {
 	VolumeID          string `json:"volume_id"`
 	LayoutID          string `json:"layout_id,omitempty"`
 	SizeBytes         uint64 `json:"size_bytes"`
+	BlockSize         uint32 `json:"block_size"`
+	ChunkBytes        uint64 `json:"chunk_bytes"`
 	ReplicationFactor int    `json:"replication_factor"`
 	Protocol          string `json:"protocol,omitempty"`
 	FrontendTransport string `json:"frontend_transport,omitempty"`
@@ -51,6 +53,10 @@ type VolumeSpec struct {
 type VolumeRecord struct {
 	Spec       VolumeSpec `json:"spec"`
 	AttachedTo string     `json:"attached_to,omitempty"`
+	// StoreReady is a one-way placement hint, set only after the matching
+	// VOLUME and unclaimed HEAD have been created in the filer. Start still
+	// checks those records independently before serving.
+	StoreReady bool `json:"store_ready,omitempty"`
 }
 
 // FileStore persists one JSON record per volume ID.
@@ -187,12 +193,39 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	return rec, nil
 }
 
+// MarkStoreReady publishes the durable placement hint after the filer has
+// accepted both exclusive creates. A retry of the same create may repeat it;
+// another layout identity may not mark this record ready.
+func (s *FileStore) MarkStoreReady(volumeID, layoutID string) (VolumeRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[volumeID]
+	if !ok {
+		return VolumeRecord{}, ErrVolumeNotFound
+	}
+	if rec.Spec.LayoutID != layoutID {
+		return VolumeRecord{}, ErrVolumeConflict
+	}
+	if rec.StoreReady {
+		return rec, nil
+	}
+	rec.StoreReady = true
+	if err := s.putLocked(rec); err != nil {
+		return VolumeRecord{}, err
+	}
+	s.records[volumeID] = rec
+	s.publishLocked()
+	return rec, nil
+}
+
 func volumeSpecsCompatible(a, b VolumeSpec) bool {
 	a = normalizeVolumeSpec(a)
 	b = normalizeVolumeSpec(b)
 	return a.VolumeID == b.VolumeID &&
 		(b.LayoutID == "" || a.LayoutID == b.LayoutID) &&
 		a.SizeBytes == b.SizeBytes &&
+		a.BlockSize == b.BlockSize &&
+		a.ChunkBytes == b.ChunkBytes &&
 		a.ReplicationFactor == b.ReplicationFactor &&
 		a.Protocol == b.Protocol &&
 		a.FrontendTransport == b.FrontendTransport
@@ -361,6 +394,12 @@ func validateSpec(spec VolumeSpec) error {
 	if spec.SizeBytes == 0 {
 		return fmt.Errorf("%w: size_bytes must be > 0", ErrInvalidVolumeSpec)
 	}
+	if err := (layout.Geometry{SizeBytes: spec.SizeBytes, BlockSize: spec.BlockSize, ChunkBytes: spec.ChunkBytes}).Check(); err != nil {
+		return fmt.Errorf("%w: geometry: %v", ErrInvalidVolumeSpec, err)
+	}
+	if spec.BlockSize != 4096 || spec.ChunkBytes != 4<<20 {
+		return fmt.Errorf("%w: v1 accepts only block_size=4096 and chunk_bytes=4194304", ErrInvalidVolumeSpec)
+	}
 	if spec.ReplicationFactor <= 0 {
 		return fmt.Errorf("%w: replication_factor must be > 0", ErrInvalidVolumeSpec)
 	}
@@ -380,6 +419,12 @@ func validateSpec(spec VolumeSpec) error {
 }
 
 func normalizeVolumeSpec(spec VolumeSpec) VolumeSpec {
+	if spec.BlockSize == 0 {
+		spec.BlockSize = 4096
+	}
+	if spec.ChunkBytes == 0 {
+		spec.ChunkBytes = 4 << 20
+	}
 	if spec.Protocol == "" {
 		spec.Protocol = "iscsi"
 	}

@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	defaultChunkPath = "/swblock/chunks"
+	defaultChunkPath = chunkstore.DefaultChunkPath
 	// Periodic HEAD publication bounds the host-loss recovery point. Scheduled
 	// named snapshots are set by --chunk-snapshot-schedule.
 	defaultChunkCaptureInterval     = 0
@@ -162,7 +162,7 @@ type chunkWiring struct {
 // newChunkWiring dials the filer and refuses unless it is the only filer of
 // its group (chunkstore.CheckSingleFiler).
 func newChunkWiring(c chunkFlags, masterTLS grpc.DialOption, master ...string) (chunkWiring, error) {
-	client, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{
+	bcat, client, err := chunkstore.DialBCatalog(context.Background(), chunkstore.SWFSConfig{
 		FilerGRPC:   c.filer,
 		Collection:  c.collection,
 		Replication: c.replication,
@@ -171,31 +171,42 @@ func newChunkWiring(c chunkFlags, masterTLS grpc.DialOption, master ...string) (
 	if err != nil {
 		return chunkWiring{}, err
 	}
-	// Deployment rule: block metadata goes through exactly one filer.
-	if err := client.CheckSingleFiler(context.Background()); err != nil {
-		_ = client.Close()
-		return chunkWiring{}, err
-	}
-	bcat, err := chunkstore.NewBCatalog(client, client, c.path)
-	if err != nil {
-		_ = client.Close()
-		return chunkWiring{}, err
-	}
 	return chunkWiring{
 		bCatalog: bcat,
 		close:    client.Close,
 	}, nil
 }
 
-// chunkAttachCheck creates only the master's identified volume. Geometry is
-// written once in VOLUME; no second catalog record is created.
+// chunkAttachCheck admits only a volume the master already created in the
+// store. Starting a holder never creates VOLUME or HEAD.
 func chunkAttachCheck(cat *chunkstore.BCatalog, ref chunkstore.VolumeRef) func(context.Context, string, durable.ChunkGeometry) error {
 	return func(ctx context.Context, name string, g durable.ChunkGeometry) error {
 		if cat == nil || name != ref.Name || ref.ID.IsZero() {
 			return layout.ErrIdentity
 		}
-		_, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: g.NumBlocks * uint64(g.BlockSize), BlockSize: g.BlockSize, ChunkBytes: uint64(g.ChunkBlocks) * uint64(g.BlockSize)})
-		return err
+		st, err := cat.Store(ref)
+		if err != nil {
+			return err
+		}
+		v, found, err := st.ReadVolumeRecord(ctx)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: volume %s not created in the store", layout.ErrMissing, name)
+		}
+		want := layout.Geometry{SizeBytes: g.NumBlocks * uint64(g.BlockSize), BlockSize: g.BlockSize, ChunkBytes: uint64(g.ChunkBlocks) * uint64(g.BlockSize)}
+		if v.Geometry != want {
+			return fmt.Errorf("%w: local %+v differs from VOLUME %+v", layout.ErrGeometryMismatch, want, v.Geometry)
+		}
+		_, found, err = cat.ReadHead(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: volume %s not created in the store", layout.ErrHeadAbsent, name)
+		}
+		return nil
 	}
 }
 
@@ -222,7 +233,10 @@ func geometryFlagsRefusal(ctx context.Context, cat *chunkstore.BCatalog, ref chu
 		}
 		return fmt.Sprintf("blockvolume: the volume record of %s could not be read (%v); no local store was created; retrying", ref.Name, err), exitWorkspaceRetry
 	}
-	if !found || (v.SizeBytes == numBlocks*uint64(blockSize) && v.BlockSize == blockSize && v.ChunkBytes == uint64(chunkBlocks)*uint64(blockSize)) {
+	if !found {
+		return fmt.Sprintf("blockvolume: volume %s was not created in the store; no local store was created; retry the master CreateVolume operation", ref.Name), exitGeometryRefused
+	}
+	if v.SizeBytes == numBlocks*uint64(blockSize) && v.BlockSize == blockSize && v.ChunkBytes == uint64(chunkBlocks)*uint64(blockSize) {
 		return "", 0
 	}
 	return fmt.Sprintf("blockvolume: geometry_mismatch: --durable-blocks %d --durable-blocksize %d --chunk-blocks %d disagree with the volume record of %s (%d blocks of %d bytes, chunk_bytes %d); no local store was created; start it with the record's geometry", numBlocks, blockSize, chunkBlocks, ref.Name, v.SizeBytes/uint64(v.BlockSize), v.BlockSize, v.ChunkBytes), exitGeometryRefused

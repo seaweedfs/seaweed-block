@@ -121,9 +121,8 @@ func TestChunkVolumeRootStaysInsideBase(t *testing.T) {
 // Before any local store is created, a geometry flag that disagrees with the
 // volume record is refused with a line naming both (78); a record the filer
 // could not deliver is refused as retryable (75), never taken as "absent";
-// a record that is there but does not decode is refused for good (78); a matching
-// record, a missing record (the attach check creates it) and an existing
-// store (no create geometry) are not refused.
+// a record that is there but does not decode is refused for good (78);
+// a missing record is also refused (78), while matching geometry proceeds.
 func TestGeometryFlagsRefusalComparesTheRecord(t *testing.T) {
 	ctx := context.Background()
 
@@ -138,8 +137,8 @@ func TestGeometryFlagsRefusalComparesTheRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, code := geometryFlagsRefusal(ctx, cat, ref, 32768, 4096, 1024); got != "" || code != 0 {
-		t.Fatal(got, code)
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 32768, 4096, 1024); code != exitGeometryRefused || !strings.Contains(got, "not created in the store") {
+		t.Fatal("missing VOLUME must refuse attach", got, code)
 	}
 	g := layout.Geometry{SizeBytes: 65536 * 4096, BlockSize: 4096, ChunkBytes: 1024 * 4096}
 	if _, err := cat.CreateVolume(ctx, ref, g); err != nil {
@@ -199,7 +198,7 @@ func (f *lookupFailFiler) LookupEntry(ctx context.Context, dir, name string) (*f
 	return f.MemFiler.LookupEntry(ctx, dir, name)
 }
 
-// Attach creates an unclaimed HEAD only in the master's identified directory.
+// Attach only reads the master's identified VOLUME and HEAD.
 func TestChunkAttachCheckAppliesVolumeRules(t *testing.T) {
 	ctx := context.Background()
 	f := &layoutAttachFiler{MemFiler: chunkstore.NewMemFiler()}
@@ -211,6 +210,15 @@ func TestChunkAttachCheckAppliesVolumeRules(t *testing.T) {
 	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
 	check := chunkAttachCheck(cat, ref)
 	g := durable.ChunkGeometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}
+	if err := check(ctx, "v1", g); !errors.Is(err, layout.ErrMissing) {
+		t.Fatal("attach created a missing volume", err)
+	}
+	if _, found, err := cat.ReadHead(ctx, ref); err != nil || found {
+		t.Fatal("attach created a missing HEAD", found, err)
+	}
+	if _, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 8 * 4096}); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 2; i++ {
 		if err := check(ctx, "v1", g); err != nil {
 			t.Fatal(err)

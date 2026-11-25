@@ -213,6 +213,9 @@ func (h *Host) admitWorkspacePublication(ask authority.AssignmentAsk, publish fu
 	if _, alive := h.lifecycle.Volumes.GetVolume(ask.VolumeID); !alive {
 		return fmt.Errorf("workspace publication: no lifecycle VolumeRecord for %s; register it (CreateVolume) before publishing", ask.VolumeID)
 	}
+	if !h.layoutStoreReady(ask.VolumeID) {
+		return fmt.Errorf("workspace publication: volume %s created, store not ready; retry CreateVolume", ask.VolumeID)
+	}
 	bindings, bound, err := h.lifecycle.WorkspaceBindings.Get(ask.VolumeID)
 	if err != nil {
 		return err

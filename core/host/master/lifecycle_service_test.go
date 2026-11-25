@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -10,6 +11,39 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestCreateVolumeRetriesFilerCreateBeforeStoreReady(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	failure := errors.New("filer unavailable")
+	var calls []lifecycle.VolumeSpec
+	h.cfg.LayoutCreateVolume = func(_ context.Context, spec lifecycle.VolumeSpec) error {
+		calls = append(calls, spec)
+		if len(calls) == 1 {
+			return failure
+		}
+		return nil
+	}
+	svc := newServices(h)
+	req := &control.CreateVolumeRequest{VolumeId: "v", SizeBytes: 1 << 20, ReplicationFactor: 1}
+	if _, err := svc.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+		t.Fatalf("first create=%v, want retryable unavailable", err)
+	}
+	partial, ok := h.Lifecycle().Volumes.GetVolume("v")
+	if !ok || partial.StoreReady {
+		t.Fatalf("partial create advertised readiness: %+v", partial)
+	}
+	resp, err := svc.CreateVolume(context.Background(), req)
+	if err != nil || !resp.GetStoreReady() {
+		t.Fatalf("replay did not heal: response=%+v err=%v", resp, err)
+	}
+	if len(calls) != 2 || calls[0] != calls[1] || calls[0].LayoutID != partial.Spec.LayoutID {
+		t.Fatalf("replay changed persisted identity: calls=%+v partial=%+v", calls, partial)
+	}
+	if _, err := svc.CreateVolume(context.Background(), req); err != nil || len(calls) != 2 {
+		t.Fatalf("ready replay must not create an absent HEAD after service: calls=%d err=%v", len(calls), err)
+	}
+}
 
 func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	h := newTestMaster(t, t.TempDir())
@@ -33,6 +67,12 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if resp.GetVolumeId() != "pvc-a" || resp.GetSizeBytes() != 1<<30 || resp.GetReplicationFactor() != 2 {
 		t.Fatalf("response=%+v", resp)
 	}
+	if resp.GetBlockSize() != 4096 || resp.GetChunkBytes() != 4<<20 {
+		t.Fatalf("response geometry=%+v", resp)
+	}
+	if resp.GetStoreReady() {
+		t.Fatal("record without filer creation advertised store readiness")
+	}
 	if resp.GetPvcName() != "demo-pvc" || resp.GetPvcNamespace() != "demo-ns" || resp.GetPvcUid() != "uid-123" || resp.GetPvName() != "pvc-a" {
 		t.Fatalf("kubernetes metadata response=%+v", resp)
 	}
@@ -48,6 +88,9 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	}
 	if rec.Spec.VolumeID != "pvc-a" || rec.Spec.SizeBytes != 1<<30 || rec.Spec.ReplicationFactor != 2 {
 		t.Fatalf("record=%+v", rec)
+	}
+	if rec.Spec.BlockSize != 4096 || rec.Spec.ChunkBytes != 4<<20 {
+		t.Fatalf("record geometry=%+v", rec.Spec)
 	}
 	if resp.GetLayoutId() == "" || resp.GetLayoutId() != rec.Spec.LayoutID {
 		t.Fatal("create response does not carry the durable layout identity")
