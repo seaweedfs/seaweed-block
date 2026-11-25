@@ -531,7 +531,7 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		addedPeers = append(addedPeers, peer)
 	}
 
-	v.seedNewPeerLiveCursorsLocked(addedPeers)
+	learn := v.seedNewPeerLiveCursorsLocked(addedPeers)
 	v.applyExpectedStoresLocked(targets)
 
 	// Advance the monotonic guard only for real (non-zero) generations.
@@ -540,23 +540,29 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 	}
 	v.membershipUpdating = false
 	v.mu.Unlock()
+	v.learnPeerStores(learn)
 	return nil
 }
 
-// learnPeerStoresLocked runs a barrier at LSN 0 to each peer: the answer
-// carries the peer's store. A peer that does not answer stays as it is (its
-// store is learned at its next barrier).
-func (v *ReplicationVolume) learnPeerStoresLocked(peers []*ReplicaPeer) {
+// learnPeerStores runs a barrier at LSN 0 to each peer, in parallel and
+// without v.mu (only the UpdateReplicaSet call waits, at most one barrier
+// timeout): the answer carries the peer's store. A peer that does not answer
+// is degraded like any failed barrier; its store is learned at the barrier
+// that heals it.
+func (v *ReplicationVolume) learnPeerStores(peers []*ReplicaPeer) {
+	var wg sync.WaitGroup
 	for _, peer := range peers {
-		if peer == nil {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), promotionSeedBarrierTimeout)
-		if _, err := peer.Barrier(ctx, 0); err != nil {
-			log.Printf("replication: volume %s store barrier peer=%s: %v", v.volumeID, peer.Target().ReplicaID, err)
-		}
-		cancel()
+		wg.Add(1)
+		go func(peer *ReplicaPeer) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), promotionSeedBarrierTimeout)
+			defer cancel()
+			if _, err := peer.Barrier(ctx, 0); err != nil {
+				log.Printf("replication: volume %s store barrier peer=%s: %v", v.volumeID, peer.Target().ReplicaID, err)
+			}
+		}(peer)
 	}
+	wg.Wait()
 }
 
 func (v *ReplicationVolume) closePeerQueueLocked(replicaID string) {
@@ -611,24 +617,28 @@ func (v *ReplicationVolume) replaceTerminalPeerQueueLocked(id string, old *peerW
 // cannot satisfy sync-quorum/sync-all write acknowledgement. A peer that
 // answers above the frontier holds a divergent old-epoch tail and is
 // degraded too (it needs a rebuild, never counts by length).
-func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
+//
+// It returns the peers whose store is still to be learned (a new volume
+// where stores are required): the caller runs learnPeerStores on them after
+// releasing v.mu.
+func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) []*ReplicaPeer {
 	if len(peers) == 0 {
-		return
+		return nil
 	}
 	frontier, err := v.store.Sync()
 	if err != nil {
 		log.Printf("replication: volume %s live cursor seed skipped: local sync failed: %v",
 			v.volumeID, err)
-		return
+		return nil
 	}
 	if frontier == 0 {
 		// Nothing to seed. Where stores are required, a barrier at 0 still
 		// teaches the primary each new peer's store, so it can attest it
 		// before any write (a new volume serves nothing until then).
 		if v.requireAttest {
-			v.learnPeerStoresLocked(peers)
+			return peers
 		}
-		return
+		return nil
 	}
 	for _, peer := range peers {
 		if peer == nil {
@@ -672,6 +682,7 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 		}
 		peer.SeedLiveShipCursor(frontier, "assignment frontier barrier")
 	}
+	return nil
 }
 
 // peerIDSet extracts the set of peer IDs from the current peers map.

@@ -63,3 +63,43 @@ func TestUnrecordedReplicaAckDoesNotCompleteAQuorumWrite(t *testing.T) {
 		t.Fatalf("the flush after replica-1's store was recorded: %v", err)
 	}
 }
+
+// CONVERGENCE, with no operator: a replica whose store the master does not
+// have (an upgraded volume: nothing recorded; a rebuilt replica: its old
+// store recorded) fails sync_all flushes, but the failure leaves it Healthy
+// with its barrier-learned store, so the primary's next attestation names
+// that store. The master records it and re-sends the descriptors; the next
+// flush counts it. The window is one attestation round (a heartbeat plus the
+// re-send); the rule is not relaxed during it.
+func TestUnrecordedReplicaConvergesThroughItsAttestation(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		recorded func(real storage.StoreID) map[string]storage.StoreID
+	}{
+		{"upgraded volume (no record)", func(storage.StoreID) map[string]storage.StoreID { return nil }},
+		{"rebuilt replica (old store recorded)", func(storage.StoreID) map[string]storage.StoreID {
+			return map[string]storage.StoreID{"replica-0": {9, 9}}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cl := NewCluster(t, Walstore).WithReplicas(1).WithLiveShip().Start()
+			rv := cl.Primary().RepVol
+			rv.SetDurabilityMode(replication.DurabilitySyncAll)
+			real := storage.StoreIDOf(cl.Replica(0).Store)
+			rv.RequireAttestedStores()
+			recordStores(t, cl, c.recorded(real))
+			if err := attestSync(t, cl, 1, 0x11); err == nil {
+				t.Fatal("a sync_all flush counted a replica whose store the master does not have")
+			}
+			// What the primary attests in its next heartbeat:
+			att := rv.AttestedStores()
+			if att["replica-0"] != real {
+				t.Fatalf("after the refused flush the primary attests %x, want the replica's store %x (an invalidated peer would never be attested)", att["replica-0"], real)
+			}
+			recordStores(t, cl, att) // the master records the attestation and re-sends
+			if err := attestSync(t, cl, 2, 0x22); err != nil {
+				t.Fatalf("the flush after the attestation was recorded: %v", err)
+			}
+		})
+	}
+}
