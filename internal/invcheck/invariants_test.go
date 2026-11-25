@@ -22,6 +22,7 @@ type invRow struct {
 	tests     []string
 	status    string
 	line      int
+	paths     []string // repository .go paths the code and test cells cite
 }
 
 // maxStatement is the longest Statement cell, in characters, a row may have.
@@ -30,6 +31,7 @@ const maxStatement = 300
 var (
 	rowID     = regexp.MustCompile("^\\| `(INV-[A-Z0-9-]+)` \\|")
 	testName  = regexp.MustCompile("`(Test[A-Za-z0-9_]+)`")
+	goPath    = regexp.MustCompile("`([a-z][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)+\\.go)`")
 	testFunc  = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
 	countLine = regexp.MustCompile("(\\d+) (?:`INV-` )?rows: (\\d+) ACTIVE, (\\d+) STUB, (\\d+) ARCHIVED")
 )
@@ -80,6 +82,9 @@ func partB(t *testing.T, root string) ([]invRow, string) {
 		r := invRow{id: m[1], statement: strings.TrimSpace(cells[1]), status: strings.TrimSpace(cells[6]), line: firstLine + i}
 		for _, tm := range testName.FindAllStringSubmatch(cells[4], -1) {
 			r.tests = append(r.tests, tm[1])
+		}
+		for _, pm := range goPath.FindAllStringSubmatch(cells[3]+" "+cells[4], -1) {
+			r.paths = append(r.paths, pm[1])
 		}
 		rows = append(rows, r)
 	}
@@ -170,6 +175,24 @@ func TestInvariantRowsNameExistingTests(t *testing.T) {
 		for _, name := range r.tests {
 			if !tests[name] {
 				t.Errorf("invariants.md:%d: %s names %s, which is not a test in this repository", r.line, r.id, name)
+			}
+		}
+	}
+}
+
+// An ACTIVE row names the code and tests that hold it now: every repository
+// .go path its code and test cells cite must exist (a deleted file is
+// rebound to its successor, or the row is retired).
+func TestActiveInvariantRowsCiteExistingPaths(t *testing.T) {
+	root := repoRoot(t)
+	rows, _ := partB(t, root)
+	for _, r := range rows {
+		if r.status != "ACTIVE" {
+			continue
+		}
+		for _, p := range r.paths {
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err != nil {
+				t.Errorf("invariants.md:%d: %s is ACTIVE and cites %s, which does not exist", r.line, r.id, p)
 			}
 		}
 	}
