@@ -319,21 +319,23 @@ func (v *claimExitView) Projection() frontend.Projection {
 func TestWorkspaceForeignHeadClaimChoosesNoRetry(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		headEpoch  uint64
 		grantEpoch uint64
 		deferred   bool
 		wantExit   bool
 	}{
-		{"foreign holder at granted epoch", 1, false, true},
-		{"foreign holder after assignment", 1, true, true},
-		{"foreign holder below granted epoch", 2, false, false},
+		{"foreign holder at granted epoch", 1, 1, false, true},
+		{"foreign holder above granted epoch", 2, 1, false, true},
+		{"foreign holder after assignment", 1, 1, true, true},
+		{"foreign holder below granted epoch", 1, 2, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			testWorkspaceLayoutForeignClaimExit(t, tc.grantEpoch, tc.deferred, tc.wantExit)
+			testWorkspaceLayoutForeignClaimExit(t, tc.headEpoch, tc.grantEpoch, tc.deferred, tc.wantExit)
 		})
 	}
 }
 
-func testWorkspaceLayoutForeignClaimExit(t *testing.T, grantEpoch uint64, deferred, wantExit bool) {
+func testWorkspaceLayoutForeignClaimExit(t *testing.T, headEpoch, grantEpoch uint64, deferred, wantExit bool) {
 	t.Helper()
 	ctx := context.Background()
 	id, err := layout.NewVolumeID()
@@ -356,7 +358,7 @@ func testWorkspaceLayoutForeignClaimExit(t *testing.T, grantEpoch uint64, deferr
 	if err != nil || !found {
 		t.Fatalf("initial HEAD: found=%v err=%v", found, err)
 	}
-	foreign.Epoch, foreign.Holder, foreign.ClaimID = 1, "other/r", "other-claim"
+	foreign.Epoch, foreign.Holder, foreign.ClaimID = headEpoch, "other/r", "other-claim"
 	if err := st.UpdateHead(ctx, foreign.Gen, foreign); err != nil {
 		t.Fatal(err)
 	}
@@ -391,8 +393,8 @@ func testWorkspaceLayoutForeignClaimExit(t *testing.T, grantEpoch uint64, deferr
 		case <-time.After(3 * time.Second):
 			t.Fatal("foreign layout HEAD did not end deferred startup")
 		}
-	} else if wantExit && !errors.Is(err, layout.ErrNotHolder) {
-		t.Fatalf("layout Start refusal: %v; want not holder", err)
+	} else if wantExit && !errors.Is(err, layout.ErrNotHolder) && !errors.Is(err, layout.ErrStaleEpoch) {
+		t.Fatalf("layout Start refusal: %v; want not-holder or stale-epoch", err)
 	}
 	if !wantExit {
 		if err != nil {
