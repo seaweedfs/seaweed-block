@@ -98,9 +98,9 @@ func TestDurableHydration_NVMePreservesPhysicalAndHashErrors(t *testing.T) {
 			if !corrupt {
 				r.fault = errors.Join(context.DeadlineExceeded, errors.New("physical remote read failure"))
 			}
-			f.Blobs.GetHook = r.Get
 			p := hydrationProvider(t, f, v1View())
 			openRecovered(t, p)
+			f.Blobs.GetHook = r.Get
 			b, err := p.Open(context.Background(), "v1")
 			if err != nil {
 				t.Fatal(err)
@@ -143,10 +143,10 @@ func (r *pacedHydrationRemote) Get(ctx context.Context, _ string, data []byte) (
 func TestDurableHydration_MultipleChunksShareOneDeadline(t *testing.T) {
 	f := seededHydrationLayout(t)
 	r := &pacedHydrationRemote{second: make(chan struct{})}
-	f.Blobs.GetHook = r.Get
 	p := hydrationProvider(t, f, v1View())
 	t.Cleanup(r.release)
 	openRecovered(t, p)
+	f.Blobs.GetHook = r.Get
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
 		t.Fatal(err)
@@ -204,10 +204,10 @@ func (r *heldHydrationRemote) Get(ctx context.Context, _ string, data []byte) ([
 func TestDurableHydration_HostRetriesJoinOwnedFetch(t *testing.T) {
 	f := seededHydrationLayout(t)
 	r := &heldHydrationRemote{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
-	f.Blobs.GetHook = r.Get
 	p := hydrationProvider(t, f, v1View())
 	t.Cleanup(r.release)
 	openRecovered(t, p)
+	f.Blobs.GetHook = r.Get
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
 		t.Fatal(err)
@@ -256,10 +256,10 @@ func TestDurableHydration_FenceWinsCallerExpiry(t *testing.T) {
 	f := seededHydrationLayout(t)
 	r := &heldHydrationRemote{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	view := v1View()
-	f.Blobs.GetHook = r.Get
 	p := hydrationProvider(t, f, view)
 	t.Cleanup(r.release)
 	openRecovered(t, p)
+	f.Blobs.GetHook = r.Get
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +308,6 @@ func TestDurableHydration_ReadAndRMWPreserveCallerBudget(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := seededHydrationLayout(t)
 			r := &heldHydrationRemote{gate: make(chan struct{})}
-			f.Blobs.GetHook = r.Get
 			p := hydrationProvider(t, f, v1View())
 			t.Cleanup(r.release)
 			s, err := p.EnsureStorage("v1")
@@ -318,6 +317,7 @@ func TestDurableHydration_ReadAndRMWPreserveCallerBudget(t *testing.T) {
 			if _, err = p.RecoverVolume(context.Background(), "v1"); err != nil {
 				t.Fatal(err)
 			}
+			f.Blobs.GetHook = r.Get
 			b, err := p.Open(context.Background(), "v1")
 			if err != nil {
 				t.Fatal(err)
@@ -357,10 +357,10 @@ func TestDurableHydration_RMWFenceWinsCallerExpiry(t *testing.T) {
 	f := seededHydrationLayout(t)
 	r := &heldHydrationRemote{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	view := v1View()
-	f.Blobs.GetHook = r.Get
 	p := hydrationProvider(t, f, view)
 	t.Cleanup(r.release)
 	openRecovered(t, p)
+	f.Blobs.GetHook = r.Get
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
 		t.Fatal(err)
@@ -414,10 +414,10 @@ func TestDurableHydration_RMWFenceKeepsCommittedPrefix(t *testing.T) {
 	f := seededHydrationLayout(t)
 	r := &heldHydrationRemote{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	view := v1View()
-	f.Blobs.GetHook = r.Get
 	p := hydrationProvider(t, f, view)
 	t.Cleanup(r.release)
 	openRecovered(t, p)
+	f.Blobs.GetHook = r.Get
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
 		t.Fatal(err)
