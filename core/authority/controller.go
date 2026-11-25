@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // TopologyController is the multi-volume, cluster-scoped directive
@@ -493,12 +495,18 @@ func (c *TopologyController) decideVolume(
 			}, "endpoint refresh", true
 		}
 		if target, ok := chooseRebalanceCandidate(vol, current, serverIndex, currentLoad, projectedLoad, c.config.RebalanceSkew); ok {
+			// A primary change goes out only with the promotion gate's
+			// evidence for its target (one decider): none, no rebalance.
+			if target.PromotionEvidence.Kind != adapter.PrimaryKindPromotion {
+				return AssignmentAsk{}, "", false
+			}
 			return AssignmentAsk{
 				VolumeID:  vol.VolumeID,
 				ReplicaID: target.ReplicaID,
 				DataAddr:  target.DataAddr,
 				CtrlAddr:  target.CtrlAddr,
 				Intent:    IntentReassign,
+				Evidence:  target.PromotionEvidence,
 			}, "rebalance", true
 		}
 		return AssignmentAsk{}, "", false
@@ -523,13 +531,18 @@ func (c *TopologyController) decideVolume(
 	other := acceptableCandidatesExcept(vol, serverIndex, current.ReplicaID)
 	if len(other) > 0 {
 		best := chooseFailoverCandidate(other, projectedLoad)
-		return AssignmentAsk{
-			VolumeID:  vol.VolumeID,
-			ReplicaID: best.ReplicaID,
-			DataAddr:  best.DataAddr,
-			CtrlAddr:  best.CtrlAddr,
-			Intent:    IntentReassign,
-		}, "failover", true
+		// A failover goes out only with the promotion gate's evidence for
+		// its target (one decider): no evidence, no promotion.
+		if best.PromotionEvidence.Kind == adapter.PrimaryKindPromotion {
+			return AssignmentAsk{
+				VolumeID:  vol.VolumeID,
+				ReplicaID: best.ReplicaID,
+				DataAddr:  best.DataAddr,
+				CtrlAddr:  best.CtrlAddr,
+				Intent:    IntentReassign,
+				Evidence:  best.PromotionEvidence,
+			}, "failover", true
+		}
 	}
 	// No promotion-ready peer exists. Keep the current authority endpoint fresh
 	// when the current replica is still reachable/eligible; this preserves

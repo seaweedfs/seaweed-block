@@ -102,6 +102,14 @@ func TestMountedFailover_ProductLoopRF2UsesAuthorityControllerForFailover(t *tes
 		ExpectedSlotsPerVolume: 2,
 	})
 	defer closeTestMaster(t, h)
+	// The candidate's answer to the promotion probe round: RF2 decides a
+	// failover on it like RF3 (a primary change goes out only with evidence).
+	h.SetPromotionEvidenceProvider(staticPromotionProbe{result: PromotionProbeResult{
+		AckProfile:   "sync-quorum",
+		CurrentKnown: true,
+		Current:      PromotionCandidateEvidence{ReplicaID: "r1"},
+		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 1}},
+	}})
 	seedRF2Placement(t, h)
 	ingestRF2Observation(t, h, true, true)
 
@@ -981,6 +989,9 @@ type staticPromotionProbe struct {
 func (s staticPromotionProbe) ProbePromotionCandidates(string, authority.AuthorityBasis, []authority.ReplicaCandidate) (PromotionProbeResult, error) {
 	return s.result, s.err
 }
+
+// AckProfile reports the probe's ack profile (as the round provider does).
+func (s staticPromotionProbe) AckProfile() string { return s.result.AckProfile }
 
 func recvAssignmentInfo(t *testing.T, ch <-chan adapter.AssignmentInfo) adapter.AssignmentInfo {
 	t.Helper()

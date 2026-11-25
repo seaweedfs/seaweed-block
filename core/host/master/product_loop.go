@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/ops"
@@ -26,6 +27,14 @@ type PromotionCandidateEvidence struct {
 	Ready      bool
 	DurableLSN uint64
 	ProbeAddr  string
+	// LastDataEpoch and LastDataFirstLSN are the candidate's epoch-table row
+	// at DurableLSN (zero: no table, or no row): the promotion line carries
+	// them, and the target adopts only if its own row at that LSN is the same.
+	LastDataEpoch    uint64
+	LastDataFirstLSN uint64
+	// TableInvalid: a recovery left the candidate's table without a known
+	// history; such a candidate is never Ready (never a promotion survivor).
+	TableInvalid bool
 }
 
 type PromotionProbeResult struct {
@@ -204,7 +213,9 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 	}
 	for vi := range snap.Volumes {
 		vol := &snap.Volumes[vi]
-		if len(vol.Slots) < 3 || !vol.Authority.Assigned {
+		h.noteSlotServers(vol.VolumeID, vol.Slots)
+		// Every replicated volume (RF2 and RF3) decides a promotion here.
+		if len(vol.Slots) < 2 || !vol.Authority.Assigned {
 			continue
 		}
 		currentIdx := replicaIndex(vol.Slots, vol.Authority.ReplicaID)
@@ -244,9 +255,11 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 			}
 			if allowed[slot.ReplicaID] {
 				slot.ReadyForPrimary = true
+				slot.PromotionEvidence = promotionEvidenceFor(result, slot.ReplicaID)
 				enabledCandidate = true
 			} else {
 				slot.ReadyForPrimary = false
+				slot.PromotionEvidence = adapter.PrimaryEvidence{}
 			}
 		}
 		// After the (blocking) probe, judge the current primary from its
@@ -266,6 +279,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 					DataAddr:  target.DataAddr,
 					CtrlAddr:  target.CtrlAddr,
 					Intent:    authority.IntentReassign,
+					Evidence:  promotionEvidenceFor(result, target.ReplicaID),
 				})
 			}
 		}
@@ -297,7 +311,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		// and every start counts toward flap history (#128). The
 		// promotion rules below are unchanged.
 		h.recordCurrentBootFact(placement.VolumeID)
-		if len(placement.Slots) < 3 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
+		if len(placement.Slots) < 2 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
 			continue
 		}
 		current, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID)
@@ -361,6 +375,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 					DataAddr:  target.DataAddr,
 					CtrlAddr:  target.CtrlAddr,
 					Intent:    authority.IntentReassign,
+					Evidence:  promotionEvidenceFor(result, target.ReplicaID),
 				})
 			}
 			continue
@@ -666,6 +681,17 @@ func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount in
 		}
 	}
 	return allowed
+}
+
+// promotionEvidenceFor is the line's evidence for promoting replicaID: what
+// this tick's probe saw on it (its durable LSN and its epoch-table row there).
+func promotionEvidenceFor(result PromotionProbeResult, replicaID string) adapter.PrimaryEvidence {
+	for _, c := range result.Candidates {
+		if c.ReplicaID == replicaID {
+			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN}
+		}
+	}
+	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}
 }
 
 func chooseAllowedPromotionTarget(vol authority.VolumeTopologySnapshot, result PromotionProbeResult, allowed map[string]bool) (authority.ReplicaCandidate, bool) {
