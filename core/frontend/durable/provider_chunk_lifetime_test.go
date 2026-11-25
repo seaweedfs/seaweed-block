@@ -719,6 +719,7 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 	root := t.TempDir()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
 	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	seedPreviouslyServedRoot(t, root, fixture)
 	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
@@ -737,9 +738,6 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 	ctx := context.Background()
 	if _, err := p.RecoverVolume(ctx, "v1"); err != nil { // A: ok, no authority
 		t.Fatalf("recovery A: %v", err)
-	}
-	if _, err := s.Write(5, block(0xA7)); err != nil {
-		t.Fatal(err)
 	}
 	// This oracle requires corruption below a persisted W. Default mode C
 	// intentionally permits losing its newest uncheckpointed batch instead.
@@ -801,6 +799,7 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 	root := t.TempDir()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
 	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	seedPreviouslyServedRoot(t, root, fixture)
 	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
@@ -822,9 +821,6 @@ func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 	}
 	if _, err := p.CaptureVolume(ctx, "v1"); errors.Is(err, durable.ErrNotChunkVolume) || err == nil {
 		t.Fatalf("after recovery without authority: %v; want the volume awaiting authority", err)
-	}
-	if _, err := s.Write(5, block(0xA7)); err != nil {
-		t.Fatal(err)
 	}
 	// This oracle requires corruption below a persisted W. Default mode C
 	// intentionally permits losing its newest uncheckpointed batch instead.
@@ -889,13 +885,13 @@ func (v *parkingView) Projection() frontend.Projection {
 
 // countingRemote counts HEAD reads (an attach starts with one).
 type countingRemote struct {
-	storage.ChunkRemote
+	*chunkstore.LayoutRemote
 	heads atomic.Int64
 }
 
 func (c *countingRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	c.heads.Add(1)
-	return c.ChunkRemote.GetHead(ctx)
+	return c.LayoutRemote.GetHead(ctx)
 }
 
 // The window the per-tick check cannot cover: wait A has passed its tick
@@ -905,6 +901,7 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	root := t.TempDir()
 	view := &parkingView{stubView: newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})}
 	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	seedPreviouslyServedRoot(t, root, fixture)
 	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
@@ -917,7 +914,7 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		remote.ChunkRemote = inner
+		remote.LayoutRemote = inner
 		return remote, nil
 	}
 	p, err := durable.NewDurableProvider(cfg, view)
@@ -932,9 +929,6 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	ctx := context.Background()
 	if _, err := p.RecoverVolume(ctx, "v1"); err != nil { // A: ok, no authority
 		t.Fatalf("recovery A: %v", err)
-	}
-	if _, err := s.Write(5, block(0xA7)); err != nil {
-		t.Fatal(err)
 	}
 	// This oracle requires corruption below a persisted W. Default mode C
 	// intentionally permits losing its newest uncheckpointed batch instead.
@@ -1010,6 +1004,43 @@ func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 		t.Fatalf("capture after convergence: %v", err)
 	}
 	readEq(t, s, 5, block(0xA7), "repaired WAL record after convergence")
+}
+
+// Recovery-race fixtures start from a real B root that previously served and
+// acknowledged a write. Reopening it without authority then exercises the
+// deferred-attach path without fabricating a fresh root's identity.
+func seedPreviouslyServedRoot(t *testing.T, root string, fixture *testutil.LayoutFixture) {
+	t.Helper()
+	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, WALRecoveryTestDisableFlusher: true}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	ws, ok := s.(*storage.WALStore)
+	if !ok {
+		t.Fatalf("unexpected native store %T", s)
+	}
+	if err := ws.SetWMode(storage.WModeStrict); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(5, block(0xA7)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // captureWhenReconciled cuts once the volume's chunk layer has reconciled
