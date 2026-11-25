@@ -47,17 +47,19 @@ func newReplicationIngress(f flags, store storage.LogicalStorage) *replicationIn
 // EpochTable is the volume's epoch table (nil when it failed to load).
 func (r *replicationIngress) EpochTable() *transport.EpochTable { return r.epochs }
 
-// notePrimaryEpoch makes the primary's row (epoch, durable end + 1) durable
-// before the role is adopted, so no entry of the epoch can be durable first.
+// notePrimaryEpoch makes the primary's row (epoch, the store's next LSN)
+// durable before the role is adopted: the frontend is still gated, so the
+// first write at this epoch takes exactly that LSN and no entry of the epoch
+// can be durable before its row. NextLSN does not sync, so adoption never
+// waits on an in-flight store effect.
 func (r *replicationIngress) notePrimaryEpoch(epoch uint64) error {
 	if r.epochsErr != nil {
 		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
 	}
-	head, err := r.store.Sync()
-	if err != nil {
-		return fmt.Errorf("volume %s epoch table: local sync: %w", r.volumeID, err)
+	if err := r.epochs.Note(epoch, r.store.NextLSN()); err != nil {
+		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, err)
 	}
-	return r.epochs.Note(epoch, head+1)
+	return nil
 }
 
 // rf1Only is the single-replica rule of this volume, "" when replication is
