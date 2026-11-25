@@ -25,7 +25,6 @@ func TestLayoutGrantedEpochIssuerSites(t *testing.T) {
 		"authority.go applyWithWorkspaceMove epoch":                      2,
 		"controller.go decideVolume reassign":                            2,
 		"failback_runtime.go ExecuteFailback reassign":                   1,
-		"policy.go reassignAskFor reassign":                              1,
 		"workspace.go MoveWorkspace reassign":                            1,
 		"authority.go apply applyWithWorkspaceMove":                      2,
 		"workspace.go MoveWorkspace applyWithWorkspaceMove":              1,
