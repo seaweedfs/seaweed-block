@@ -80,7 +80,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=blockmaster" \
   -keyout master.key -out master.csr
 openssl x509 -req -in master.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 825 \
-  -extfile <(printf "subjectAltName=DNS:master.example,IP:10.0.0.10") -out master.crt
+  -extfile <(printf "subjectAltName=DNS:master.example,IP:192.0.2.10") -out master.crt
 # a volume host: CN = its --server-id
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=node-a" \
   -keyout node-a.key -out node-a.csr
