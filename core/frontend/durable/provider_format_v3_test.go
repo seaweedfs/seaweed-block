@@ -95,6 +95,18 @@ func (f *formatV3Fixture) puts() int {
 	return len(f.blobs.b)
 }
 
+func (f *formatV3Fixture) chunkPuts() int {
+	f.blobs.Lock()
+	defer f.blobs.Unlock()
+	count := 0
+	for _, data := range f.blobs.b {
+		if len(data) == 4*4096 {
+			count++
+		}
+	}
+	return count
+}
+
 type formatV3Entry struct {
 	Dir   string
 	Entry *filerpb.Entry
@@ -203,6 +215,9 @@ func TestDurableProviderV3_MappedCheckpointCaptureAndReopen(t *testing.T) {
 		}
 	}
 	check(data)
+	if err = p.Close(); err != nil {
+		t.Fatal(err)
+	}
 	raw, err := os.ReadFile(p.volumePath("v1"))
 	if err != nil {
 		t.Fatal(err)
@@ -212,9 +227,6 @@ func TestDurableProviderV3_MappedCheckpointCaptureAndReopen(t *testing.T) {
 	}
 	if _, err = os.Stat(p.volumePath("v1") + ".chunkbitmap"); !os.IsNotExist(err) {
 		t.Fatalf("legacy bitmap exists: %v", err)
-	}
-	if err = p.Close(); err != nil {
-		t.Fatal(err)
 	}
 	p2 := mappedProviderV3(t, root, fixture, formatV3View{})
 	st2, err := p2.EnsureStorage("v1")
@@ -239,12 +251,12 @@ func TestDurableProviderV3_MappedCheckpointCaptureAndReopen(t *testing.T) {
 	if err = storage.FlushMappedWALStoreV3Test(st2.(*storage.WALStore)); err != nil {
 		t.Fatal(err)
 	}
-	before := fixture.puts()
+	before := fixture.chunkPuts()
 	if _, err = p2.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.puts()-before != 1 {
-		t.Fatalf("incremental capture uploaded %d chunks", fixture.puts()-before)
+	if fixture.chunkPuts()-before != 1 {
+		t.Fatalf("incremental capture uploaded %d chunks", fixture.chunkPuts()-before)
 	}
 	check(next)
 }
@@ -290,6 +302,9 @@ func TestDurableProviderV3_DefaultSelectorCreatesV3(t *testing.T) {
 	if _, err = p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
+	if err = p.Close(); err != nil {
+		t.Fatal(err)
+	}
 	f, err := os.Open(p.volumePath("v1"))
 	if err != nil {
 		t.Fatal(err)
@@ -319,12 +334,20 @@ func TestDurableProviderV3_InvalidHEADFrontierRefusesBeforeClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := fixture.head(t)
-	p := mappedProviderV3(t, t.TempDir(), fixture, formatV3View{})
+	root := t.TempDir()
+	p := mappedProviderV3(t, root, fixture, formatV3View{})
 	if _, err = p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Close(); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(p.volumePath("v1"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	p = mappedProviderV3(t, root, fixture, formatV3View{})
+	if _, err = p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = p.RecoverVolume(ctx, "v1"); err == nil {
@@ -332,7 +355,14 @@ func TestDurableProviderV3_InvalidHEADFrontierRefusesBeforeClaim(t *testing.T) {
 	}
 	after := fixture.head(t)
 	if after.Gen != before.Gen || after.Epoch != before.Epoch || after.Holder != before.Holder || after.Position != before.Position {
-		t.Fatal("failed seed claimed HEAD")
+		t.Fatalf("failed seed claimed HEAD: before=%+v after=%+v recovery=%v", before, after, err)
+	}
+	var buf [4096]byte
+	if _, err := p.Backend("v1").Read(ctx, 0, buf[:]); err == nil {
+		t.Fatal("failed restore left backend operational")
+	}
+	if err = p.Close(); err != nil {
+		t.Fatal(err)
 	}
 	now, err := os.ReadFile(p.volumePath("v1"))
 	if err != nil {
@@ -342,10 +372,6 @@ func TestDurableProviderV3_InvalidHEADFrontierRefusesBeforeClaim(t *testing.T) {
 	// a legacy header or advance the inherited logical frontier.
 	if binary.LittleEndian.Uint16(now[4:6]) != 3 || binary.LittleEndian.Uint16(raw[4:6]) != 3 {
 		t.Fatal("restore serialized a legacy header")
-	}
-	var buf [4096]byte
-	if _, err := p.Backend("v1").Read(ctx, 0, buf[:]); err == nil {
-		t.Fatal("failed restore left backend operational")
 	}
 }
 
