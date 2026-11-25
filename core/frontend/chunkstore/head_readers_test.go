@@ -24,8 +24,10 @@ import (
 // pins it. "GAP" marks a reader that takes an absent HEAD for an empty
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
-	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":      "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",
-	"core/frontend/chunkstore/layout_store.go ReadHead -> LookupEntry": "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
+	"core/frontend/chunkstore/layout_store.go ReadHead -> DecodeLayoutHeadEntry":                      "shared canonical entry decoder; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",
+	"core/host/master/workspace_layout_head.go NewLayoutWorkspaceHEADReader -> DecodeLayoutHeadEntry": "any missing/failed metadata refuses; identity comes from master intent (TestWorkspaceLayoutHEADRefusalsAndStates)",
+	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":                                     "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",
+	"core/frontend/chunkstore/layout_store.go ReadHead -> LookupEntry":                                "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
 	// chunkstore: the two raw reads every other reader goes through
 	"core/frontend/chunkstore/catalog.go ReadHead -> LookupEntry":                    "ok=false, no error (probe ReadHead)",
 	"core/frontend/chunkstore/chunk_remote.go getHeadRoot -> LookupEntry":            "zero HEAD, no error (probe GetHead)",
@@ -115,7 +117,7 @@ func TestHeadReaders_Enumeration(t *testing.T) {
 					case *ast.Ident:
 						name = x.Name
 					}
-					hit := name == "ReadHead" || name == "GetHead" || name == "GetHeadRoot" || name == "getHeadRoot" || name == "headExists"
+					hit := name == "ReadHead" || name == "GetHead" || name == "GetHeadRoot" || name == "getHeadRoot" || name == "headExists" || name == "DecodeLayoutHeadEntry"
 					if name == "LookupEntry" {
 						for _, a := range call.Args {
 							if id, ok := a.(*ast.Ident); ok && id.Name == "headName" {
