@@ -120,6 +120,30 @@ func TestLayoutRemote_ReusedChunkBirthDoesNotFenceNoopCut(t *testing.T) {
 	lh.readBack("reader", map[uint32][]byte{1: block(1), 9: block(9)})
 }
 
+// A successful Commit may lose its reply. The next HEAD read must use the
+// pending engine refs for that published image, including a reused old chunk.
+func TestLayoutRemote_ReusedChunkBirthAfterLostCommitReply(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, layer, remote := lh.attach("active", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{1: block(1)})
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lost := &lostReplyStore{sessionStore: remote.st, armed: true}
+	remote.st = lost
+	writeSync(t, s, map[uint32][]byte{9: block(9)})
+	_, _ = layer.Capture(ctx)
+	if lost.armed {
+		t.Fatal("the commit reply was not lost")
+	}
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatalf("no-op cut after a lost commit reply: %v", err)
+	}
+	lh.readBack("reader", map[uint32][]byte{1: block(1), 9: block(9)})
+}
+
 type pauseCleanEndStore struct {
 	sessionStore
 	persisted chan struct{}
