@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path"
+	"strconv"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"google.golang.org/protobuf/proto"
 )
 
 type formatV3View struct{}
@@ -329,11 +331,30 @@ func TestDurableProviderV3_InvalidHEADFrontierRefusesBeforeClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad := fixture.head(t)
-	bad.Epoch, bad.Holder, bad.ClaimID, bad.Position = 2, "old", "old-claim", ^uint64(0)
+	bad.Epoch, bad.Holder, bad.ClaimID = 2, "old", "old-claim"
 	if err := store.UpdateHead(ctx, bad.Gen, bad); err != nil {
 		t.Fatal(err)
 	}
-	before := fixture.head(t)
+	// An old writer could leave a HEAD with no next LSN. The current kernel
+	// refuses to write it, so inject its canonical bytes through the filer.
+	dir := path.Join("/format-v3", fixture.ref.Dir())
+	entry, err := fixture.filer.LookupEntry(ctx, dir, layout.HeadName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPosition := []byte(`"position":` + strconv.FormatUint(bad.Position, 10))
+	if bytes.Count(entry.Content, oldPosition) != 1 {
+		t.Fatalf("HEAD position field not unique: %s", entry.Content)
+	}
+	entry.Content = bytes.Replace(entry.Content, oldPosition, []byte(`"position":`+strconv.FormatUint(^uint64(0), 10)), 1)
+	entry.Attributes.FileSize = uint64(len(entry.Content))
+	if err := fixture.filer.UpdateEntry(ctx, dir, entry, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fixture.filer.LookupEntry(ctx, dir, layout.HeadName)
+	if err != nil {
+		t.Fatal(err)
+	}
 	root := t.TempDir()
 	p := mappedProviderV3(t, root, fixture, formatV3View{})
 	if _, err = p.EnsureStorage("v1"); err != nil {
@@ -350,12 +371,16 @@ func TestDurableProviderV3_InvalidHEADFrontierRefusesBeforeClaim(t *testing.T) {
 	if _, err = p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = p.RecoverVolume(ctx, "v1"); err == nil {
+	_, recoverErr := p.RecoverVolume(ctx, "v1")
+	if recoverErr == nil {
 		t.Fatal("invalid HEAD frontier accepted")
 	}
-	after := fixture.head(t)
-	if after.Gen != before.Gen || after.Epoch != before.Epoch || after.Holder != before.Holder || after.Position != before.Position {
-		t.Fatalf("failed seed claimed HEAD: before=%+v after=%+v recovery=%v", before, after, err)
+	after, err := fixture.filer.LookupEntry(ctx, dir, layout.HeadName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(after, before) {
+		t.Fatalf("failed seed claimed HEAD: before=%+v after=%+v recovery=%v", before, after, recoverErr)
 	}
 	var buf [4096]byte
 	if _, err := p.Backend("v1").Read(ctx, 0, buf[:]); err == nil {
