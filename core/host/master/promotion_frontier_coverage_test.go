@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 )
 
@@ -241,27 +242,52 @@ func TestProductLoop_UnknownFrontierSurvivorReadyLastTickMissingNowRefused(t *te
 
 // RF2 never consults the RF3 promotion gate: a probe that would refuse every
 // candidate (unknown frontier, no survivors) does not stop RF2 failover.
-func TestMountedFailover_ProductLoopRF2IgnoresRF3FrontierGate(t *testing.T) {
-	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 2})
-	defer closeTestMaster(t, h)
-	h.SetPromotionEvidenceProvider(staticPromotionProbe{result: PromotionProbeResult{AckProfile: "sync-quorum"}})
-	seedRF2Placement(t, h)
-	ingestRF2Observation(t, h, true, true)
-	if _, err := h.RunLifecycleProductTick(); err != nil {
-		t.Fatalf("initial product tick: %v", err)
-	}
-	if initial := waitAuthorityLine(t, h.Publisher(), "vol-rf2"); initial.ReplicaID != "r1" {
-		t.Fatalf("initial line=%+v want r1", initial)
-	}
-	ingestRF2Observation(t, h, false, true)
-	result, err := h.RunLifecycleProductTick()
-	if err != nil {
-		t.Fatalf("failover product tick: %v", err)
-	}
-	if result.PromotionProbes != 0 {
-		t.Fatalf("result=%+v want no RF3 promotion probe for RF2", result)
-	}
-	if failover := waitAuthorityReplica(t, h.Publisher(), "vol-rf2", "r2"); failover.Epoch != 2 {
-		t.Fatalf("failover line=%+v want r2@2", failover)
+// RF2 decides a promotion on the promotion gate too (one replica besides the
+// primary): with the candidate's answer ready the failover goes to it with
+// the gate's evidence on the line; without a ready answer nothing is
+// promoted, whatever the heartbeats say.
+func TestMountedFailover_ProductLoopRF2DecidesOnThePromotionGate(t *testing.T) {
+	for _, ready := range []bool{true, false} {
+		t.Run(map[bool]string{true: "candidate ready", false: "no ready answer"}[ready], func(t *testing.T) {
+			h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 2})
+			defer closeTestMaster(t, h)
+			h.SetPromotionEvidenceProvider(staticPromotionProbe{result: PromotionProbeResult{
+				AckProfile:   "sync-quorum",
+				CurrentKnown: true,
+				Current:      PromotionCandidateEvidence{ReplicaID: "r1"},
+				Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: ready, DurableLSN: 1}},
+			}})
+			seedRF2Placement(t, h)
+			ingestRF2Observation(t, h, true, true)
+			if _, err := h.RunLifecycleProductTick(); err != nil {
+				t.Fatalf("initial product tick: %v", err)
+			}
+			if initial := waitAuthorityLine(t, h.Publisher(), "vol-rf2"); initial.ReplicaID != "r1" {
+				t.Fatalf("initial line=%+v want r1", initial)
+			}
+			ingestRF2Observation(t, h, false, true)
+			result, err := h.RunLifecycleProductTick()
+			if err != nil {
+				t.Fatalf("failover product tick: %v", err)
+			}
+			if result.PromotionProbes == 0 {
+				t.Fatalf("result=%+v: RF2 was not decided on the promotion gate", result)
+			}
+			if !ready {
+				time.Sleep(200 * time.Millisecond)
+				if line, _ := h.Publisher().VolumeAuthorityLine("vol-rf2"); line.ReplicaID != "r1" || line.Epoch != 1 {
+					t.Fatalf("promoted without a ready answer: line %+v", line)
+				}
+				return
+			}
+			failover := waitAuthorityReplica(t, h.Publisher(), "vol-rf2", "r2")
+			if failover.Epoch != 2 {
+				t.Fatalf("failover line=%+v want r2@2", failover)
+			}
+			info, _ := h.Publisher().LastPublished("vol-rf2", "r2")
+			if info.Primary.Kind != adapter.PrimaryKindPromotion || info.Primary.DurableLSN != 1 {
+				t.Fatalf("failover line evidence %+v; want the gate's PROMOTION at durable LSN 1", info.Primary)
+			}
+		})
 	}
 }
