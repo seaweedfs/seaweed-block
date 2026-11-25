@@ -2,7 +2,6 @@ package master
 
 import (
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/auth"
@@ -49,31 +48,34 @@ func TestMasterAuthorizationTableCoversEveryMethod(t *testing.T) {
 // The strict set (audit attempt written before the handler, or the call is
 // refused) is exactly the mutating operator and admin methods; node methods
 // and reads are never strict (the lease never waits on the audit log).
-func TestMasterStrictAuditMethodsAreTheMutatingOnes(t *testing.T) {
-	want := []string{
-		control.FailbackService_ExecuteFailback_FullMethodName,
-		control.LifecycleService_AbortVolumeDeleting_FullMethodName,
-		control.LifecycleService_CommitVolumeDeleting_FullMethodName,
-		control.LifecycleService_CreateVolume_FullMethodName,
-		control.LifecycleService_DeleteVolume_FullMethodName,
-		control.LifecycleService_MarkVolumeDeleting_FullMethodName,
-		control.WorkspaceService_MoveWorkspace_FullMethodName,
-		control.WorkspaceService_PlaceWorkspace_FullMethodName,
-		control.WorkspaceService_RegisterWorkspaceBinding_FullMethodName,
-		control.WorkspaceService_RevokeWorkspace_FullMethodName,
+// TestMasterOperatorMethodsAreStrict is inverted on purpose: every method an
+// operator or admin may call is strict (its attempt line is written before it
+// runs, or it is refused) unless it is named below with the reason. A new
+// operator or admin method added without Strict fails here.
+func TestMasterOperatorMethodsAreStrict(t *testing.T) {
+	notStrict := map[string]string{
+		// Appends an operator's note to the cluster event log; it changes no
+		// volume, placement or lease state.
+		control.ObservationService_ReportClusterEvent_FullMethodName: "event log append only",
 	}
-	sort.Strings(want)
-	var got []string
+	strict := 0
 	for m, r := range masterRules {
+		person := r.Min == auth.RoleOperator || r.Min == auth.RoleAdmin
+		if r.Strict && (r.Node || !person) {
+			t.Errorf("%s is strict but open to nodes or viewers", m)
+		}
 		if r.Strict {
-			got = append(got, m)
-			if r.Node || r.Min == auth.RoleViewer {
-				t.Errorf("%s is strict but open to nodes or viewers", m)
-			}
+			strict++
+		}
+		_, excepted := notStrict[m]
+		switch {
+		case person && !r.Strict && !excepted:
+			t.Errorf("%s (min %s) is not strict: mark it Strict or name it in notStrict with the reason", m, r.Min)
+		case excepted && (r.Strict || !person):
+			t.Errorf("%s is named in notStrict but is not a non-strict operator method: drop the entry", m)
 		}
 	}
-	sort.Strings(got)
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("strict audit methods %v; want %v", got, want)
+	if strict != 10 {
+		t.Errorf("%d strict methods; the phase 0 set is 10 (update this count with the change that adds one)", strict)
 	}
 }

@@ -66,7 +66,8 @@ end at the reload. A malformed file keeps the previous table and says so in the 
 one JSON line per person's call, per role-file reload and per refused node call (at most once a minute per
 certificate and method). A changing call (create, delete, place, revoke, move, register a binding, failback) is
 written as an attempt before it runs: if the line cannot be written within 2 s the call is refused as "audit
-unavailable" and nothing happens. An unwritable audit log stops operator changes, never the volumes: node calls
+unavailable" and nothing happens. The attempt line is written without fsync: it survives a blockmaster crash,
+not a host crash or power loss. An unwritable audit log stops operator changes, never the volumes: node calls
 never wait on it, and reads and refusals are dropped and counted (`GET /status/audit`) when it falls behind.
 
 **Issue the certificates** (one CA, one key per host or person; a node key gives control of that host's volumes, so
