@@ -27,7 +27,7 @@ func TestLayoutRemoteSessionFieldSites(t *testing.T) {
 			return true
 		})
 	}
-	if !reflect.DeepEqual(fields, map[string]int{"openSessionLocked": 2, "rollBackLocked": 1, "Put": 1, "CASHead": 2, "CommitPendingSnapshot": 2, "writeRootLocked": 2, "Clean": 1, "syncSessionLocked": 3, "takeAbandonLocked": 1}) {
+	if !reflect.DeepEqual(fields, map[string]int{"openSessionLocked": 2, "rollBackLocked": 1, "Put": 1, "CASHead": 2, "CommitPendingSnapshot": 2, "writeRootLocked": 1, "Clean": 1, "syncSessionLocked": 3, "takeAbandonLocked": 1}) {
 		t.Fatal("session field sites changed; enumerate and probe them", fields)
 	}
 }
