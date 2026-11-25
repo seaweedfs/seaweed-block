@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,78 @@ type commitThenChangeHEAD struct {
 	*LayoutRemote
 	armed  bool
 	change func(context.Context) error
+}
+
+// conflictBeforeCommitStore places a second HEAD writer after Commit read its
+// base but before its conditional write. The underlying store gives the
+// commit a definite generation refusal.
+type conflictBeforeCommitStore struct {
+	sessionStore
+	armed  bool
+	change func(context.Context) error
+}
+
+func (s *conflictBeforeCommitStore) UpdateHead(ctx context.Context, gen uint64, next layout.Head) error {
+	if s.armed && next.Activity.Kind == layout.ActIdle && next.Current != nil {
+		s.armed = false
+		if err := s.change(ctx); err != nil {
+			return err
+		}
+	}
+	return s.sessionStore.UpdateHead(ctx, gen, next)
+}
+
+func TestLayoutRemote_OperatorSnapshotDeleteDuringCommitRetries(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, layer, remote := lh.attach("active", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{2: block(2)})
+	remote.SetSnapshot("old", layout.SnapshotMeta{CreatedNs: 1})
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := &conflictBeforeCommitStore{sessionStore: remote.st, armed: true}
+	st.change = func(ctx context.Context) error {
+		_, err := layout.RunDeleteSnapshot(ctx, st.sessionStore, "old")
+		return err
+	}
+	remote.st = st
+	writeSync(t, s, map[uint32][]byte{9: block(9)})
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatalf("same-holder commit after snapshot delete: %v", err)
+	}
+	if st.armed {
+		t.Fatal("snapshot deletion was not injected before the conditional commit")
+	}
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatalf("next cut after snapshot deletion: %v", err)
+	}
+	lh.readBack("reader", map[uint32][]byte{2: block(2), 9: block(9)})
+}
+
+func TestLayoutRemote_ForeignClaimDuringCommitFences(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, layer, remote := lh.attach("active", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{2: block(2)})
+	if _, err := layer.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := &conflictBeforeCommitStore{sessionStore: remote.st, armed: true}
+	st.change = func(ctx context.Context) error {
+		_, err := layout.RunClaim(ctx, st.sessionStore, okClaimLease{}, layout.HolderID{Epoch: lh.me.Epoch + 1, Holder: "foreign", ClaimID: "foreign-claim"})
+		return err
+	}
+	remote.st = st
+	writeSync(t, s, map[uint32][]byte{9: block(9)})
+	if _, err := layer.Capture(ctx); !errors.Is(err, storage.ErrChunkLayerFenced) {
+		t.Fatalf("foreign claim during commit: %v; want final fence", err)
+	}
+	if st.armed {
+		t.Fatal("foreign claim was not injected before the conditional commit")
+	}
 }
 
 func (r *commitThenChangeHEAD) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
