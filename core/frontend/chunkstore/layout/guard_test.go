@@ -192,6 +192,9 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 		bad = append(bad, "OperatorReleaseDependent does not read the target's HEAD before releasing")
 	}
 	for name, by := range code {
+		if name == "DeleteSnapshot" {
+			continue // a HEAD transition (a snapshot's name leaves HEAD), not a store remover
+		}
 		if strings.HasPrefix(name, "Delete") || strings.HasPrefix(name, "Remove") {
 			for _, fn := range owners(by) {
 				if fn != "RemoveUnreachable" && fn != "DeleteVolume" {
