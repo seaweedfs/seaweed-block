@@ -85,7 +85,7 @@ func TestLayoutRestartClosesActivityBeforeGuestWrites(t *testing.T) {
 			old, ws := open(dir)
 			claim, _, _ := ws.LayoutIdentity()
 			me := layout.HolderID{Epoch: 1, Holder: "s/r1", ClaimID: claim}
-			if _, err := layout.Start(ctx, st, restartLease{}, me, layout.LocalRoot{Geometry: g, ClaimID: claim, Fresh: true}); err != nil {
+			if _, err := layout.Start(ctx, st, restartLease{}, me, layout.LocalRoot{Geometry: g, ClaimID: claim, Fresh: true, CanStartFrom: anyStart}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := layout.RunBegin(ctx, st, me, "old-stop"); err != nil {

@@ -36,7 +36,7 @@ func TestStartGeometryMismatchPrecedesClaim(t *testing.T) {
 	h := startHead(1, "s/r", "k")
 	for _, g := range []Geometry{{SizeBytes: 128 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, {SizeBytes: 64 * 4096, BlockSize: 512, ChunkBytes: 4 * 4096}, {SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 8 * 4096}} {
 		st := &memHead{h: &h}
-		_, err := Start(context.Background(), st, &fakeLease{ended: true}, HolderID{Epoch: 2, Holder: "s/r"}, LocalRoot{Geometry: g, ClaimID: "new", Fresh: true})
+		_, err := Start(context.Background(), st, &fakeLease{ended: true}, HolderID{Epoch: 2, Holder: "s/r"}, LocalRoot{Geometry: g, ClaimID: "new", Fresh: true, CanStartFrom: anyStart})
 		if !errors.Is(err, ErrGeometryMismatch) || st.updates != 0 {
 			t.Fatalf("geometry mismatch changed HEAD: %v writes=%d", err, st.updates)
 		}

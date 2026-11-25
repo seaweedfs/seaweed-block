@@ -31,7 +31,7 @@ func TestLayoutStoreMissingHEADRefusesStart(t *testing.T) {
 	if _, found, err := s.ReadHead(ctx); found || err != nil {
 		t.Fatal("missing HEAD did not remain absent", found, err)
 	}
-	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "root", Fresh: true}); !errors.Is(err, layout.ErrHeadAbsent) {
+	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "root", Fresh: true, CanStartFrom: anyStart}); !errors.Is(err, layout.ErrHeadAbsent) {
 		t.Fatal("missing HEAD must not start", err)
 	}
 	if len(f.written) != 0 {

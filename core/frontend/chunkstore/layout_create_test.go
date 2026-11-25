@@ -24,7 +24,7 @@ func TestLayoutStoreCreateVolumeThenStart(t *testing.T) {
 	if _, err := layout.CreateVolume(ctx, s, v); err != nil {
 		t.Fatalf("re-create: %v", err)
 	}
-	h, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "root", Fresh: true})
+	h, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "root", Fresh: true, CanStartFrom: anyStart})
 	if err != nil || h.Epoch != 1 || h.ClaimID != "root" || h.Gen != 2 {
 		t.Fatalf("first Start: %+v %v", h, err)
 	}

@@ -121,7 +121,7 @@ func TestStart_ClaimsAnUnclaimedHeadFromAFreshRoot(t *testing.T) {
 	if _, err := Start(ctx, st, &fakeLease{ended: true}, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k1"}); !errors.Is(err, ErrStaleLocalRoot) || st.updates != 0 {
 		t.Fatalf("non-fresh root on an unclaimed HEAD: %v (%d writes); want ErrStaleLocalRoot", err, st.updates)
 	}
-	got, err := Start(ctx, st, &fakeLease{ended: true}, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k1", Fresh: true})
+	got, err := Start(ctx, st, &fakeLease{ended: true}, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k1", Fresh: true, CanStartFrom: anyStart})
 	if err != nil || got.Epoch != 1 || got.Holder != "s1/r1" || got.ClaimID != "k1" {
 		t.Fatalf("fresh root on an unclaimed HEAD: %+v %v", got, err)
 	}

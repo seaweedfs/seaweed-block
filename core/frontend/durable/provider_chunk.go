@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -123,10 +124,25 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
-	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim)) {
+	if (errors.Is(err, storage.ErrChunkLayerFenced) &&
+		(!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim))) ||
+		finalLayoutStartRefusal(err) {
 		p.endChunkStartup(h, gen, err)
 	}
 	return err == nil, err
+}
+
+// finalLayoutStartRefusal distinguishes a store's definite Start refusal
+// from an unavailable read or a conditional-write race that may be retried.
+// A detached HEAD has its separate replay-retained disposition below.
+func finalLayoutStartRefusal(err error) bool {
+	return errors.Is(err, layout.ErrStaleLocalRoot) || errors.Is(err, layout.ErrMissingLocalRoot) ||
+		errors.Is(err, layout.ErrGeometryMismatch) || errors.Is(err, layout.ErrHeadAbsent) ||
+		errors.Is(err, layout.ErrVolumeDeleting) || errors.Is(err, layout.ErrStaleEpoch) ||
+		errors.Is(err, layout.ErrNotHolder) || errors.Is(err, layout.ErrIdentity) ||
+		errors.Is(err, layout.ErrCorrupt) || errors.Is(err, layout.ErrMalformed) ||
+		errors.Is(err, layout.ErrMissing) || errors.Is(err, layout.ErrHeadTooLarge) ||
+		errors.Is(err, chunkstore.ErrLegacyStore)
 }
 
 // startChunkAuthorityWait starts the authority wait of recovery gen,
@@ -286,6 +302,16 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			} else {
 				p.endChunkStartup(h, gen, err)
 			}
+			return
+		case finalLayoutStartRefusal(err):
+			ended = "layout Start refused, not serving"
+			log.Printf("durable: chunk layer for volume=%s: %v (final refusal)", volumeID, err)
+			h.attachMu.Lock()
+			if p.current(h, gen) && h.chunk == nil {
+				h.backend.SetOperational(false, "chunk layer attach refused: "+err.Error())
+				p.endChunkStartup(h, gen, err)
+			}
+			h.attachMu.Unlock()
 			return
 		case errors.Is(err, errChunkNoAuthority):
 			log.Printf("durable: chunk layer attach for volume=%s: authority lost before attempt %d (projection lacks %s); waiting",
@@ -514,16 +540,20 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return nil
 		},
 	}
-	// The kernel already claimed and validated this root. Seed only a fresh
-	// root; an existing root keeps its acknowledged WAL and synced position.
-	if h.fresh {
-		if base, complete := ws.InstalledBaseLSN(); complete {
-			if layoutHead.Position > base {
-				return nil, errors.New("durable: completed BASE behind layout HEAD")
-			}
-			cfg.FreshFromHead = false
-		} else if err := h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(layoutHead.Position) }); err != nil {
+	if p.cfg.ChunkLayoutHeadFor != nil {
+		// The kernel already claimed and validated this root. Seed only a fresh
+		// root; an existing root keeps its acknowledged WAL and synced position.
+		path, err := canStartFrom(ws, h.fresh, layoutHead)
+		if err != nil {
 			return nil, err
+		}
+		switch path {
+		case startAttachBase:
+			cfg.FreshFromHead = false
+		case startSeed:
+			if err := h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(layoutHead.Position) }); err != nil {
+				return nil, err
+			}
 		}
 	}
 	layer, err := storage.AttachChunkLayer(ws, remote, cfg)
@@ -930,6 +960,11 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 		})
 		if err != nil && ctx.Err() == nil {
 			log.Printf("durable: maintenance volume=%s: %v", volumeID, err)
+		}
+		// The holder's cleaning may be the first call to see HEAD move away
+		// (an idle volume runs no cut): its refusal latches the layer too.
+		if obs, ok := layer.(interface{ ObserveRemoteError(error) error }); ok && err != nil {
+			_ = obs.ObserveRemoteError(err)
 		}
 		// Completion-relative reset coalesces all elapsed ticks; no catch-up queue.
 		timer.Reset(interval)

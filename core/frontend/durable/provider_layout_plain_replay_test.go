@@ -136,15 +136,24 @@ func TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory(t *testing.T) {
 
 type lostLayoutDetachAnswer struct {
 	*chunkstore.LayoutRemote
-	lose bool
+	lose          bool
+	lostCommitted bool
 }
 
 func (r *lostLayoutDetachAnswer) CASHead(ctx context.Context, version storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	gen, err := r.LayoutRemote.CASHead(ctx, version, next)
 	if err == nil && r.lose && next.State == storage.ChunkHeadDetached {
+		r.lostCommitted = true
 		return 0, errors.New("fixture: detached commit reply lost")
 	}
 	return gen, err
+}
+
+func (r *lostLayoutDetachAnswer) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+	if r.lostCommitted {
+		return storage.ChunkHead{}, errors.New("fixture: committed HEAD readback unavailable")
+	}
+	return r.LayoutRemote.GetHead(ctx)
 }
 
 func (r *lostLayoutDetachAnswer) AbortOpenSession(ctx context.Context) (string, error) {

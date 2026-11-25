@@ -39,7 +39,7 @@ func newLayoutHost(t *testing.T) *layoutHost {
 	}
 	s, _ := cat.Store(v)
 	me := layout.HolderID{Epoch: 1, Holder: "a", ClaimID: "k-a"}
-	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "a"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 8 * 4096}, ClaimID: "k-a", Fresh: true}); err != nil {
+	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "a"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 8 * 4096}, ClaimID: "k-a", Fresh: true, CanStartFrom: anyStart}); err != nil {
 		t.Fatal(err)
 	}
 	return &layoutHost{t: t, cat: cat, v: v, me: me, dir: t.TempDir()}

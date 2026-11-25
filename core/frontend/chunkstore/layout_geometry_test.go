@@ -20,7 +20,7 @@ func TestBCatalogRestoreCopiesVolumeGeometry(t *testing.T) {
 	}
 	st, _ := c.Store(src)
 	me := layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
-	if _, err := layout.Start(ctx, st, okClaimLease{}, me, layout.LocalRoot{Geometry: g, ClaimID: "k", Fresh: true}); err != nil {
+	if _, err := layout.Start(ctx, st, okClaimLease{}, me, layout.LocalRoot{Geometry: g, ClaimID: "k", Fresh: true, CanStartFrom: anyStart}); err != nil {
 		t.Fatal(err)
 	}
 	const session = "snap"
