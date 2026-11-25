@@ -120,6 +120,9 @@ type memHead struct {
 	after   bool
 	dead    bool
 	hook    func() // runs between a read and the next update
+	// afterRead runs once after a ReadHead returned (another actor acting
+	// right after this reader's view of HEAD).
+	afterRead func()
 }
 
 var errKilled = errors.New("process killed")
@@ -135,6 +138,11 @@ func (m *memHead) ReadHead(context.Context) (Head, bool, error) {
 	}
 	b, _ := m.h.Encode()
 	h, err := DecodeHead(b, m.h.Gen)
+	if m.afterRead != nil {
+		f := m.afterRead
+		m.afterRead = nil
+		defer func() { m.mu.Unlock(); f(); m.mu.Lock() }()
+	}
 	return h, true, err
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,46 @@ func SetPutAfterRenameFaultForTest(hook func(DurableRecord) error) {
 		return
 	}
 	putAfterRenameFault.Store(&hook)
+}
+
+// dirFault, when set, runs at each step of the directory fsync after the
+// rename in every FileAuthorityStore.Put ("open", "fsync", "close"); a
+// non-nil error replaces that step's result. Tests only.
+var dirFault atomic.Pointer[func(step string) error]
+
+// ExitDurabilityUnknown is the process exit code of the fail-stop after a
+// record's rename whose durability is unknown (sysexits EX_IOERR).
+const ExitDurabilityUnknown = 74
+
+// failStopDurabilityUnknown ends the process: the rename is done but the
+// directory fsync that makes it survive a crash failed (or could not run).
+// The record may or may not survive, so no caller may be told "failed"
+// (it would act on a write a restart reloads) nor "written". The in-flight
+// caller sees its connection drop (outcome unknown); the restart reloads
+// whatever is on disk (the conventional answer, PostgreSQL after fsyncgate).
+func failStopDurabilityUnknown(volumeID, step string, err error) {
+	fmt.Fprintf(os.Stderr, "authority_store: FAIL-STOP: directory fsync after rename of volume %s: %s: %v (outcome unknown; restart reloads the store)\n",
+		volumeID, step, err)
+	os.Exit(ExitDurabilityUnknown)
+}
+
+// SetDirFaultForTest installs (nil clears) that fault.
+func SetDirFaultForTest(fault func(step string) error) {
+	if fault == nil {
+		dirFault.Store(nil)
+		return
+	}
+	dirFault.Store(&fault)
+}
+
+// dirStep returns the injected error for step, or err.
+func dirStep(step string, err error) error {
+	if f := dirFault.Load(); f != nil {
+		if ferr := (*f)(step); ferr != nil {
+			return ferr
+		}
+	}
+	return err
 }
 
 // ============================================================
@@ -212,10 +253,36 @@ func (s *FileAuthorityStore) Put(record DurableRecord) error {
 		}
 	}
 
-	// Best-effort fsync the directory so the rename is durable.
-	// On Windows, opening directories as files for fsync is not
-	// supported; skip silently.
-	if d, derr := os.Open(s.dir); derr == nil {
+	// Windows cannot fsync a directory (NTFS journals the rename itself);
+	// its behaviour is unchanged: best effort, except that a workspace
+	// record keeps its refusal. The product runs on Linux.
+	if runtime.GOOS == "windows" && dirFault.Load() == nil {
+		return windowsDirSync(s.dir, record)
+	}
+	// Fsync the directory so the rename survives a crash. From here on a
+	// failure cannot be reported: the rename is done, so its outcome is
+	// unknown and the process fail-stops, for every record type.
+	d, derr := os.Open(s.dir)
+	if derr = dirStep("open", derr); derr != nil {
+		if d != nil {
+			_ = d.Close()
+		}
+		failStopDurabilityUnknown(record.VolumeID, "directory open", derr)
+	}
+	if syncErr := dirStep("fsync", d.Sync()); syncErr != nil {
+		_ = d.Close()
+		failStopDurabilityUnknown(record.VolumeID, "directory fsync", syncErr)
+	}
+	// A close error after a successful fsync changes nothing on disk: the
+	// rename is durable, so the write is reported written.
+	_ = dirStep("close", d.Close())
+	return nil
+}
+
+// windowsDirSync is the directory sync as it was before the fail-stop, kept
+// for Windows only.
+func windowsDirSync(dir string, record DurableRecord) error {
+	if d, derr := os.Open(dir); derr == nil {
 		syncErr := d.Sync()
 		closeErr := d.Close()
 		if record.Workspace != nil {

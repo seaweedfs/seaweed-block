@@ -351,7 +351,7 @@ func TestWorkspaceAmbiguousExtensionLatchesUncertainty(t *testing.T) {
 	first := p.WorkspaceState("v").Lease.ExpiresAtNS
 	hs.setAfter(func(r DurableRecord) error {
 		if isExtension(r, "v", first) {
-			return errors.New("injected: directory sync failed after rename")
+			return errors.New("injected: failure after the rename")
 		}
 		return nil
 	})
