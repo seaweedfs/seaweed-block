@@ -1,8 +1,14 @@
 package layout
 
 import (
+	"context"
+	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +55,51 @@ func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 	sort.Strings(missing)
 	if len(missing) != 0 {
 		t.Fatalf("transitions not in the stale-holder table: %v", missing)
+	}
+}
+
+// The removal refuses a stale holder too, one dimension at a time: an
+// older epoch of the same server, and the same epoch held by another
+// server; nothing is deleted. Every function of the package that takes a
+// HolderID and is not a Run transition (those go through the pure methods
+// above) must be listed here, so a new one fails until it is covered.
+func TestHolderFunctions_RefuseAStaleHolder(t *testing.T) {
+	callers := map[string]HolderID{
+		"older epoch, same server":   {Epoch: me.Epoch - 1, Holder: me.Holder},
+		"same epoch, another server": {Epoch: me.Epoch, Holder: "srv-b"},
+	}
+	for who, c := range callers {
+		o, h, _, orphans := removeFixture(t)
+		r, err := NewReader(removeBase, "v1", o.fetch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = RemoveUnreachable(context.Background(), &memHead{h: h}, r, o, &fakeHeld{}, c, "c1", 0, orphans)
+		if !errors.Is(err, ErrNotHolder) || len(o.deletes) != 0 {
+			t.Errorf("RemoveUnreachable by %s: %v, %d deletes; want ErrNotHolder and none", who, err, len(o.deletes))
+		}
+	}
+	covered := map[string]bool{"RemoveUnreachable": true}
+	var missing []string
+	for fname, src := range packageSources(t, false) {
+		file, err := parser.ParseFile(token.NewFileSet(), fname, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || strings.HasPrefix(fn.Name.Name, "Run") {
+				continue
+			}
+			for _, p := range fn.Type.Params.List {
+				if id, ok := p.Type.(*ast.Ident); ok && id.Name == "HolderID" && !covered[fn.Name.Name] {
+					missing = append(missing, fn.Name.Name)
+				}
+			}
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) != 0 {
+		t.Fatalf("functions taking a HolderID not covered by a stale-holder case: %v", missing)
 	}
 }

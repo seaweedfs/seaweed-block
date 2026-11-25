@@ -180,20 +180,56 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 }
 
 // removerOrderFindings checks the removal half of the time premise in the
-// sources: in RemoveUnreachable, every statement that deletes
-// (DeleteObject) sits in a block where an earlier statement checks the
-// remover's own lease (StillHeld).
+// sources: in RemoveUnreachable, every statement that calls a method named
+// Delete* or Remove* is IMMEDIATELY preceded, in the same block, by a lease
+// gate: an if statement whose init calls StillHeld and whose body returns
+// on its error. A check whose result is ignored, one check reused for a
+// second removal, and a removal method the scan does not list each fail.
 func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
 	t.Helper()
-	uses := func(n ast.Node, name string) bool {
+	removes := func(n ast.Node) bool {
 		found := false
 		ast.Inspect(n, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
-				found = true
+			if c, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := c.Fun.(*ast.SelectorExpr); ok && (strings.HasPrefix(sel.Sel.Name, "Delete") || strings.HasPrefix(sel.Sel.Name, "Remove")) {
+					found = true
+				}
 			}
 			return !found
 		})
 		return found
+	}
+	leaseGate := func(st ast.Stmt) bool {
+		is, ok := st.(*ast.IfStmt)
+		if !ok || is.Init == nil {
+			return false
+		}
+		as, ok := is.Init.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 || len(as.Lhs) != 1 {
+			return false
+		}
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "StillHeld" {
+			return false
+		}
+		errName, ok := as.Lhs[0].(*ast.Ident)
+		cond, ok2 := is.Cond.(*ast.BinaryExpr)
+		if !ok || !ok2 || cond.Op != token.NEQ {
+			return false
+		}
+		if x, ok := cond.X.(*ast.Ident); !ok || x.Name != errName.Name {
+			return false
+		}
+		for _, b := range is.Body.List {
+			if _, ok := b.(*ast.ReturnStmt); ok {
+				return true
+			}
+		}
+		return false
 	}
 	var bad []string
 	for fname, src := range srcs {
@@ -213,24 +249,16 @@ func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
 					return true
 				}
 				for i, st := range blk.List {
-					if _, isBlock := st.(*ast.BlockStmt); isBlock || !uses(st, "DeleteObject") {
-						continue
+					switch st.(type) {
+					case *ast.BlockStmt, *ast.RangeStmt, *ast.ForStmt:
+						continue // their bodies are checked as their own blocks
 					}
-					if _, nested := st.(*ast.RangeStmt); nested {
-						continue // its body is checked as its own block
-					}
-					if _, nested := st.(*ast.ForStmt); nested {
+					if !removes(st) {
 						continue
 					}
 					deletes++
-					checked := false
-					for _, prev := range blk.List[:i] {
-						if uses(prev, "StillHeld") {
-							checked = true
-						}
-					}
-					if !checked {
-						bad = append(bad, "RemoveUnreachable deletes without a lease check before it in the same block")
+					if i == 0 || !leaseGate(blk.List[i-1]) {
+						bad = append(bad, "RemoveUnreachable removes without a lease gate immediately before it (an if on StillHeld's error that returns)")
 					}
 				}
 				return true
@@ -309,7 +337,7 @@ func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
 		}
 	}
 	return nil
-}`, want: "deletes without a lease check"},
+}`, want: "without a lease gate immediately before it"},
 		"lease check after the delete": {file: "remove.go", src: `type p interface{ DeleteObject(context.Context, string) error }
 type l interface{ StillHeld(context.Context) error }
 func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
@@ -322,7 +350,7 @@ func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
 		}
 	}
 	return nil
-}`, want: "deletes without a lease check"},
+}`, want: "without a lease gate immediately before it"},
 		"lease check once before the loop": {file: "remove.go", src: `type p interface{ DeleteObject(context.Context, string) error }
 type l interface{ StillHeld(context.Context) error }
 func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
@@ -335,11 +363,14 @@ func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
 		}
 	}
 	return nil
-}`, want: "deletes without a lease check"},
+}`, want: "without a lease gate immediately before it"},
 		"claim without lease wait": {src: `func RunClaim(ctx context.Context, st HeadStore, lease LeaseWait, me HolderID) (Head, error) {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h, false, nil })
 }`, want: "does not wait for the old lease", file: "claim.go"},
 		"transition not through runTransition": {src: `func RunZz(ctx context.Context, st HeadStore) (Head, error) { h, _, err := st.ReadHead(ctx); return h, err }`, want: "does not go through runTransition"},
+		"ignored lease check":                  {file: "remove.go", src: removeVariant(t, "ignored"), want: "without a lease gate immediately before it"},
+		"one check, two deletes":               {file: "remove.go", src: removeVariant(t, "second"), want: "without a lease gate immediately before it"},
+		"unlisted removal method":              {file: "remove.go", src: removeVariant(t, "other"), want: "without a lease gate immediately before it"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
 func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable removes"},
 	} {
@@ -354,4 +385,29 @@ func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable remove
 			t.Errorf("control %q: findings %q; want one containing %q", name, bad, c.want)
 		}
 	}
+}
+
+// removeVariant returns remove.go's real source changed in one way, minus
+// its package clause and imports (the controls add their own header).
+func removeVariant(t *testing.T, mode string) string {
+	t.Helper()
+	b, err := os.ReadFile("remove.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := strings.ReplaceAll(string(b), "\r\n", "\n")
+	gate := "if err := lease.StillHeld(ctx); err != nil {\n\t\t\treturn removed, fmt.Errorf(\"%w: %v\", ErrLeaseLost, err)\n\t\t}"
+	switch mode {
+	case "ignored":
+		if !strings.Contains(src, gate) {
+			t.Fatal("remove.go lease gate not found")
+		}
+		src = strings.Replace(src, gate, "_ = lease.StillHeld(ctx)", 1)
+	case "second":
+		src = strings.Replace(src, "removed = append(removed, c)", "_ = pool.DeleteObject(ctx, c.Path())\n\t\tremoved = append(removed, c)", 1)
+	case "other":
+		src = strings.Replace(src, "removed = append(removed, c)", "_ = pool.RemoveOther(ctx, c.Path())\n\t\tremoved = append(removed, c)", 1)
+	}
+	i := strings.Index(src, ")\n")
+	return src[i+2:]
 }
