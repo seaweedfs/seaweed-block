@@ -7,16 +7,17 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 func TestDurableProvider_CheckpointPersistenceStatus(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", 64, 4)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: 64, ChunkBlocks: 4, ChunkCaptureInterval: 0,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, v1View())
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
