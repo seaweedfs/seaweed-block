@@ -6,7 +6,7 @@ import "github.com/seaweedfs/seaweed-block/core/lifecycle"
 // layout masters install LayoutCreateVolume; older non-layout deployments do
 // not use the filer-ready bit.
 func (h *Host) layoutStoreReady(volume string) bool {
-	if h.cfg.LayoutCreateVolume == nil {
+	if !h.cfg.WorkspaceRPC && h.cfg.LayoutCreateVolume == nil {
 		return true
 	}
 	if h.lifecycle == nil || h.lifecycle.Volumes == nil {
