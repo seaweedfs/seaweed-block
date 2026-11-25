@@ -423,7 +423,7 @@ func snapshotRefusal(err error) bool {
 // to the store not answering.
 var kernelRefusals = []error{layout.ErrPrecondition, layout.ErrNotHolder, layout.ErrNoSession, layout.ErrBusy, layout.ErrDetached,
 	layout.ErrVolumeDeleting, layout.ErrStaleEpoch, layout.ErrNotPrepared, layout.ErrStaleBase, layout.ErrHeadAbsent,
-	layout.ErrMalformed, layout.ErrGeometryMismatch, layout.ErrTooManySnapshots, layout.ErrSnapshotExists}
+	layout.ErrMalformed, layout.ErrGeometryMismatch, layout.ErrTooManySnapshots, layout.ErrSnapshotExists, layout.ErrPositionBehind}
 
 func isKernelRefusal(err error) bool {
 	for _, k := range kernelRefusals {
@@ -706,7 +706,8 @@ func layoutRemoteErr(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, layout.ErrNotHolder), errors.Is(err, layout.ErrStaleEpoch), errors.Is(err, layout.ErrDetached):
+	case errors.Is(err, layout.ErrNotHolder), errors.Is(err, layout.ErrStaleEpoch), errors.Is(err, layout.ErrDetached),
+		errors.Is(err, layout.ErrPositionBehind):
 		return fmt.Errorf("%w: %w", storage.ErrChunkLayerFenced, err)
 	case errors.Is(err, layout.ErrPrecondition), errors.Is(err, layout.ErrNoSession):
 		return fmt.Errorf("%w: %w", storage.ErrChunkHeadPrecondition, err)
