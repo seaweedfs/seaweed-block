@@ -59,10 +59,12 @@ func ingestRF3Incarnations(t *testing.T, h *Host, r1, r2, r3 rf3Slot) {
 	}
 }
 
-// switchProbe is the promotion probe: r2 is always a ready survivor;
+// switchProbe is the promotion probe: r2 is always a ready survivor, r3
+// answers as a lagging replica (not ready; its end is r3End, 60 when unset);
 // the current primary r1 is ready only while currentReady is set.
 type switchProbe struct {
 	mu           sync.Mutex
+	r3End        uint64
 	currentReady bool
 	// currentUnknown: the current primary did not answer (status GET
 	// refused or timed out), so CurrentKnown is false.
@@ -99,13 +101,20 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 	defer p.mu.Unlock()
 	return PromotionProbeResult{
 		AckProfile: "sync-quorum",
-		// Only r2 is seen, so its promotion needs a known frontier
-		// it covers (#181); r3 is silent in these tests.
+		// Only r2 is ready, so its promotion needs a known frontier it
+		// covers (#181); r3 answers but lags. A fencing round counts both.
 		SyncAckLSN:   70,
 		CurrentKnown: !p.currentUnknown,
 		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, DurableLSN: 70},
-		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}},
+		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}, {ReplicaID: "r3", DurableLSN: p.lagEnd()}},
 	}, nil
+}
+
+func (p *switchProbe) lagEnd() uint64 {
+	if p.r3End == 0 {
+		return 60
+	}
+	return p.r3End
 }
 
 func probeOf(t *testing.T, h *Host) *switchProbe {
