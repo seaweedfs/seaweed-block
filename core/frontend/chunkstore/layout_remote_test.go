@@ -732,3 +732,27 @@ func TestLayoutRemote_AbortOpenSessionFencesAForeignHead(t *testing.T) {
 		}
 	}
 }
+
+// A layout key has exactly one spelling per reference: a key that does
+// not round-trip, or names no volume, is refused.
+func TestLayoutRemote_KeysAreCanonical(t *testing.T) {
+	data := block(1)
+	id := layout.VolumeID{0xab, 0xcd}
+	good := LayoutKey(layout.Ref{Owner: "v", OwnerID: id, Chunk: layout.NameChunk(7, data)})
+	ref, err := ParseLayoutKey(good)
+	if err != nil || LayoutKey(ref) != good {
+		t.Fatalf("canonical key %q: %+v %v", good, ref, err)
+	}
+	upper := "layout:v:" + strings.ToUpper(id.String()) + ":" + layout.NameChunk(7, data).String()
+	padded := strings.Replace(good, ":7-", ":07-", 1)
+	zero := LayoutKey(layout.Ref{Owner: "v", Chunk: layout.NameChunk(7, data)})
+	noOwner := "layout::" + id.String() + ":" + layout.NameChunk(7, data).String()
+	for name, k := range map[string]string{"uppercase id": upper, "padded index": padded, "zero owner id": zero, "empty owner": noOwner} {
+		if k == good {
+			t.Fatalf("%s: the fixture did not change the key", name)
+		}
+		if _, err := ParseLayoutKey(k); !errors.Is(err, storage.ErrChunkKeyInvalid) {
+			t.Errorf("%s %q: %v; want ErrChunkKeyInvalid", name, k, err)
+		}
+	}
+}

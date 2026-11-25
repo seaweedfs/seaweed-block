@@ -21,9 +21,10 @@ var (
 
 // DeleteSnapshot is transition 9: the named snapshot is removed, refused
 // while it has dependents (ErrHasDependents) or while the volume is being
-// deleted. A missing name is a replay.
+// deleted. A detached volume (stopped cleanly) takes it: the snapshot table
+// is not part of the stop's proof. A missing name is a replay.
 func (h Head) DeleteSnapshot(name string) (next Head, changed bool, err error) {
-	if h.State != StateLive {
+	if h.State != StateLive && h.State != StateDetached {
 		return Head{}, false, fmt.Errorf("%w: HEAD is %s", ErrVolumeDeleting, h.State)
 	}
 	s, ok := h.Snapshots[name]
@@ -41,9 +42,10 @@ func (h Head) DeleteSnapshot(name string) (next Head, changed bool, err error) {
 // AddDependent is transition 10 on the source's HEAD: target (its name and
 // volume id) is recorded as a dependent of the named snapshot, with that
 // snapshot's root, which must be root (the one checked to name no foreign
-// chunk). A dependent already recorded is a replay.
+// chunk). A dependent already recorded is a replay. A detached volume
+// (stopped cleanly) is a restore source like a live one.
 func (h Head) AddDependent(name string, target Dependent, root RootName) (next Head, changed bool, err error) {
-	if h.State != StateLive {
+	if h.State != StateLive && h.State != StateDetached {
 		return Head{}, false, fmt.Errorf("%w: HEAD is %s", ErrVolumeDeleting, h.State)
 	}
 	if target.TargetID.IsZero() {

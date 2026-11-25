@@ -84,7 +84,17 @@ func Start(ctx context.Context, st StartStore, lease LeaseWait, line HolderID, l
 		return Head{}, err
 	}
 	if h.Epoch == line.Epoch && h.Holder == line.Holder && h.State == StateLive {
-		return h, nil // HEAD holds this root's claim id: it continues
+		// HEAD holds this root's claim id: it continues, after ending the
+		// transaction the previous process of this claim left open (never a
+		// new one beside it): its session is rolled back, its cleaning ended.
+		me := HolderID{Epoch: line.Epoch, Holder: line.Holder, ClaimID: local.ClaimID}
+		switch h.Activity.Kind {
+		case ActSnap:
+			return RunAbort(ctx, st, me, h.Activity.Session)
+		case ActClean:
+			return RunEndClean(ctx, st, me, h.Activity.Session)
+		}
+		return h, nil
 	}
 	// The claim re-checks the local root against the very HEAD it updates:
 	// another lineage's claim or a higher published position after the

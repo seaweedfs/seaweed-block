@@ -25,6 +25,8 @@ var (
 	ErrHasDependents = errors.New("layout: a snapshot has dependents")
 	// ErrHolderActive: a transaction is open on the volume.
 	ErrHolderActive = errors.New("layout: a holder is acting on the volume")
+	// ErrNotDeleting: MarkDeleted on a HEAD whose delete never began.
+	ErrNotDeleting = errors.New("layout: the volume's delete has not begun")
 	// ErrTargetLive: the operator asked to release a dependent whose
 	// target still exists and may still name the source's chunks.
 	ErrTargetLive = errors.New("layout: the dependent's target is live")
@@ -80,7 +82,7 @@ func (h Head) MarkDeleted() (next Head, changed bool, err error) {
 	case StateDeleted:
 		return h, false, nil
 	case StateLive, StateDetached:
-		return Head{}, false, fmt.Errorf("layout: HEAD is %q; a delete marks it deleting first", h.State)
+		return Head{}, false, fmt.Errorf("%w: HEAD is %q; a delete marks it deleting first", ErrNotDeleting, h.State)
 	}
 	next = h.clone()
 	next.State = StateDeleted

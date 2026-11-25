@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -120,13 +119,19 @@ func ParseLayoutKey(key string) (layout.Ref, error) {
 	}
 	id, err := layout.ParseVolumeID(parts[1])
 	if err != nil {
-		return layout.Ref{}, err
+		return layout.Ref{}, fmt.Errorf("%w: %q: %w", storage.ErrChunkKeyInvalid, key, err)
 	}
 	name, err := layout.ParseChunkName(parts[2])
 	if err != nil {
-		return layout.Ref{}, err
+		return layout.Ref{}, fmt.Errorf("%w: %q: %w", storage.ErrChunkKeyInvalid, key, err)
 	}
-	return layout.Ref{Owner: parts[0], OwnerID: id, Chunk: name}, nil
+	ref := layout.Ref{Owner: parts[0], OwnerID: id, Chunk: name}
+	// One key per reference: a key that does not round-trip (an uppercase
+	// id, a padded index, ...) or names no volume is not a layout key.
+	if id.IsZero() || parts[0] == "" || LayoutKey(ref) != key {
+		return layout.Ref{}, fmt.Errorf("%w: %q is not a canonical layout key", storage.ErrChunkKeyInvalid, key)
+	}
+	return ref, nil
 }
 
 // ChunkKey names the key of this volume's chunk idx whose bytes hash to sum.
@@ -254,19 +259,13 @@ func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 
 // manifest is the chunk map root names.
 func (l *LayoutRemote) manifest(ctx context.Context, rn layout.RootName) (map[uint64]layout.Ref, error) {
-	img, err := l.r.Open(ctx, rn)
+	m := map[uint64]layout.Ref{}
+	err := l.r.EachRef(ctx, rn, layout.AllShards, func(idx uint64, ref layout.Ref) bool {
+		m[idx] = ref
+		return true
+	})
 	if err != nil {
 		return nil, layoutRemoteErr(err)
-	}
-	m := map[uint64]layout.Ref{}
-	for _, sh := range img.Shards() {
-		seg, _, err := img.Segment(ctx, sh)
-		if err != nil {
-			return nil, layoutRemoteErr(err)
-		}
-		for idx, ref := range seg.Chunks {
-			m[idx] = ref
-		}
 	}
 	return m, nil
 }
@@ -381,21 +380,8 @@ func (l *LayoutRemote) writeRootLocked(ctx context.Context, next map[uint64]layo
 	if err != nil {
 		return err
 	}
-	names := make([]layout.SegName, 0, len(segs))
-	for n := range segs {
-		names = append(names, n)
-	}
-	sort.Slice(names, func(a, b int) bool { return names[a].Shard < names[b].Shard })
-	for _, n := range names {
-		if err := layout.EnsureObject(ctx, l.st, n.Path(), segs[n], l.session); err != nil {
-			return layoutRemoteErr(err)
-		}
-	}
-	rn, rb, err := layout.NameRoot(root)
-	if err != nil {
-		return err
-	}
-	return layoutRemoteErr(layout.EnsureObject(ctx, l.st, rn.Path(), rb, l.session))
+	_, err = layout.PrepareRoot(ctx, l.st, root, segs, l.session)
+	return layoutRemoteErr(err)
 }
 
 // The engine's intents are the session on the layout: these exist on the
