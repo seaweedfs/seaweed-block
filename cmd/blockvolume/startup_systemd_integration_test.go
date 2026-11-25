@@ -262,6 +262,27 @@ func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, 
 	if gap1Operational(t, statusAddr, volume) {
 		t.Fatal("the moved-away source served after its exit")
 	}
+	// The exit must come from the move, not from an unassigned or
+	// disconnected timeout: the journal shows the source received the line
+	// naming the other host, refused it as another server's, and never adopted
+	// a lineage of its own.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	journal, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat").CombinedOutput()
+	cancel()
+	if err != nil {
+		t.Fatalf("moved-away source journal: %v %s", err, journal)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("assignment identity refusal volume=%q replica=%q server=%q", volume, "r1", "s2"),
+		fmt.Sprintf("foreign assignment server=%q replica=%q recorded, not adopted", "s2", "r1"),
+	} {
+		if !strings.Contains(string(journal), want) {
+			t.Fatalf("the moved-away source's journal lacks %q: its exit is not proven to come from the move\n%s", want, journal)
+		}
+	}
+	if strings.Contains(string(journal), "adopted as PRIMARY") {
+		t.Fatalf("the moved-away source adopted a lineage:\n%s", journal)
+	}
 	gap1Systemctl(t, "stop", unit)
 }
 
