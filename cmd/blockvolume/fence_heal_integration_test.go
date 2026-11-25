@@ -62,7 +62,7 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 		}
 		data, _ := os.ReadFile(master.log)
 		for _, l := range strings.Split(string(data), string(rune(10))) {
-			if strings.Contains(l, "rejected") || strings.Contains(l, "DEBUG direct") || strings.Contains(l, "DEBUG placements") || strings.Contains(l, "authority:") || strings.Contains(l, "published") {
+			if strings.Contains(l, "rejected") || strings.Contains(l, "DEBUG queue") || strings.Contains(l, "DEBUG publisher") || strings.Contains(l, "DEBUG placements") || strings.Contains(l, "authority:") || strings.Contains(l, "published") {
 				t.Logf("DEBUGM %s", l)
 			}
 		}

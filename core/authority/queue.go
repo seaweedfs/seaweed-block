@@ -2,6 +2,7 @@ package authority
 
 import (
 	"context"
+	"log"
 	"sync"
 )
 
@@ -39,6 +40,9 @@ func (q *assignmentQueue) enqueue(ask AssignmentAsk) {
 func (q *assignmentQueue) discard(volumeID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if a, ok := q.items[volumeID]; ok {
+		log.Printf("DEBUG queue discard %+v", a)
+	}
 	delete(q.items, volumeID)
 }
 
