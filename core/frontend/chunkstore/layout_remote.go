@@ -681,6 +681,7 @@ func (l *LayoutRemote) syncSessionLocked(h layout.Head) {
 // view; the session is re-derived from h.
 func (l *LayoutRemote) viewLocked(h layout.Head) {
 	l.syncSessionLocked(h)
+	// head-generation-cache-exception: imageOf controls view changes
 	if h.Gen != l.ownGen || l.forceView {
 		if t := imageOf(h); l.forceView || l.visible == 0 || t != l.seen {
 			l.visible, l.seen = h.Gen, t

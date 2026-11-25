@@ -13,7 +13,8 @@ import (
 
 // Storage's ChunkHead generation is the adapter's synthetic engine-view token,
 // not the filer's HEAD generation. Check the kernel and all consumers outside
-// that engine. Only the two conditional-update implementations own comparisons.
+// that engine. Conditional-update implementations and one tagged image-cache
+// short-circuit own comparisons; literal-zero presence probes stay legal.
 func headGenerationComparisons(name string, src []byte) ([]string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, name, src, 0)
@@ -21,6 +22,7 @@ func headGenerationComparisons(name string, src []byte) ([]string, error) {
 		return nil, err
 	}
 	var bad []string
+	cacheExceptions := 0
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -38,7 +40,7 @@ func headGenerationComparisons(name string, src []byte) ([]string, error) {
 			ast.Inspect(n, func(n ast.Node) bool {
 				switch x := n.(type) {
 				case *ast.SelectorExpr:
-					found = found || x.Sel.Name == "Gen" || x.Sel.Name == "HeadGen"
+					found = found || x.Sel.Name == "Gen" || x.Sel.Name == "HeadGen" || x.Sel.Name == "ownGen"
 				case *ast.Ident:
 					found = found || x.Obj != nil && aliases[x.Obj]
 				}
@@ -84,12 +86,22 @@ func headGenerationComparisons(name string, src []byte) ([]string, error) {
 			case *ast.BinaryExpr:
 				switch x.Op {
 				case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
-					if usesGen(x) {
+					if usesGen(x.X) && usesGen(x.Y) {
+						if name == "core/frontend/chunkstore/layout_remote.go" && fn.Name.Name == "viewLocked" && strings.Contains(string(src), generationCacheException) {
+							left, lok := x.X.(*ast.SelectorExpr)
+							right, rok := x.Y.(*ast.SelectorExpr)
+							if lok && rok && left.Sel.Name == "Gen" && right.Sel.Name == "ownGen" && x.Op == token.NEQ {
+								cacheExceptions++
+								if cacheExceptions == 1 {
+									return true
+								}
+							}
+						}
 						bad = append(bad, fset.Position(x.Pos()).String()+" "+fn.Name.Name)
 					}
 				}
 			case *ast.SwitchStmt:
-				if x.Tag != nil && usesGen(x.Tag) {
+				if x.Tag != nil && usesGen(x.Tag) && switchHasGenerationCase(x, usesGen) {
 					bad = append(bad, fset.Position(x.Pos()).String()+" "+fn.Name.Name)
 				}
 			}
@@ -99,14 +111,29 @@ func headGenerationComparisons(name string, src []byte) ([]string, error) {
 	return bad, nil
 }
 
+const generationCacheException = "head-generation-cache-exception: imageOf controls view changes"
+
+func switchHasGenerationCase(s *ast.SwitchStmt, usesGen func(ast.Node) bool) bool {
+	for _, clause := range s.Body.List {
+		for _, value := range clause.(*ast.CaseClause).List {
+			if usesGen(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestHeadGenerationSourceGuardDetector(t *testing.T) {
 	for _, tc := range []struct {
 		src string
 		bad bool
 	}{
-		{"package p; func f(h H) bool { return h.Gen == 7 }", true},
-		{"package p; func f(h H) bool { g := h.Gen; k := g; return k != 7 }", true},
-		{"package p; func f(h H) { switch h.Gen { case 7: } }", true},
+		{"package p; func f(h H) bool { return h.Gen == other.Gen }", true},
+		{"package p; func f(h H) bool { g := h.Gen; k := g; return k != other.Gen }", true},
+		{"package p; func f(h H) { switch h.Gen { case other.Gen: } }", true},
+		{"package p; func f(h H) bool { return h.Gen == 0 }", false},
+		{"package p; func f(h H) bool { return 0 != h.Gen }", false},
 		{"package p; func f(h H) { store.UpdateHead(h.Gen, h) }", false},
 		{"package p; func f(h H) { if err := store.UpdateHead(h.Gen, h); err != nil {} }", false},
 		{"package p; func f(h H) bool { r := R{HeadGen: h.Gen}; return r.Kind == 7 }", false},
@@ -119,8 +146,28 @@ func TestHeadGenerationSourceGuardDetector(t *testing.T) {
 	}
 }
 
+func TestHeadGenerationCacheExceptionIsSingular(t *testing.T) {
+	const name = "core/frontend/chunkstore/layout_remote.go"
+	for _, tc := range []struct {
+		tag, body string
+		bad       bool
+	}{
+		{"", "if h.Gen != l.ownGen {}", true},
+		{generationCacheException, "if h.Gen != l.ownGen {}", false},
+		{generationCacheException, "if h.Gen != l.ownGen {}; if h.Gen != l.ownGen {}", true},
+		{generationCacheException, "if h.Gen != other.Gen {}", true},
+	} {
+		src := "package p; // " + tc.tag + "\nfunc viewLocked() {" + tc.body + "}"
+		got, err := headGenerationComparisons(name, []byte(src))
+		if err != nil || (len(got) != 0) != tc.bad {
+			t.Fatalf("%s: %v %v", src, got, err)
+		}
+	}
+}
+
 func TestHeadGenerationComparedOnlyByConditionalUpdate(t *testing.T) {
 	root := filepath.Clean("../../../..")
+	exceptions := 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -143,6 +190,7 @@ func TestHeadGenerationComparedOnlyByConditionalUpdate(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		exceptions += strings.Count(string(raw), generationCacheException)
 		bad, err := headGenerationComparisons(rel, raw)
 		if err != nil {
 			return err
@@ -154,5 +202,8 @@ func TestHeadGenerationComparedOnlyByConditionalUpdate(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if exceptions != 1 {
+		t.Fatalf("cache exception tags = %d, want exactly 1", exceptions)
 	}
 }
