@@ -588,6 +588,13 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 		if reservedEpoch != 0 {
 			next.Epoch = reservedEpoch
 		}
+		// A decision made on a fencing round holds only for the epoch its
+		// survivors were fenced at: the line must still be at the epoch
+		// below it.
+		if ask.Evidence.FencedEpoch != 0 && next.Epoch != ask.Evidence.FencedEpoch {
+			p.mu.Unlock()
+			return fmt.Errorf("%w: volume %s fenced at %d, the next epoch is %d", ErrFenceSuperseded, ask.VolumeID, ask.Evidence.FencedEpoch, next.Epoch)
+		}
 
 	default:
 		p.mu.Unlock()

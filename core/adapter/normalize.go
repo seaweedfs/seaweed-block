@@ -58,6 +58,10 @@ type PrimaryEvidence struct {
 	DataEpoch    uint64 // the target's epoch-table row at DurableLSN
 	DataFirstLSN uint64
 	StoreID      [16]byte // the probed store's id (its superblock UUID)
+	// FencedEpoch: the survivors made this epoch their durable floor before
+	// answering (a fencing round); the line is minted only at this epoch.
+	// 0: no fencing round (a planned move).
+	FencedEpoch uint64
 }
 
 // ProbeResult is the outcome of a transport probe.

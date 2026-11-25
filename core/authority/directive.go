@@ -79,6 +79,10 @@ type AssignmentAsk struct {
 // promotion-gate evidence, not a forced move); the publisher mints no line.
 var ErrReassignWithoutKind = errors.New("authority: a reassign needs a primary kind (promotion evidence or a forced move)")
 
+// ErrFenceSuperseded: a primary change decided on a fencing round at epoch
+// e+1 arrived after the volume's line left e; the publisher mints nothing.
+var ErrFenceSuperseded = errors.New("authority: the fencing round's epoch is no longer the next epoch of the line")
+
 // Directive is the input side of the authority route. A Directive
 // emits one AssignmentAsk at a time. The publisher's Run loop calls
 // Next repeatedly until ctx cancellation.

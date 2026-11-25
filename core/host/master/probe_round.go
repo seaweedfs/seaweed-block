@@ -73,7 +73,16 @@ func (h *probeHub) close(roundID uint64) {
 // ask sends the round for replicaID to its node; false when the node has no
 // open round stream (it cannot answer: the replica is not ready).
 func (h *probeHub) ask(roundID uint64, r *openRound, serverID, replicaID string) bool {
-	msg := &control.ProbeRound{VolumeId: r.volumeID, ReplicaId: replicaID, RoundId: roundID}
+	return h.send(r, serverID, replicaID, &control.ProbeRound{VolumeId: r.volumeID, ReplicaId: replicaID, RoundId: roundID})
+}
+
+// askFence asks a replica in a fencing round: it makes fenceEpoch its durable
+// floor first (when its store is store), then answers.
+func (h *probeHub) askFence(roundID uint64, r *openRound, serverID, replicaID string, fenceEpoch uint64, store storage.StoreID) bool {
+	return h.send(r, serverID, replicaID, &control.ProbeRound{VolumeId: r.volumeID, ReplicaId: replicaID, RoundId: roundID, FenceEpoch: fenceEpoch, ExpectedStoreId: append([]byte(nil), store[:]...)})
+}
+
+func (h *probeHub) send(r *openRound, serverID, replicaID string, msg *control.ProbeRound) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	r.asked[replicaID] = serverID
@@ -120,6 +129,26 @@ type roundEvidenceProvider struct {
 	attested func(volumeID, replicaID string) (storage.StoreID, bool)
 }
 
+// FencePromotionCandidates is the fencing round of a decision to replace the
+// primary at line epoch e: each survivor is asked to make e+1 its durable
+// floor on its probed store FIRST and then answer (the answer is its promise
+// to refuse the old primary). The answers are read as a probe round's; the
+// gate counts only those whose floor is e+1.
+func (p *roundEvidenceProvider) FencePromotionCandidates(volumeID string, current authority.AuthorityBasis, survivors []PromotionCandidateEvidence) (PromotionProbeResult, error) {
+	fence := current.Epoch + 1
+	candidates := make([]authority.ReplicaCandidate, 0, len(survivors))
+	stores := map[string]storage.StoreID{}
+	for _, s := range survivors {
+		candidates = append(candidates, authority.ReplicaCandidate{ReplicaID: s.ReplicaID})
+		stores[s.ReplicaID] = s.StoreID
+	}
+	result, err := p.round(volumeID, authority.AuthorityBasis{}, candidates, func(roundID uint64, r *openRound, serverID, replicaID string) bool {
+		return p.hub.askFence(roundID, r, serverID, replicaID, fence, stores[replicaID])
+	})
+	result.FencedEpoch = fence
+	return result, err
+}
+
 func newRoundID() uint64 {
 	var b [8]byte
 	for {
@@ -133,6 +162,10 @@ func newRoundID() uint64 {
 }
 
 func (p *roundEvidenceProvider) ProbePromotionCandidates(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, error) {
+	return p.round(volumeID, current, candidates, p.hub.ask)
+}
+
+func (p *roundEvidenceProvider) round(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate, ask func(roundID uint64, r *openRound, serverID, replicaID string) bool) (PromotionProbeResult, error) {
 	required, requiredKnown := p.required[volumeID]
 	result := PromotionProbeResult{
 		AckProfile:   p.ackProfile,
@@ -149,7 +182,7 @@ func (p *roundEvidenceProvider) ProbePromotionCandidates(volumeID string, curren
 		if serverID == "" {
 			serverID = p.serverOf(volumeID, replicaID)
 		}
-		if serverID != "" && p.hub.ask(roundID, r, serverID, replicaID) {
+		if serverID != "" && ask(roundID, r, serverID, replicaID) {
 			want[replicaID] = true
 		}
 	}
@@ -175,7 +208,15 @@ done:
 	if current.ReplicaID != "" {
 		if a := got[current.ReplicaID]; a != nil {
 			result.CurrentKnown = true
-			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, Ready: a.GetPrimaryReady(), DurableLSN: a.GetDurableEnd()}
+			var store storage.StoreID
+			if len(a.GetStoreId()) == len(store) {
+				copy(store[:], a.GetStoreId())
+			}
+			// The current primary's own evidence (a heal continues it on it):
+			// ready as a serving primary, on a valid table.
+			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, Ready: a.GetPrimaryReady(), DurableLSN: a.GetDurableEnd(),
+				LastDataEpoch: a.GetLastDataEpoch(), LastDataFirstLSN: a.GetLastDataFirstLsn(), TableInvalid: a.GetTablePresent() && !a.GetTableValid(),
+				StoreID: store, Floor: a.GetFloor()}
 		} else {
 			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, ProbeAddr: "no answer"}
 		}
@@ -203,6 +244,7 @@ done:
 			LastDataFirstLSN: a.GetLastDataFirstLsn(),
 			TableInvalid:     invalid,
 			StoreID:          store,
+			Floor:            a.GetFloor(),
 			// A promotion target answers as a ready replica, from a store
 			// whose epoch table is present and valid, and whose id is the
 			// store its primary attested (counted toward its write ACKs).

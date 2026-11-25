@@ -27,6 +27,16 @@ func (readyGate) ProbePromotionCandidates(_ string, _ authority.AuthorityBasis, 
 	return res, nil
 }
 
+// FencePromotionCandidates: every survivor obeys the fence.
+func (readyGate) FencePromotionCandidates(_ string, current authority.AuthorityBasis, survivors []master.PromotionCandidateEvidence) (master.PromotionProbeResult, error) {
+	res := master.PromotionProbeResult{FencedEpoch: current.Epoch + 1}
+	for _, s := range survivors {
+		s.Floor = current.Epoch + 1
+		res.Candidates = append(res.Candidates, s)
+	}
+	return res, nil
+}
+
 func reopenWait(t *testing.T, what string, fn func() bool) {
 	t.Helper()
 	end := time.Now().Add(5 * time.Second)
