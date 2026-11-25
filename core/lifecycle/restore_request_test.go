@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -33,5 +34,14 @@ func TestRestoreRequestBindsTargetName(t *testing.T) {
 		if _, err := s.CreateVolume(changed); !errors.Is(err, ErrVolumeConflict) {
 			t.Fatalf("rebound target %+v: %v; want conflict", changed, err)
 		}
+	}
+	bad := spec
+	bad.VolumeID = "new-target"
+	bad.SourceSnapshot = strings.Repeat("x", 65)
+	if _, err := s.CreateVolume(bad); !errors.Is(err, ErrInvalidVolumeSpec) {
+		t.Fatalf("invalid source snapshot was persisted: %v", err)
+	}
+	if _, ok := s.GetVolume(bad.VolumeID); ok {
+		t.Fatal("invalid restore created a target record")
 	}
 }

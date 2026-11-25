@@ -7,10 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/retain"
-	"github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
-	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"io"
 	"sort"
 	"strings"
@@ -18,7 +14,13 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/retain"
 	"github.com/seaweedfs/seaweed-block/core/ops"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // restoreCreateRPC is the one master transition for a restore. Tests replace
@@ -271,7 +273,20 @@ func chunkRestore(args []string, stdout, stderr io.Writer) int {
 		VolumeId: target, SourceVolume: source, SourceSnapshot: snapshot, CreateRequestId: requestID,
 	})
 	if err != nil {
-		return chunkResult("restore", nil, err, stdout, stderr)
+		switch status.Code(err) {
+		case codes.NotFound:
+			return chunkFail("restore", stdout, stderr, chunkExitFailed, "snapshot_not_found", err.Error(), false)
+		case codes.AlreadyExists:
+			return chunkFail("restore", stdout, stderr, chunkExitFailed, "target_exists", err.Error(), false)
+		case codes.InvalidArgument:
+			return chunkFail("restore", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
+		case codes.FailedPrecondition:
+			return chunkFail("restore", stdout, stderr, chunkExitFailed, "not_admitted", err.Error(), false)
+		case codes.Unavailable, codes.DeadlineExceeded:
+			return chunkFail("restore", stdout, stderr, chunkExitFailed, codeUnavailableCLI, err.Error(), true)
+		default:
+			return chunkResult("restore", nil, err, stdout, stderr)
+		}
 	}
 	if resp.GetVolumeId() != target || !resp.GetStoreReady() {
 		return chunkFail("restore", stdout, stderr, chunkExitFailed, codeUnavailableCLI, "master did not confirm the restored target is store-ready", true)

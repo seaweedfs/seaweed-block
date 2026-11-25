@@ -398,6 +398,12 @@ func validateSpec(spec VolumeSpec) error {
 		if err := validateVolumeID(spec.SourceVolume); err != nil || spec.SourceSnapshot == "" || spec.CreateRequestID == "" || spec.SourceVolume == spec.VolumeID {
 			return fmt.Errorf("%w: restore needs a distinct source volume, snapshot and request id", ErrInvalidVolumeSpec)
 		}
+		if err := layout.CheckSnapshot(spec.SourceSnapshot, layout.SnapshotMeta{}); err != nil {
+			return fmt.Errorf("%w: restore snapshot: %v", ErrInvalidVolumeSpec, err)
+		}
+		if len(spec.CreateRequestID) > 128 {
+			return fmt.Errorf("%w: restore request id is over 128 bytes", ErrInvalidVolumeSpec)
+		}
 	}
 	if spec.LayoutID != "" {
 		if _, err := layout.ParseVolumeID(spec.LayoutID); err != nil {
