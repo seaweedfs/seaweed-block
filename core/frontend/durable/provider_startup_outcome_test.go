@@ -64,9 +64,9 @@ func TestChunkStartupSealedAssignmentStaysForReplay(t *testing.T) {
 	logs := &lockedLog{}
 	captureWriteLogs(t, logs)
 	ctx := hangGuard(t)
-	remote := storage.NewMemChunkRemote()
+	c := newLayoutCase(t, 64, 4)
 	root := t.TempDir()
-	first := chunkProvider(t, root, remote, v1View(), 0)
+	first := c.provider(t, root, v1View(), "s/r1", nil)
 	openRecovered(t, first)
 	sealed, _, err := first.DetachVolumePlain(ctx, "v1")
 	if err != nil {
@@ -81,7 +81,7 @@ func TestChunkStartupSealedAssignmentStaysForReplay(t *testing.T) {
 	waiting.Epoch = 0
 	waiting.Healthy = false
 	view.set(waiting)
-	second := chunkProvider(t, root, remote, view, 0)
+	second := c.provider(t, root, view, "s/r1", nil)
 	if _, err := second.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}

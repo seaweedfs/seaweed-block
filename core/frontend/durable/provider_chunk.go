@@ -269,7 +269,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		case errors.Is(err, errProviderClosed):
 			ended = "provider closed"
 			return
-		case errors.Is(err, storage.ErrChunkLayerDetached):
+		case errors.Is(err, storage.ErrChunkLayerDetached), errors.Is(err, layout.ErrDetached):
 			// INV-WS-STARTUP-RETRY-001: an assigned sealed incarnation stays
 			// non-serving for exact seal replay; restarting cannot unseal it.
 			retained = true
