@@ -176,6 +176,15 @@ type Host struct {
 	// re-applies the current role until it succeeds or is refused for good.
 	// Under selfFenceMu.
 	roleRetry bool
+	// factMu serialises applyFact (the subscription stream, the readiness
+	// replay) with runRoleRetry's completion of a skipped supporting
+	// assignment. Lock order: factMu, then selfFenceMu.
+	factMu sync.Mutex
+	// pendingSupport (under factMu): the supporting assignment the last
+	// fact skipped because its replica role call failed with an error a
+	// retry may outlast. runRoleRetry completes it once the role call
+	// succeeds at its epoch; any later fact supersedes it.
+	pendingSupport *pendingSupport
 	// RF1Only admission state, one unit under rf1Mu (field access only, no
 	// calls): the highest refused epoch with its reason ("" = cleared), and the
 	// highest epoch an RF1 fact was admitted at. A clear removes only the
@@ -489,6 +498,12 @@ func (h *Host) latchRoleAdmission(role selfRole, epoch uint64, err error) {
 	h.roleAdmissionFailed.Store("")
 }
 
+// pendingSupport is a supporting assignment waiting for its role call.
+type pendingSupport struct {
+	info    adapter.AssignmentInfo
+	primary string
+}
+
 // ErrRoleRefused marks a role call refused for good (the listener is closed,
 // or the volume refuses replica peers): retrying cannot succeed, so the
 // latch stays with its reason and no retry runs.
@@ -511,9 +526,11 @@ func (h *Host) runRoleRetry(ctx context.Context) {
 			return
 		case <-time.After(delay):
 		}
+		h.factMu.Lock()
 		h.selfFenceMu.Lock()
 		if !h.roleRetry || h.selfFence == nil || h.selfRole != selfRoleReplica {
 			h.selfFenceMu.Unlock()
+			h.factMu.Unlock()
 			delay = roleRetryMin
 			continue
 		}
@@ -523,13 +540,35 @@ func (h *Host) runRoleRetry(ctx context.Context) {
 		h.selfFenceMu.Unlock()
 		if err == nil {
 			h.log.Printf("blockvolume: replica role at epoch %d admitted on retry", epoch)
+			// Finish what the fact skipped when its role call failed, as the
+			// assignment path would have after a successful one (factMu held:
+			// no fact can be applied in between).
+			if p := h.pendingSupport; p != nil && p.info.Epoch == epoch {
+				h.pendingSupport = nil
+				h.completeSupporting(p.info, p.primary)
+			}
+			h.factMu.Unlock()
 			delay = roleRetryMin
 			continue
 		}
+		h.factMu.Unlock()
 		if delay *= 2; delay > roleRetryMax {
 			delay = roleRetryMax
 		}
 	}
+}
+
+// completeSupporting applies a supporting assignment once its replica role
+// call succeeded: the adapter's identity, the watchdog, the ready marker.
+func (h *Host) completeSupporting(info adapter.AssignmentInfo, primary string) {
+	h.adpt.OnAssignment(info)
+	h.wd.supportingAdmitted(info.Epoch)
+	h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
+		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, primary)
+	// Supporting replicas need durable lineage latching for promotion-readiness,
+	// but this must not consume the primary readyOnce. A later promotion to
+	// PRIMARY has to emit its own marker for the promoted lineage.
+	h.emitSupportingReadyMarker(info)
 }
 
 // RoleAdmissionFailure reports the G1 admission latch: whether the last role
@@ -952,6 +991,15 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // OnAssignment could flip the projection Healthy before peers were
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
+	h.factMu.Lock()
+	defer h.factMu.Unlock()
+	// A newer fact supersedes a supporting assignment still waiting for
+	// its role call.
+	h.pendingSupport = nil
+	h.applyFactLocked(fact)
+}
+
+func (h *Host) applyFactLocked(fact *control.AssignmentFact) {
 	// INV-AUTH-HOLDER-IDENTITY-001: matching r1 and loopback endpoints do not identify a host.
 	if h.refusePrimaryAssignment(fact) {
 		return
@@ -974,20 +1022,17 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 				return
 			}
 			if err := h.fenceSelf(selfRoleReplica, info.Epoch); err != nil {
-				// G1: fail closed, as for the primary path; stream replay
-				// redelivers the fact and a later success clears the latch.
+				// G1: fail closed, as for the primary path. The role call is
+				// retried (runRoleRetry), which completes this assignment
+				// once it succeeds; a later fact supersedes it.
 				h.log.Printf("blockvolume: volume %s could not admit its replica listener at epoch %d: %v — NOT admitting supporting replica (fail-closed)",
 					h.cfg.VolumeID, info.Epoch, err)
+				if !errors.Is(err, ErrRoleRefused) {
+					h.pendingSupport = &pendingSupport{info: info, primary: fact.ReplicaId}
+				}
 				return
 			}
-			h.adpt.OnAssignment(info)
-			h.wd.supportingAdmitted(info.Epoch)
-			h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
-				h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, fact.ReplicaId)
-			// Supporting replicas need durable lineage latching for promotion-readiness,
-			// but this must not consume the primary readyOnce. A later promotion to
-			// PRIMARY has to emit its own marker for the promoted lineage.
-			h.emitSupportingReadyMarker(info)
+			h.completeSupporting(info, fact.ReplicaId)
 			return
 		}
 		// The new authoritative set excludes us: close assignment-gated
