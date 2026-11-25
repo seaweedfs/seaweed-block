@@ -184,7 +184,16 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 		return lastSent, errSessionInvalidated
 	default:
 	}
-	if err := sendBarrierReq(conn, session.lineage, recoveryConnTimeout); err != nil {
+	// The final barrier carries this primary's epoch rows: the replica's
+	// entries up to its end are now this primary's history.
+	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
+		return lastSent, fmt.Errorf("catch-up barrier: set deadline: %w", err)
+	}
+	req := EncodeLineage(session.lineage)
+	if e.epochs != nil {
+		req = append(req, EncodeEpochRows(e.epochs.Rows())...)
+	}
+	if err := WriteMsg(conn, MsgBarrierReq, req); err != nil {
 		return lastSent, fmt.Errorf("catch-up barrier: %w", err)
 	}
 	resp, err := recvBarrierResp(conn, recoveryConnTimeout)

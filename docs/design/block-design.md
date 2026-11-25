@@ -294,22 +294,24 @@ This section is the replication engine as a core component. Kubernetes volumes u
 ```mermaid
 stateDiagram-v2
   [*] --> Unknown
-  Unknown --> Healthy: probe and barrier succeed
+  Unknown --> Healthy: probe, then a barrier whose (last data epoch, end) the primary's epoch table finds in sync
   Healthy --> Degraded: barrier or ship failure
+  Healthy --> NeedsRebuild: seed barrier finds diverged history (another epoch at the same LSNs, or a tail above the frontier), via Degraded
   Degraded --> CatchingUp: gap within the primary's WAL
   CatchingUp --> CatchingUp: identical recovery facts retain the prepared session
   CatchingUp --> CatchingUp: active session refuses promotion readiness
   Healthy --> Healthy: delayed probe retains completed durable R
   Healthy --> Healthy: completed recovery certifies P, prune version suffix
-  CatchingUp --> Healthy: caught up to the target
+  CatchingUp --> Healthy: caught up to the target and reconciled in sync by (epoch, LSN)
   CatchingUp --> Degraded: catch-up fails
-  Degraded --> Healthy: recovers
+  Degraded --> Healthy: recovers and reconciles in sync by (epoch, LSN), never by length
+  Degraded --> NeedsRebuild: a heal's reconciliation finds diverged history
   Degraded --> NeedsRebuild: gap beyond WAL retention or retries exhausted
   CatchingUp --> NeedsRebuild: WAL recycled
   NeedsRebuild --> [*]: terminal for this peer
 ```
 
-(Peer states and allowed transitions are in `core/replication/peer.go` `ReplicaState`, `replicaStateTransitionAllowed`. `NeedsRebuild` is terminal in this state machine; the rebuild itself runs as a separate dual-lane session, and the Kubernetes line drives it through an opt-in operator path, see the [Kubernetes block design](kubernetes-block-design.md#4-replication-and-failover).)
+(Peer states and allowed transitions are in `core/replication/peer.go` `ReplicaState`, `replicaStateTransitionAllowed`. Every route to `Healthy` from a recovery verdict goes through `ReplicaPeer.HealIfInSync`: a barrier in this session whose (last data epoch, end) the primary's epoch table (`core/transport/epoch_table.go`, `SharedEnd`) finds in sync; diverged history goes to `NeedsRebuild` and is never counted. `NeedsRebuild` is terminal in this state machine; the rebuild itself runs as a separate dual-lane session, and the Kubernetes line drives it through an opt-in operator path, see the [Kubernetes block design](kubernetes-block-design.md#4-replication-and-failover).)
 
 **Invariants.**
 

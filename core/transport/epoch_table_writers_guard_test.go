@@ -2,8 +2,10 @@ package transport
 
 import (
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"path/filepath"
 	"sort"
@@ -20,16 +22,18 @@ import (
 var epochTableWriters = []string{
 	"cmd/blockvolume/replication_ingress.go: func newReplicationIngress .TrimAbove",
 	"cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Note",
-	"core/transport/replica.go: func handleConn .Note",
-	"core/transport/replica.go: func handleConn .Replace",
+	"core/transport/replica.go: func handleConn .Note",    // live-lane entry, before the apply
+	"core/transport/replica.go: func handleConn .Replace", // rebuild done
+	"core/transport/replica.go: func handleConn .Replace", // catch-up's final barrier
 }
 
-// epochWrites lists the non-test calls of Note or Replace on an expression
-// naming an epoch table (an identifier or field whose name contains "epoch"),
-// as "file: func F .Method".
+// epochWrites lists the non-test calls of Note, Replace or TrimAbove whose
+// receiver's TYPE is *EpochTable (any variable, field or alias name), as
+// "file: func F .Method", type-checking every package that imports this one.
 func epochWrites(t *testing.T, root string) []string {
 	t.Helper()
-	var out []string
+	const self = "github.com/seaweedfs/seaweed-block/core/transport"
+	dirs := map[string][]string{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -40,25 +44,59 @@ func epochWrites(t *testing.T, root string) []string {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			dirs[filepath.Dir(path)] = append(dirs[filepath.Dir(path)], path)
 		}
-		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(root, path)
-		out = append(out, writesIn(f, filepath.ToSlash(rel))...)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	fset := token.NewFileSet()
+	imp := importer.ForCompiler(fset, "source", nil)
+	var out []string
+	for dir, paths := range dirs {
+		var files []*ast.File
+		uses := false
+		for _, p := range paths {
+			f, err := parser.ParseFile(fset, p, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, f)
+			for _, im := range f.Imports {
+				if strings.Trim(im.Path.Value, `"`) == self {
+					uses = true
+				}
+			}
+		}
+		rel, _ := filepath.Rel(root, dir)
+		if !uses && filepath.ToSlash(rel) != "core/transport" {
+			continue
+		}
+		info := &types.Info{Selections: map[*ast.SelectorExpr]*types.Selection{}}
+		conf := types.Config{Importer: imp, Error: func(error) {}}
+		_, _ = conf.Check(dir, fset, files, info)
+		for _, f := range files {
+			name := filepath.ToSlash(mustRel(root, fset.Position(f.Pos()).Filename))
+			out = append(out, typedWritesIn(f, name, info)...)
+		}
+	}
 	sort.Strings(out)
 	return out
 }
 
-func writesIn(f *ast.File, rel string) []string {
+func mustRel(root, p string) string {
+	r, err := filepath.Rel(root, p)
+	if err != nil {
+		return p
+	}
+	return r
+}
+
+// typedWritesIn: calls of the writer methods on a receiver of type
+// *EpochTable (or EpochTable).
+func typedWritesIn(f *ast.File, rel string, info *types.Info) []string {
 	var out []string
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -71,17 +109,18 @@ func writesIn(f *ast.File, rel string) []string {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || (sel.Sel.Name != "Note" && sel.Sel.Name != "Replace" && sel.Sel.Name != "TrimAbove") {
+			if !ok || !epochWriter[sel.Sel.Name] {
 				return true
 			}
-			var recv string
-			switch x := sel.X.(type) {
-			case *ast.Ident:
-				recv = x.Name
-			case *ast.SelectorExpr:
-				recv = x.Sel.Name
+			s := info.Selections[sel]
+			if s == nil {
+				return true
 			}
-			if strings.Contains(strings.ToLower(recv), "epoch") {
+			recv := s.Recv()
+			if p, ok := recv.(*types.Pointer); ok {
+				recv = p.Elem()
+			}
+			if named, ok := recv.(*types.Named); ok && named.Obj().Name() == "EpochTable" {
 				out = append(out, rel+": func "+fn.Name.Name+" ."+sel.Sel.Name)
 			}
 			return true
@@ -89,6 +128,8 @@ func writesIn(f *ast.File, rel string) []string {
 	}
 	return out
 }
+
+var epochWriter = map[string]bool{"Note": true, "Replace": true, "TrimAbove": true}
 
 func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 	got := epochWrites(t, filepath.Join("..", ".."))
@@ -123,15 +164,41 @@ func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 	}
 }
 
-// The census sees a fourth writer: a call in any function on any epoch-named
-// receiver.
+// The census sees a fourth writer whatever the receiver is called: an alias
+// of the table, a field, a plain variable.
 func TestEpochTableWriterCensusFindsAFourth(t *testing.T) {
-	src := "package p\nfunc sneak(epochs *T) { _ = epochs.Note(9, 9) }\nfunc ok(x *T) { _ = x.Note(1, 1) }\n"
-	f, err := parser.ParseFile(token.NewFileSet(), "sneak.go", src, 0)
+	src := `package p
+
+type EpochTable struct{}
+
+func (*EpochTable) Note(a, b uint64) error { return nil }
+
+type holder struct{ h *EpochTable }
+
+func sneak(epochs *EpochTable) {
+	history := epochs
+	_ = history.Note(9, 9)
+	x := holder{h: epochs}
+	_ = x.h.Note(1, 1)
+}
+
+type other struct{}
+
+func (other) Note(a, b uint64) error { return nil }
+
+func notATable(o other) { _ = o.Note(1, 1) }
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "sneak.go", src, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := writesIn(f, "sneak.go"); len(got) != 1 || got[0] != "sneak.go: func sneak .Note" {
-		t.Fatalf("census of a planted writer: %v", got)
+	info := &types.Info{Selections: map[*ast.SelectorExpr]*types.Selection{}}
+	if _, err := (&types.Config{}).Check("p", fset, []*ast.File{f}, info); err != nil {
+		t.Fatal(err)
+	}
+	got := typedWritesIn(f, "sneak.go", info)
+	if len(got) != 2 || got[0] != "sneak.go: func sneak .Note" || got[1] != "sneak.go: func sneak .Note" {
+		t.Fatalf("census of planted writers (alias, field; not another type): %v", got)
 	}
 }

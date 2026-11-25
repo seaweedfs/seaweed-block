@@ -427,11 +427,16 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
 					return true
 				}
-				// The row first, then the entry: an entry whose epoch the
-				// table cannot name is never applied.
-				if err := r.epochs.Note(entry.Lineage.Epoch, entry.LSN); err != nil {
-					log.Printf("replica: epoch table lsn=%d epoch=%d: %v", entry.LSN, entry.Lineage.Epoch, err)
-					return true
+				// Live lane: the row first, then the entry, so an entry
+				// whose epoch the table cannot name is never applied. A
+				// recovery lane ships history: the session's epoch is not
+				// its entries' epoch, so nothing is noted here; the
+				// session's final barrier carries the primary's rows.
+				if lane != mutationLaneRecovery {
+					if err := r.epochs.Note(entry.Lineage.Epoch, entry.LSN); err != nil {
+						log.Printf("replica: epoch table lsn=%d epoch=%d: %v", entry.LSN, entry.Lineage.Epoch, err)
+						return true
+					}
 				}
 				// If the apply-gate is installed, route through it.
 				// Caller (this handler) decides lane; gate is lane-pure.
@@ -594,7 +599,27 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
 				}
-				frontier, _ := r.store.Sync()
+				frontier, syncErr := r.store.Sync()
+				// A catch-up's final barrier carries the primary's rows:
+				// the entries up to frontier are now the primary's history,
+				// so its rows cut there replace this table before the ack.
+				if len(payload) > 32 {
+					if syncErr != nil {
+						log.Printf("replica: catch-up barrier sync: %v", syncErr)
+						return true // no ack: the table is not replaced over an unknown end
+					}
+					rows, err := DecodeEpochRows(payload[32:])
+					if err != nil {
+						log.Printf("replica: catch-up barrier epoch rows: %v", err)
+						return true
+					}
+					if r.epochs != nil {
+						if err := r.epochs.Replace(RowsThrough(rows, frontier)); err != nil {
+							log.Printf("replica: catch-up barrier epoch table: %v", err)
+							return true
+						}
+					}
+				}
 				// Echo the request's full lineage in the barrier ack.
 				// The primary's DurabilityCoordinator validates this
 				// tuple against the session it is awaiting before
