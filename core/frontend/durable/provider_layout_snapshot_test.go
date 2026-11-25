@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
@@ -118,5 +119,78 @@ func TestLayoutProviderSnapshotVolume(t *testing.T) {
 	}
 	if ri := chunkstore.SnapshotInfoFromHead("v1", "daily", again); ri.CutLSN != info.CutLSN || ri.Root != info.Root || ri.CreatedNs != 11 || ri.CutLSN == again.Position {
 		t.Fatalf("replay after later cuts: cut %d root %s created %d; want the recorded cut %d root %s (HEAD now at %d)", ri.CutLSN, ri.Root, ri.CreatedNs, info.CutLSN, info.Root, again.Position)
+	}
+}
+
+// A snapshot request whose cut fails returns the error and withdraws its
+// name: the cut keeps its session and staged uploads for its retry, and
+// that later cut must not name the image the requester was told was not
+// taken.
+func TestLayoutProviderFailedSnapshotNamesNoLaterImage(t *testing.T) {
+	ctx := context.Background()
+	blobs := &layoutProviderBlobs{blobs: map[string][]byte{}}
+	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), blobs, "/layout-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := chunkstore.VolumeRef{Name: "v1", ID: id}
+	if _, err = cat.CreateVolume(ctx, v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}))
+	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r1",
+		ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return cat.Store(v) },
+		ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			return chunkstore.NewLayoutRemote(cat, v, me)
+		},
+	}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	s, err := p.EnsureStorage("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := s.(*storage.WALStore)
+	if _, err = p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ws.Write(0, bytes.Repeat([]byte{'A'}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ws.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	blobs.Lock()
+	blobs.fail = errors.New("blob store down")
+	blobs.Unlock()
+	shortCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if _, err := p.SnapshotVolume(shortCtx, "v1", "weekly", layout.SnapshotMeta{CreatedNs: 7}); err == nil {
+		t.Fatal("a snapshot whose cut could not upload succeeded")
+	}
+	blobs.Lock()
+	blobs.fail = nil
+	blobs.Unlock()
+	if _, err = ws.Write(1, bytes.Repeat([]byte{'B'}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ws.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CutVolume(ctx, "v1", 0); err != nil {
+		t.Fatalf("the later cut: %v", err)
+	}
+	h, _, err := cat.ReadHead(ctx, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, named := h.Snapshots["weekly"]; named {
+		t.Fatalf("the failed request's name rode onto a later cut: %+v", h.Snapshots)
 	}
 }

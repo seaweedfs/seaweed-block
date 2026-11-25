@@ -43,6 +43,16 @@ func startLayoutRoot(ctx context.Context, ws *storage.WALStore, st layout.StartS
 	position, _, _ := ws.Boundaries()
 	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: uint64(ws.NumBlocks()) * uint64(ws.BlockSize()), BlockSize: uint32(ws.BlockSize()), ChunkBytes: uint64(ws.ChunkBlocks()) * uint64(ws.BlockSize())}, ClaimID: id, Fresh: fresh, Position: position})
 	if err != nil {
+		if errors.Is(err, layout.ErrNotHolder) || errors.Is(err, layout.ErrStaleEpoch) || errors.Is(err, layout.ErrPrecondition) {
+			// A HEAD held by another holder at our granted epoch, or any
+			// HEAD above it, is a final refusal. A stale local root keeps
+			// its own cure even when that root cannot claim this HEAD.
+			observed, found, readErr := st.ReadHead(ctx)
+			if readErr == nil && found && !errors.Is(err, layout.ErrStaleLocalRoot) &&
+				(observed.Epoch > line.Epoch || observed.Epoch == line.Epoch && observed.Holder != line.Holder) {
+				err = errors.Join(err, storage.ErrChunkLayerFenced, errChunkForeignClaim)
+			}
+		}
 		return layout.Head{}, fmt.Errorf("durable: layout Start: %w", err)
 	}
 	return h, nil
@@ -87,11 +97,7 @@ func (r *layoutBoundRemote) ChunkKey(index uint64, sum [32]byte) string {
 	return r.keyer.ChunkKey(index, sum)
 }
 
-func (r *layoutBoundRemote) AbortCut() {
-	if a, ok := r.ChunkRemote.(storage.CutAborter); ok {
-		a.AbortCut()
-	}
-}
+func (r *layoutBoundRemote) Abort() { r.ChunkRemote.Abort() }
 
 type layoutStopRemote interface {
 	AbortOpenSession(context.Context) (string, error)

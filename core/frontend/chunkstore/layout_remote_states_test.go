@@ -17,52 +17,76 @@ import (
 //
 //	idle      no session; HEAD idle (the engine has read HEAD)
 //	open      session s held; HEAD snap(s)
-//	abandoned session s held, the engine's AbortCut notice taken; HEAD snap(s)
+//	abandoned session s held, the engine's Abort notice taken; HEAD snap(s)
 //	pending   no session, a snapshot name set; HEAD idle
-//	births-pending commit reply lost, HEAD idle, engine birth refs cached only in this adapter
+//	births-pending commit reply lost; HEAD idle, adapter still holds the old session and birth refs
 //	dead      no session, nothing read yet; HEAD snap(d) of this holder (a dead process's)
+//	cleaning  this remote's cleaning tick running; HEAD clean(c)
 //
 // The other in-memory pieces (visible/ownGen/seen/forceView, cleaning,
-// snapErr, lastCommit) are covered by their own tests; when the intent
-// seam goes with the old store, PutIntent and the abandon notice remain
-// (the engine still opens and gives up cuts), so these states remain.
+// snapErr, lastCommit) are covered by their own tests. The seam's calls
+// are the kernel's: Begin opens the cut's session, Abort is the engine's
+// notice that it gave a cut up.
 func TestLayoutRemote_StateByCallTable(t *testing.T) {
 	ctx := context.Background()
 	type outcome struct {
-		err     string // "", "precondition"
+		err     string // "", "precondition", "busy"
 		act     string // HEAD activity kind after the call
 		named   bool   // the pending name is in HEAD after the call
 		settled string // AbortOpenSession's answer, when the call is it
 	}
-	calls := []string{"GetHead", "PutIntent", "Put", "CASHead", "AbortOpenSession", "CommitPendingSnapshot"}
+	// Abort is the engine's non-blocking notice: it writes nothing, so HEAD
+	// is what the state left; the next HEAD read ends the session.
+	// Clean is the cleaning (maintenance) tick: it ends a given-up session
+	// (abandoned, dead) before it cleans, and is refused while one is held.
+	calls := []string{"GetHead", "Begin", "Put", "CASHead", "Abort", "Clean", "AbortOpenSession", "CommitPendingSnapshot"}
 	table := map[string]map[string]outcome{
 		"idle": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Clean":   {act: layout.ActIdle},
+			"Abort":   {act: layout.ActIdle},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle},
 		},
 		"open": {
-			"GetHead": {act: layout.ActSnap}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Clean":   {err: "busy", act: layout.ActSnap},
+			"Abort":   {act: layout.ActSnap},
+			"GetHead": {act: layout.ActSnap}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
 			"CommitPendingSnapshot": {act: layout.ActSnap},
 		},
 		"abandoned": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Clean":   {act: layout.ActIdle},
+			"Abort":   {act: layout.ActSnap},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
 			"CommitPendingSnapshot": {act: layout.ActSnap},
 		},
 		"pending": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Clean":   {act: layout.ActIdle},
+			"Abort":   {act: layout.ActIdle},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {act: layout.ActIdle, named: true}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle, named: true},
 		},
 		"births-pending": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActIdle}, "Put": {act: layout.ActIdle},
+			"Clean":   {err: "busy", act: layout.ActIdle},
+			"Abort":   {act: layout.ActIdle},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActIdle}, "Put": {act: layout.ActIdle},
 			"CASHead": {err: "precondition", act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle},
 		},
+		"cleaning": {
+			"Clean":   {err: "busy", act: layout.ActClean},
+			"Abort":   {act: layout.ActClean},
+			"GetHead": {act: layout.ActClean}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
+			"CommitPendingSnapshot": {act: layout.ActClean},
+		},
 		"dead": {
-			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"Clean":   {act: layout.ActIdle},
+			"Abort":   {act: layout.ActSnap},
+			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {err: "precondition", act: layout.ActSnap}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
 			"CommitPendingSnapshot": {act: layout.ActSnap},
 		},
@@ -80,18 +104,18 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 		}
 		switch state {
 		case "open":
-			if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+			if _, err := r.Begin(ctx); err != nil {
 				t.Fatal(err)
 			}
 		case "abandoned":
-			if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+			if _, err := r.Begin(ctx); err != nil {
 				t.Fatal(err)
 			}
-			r.AbortCut()
+			r.Abort()
 		case "pending":
 			r.SetSnapshot("p", layout.SnapshotMeta{CreatedNs: 1})
 		case "births-pending":
-			if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+			if _, err := r.Begin(ctx); err != nil {
 				t.Fatal(err)
 			}
 			data := block(9)
@@ -110,6 +134,23 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 				t.Fatalf("lost reply did not leave births pending: err=%v armed=%t refs=%d", err, lost.armed, len(r.pendingRefs))
 			}
 			r.st = lost.sessionStore
+		case "cleaning":
+			// a cleaning tick that runs until a session's call stops it
+			// (or the test ends)
+			release, started, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = r.Clean(ctx, func(cctx context.Context, _ layout.HolderID, _ string) error {
+					close(started)
+					select {
+					case <-cctx.Done():
+					case <-release:
+					}
+					return nil
+				})
+			}()
+			<-started
+			t.Cleanup(func() { close(release); <-done })
 		case "dead":
 			st, _ := lh.cat.Store(lh.v)
 			if _, err := layout.RunBegin(ctx, st, lh.me, "s-dead"); err != nil {
@@ -132,8 +173,8 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 				switch call {
 				case "GetHead":
 					_, err = r.GetHead(ctx)
-				case "PutIntent":
-					_, err = r.PutIntent(ctx, storage.ChunkIntent{})
+				case "Begin":
+					_, err = r.Begin(ctx)
 				case "Put":
 					err = r.Put(ctx, r.ChunkKey(3, layout.Sum(data)), data)
 				case "CASHead":
@@ -141,6 +182,10 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 						_, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: r.visible, Epoch: lh.me.Epoch}, storage.ChunkHead{Epoch: lh.me.Epoch, Chunks: map[uint64]storage.ChunkRef{}})
 						return err
 					}()
+				case "Abort":
+					r.Abort()
+				case "Clean":
+					err = r.Clean(ctx, func(context.Context, layout.HolderID, string) error { return nil })
 				case "AbortOpenSession":
 					settled, err = r.AbortOpenSession(ctx)
 				case "CommitPendingSnapshot":
@@ -154,6 +199,10 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 				case "precondition":
 					if !errors.Is(err, storage.ErrChunkHeadPrecondition) {
 						t.Fatalf("%s x %s: %v; want a precondition", state, call, err)
+					}
+				case "busy":
+					if !errors.Is(err, layout.ErrBusy) {
+						t.Fatalf("%s x %s: %v; want busy", state, call, err)
 					}
 				}
 				h := lh.head()

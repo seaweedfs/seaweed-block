@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -19,11 +20,15 @@ import (
 type layoutProviderBlobs struct {
 	sync.Mutex
 	blobs map[string][]byte
+	fail  error // Put fails with it while set
 }
 
 func (b *layoutProviderBlobs) Put(_ context.Context, raw []byte) (string, error) {
 	b.Lock()
 	defer b.Unlock()
+	if b.fail != nil {
+		return "", b.fail
+	}
 	id := fmt.Sprint(len(b.blobs) + 1)
 	b.blobs[id] = append([]byte(nil), raw...)
 	return id, nil
@@ -162,8 +167,11 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	remounted, _ := makeProvider(oldRoot)
-	if _, err = remounted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrStaleLocalRoot) {
+	if _, err = remounted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrStaleLocalRoot) || !strings.Contains(err.Error(), layout.StaleLocalRootCure) {
 		t.Fatalf("old directory served new lineage: %v", err)
+	}
+	if _, ended := remounted.ChunkStartupOutcome("v1"); ended {
+		t.Fatal("same-holder stale local root was misclassified as superseded")
 	}
 	if remoteCalls != 2 {
 		t.Fatalf("remote constructed before Start/duplicated: %d", remoteCalls)

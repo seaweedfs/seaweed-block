@@ -72,5 +72,5 @@ func TestChunkStageV3_MidUploadAbortReducesRetryBytes(t *testing.T) {
 		t.Fatalf("retry frontier=%d want%d", result.Head.RemoteLSN, frontier)
 	}
 	assertImage(t, "retry image", f.imageOf(t, result.Head), want)
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }

@@ -170,7 +170,7 @@ func TestChunkLayerV3_UnsettledCaptureNeverClearsUNKNOWN(t *testing.T) {
 			f := newFakeChunkRemote()
 			layer := attachCleanMapFixtureV3(t, s, f, chunkHead{})
 			if mode == "intent_failure" {
-				f.failPutIntent = errors.New("intent unavailable")
+				f.failBegin = errors.New("intent unavailable")
 			} else {
 				f.casModes = []fakeCASMode{casUnknownNotApplied}
 			}

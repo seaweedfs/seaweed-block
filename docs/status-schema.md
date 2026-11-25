@@ -249,7 +249,6 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Chunk.Stats.LastCut.PublishPrepareNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
 | `Volumes[].Chunk.Stats.LastCut.ManifestNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
 | `Volumes[].Chunk.Stats.LastCut.CommitStateNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
-| `Volumes[].Chunk.Stats.LastCut.IntentCleanupNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
 | `Volumes[].Chunk.Stats.LastCut.NonPayloadCopyNs` | int64 | (group of `CandidateNs`) Disjoint non-payload intervals within barrier-to-settlement fixed cost. |
 | `Volumes[].Chunk.Stats.LastCut.PayloadNs` | int64 | disjoint streaming/copy/upload wall intervals |
 | `Volumes[].Chunk.Stats.LastCut.COWWALReadAttempts` | uint64 | Local validated WAL attempts and local copy duration, including savers. |

@@ -741,31 +741,15 @@ func (r *closeBoundRemote) Delete(ctx context.Context, key string) error {
 	return r.ChunkRemote.Delete(c, key)
 }
 
-func (r *closeBoundRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (string, error) {
+func (r *closeBoundRemote) Begin(ctx context.Context) (string, error) {
 	c, end := r.bind(ctx)
 	defer end()
-	return r.ChunkRemote.PutIntent(c, in)
+	return r.ChunkRemote.Begin(c)
 }
 
-func (r *closeBoundRemote) DeleteIntent(ctx context.Context, id string) error {
-	c, end := r.bind(ctx)
-	defer end()
-	return r.ChunkRemote.DeleteIntent(c, id)
-}
-
-// DeleteSettledIntent is reserved for joined layer shutdown. Provider Close
-// has already cancelled ordinary operations; a settled root can still be
-// removed using the cleanup caller's bounded context. Unknown CAS roots never
-// reach this method: the layer retains them until publication is settled.
-func (r *closeBoundRemote) DeleteSettledIntent(ctx context.Context, id string) error {
-	return r.ChunkRemote.DeleteIntent(ctx, id)
-}
-
-func (r *closeBoundRemote) ListIntents(ctx context.Context) ([]storage.ChunkIntent, error) {
-	c, end := r.bind(ctx)
-	defer end()
-	return r.ChunkRemote.ListIntents(c)
-}
+// Abort never blocks; it is passed through even after Close (a cut left
+// open is rolled back at the next HEAD read).
+func (r *closeBoundRemote) Abort() { r.ChunkRemote.Abort() }
 
 // The fresh marker: <volume path>.chunkfresh.
 
@@ -1442,7 +1426,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		// Log only after capture releases its barrier; at most five records.
 		for _, a := range r.Precopy.Rounds {
 			p := a.FixedParts
-			log.Printf("durable: pre-copy fixed spans volume=%s attempt=%d candidate_ms=%.3f window_setup_ms=%.3f publish_prepare_ms=%.3f manifest_ms=%.3f commit_state_ms=%.3f intent_cleanup_ms=%.3f non_payload_copy_ms=%.3f barrier_overage_ms=%.3f live_drain_ms=%.3f live_capture_lock_ms=%.3f live_sync_ms=%.3f live_candidate_ms=%.3f live_other_ms=%.3f live_sync_lifecycle_wait_ms=%.3f live_sync_store_wait_ms=%.3f live_sync_group_commit_ms=%.3f live_sync_completion_wait_ms=%.3f", volumeID, a.Attempt, float64(p.Candidate)/float64(time.Millisecond), float64(p.WindowSetup)/float64(time.Millisecond), float64(p.PublishPrepare)/float64(time.Millisecond), float64(p.Manifest)/float64(time.Millisecond), float64(p.CommitState)/float64(time.Millisecond), float64(p.IntentCleanup)/float64(time.Millisecond), float64(p.NonPayloadCopy)/float64(time.Millisecond), float64(a.BarrierOverage)/float64(time.Millisecond), float64(a.BarrierParts.Drain)/float64(time.Millisecond), float64(a.BarrierParts.StoreLock)/float64(time.Millisecond), float64(a.BarrierParts.DataSync)/float64(time.Millisecond), float64(a.BarrierParts.Candidate)/float64(time.Millisecond), float64(a.BarrierParts.Other)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.LifecycleWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.StoreWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.GroupCommitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.CompletionWaitNs)/float64(time.Millisecond))
+			log.Printf("durable: pre-copy fixed spans volume=%s attempt=%d candidate_ms=%.3f window_setup_ms=%.3f publish_prepare_ms=%.3f manifest_ms=%.3f commit_state_ms=%.3f non_payload_copy_ms=%.3f barrier_overage_ms=%.3f live_drain_ms=%.3f live_capture_lock_ms=%.3f live_sync_ms=%.3f live_candidate_ms=%.3f live_other_ms=%.3f live_sync_lifecycle_wait_ms=%.3f live_sync_store_wait_ms=%.3f live_sync_group_commit_ms=%.3f live_sync_completion_wait_ms=%.3f", volumeID, a.Attempt, float64(p.Candidate)/float64(time.Millisecond), float64(p.WindowSetup)/float64(time.Millisecond), float64(p.PublishPrepare)/float64(time.Millisecond), float64(p.Manifest)/float64(time.Millisecond), float64(p.CommitState)/float64(time.Millisecond), float64(p.NonPayloadCopy)/float64(time.Millisecond), float64(a.BarrierOverage)/float64(time.Millisecond), float64(a.BarrierParts.Drain)/float64(time.Millisecond), float64(a.BarrierParts.StoreLock)/float64(time.Millisecond), float64(a.BarrierParts.DataSync)/float64(time.Millisecond), float64(a.BarrierParts.Candidate)/float64(time.Millisecond), float64(a.BarrierParts.Other)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.LifecycleWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.StoreWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.GroupCommitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.CompletionWaitNs)/float64(time.Millisecond))
 			log.Printf("durable: pre-copy attempt volume=%s attempt=%d drain_ms=%.3f barrier_ms=%.3f pause_ms=%.3f reason=%s tail=%d rate_samples=%d estimate_ms=%.3f frozen=%t fixed_ms=%.3f drain_cost_ms=%.3f store_lock_ms=%.3f local_sync_ms=%.3f head_cas_ms=%.3f readback_ms=%.3f map_persist_ms=%.3f other_fixed_ms=%.3f tail_ms=%.3f declared_freeze_ms=%.3f err=%s", volumeID, a.Attempt, float64(a.Drain)/float64(time.Millisecond), float64(a.Barrier)/float64(time.Millisecond), float64(a.Pause)/float64(time.Millisecond), a.Reason, a.TailBytes, a.RateSamples, float64(a.Estimate)/float64(time.Millisecond), a.Frozen, float64(a.Fixed)/float64(time.Millisecond), float64(a.FixedParts.Drain)/float64(time.Millisecond), float64(a.FixedParts.StoreLock)/float64(time.Millisecond), float64(a.FixedParts.DataSync)/float64(time.Millisecond), float64(a.FixedParts.HeadCAS)/float64(time.Millisecond), float64(a.FixedParts.HeadReadback)/float64(time.Millisecond), float64(a.FixedParts.MapPersist)/float64(time.Millisecond), float64(a.FixedParts.Other)/float64(time.Millisecond), float64(a.TailEstimate)/float64(time.Millisecond), float64(a.DeclaredFreeze)/float64(time.Millisecond), a.Error)
 		}
 		log.Printf("durable: pre-copy volume=%s attempts=%d measurement_rounds=%d samples_at_start=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.MeasurementRounds, r.Precopy.SamplesAtStart, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, err)
@@ -1596,7 +1580,7 @@ type manifestBoundRemote struct {
 	builder storage.ChunkManifestBuilder
 }
 
-func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, []string, error) {
+func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, error) {
 	c, end := r.bind(ctx)
 	defer end()
 	return r.builder.PrepareManifest(c, base, next, chunkBytes)
