@@ -226,3 +226,25 @@ func TestStart_StaleRootNamesTheCure(t *testing.T) {
 		t.Fatalf("old directory after a move away and back: %v; want ErrStaleLocalRoot naming %q", err, StaleLocalRootCure)
 	}
 }
+
+// Start validates the local root against the very HEAD its claim updates:
+// if HEAD changes after Start's first view (another lineage claims, or the
+// published position rises past the local root), the claim is refused,
+// never written over the newer HEAD.
+func TestStart_ValidatesAgainstTheHeadItUpdates(t *testing.T) {
+	for name, change := range map[string]func(h *Head){
+		"another lineage claims":   func(h *Head) { h.Epoch, h.Holder, h.ClaimID = 4, "s2/r1", "k-other" },
+		"published position rises": func(h *Head) { h.Position = 100 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := startHead(3, "s1/r1", "k3")
+			h.Position = 50
+			st := &memHead{h: &h}
+			st.afterRead = func() { change(st.h) }
+			_, err := Start(context.Background(), st, &fakeLease{ended: true}, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3", Position: 50})
+			if !errors.Is(err, ErrStaleLocalRoot) || st.updates != 0 {
+				t.Fatalf("start after HEAD changed under it: %v (%d writes); want ErrStaleLocalRoot, nothing written", err, st.updates)
+			}
+		})
+	}
+}
