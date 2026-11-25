@@ -252,9 +252,93 @@ func TestOpsChunk_AbsentVolume(t *testing.T) {
 	if code, out, _ := runChunk(cliArgs("show", volArgs("volume", v))...); code != 0 || !strings.Contains(out, `"head":null`) {
 		t.Fatalf("show of an absent volume: %d %q", code, out)
 	}
+	if code, out, _ := runChunk(cliArgs("retain", volArgs("volume", v), []string{"--prefix", "auto-", "--keep-newest", "1"})...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "volume_not_found" {
+		t.Fatalf("retain of an absent volume: %d %q", code, out)
+	}
 	lc := &fakeLifecycle{}
 	addr := startFakeLifecycle(t, lc)
 	if code, out, _ := runChunk(cliArgs("volume-delete", volArgs("volume", v), []string{"--master", addr, "--request-id", "r"})...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "volume_not_found" || len(lc.calls) != 0 {
 		t.Fatalf("delete of an absent volume: %d %q calls %v; want volume_not_found before any admission", code, out, lc.calls)
+	}
+}
+
+// addSnapshot names v's current image again as snapshot name (a new
+// snapshot transaction with no new chunks).
+func addSnapshot(t *testing.T, store *memChunkStore, v chunkstore.VolumeRef, name string, session string, position uint64) {
+	t.Helper()
+	ctx := context.Background()
+	cat, _ := chunkstore.NewBCatalog(store, store, defaultChunkPathCLI)
+	s, _ := cat.Store(v)
+	me := layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
+	h, _, _ := s.ReadHead(ctx)
+	r, _ := layout.NewReader(defaultChunkPathCLI, v.Dir(), s.Fetch)
+	img, err := r.Open(ctx, *h.Current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _, _ := img.Resolve(ctx, 1)
+	m := map[uint64]layout.Ref{1: ref}
+	if _, err := layout.RunBegin(ctx, s, me, session); err != nil {
+		t.Fatal(err)
+	}
+	root, segs, _ := layout.Build(m)
+	rn, rb, _ := layout.NameRoot(root)
+	objs := map[string][]byte{rn.Path(): rb}
+	for n, b := range segs {
+		objs[n.Path()] = b
+	}
+	for rel, b := range objs {
+		if err := layout.EnsureObject(ctx, s, rel, b, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := layout.RunCommit(ctx, s, s, v.Name, me, layout.CommitRequest{Session: session, Prev: m, Next: m, Position: position, Snapshot: name}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// retain keeps the newest N names with the schedule's prefix, deletes the
+// older ones, never touches other names, and keeps (reports) one a restore
+// target depends on; --dry-run writes nothing.
+func TestOpsChunk_Retain(t *testing.T) {
+	store := newMemChunkStore()
+	useMemChunkStore(t, store)
+	v := cliVolume(t, store, "v", "manual")
+	for i, n := range []string{"auto-20261125T0100Z", "auto-20261125T0200Z", "auto-20261125T0300Z", "auto-20261125T0400Z"} {
+		addSnapshot(t, store, v, n, fmt.Sprintf("s%d", i+2), uint64(i+2))
+	}
+	tid, _ := layout.NewVolumeID()
+	if code, out, errs := runChunk(cliArgs("restore", volArgs("source", v), volArgs("target", chunkstore.VolumeRef{Name: "t", ID: tid}), []string{"--snapshot", "auto-20261125T0100Z"})...); code != 0 {
+		t.Fatalf("restore: %d %q %q", code, out, errs)
+	}
+	retain := func(extra ...string) RetainResult {
+		t.Helper()
+		code, out, errs := runChunk(cliArgs("retain", volArgs("volume", v), append([]string{"--prefix", "auto-", "--keep-newest", "2"}, extra...))...)
+		var r RetainResult
+		if code != 0 || json.Unmarshal([]byte(out), &r) != nil {
+			t.Fatalf("retain %v: %d %q %q", extra, code, out, errs)
+		}
+		return r
+	}
+	dry := retain("--dry-run")
+	if strings.Join(dry.Deleted, ",") != "auto-20261125T0200Z" || strings.Join(dry.Pinned, ",") != "auto-20261125T0100Z" || strings.Join(dry.Kept, ",") != "auto-20261125T0400Z,auto-20261125T0300Z" {
+		t.Fatalf("dry run: %+v", dry)
+	}
+	code, out, _ := runChunk(cliArgs("snapshots", volArgs("volume", v))...)
+	var list []SnapshotEntry
+	if code != 0 || json.Unmarshal([]byte(out), &list) != nil || len(list) != 5 {
+		t.Fatalf("a dry run deleted something: %d %q", code, out)
+	}
+	got := retain()
+	if strings.Join(got.Deleted, ",") != "auto-20261125T0200Z" || strings.Join(got.Pinned, ",") != "auto-20261125T0100Z" {
+		t.Fatalf("retain: %+v", got)
+	}
+	code, out, _ = runChunk(cliArgs("snapshots", volArgs("volume", v))...)
+	list = nil
+	if code != 0 || json.Unmarshal([]byte(out), &list) != nil || len(list) != 4 || list[len(list)-1].Name != "manual" {
+		t.Fatalf("after retain: %d %q; want 4 left, manual untouched", code, out)
+	}
+	if code, out, _ := runChunk(cliArgs("retain", volArgs("volume", v), []string{"--keep-newest", "2"})...); code != 2 {
+		t.Fatalf("retain without --prefix: %d %q", code, out)
 	}
 }

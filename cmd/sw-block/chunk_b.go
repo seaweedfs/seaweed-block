@@ -285,3 +285,81 @@ func layoutCode(err error) string {
 	}
 	return ""
 }
+
+// RetainResult is what a retention pass deleted and kept.
+type RetainResult struct {
+	Deleted []string `json:"deleted"`
+	Kept    []string `json:"kept"`
+	// Pinned are names the policy would delete that a restore target
+	// depends on; they stay until it is released.
+	Pinned []string `json:"pinned,omitempty"`
+	DryRun bool     `json:"dry_run,omitempty"`
+}
+
+// chunkRetain applies a retention policy: of the snapshots whose names
+// start with --prefix, it keeps the newest --keep-newest (names sort in
+// time order: a schedule names its snapshots <prefix><UTC timestamp>) and
+// deletes the others (transition 9). Names without the prefix are never
+// touched; a snapshot with dependents is kept and reported.
+func chunkRetain(args []string, stdout, stderr io.Writer) int {
+	c := newBCommand("retain", 5*time.Minute, stdout, stderr)
+	var vol volumeFlags
+	var prefix string
+	var keep int
+	var dryRun bool
+	vol.bind(c.fs, "volume", "volume")
+	c.fs.StringVar(&prefix, "prefix", "", "the schedule's name prefix; only these names are considered")
+	c.fs.IntVar(&keep, "keep-newest", 0, "keep the newest N names with the prefix")
+	c.fs.BoolVar(&dryRun, "dry-run", false, "list what would be deleted; write nothing")
+	var ref chunkstore.VolumeRef
+	// The start check runs only for a pass that writes.
+	writes := true
+	for _, a := range args {
+		if a == "--dry-run" || a == "-dry-run" || a == "--dry-run=true" {
+			writes = false
+		}
+	}
+	return c.run(args, writes, func() (err error) {
+		if prefix == "" || keep < 1 {
+			return errors.New("--prefix and a positive --keep-newest are required")
+		}
+		ref, err = vol.ref("volume")
+		return err
+	}, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
+		h, found, err := cat.ReadHead(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, layout.ErrHeadAbsent
+		}
+		var names []string
+		for n := range h.Snapshots {
+			if strings.HasPrefix(n, prefix) {
+				names = append(names, n)
+			}
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(names)))
+		res := RetainResult{Deleted: []string{}, Kept: []string{}, DryRun: dryRun}
+		for i, n := range names {
+			switch {
+			case i < keep:
+				res.Kept = append(res.Kept, n)
+			case len(h.Snapshots[n].Dependents) > 0:
+				res.Pinned = append(res.Pinned, n)
+			case dryRun:
+				res.Deleted = append(res.Deleted, n)
+			default:
+				if _, err := cat.DeleteSnapshot(ctx, ref, n); err != nil {
+					if errors.Is(err, layout.ErrHasDependents) {
+						res.Pinned = append(res.Pinned, n)
+						continue
+					}
+					return res, err
+				}
+				res.Deleted = append(res.Deleted, n)
+			}
+		}
+		return res, nil
+	})
+}
