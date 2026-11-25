@@ -119,11 +119,14 @@ The host control binds a `BCatalog` to the master's `(name, layout_id)` as a `Vo
 flowchart LR
   Master[Durable master name and layout id] --> Ref[VolumeRef]
   Ref --> Attach[Attach: BCatalog.CreateVolume]
+  Ref --> Evidence[Master: one HEAD metadata response]
   Ref --> List[List: read HEAD snapshots]
   Ref --> Delete[Delete: conditional snapshot removal]
   Ref --> Usage[Usage: HEAD and current root]
   Data[Named snapshot data path] --> Commit[Commit snapshot name in HEAD]
 ```
+
+Blockmaster resolves that identity from its published lifecycle record and reads the filer's conventional `?metadata=true` endpoint once. The shared inline-HEAD decoder binds the entry generation and volume attributes to canonical content, including the claim-bearing detached image. The existing clean-move check still requires the expected epoch/holder and the recorded ACK of that generation. Failed or missing metadata refuses the move; there is no old-directory or old-codec fallback. Entry mtime comes from that same response and is diagnostic evidence, never authority. Do not edit, restore or remove HEAD outside the kernel; its single-entry generation is the proof version.
 
 Listings carry each snapshot's root and dependents. Usage reports snapshot/dependent counts and own/foreign current chunks; it does not synthesize byte accounting. Retention policy is read separately through the catalog. Snapshot entries carry their creation time, class, expiry and bounded labels, sampled once for a named capture and supplied as `CommitRequest.Meta`. A replay keeps the facts already in HEAD. Attach creates the identified VOLUME and unclaimed HEAD idempotently and never creates the legacy name-only directory. Snapshot creation belongs to the data path's HEAD commit, rather than a post-cut catalog write. The runtime cutover remains incomplete while scheduled snapshots, geometry checks and cleaning still reference the old catalog; those references must be removed before that catalog is deleted or this branch ships.
 

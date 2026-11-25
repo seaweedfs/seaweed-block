@@ -12,16 +12,17 @@ import (
 
 func TestLayoutIdentityWriterAndReaders(t *testing.T) {
 	want := map[string]bool{
-		"core/lifecycle/store.go CreateVolume":                     true,
-		"core/lifecycle/store.go volumeSpecsCompatible":            true,
-		"core/lifecycle/store.go validateSpec":                     true,
-		"core/lifecycle/workload_plan.go PlanBlockVolumeWorkloads": true,
-		"core/host/master/services.go lifecycleVolumeResponse":     true,
-		"core/launcher/k8s_renderer.go blockVolumeArgs":            true,
-		"core/launcher/k8s_renderer.go durableRoot":                true,
-		"cmd/blockvolume/main.go runVolume":                        true,
-		"cmd/blockvolume/main.go parseFlags":                       true,
-		"core/rpc/lifecycleclient/identity.go ResolveVolume":       true,
+		"core/lifecycle/store.go CreateVolume":                            true,
+		"core/lifecycle/store.go volumeSpecsCompatible":                   true,
+		"core/lifecycle/store.go validateSpec":                            true,
+		"core/lifecycle/workload_plan.go PlanBlockVolumeWorkloads":        true,
+		"core/host/master/services.go lifecycleVolumeResponse":            true,
+		"core/host/master/workspace_layout_head.go WorkspaceLayoutVolume": true,
+		"core/launcher/k8s_renderer.go blockVolumeArgs":                   true,
+		"core/launcher/k8s_renderer.go durableRoot":                       true,
+		"cmd/blockvolume/main.go runVolume":                               true,
+		"cmd/blockvolume/main.go parseFlags":                              true,
+		"core/rpc/lifecycleclient/identity.go ResolveVolume":              true,
 	}
 	seen := map[string]bool{}
 	root := filepath.Join("..", "..")

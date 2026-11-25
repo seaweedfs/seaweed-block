@@ -52,18 +52,31 @@ func (s *LayoutStore) ReadHead(ctx context.Context) (layout.Head, bool, error) {
 	if err != nil {
 		return layout.Head{}, false, err
 	}
-	if string(e.Extended[layoutKind]) != "head" {
-		return layout.Head{}, false, ErrLegacyStore
+	h, err := DecodeLayoutHeadEntry(e, s.id)
+	return h, err == nil, err
+}
+
+// DecodeLayoutHeadEntry validates the inline entry as one observation: its
+// generation and volume attributes must describe the canonical HEAD content.
+// Both filer RPC and HTTP metadata readers use this boundary.
+func DecodeLayoutHeadEntry(e *filerpb.Entry, id layout.VolumeID) (layout.Head, error) {
+	if e == nil || e.IsDirectory {
+		return layout.Head{}, fmt.Errorf("%w: HEAD is not a file", layout.ErrCorrupt)
 	}
-	if string(e.Extended[layoutVolume]) != s.id.String() {
-		return layout.Head{}, false, layout.ErrIdentity
+	if len(e.Content) > layout.MaxHeadBytes {
+		return layout.Head{}, layout.ErrHeadTooLarge
+	}
+	if string(e.Extended[layoutKind]) != "head" {
+		return layout.Head{}, ErrLegacyStore
+	}
+	if id.IsZero() || string(e.Extended[layoutVolume]) != id.String() {
+		return layout.Head{}, layout.ErrIdentity
 	}
 	gen, err := strconv.ParseUint(string(e.Extended[layoutGen]), 10, 64)
 	if err != nil || gen == 0 || strconv.FormatUint(gen, 10) != string(e.Extended[layoutGen]) || len(e.Chunks) != 0 {
-		return layout.Head{}, false, fmt.Errorf("%w: invalid HEAD entry", layout.ErrCorrupt)
+		return layout.Head{}, fmt.Errorf("%w: invalid HEAD entry", layout.ErrCorrupt)
 	}
-	h, err := layout.DecodeHead(e.Content, gen, s.id)
-	return h, err == nil, err
+	return layout.DecodeHead(e.Content, gen, id)
 }
 
 func (s *LayoutStore) UpdateHead(ctx context.Context, expectedGen uint64, next layout.Head) error {
@@ -228,6 +241,13 @@ func (s *LayoutStore) Create(ctx context.Context, rel string, raw []byte, sessio
 	e.Extended = map[string][]byte{layoutKind: []byte("object"), layoutVolume: []byte(s.id.String()), layoutSession: []byte(session), layoutMark: []byte("")}
 	err = s.f.CreateEntry(ctx, dir, e, true)
 	if errors.Is(err, ErrExists) {
+		// Exclusive refusal proves this new fid was not linked. Unknown
+		// outcomes retain it: the entry may already reference its data.
+		if d, ok := s.b.(interface {
+			DeleteBlob(context.Context, string) error
+		}); ok {
+			_ = d.DeleteBlob(ctx, fid)
+		}
 		return layout.ErrExists
 	}
 	return err
@@ -267,7 +287,7 @@ func (s *LayoutStore) Reuse(ctx context.Context, rel string, expect layout.Objec
 }
 
 func (s *LayoutStore) Mark(ctx context.Context, rel string, expect layout.ObjectMeta, mark string) error {
-	if mark == "" || expect.Mark != "" {
+	if mark == "" {
 		return layout.ErrPrecondition
 	}
 	return s.changeMeta(ctx, rel, expect, expect.Session, mark)

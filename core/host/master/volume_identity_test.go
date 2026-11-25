@@ -52,4 +52,22 @@ func TestGetLifecycleVolumeResolvesOnlyTheDurableIdentity(t *testing.T) {
 	if len(store.ListVolumes()) != 2 {
 		t.Fatal("lookup mutated lifecycle intent")
 	}
+	ref, err := svc.host.WorkspaceLayoutVolume(context.Background(), "v")
+	if err != nil || ref.Name != "v" || ref.ID.String() != id {
+		t.Fatalf("HEAD identity resolver: %+v %v", ref, err)
+	}
+	for _, name := range []string{"legacy", "missing"} {
+		if _, err := svc.host.WorkspaceLayoutVolume(context.Background(), name); err == nil {
+			t.Fatalf("HEAD identity invented for %s", name)
+		}
+	}
+	var unready *Host
+	if _, err := unready.WorkspaceLayoutVolume(context.Background(), "v"); err == nil {
+		t.Fatal("resolver accepted before Host construction")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := svc.host.WorkspaceLayoutVolume(ctx, "v"); err != context.Canceled {
+		t.Fatalf("cancelled lookup: %v", err)
+	}
 }

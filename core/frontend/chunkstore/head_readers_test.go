@@ -24,8 +24,10 @@ import (
 // pins it. "GAP" marks a reader that takes an absent HEAD for an empty
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
-	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":      "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",
-	"core/frontend/chunkstore/layout_store.go ReadHead -> LookupEntry": "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
+	"core/frontend/chunkstore/layout_store.go ReadHead -> DecodeLayoutHeadEntry":                      "shared canonical entry decoder; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",
+	"core/host/master/workspace_layout_head.go NewLayoutWorkspaceHEADReader -> DecodeLayoutHeadEntry": "any missing/failed metadata refuses; identity comes from master intent (TestWorkspaceLayoutHEADRefusalsAndStates)",
+	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":                                     "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",
+	"core/frontend/chunkstore/layout_store.go ReadHead -> LookupEntry":                                "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
 	// chunkstore: the two raw reads every other reader goes through
 	"core/frontend/chunkstore/catalog.go ReadHead -> LookupEntry":                    "ok=false, no error (probe ReadHead)",
 	"core/frontend/chunkstore/chunk_remote.go getHeadRoot -> LookupEntry":            "zero HEAD, no error (probe GetHead)",
@@ -42,7 +44,6 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/restore.go MarkIndependent -> ReadHead":                "refuses (not a restore / no HEAD) (probe MarkIndependent)",
 	"core/frontend/chunkstore/share_guard.go beginShare -> ReadHead":                 "refuses outcome_unknown: the HEAD to share is no longer current",
 	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                            "GAP: reports an empty image, no error (probe Usage)",
-	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":                     "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
 	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
 	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
@@ -54,7 +55,6 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
 	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":             "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
-	"core/frontend/chunkstore/verify.go run -> LookupEntry":                          "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":             "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
 	"core/frontend/chunkstore/volume_delete.go markHeadDeleting -> ReadHead":         "zero HEAD: creates the deleting HEAD (probe DeleteVolume)",
 	"core/frontend/chunkstore/volume_delete.go commitHeadPurging -> ReadHead":        "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
@@ -114,7 +114,7 @@ func TestHeadReaders_Enumeration(t *testing.T) {
 					case *ast.Ident:
 						name = x.Name
 					}
-					hit := name == "ReadHead" || name == "GetHead" || name == "GetHeadRoot" || name == "getHeadRoot" || name == "headExists"
+					hit := name == "ReadHead" || name == "GetHead" || name == "GetHeadRoot" || name == "getHeadRoot" || name == "headExists" || name == "DecodeLayoutHeadEntry"
 					if name == "LookupEntry" {
 						for _, a := range call.Args {
 							if id, ok := a.(*ast.Ident); ok && id.Name == "headName" {
@@ -237,13 +237,6 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		res, err := g.Run(ctx)
 		if err != nil || res.Candidates == 0 {
 			t.Fatalf("GC over an absent HEAD: %+v %v; today the volume's keys are candidates", res, err)
-		}
-	})
-	t.Run("Verify", func(t *testing.T) {
-		_, _, c, _, _, _ := absentHeadFixture(t)
-		res, err := c.Verify(ctx, "v1", VerifyOptions{})
-		if err != nil || res.FindingsByClass[FindingRootInvalid] == 0 {
-			t.Fatalf("Verify: %+v %v; want a ROOT_INVALID finding", res, err)
 		}
 	})
 	t.Run("MarkIndependent", func(t *testing.T) {

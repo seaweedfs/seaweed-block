@@ -305,3 +305,135 @@ func TestLayoutStoreDeleteNeverRemovesControlRecords(t *testing.T) {
 		}
 	}
 }
+
+// The first remover dies after Mark. The next cleaning must replace that
+// mark, and the dead remover's delayed delete must not match the replacement.
+type abandonedMarkStore struct {
+	*LayoutStore
+	t                *testing.T
+	oldDeleteRefused bool
+}
+
+func (s *abandonedMarkStore) DeleteMarked(ctx context.Context, rel, mark string) error {
+	if err := s.LayoutStore.DeleteMarked(ctx, rel, "dead-clean"); !errors.Is(err, layout.ErrPrecondition) {
+		s.t.Fatalf("old delete after re-mark: %v", err)
+	}
+	s.oldDeleteRefused = true
+	return s.LayoutStore.DeleteMarked(ctx, rel, mark)
+}
+
+func TestLayoutStoreCleaningReclaimsAnAbandonedMark(t *testing.T) {
+	s, _, _ := layoutStoreFixture(t)
+	ctx := context.Background()
+	if _, err := layout.CreateVolume(ctx, s, layout.Volume{ID: s.id, Name: "v", Format: layout.VolumeFormat}); err != nil {
+		t.Fatal(err)
+	}
+	h, _, err := s.ReadHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Epoch, h.Holder, h.ClaimID = 1, "server/r", "root"
+	h.Activity = layout.Activity{Kind: layout.ActClean, Session: "next-clean"}
+	if err := s.UpdateHead(ctx, h.Gen, h); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("unreachable")
+	n := layout.NameChunk(4, raw)
+	if err := s.Create(ctx, n.Path(), raw, "writer"); err != nil {
+		t.Fatal(err)
+	}
+	meta, _, err := s.Stat(ctx, n.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Mark(ctx, n.Path(), meta, "dead-clean"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := layout.NewReader("/blocks", "v", s.Fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os := &abandonedMarkStore{LayoutStore: s, t: t}
+	removed, err := layout.RemoveUnreachable(ctx, s, r, os, layout.HolderID{Epoch: 1, Holder: "server/r", ClaimID: "root"}, "next-clean", 0, []layout.ChunkName{n})
+	if err != nil || len(removed) != 1 || removed[0] != n || !os.oldDeleteRefused {
+		t.Fatalf("next cleaning: removed=%v old_delete_refused=%v err=%v", removed, os.oldDeleteRefused, err)
+	}
+	if _, found, err := s.Stat(ctx, n.Path()); err != nil || found {
+		t.Fatalf("orphan retained: %v %v", found, err)
+	}
+}
+
+type layoutCleanupBlobs struct {
+	*fakeBlobs
+	deleted   []string
+	deleteErr error
+}
+
+func (b *layoutCleanupBlobs) DeleteBlob(_ context.Context, fid string) error {
+	b.deleted = append(b.deleted, fid)
+	if b.deleteErr != nil {
+		return b.deleteErr
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.data, fid)
+	return nil
+}
+
+func TestLayoutStoreCreateExistsReclaimsOnlyItsUnusedUpload(t *testing.T) {
+	for _, failedCleanup := range []bool{false, true} {
+		t.Run(map[bool]string{false: "reclaimed", true: "cleanup unavailable"}[failedCleanup], func(t *testing.T) {
+			s, _, base := layoutStoreFixture(t)
+			b := &layoutCleanupBlobs{fakeBlobs: base}
+			s.b = b
+			ctx := context.Background()
+			raw := []byte("referenced bytes")
+			n := layout.NameChunk(3, raw)
+			if err := s.Create(ctx, n.Path(), raw, "winner"); err != nil {
+				t.Fatal(err)
+			}
+			if failedCleanup {
+				b.deleteErr = errors.New("volume server unavailable")
+			}
+			if err := s.Create(ctx, n.Path(), raw, "loser"); !errors.Is(err, layout.ErrExists) {
+				t.Fatal(err)
+			}
+			if len(b.deleted) != 1 {
+				t.Fatalf("unused upload cleanup calls: %v", b.deleted)
+			}
+			_, _, stored := b.counts()
+			want := 1
+			if failedCleanup {
+				want = 2
+			}
+			if stored != want {
+				t.Fatalf("stored blobs=%d, want %d", stored, want)
+			}
+			got, found, err := s.Fetch(ctx, path.Join(s.root, n.Path()))
+			if err != nil || !found || !bytes.Equal(got, raw) {
+				t.Fatalf("winner lost: %q %v %v", got, found, err)
+			}
+		})
+	}
+}
+
+func TestLayoutStoreCreateUnknownOutcomeKeepsItsUpload(t *testing.T) {
+	s, f, base := layoutStoreFixture(t)
+	b := &layoutCleanupBlobs{fakeBlobs: base}
+	s.b = b
+	unknown := errors.New("create reply lost")
+	f.failCreateAfterApply = func(string) error { return unknown }
+	raw := []byte("applied bytes")
+	n := layout.NameChunk(3, raw)
+	ctx := context.Background()
+	if err := s.Create(ctx, n.Path(), raw, "writer"); !errors.Is(err, unknown) {
+		t.Fatal(err)
+	}
+	if len(b.deleted) != 0 {
+		t.Fatalf("unknown upload deleted: %v", b.deleted)
+	}
+	got, found, err := s.Fetch(ctx, path.Join(s.root, n.Path()))
+	if err != nil || !found || !bytes.Equal(got, raw) {
+		t.Fatalf("applied data lost: %q %v %v", got, found, err)
+	}
+}
