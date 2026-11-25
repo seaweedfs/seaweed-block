@@ -136,10 +136,11 @@ default) can expire the host's slots; keep host clocks synchronized.
 
 ## Snapshots, restore and space
 
-A chunk volume delete permanently reserves the volume at blockmaster before marking HEAD. It cannot be
-cancelled or returned to service, even if a live lease or snapshot dependent currently refuses the delete.
-Wait for the recorded lease barrier, resolve snapshot dependents, and rerun with the same request id;
+A chunk volume delete refuses to reserve a volume while its lease may still be live. Once the permanent
+reservation succeeds at blockmaster, the volume cannot be returned to service, even if a snapshot dependent
+refuses the next step. Resolve snapshot dependents and rerun with the same request id;
 the command asks blockmaster for a fresh no-live-lease proof before the HEAD compare-and-swap.
+A late upload by a dead holder into a deleted volume can remain; rerun volume-delete to sweep it.
 
 
 [Standalone deployment: snapshots, restore and space](standalone-deployment.md#snapshots-restore-and-space-walstore-chunk):

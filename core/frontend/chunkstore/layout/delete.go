@@ -159,14 +159,14 @@ func RunReleaseDependent(ctx context.Context, source HeadStore, target VolumeID)
 // removes the object of a volume created again under the name), then HEAD
 // deleted. A source left out keeps an extra dependent, which over-protects
 // and is released by the operator's command.
-func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id VolumeID, sources []HeadStore, os ObjectStore, objects []string) error {
-	if auth == nil || os == nil {
-		return errors.New("layout: delete needs the master's delete authority and an object store")
-	}
-	for _, rel := range objects {
-		if !isObjectPath(rel) {
-			return fmt.Errorf("%w: %q is not a pool, segment or root object; HEAD, VOLUME and the directory stay", ErrMalformed, rel)
-		}
+//
+// The objects are listed (list) only after HEAD is deleting, so nothing a
+// holder uploaded before the reservation escapes the listing. A re-run on
+// a deleted HEAD lists and deletes again: the operator's sweep for a late
+// object of a dead holder.
+func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id VolumeID, sources []HeadStore, os ObjectStore, list func(context.Context) ([]string, error)) error {
+	if auth == nil || os == nil || list == nil {
+		return errors.New("layout: delete needs the master's delete authority, an object store and a lister")
 	}
 	if err := auth.Reserve(ctx); err != nil {
 		return fmt.Errorf("layout: delete reservation: %w", err)
@@ -179,6 +179,15 @@ func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id Vo
 			return err
 		}
 	}
+	objects, err := list(ctx)
+	if err != nil {
+		return fmt.Errorf("layout: list the volume's objects: %w", err)
+	}
+	for _, rel := range objects {
+		if !isObjectPath(rel) {
+			return fmt.Errorf("%w: %q is not a pool, segment or root object; HEAD, VOLUME and the directory stay", ErrMalformed, rel)
+		}
+	}
 	for _, rel := range objects {
 		if err := os.DeleteOfVolume(ctx, rel, id); err != nil {
 			if errors.Is(err, ErrPrecondition) {
@@ -187,7 +196,7 @@ func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id Vo
 			return fmt.Errorf("layout: delete %s: %w", rel, err)
 		}
 	}
-	_, err := RunMarkDeleted(ctx, st)
+	_, err = RunMarkDeleted(ctx, st)
 	return err
 }
 

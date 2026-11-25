@@ -22,7 +22,7 @@ const (
 )
 
 // MaxSnapshots bounds the named snapshots one HEAD holds.
-const MaxSnapshots = 100
+const MaxSnapshots = 10
 
 // Activity is HEAD's open transaction. Session names it; a session id is
 // never reused.

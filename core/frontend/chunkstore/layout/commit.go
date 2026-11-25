@@ -94,7 +94,7 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 			}
 		} else {
 			if len(next.Snapshots) >= MaxSnapshots {
-				return Head{}, false, fmt.Errorf("%w: %d", ErrTooManySnapshots, MaxSnapshots)
+				return Head{}, false, fmt.Errorf("%w: at most %d per volume; delete a snapshot, or let retention prune", ErrTooManySnapshots, MaxSnapshots)
 			}
 			if next.Snapshots == nil {
 				next.Snapshots = map[string]Snapshot{}

@@ -13,7 +13,7 @@ func TestChunkVolumeDeleteAuthorityRPCSites(t *testing.T) {
 		file string
 		want map[string]int
 	}{
-		{"chunk_volume_delete.go", map[string]int{"ReserveVolumeDeletion": 1, "CheckVolumeDeletionLease": 1}},
+		{"chunk_volume_delete.go", map[string]int{"ReserveVolumeDeletion": 1, "CheckVolumeNoLiveLease": 1}},
 		{"../../core/host/master/volume_delete_authority.go", map[string]int{"VolumeDeleteAuthority": 2, "Reserve": 1, "NoLiveLease": 1}},
 	} {
 		f, err := parser.ParseFile(token.NewFileSet(), tc.file, nil, 0)
@@ -31,7 +31,7 @@ func TestChunkVolumeDeleteAuthorityRPCSites(t *testing.T) {
 				return true
 			}
 			switch sel.Sel.Name {
-			case "ReserveVolumeDeletion", "CheckVolumeDeletionLease", "MarkVolumeDeleting", "AbortVolumeDeleting", "CommitVolumeDeleting", "VolumeDeleteAuthority", "Reserve", "NoLiveLease":
+			case "ReserveVolumeDeletion", "CheckVolumeNoLiveLease", "MarkVolumeDeleting", "AbortVolumeDeleting", "CommitVolumeDeleting", "VolumeDeleteAuthority", "Reserve", "NoLiveLease":
 				got[sel.Sel.Name]++
 			}
 			return true

@@ -60,9 +60,9 @@ func (s *services) ReserveVolumeDeletion(ctx context.Context, req *control.MarkV
 	return &control.MarkVolumeDeletingResponse{Known: known, State: lifecycle.ReservationCommitted}, nil
 }
 
-// CheckVolumeDeletionLease reads the master's authoritative barrier at the
+// CheckVolumeNoLiveLease reads the master's authoritative barrier at the
 // delete's CAS boundary, including granted-but-unclaimed lines.
-func (s *services) CheckVolumeDeletionLease(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
+func (s *services) CheckVolumeNoLiveLease(ctx context.Context, req *control.MarkVolumeDeletingRequest) (*control.MarkVolumeDeletingResponse, error) {
 	if req.GetVolumeId() == "" || req.GetToken() == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_id and token are required")
 	}

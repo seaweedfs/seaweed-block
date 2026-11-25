@@ -15,15 +15,21 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
-// chunkVolumeDelete permanently reserves deletion at the master, then asks
-// that master for the stable no-live-lease proof before the HEAD CAS.
-// A refused or interrupted delete keeps its reservation for a later rerun.
+// chunkVolumeDelete: sw-block ops chunk volume-delete --volume v
+// --chunk-filer host:port --master host:port --request-id r deletes a
+// volume in the layout kernel's order. The blockmaster holds the delete's
+// authority: ReserveVolumeDeletion commits the reservation (refused while
+// an authority line is live; no grant for the volume after it; never given
+// back), and CheckVolumeNoLiveLease runs between the HEAD read and the
+// update that marks HEAD deleting. A refused delete leaves the volume
+// reserved; rerun with the same --request-id once its cause is cleared. A
+// rerun on a deleted volume sweeps any object that landed late.
 func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("volume-delete", time.Minute, stdout, stderr)
 	var vol volumeFlags
 	var requestID string
 	c.bindVolume(&vol, "volume", "volume")
-	c.fs.StringVar(&requestID, "request-id", "", "this delete's operation id; a rerun with the same id resumes its admission")
+	c.fs.StringVar(&requestID, "request-id", "", "this delete's operation id; a rerun with the same id resumes it")
 	var ref chunkstore.VolumeRef
 	return c.run(args, true, func() (err error) {
 		if c.master == "" || requestID == "" || c.timeout <= 0 {
@@ -37,7 +43,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 			return nil, err
 		}
 		defer conn.Close()
-		auth := &masterAuthority{lc: control.NewLifecycleServiceClient(conn), token: requestID, vol: ref.Name}
+		auth := &masterAuthority{lc: control.NewLifecycleServiceClient(conn), req: &control.MarkVolumeDeletingRequest{VolumeId: ref.Name, Token: requestID}}
 		if err := cat.DeleteVolume(ctx, ref, auth); err != nil {
 			return nil, err
 		}
@@ -45,29 +51,27 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	})
 }
 
-// masterAuthority forwards both facts to the owner of the durable reservation
-// and lease horizons. A successful reservation alone is never a lease proof.
+// masterAuthority is the layout delete's authority, held by the
+// blockmaster: both operations are its RPCs, nothing is decided here.
 type masterAuthority struct {
-	lc         control.LifecycleServiceClient
-	token, vol string
+	lc  control.LifecycleServiceClient
+	req *control.MarkVolumeDeletingRequest
 }
 
-func (m *masterAuthority) req() *control.MarkVolumeDeletingRequest {
-	return &control.MarkVolumeDeletingRequest{VolumeId: m.vol, Token: m.token}
-}
 func (m *masterAuthority) Reserve(ctx context.Context) error {
-	_, err := m.lc.ReserveVolumeDeletion(ctx, m.req())
-	return admissionErr(err)
-}
-func (m *masterAuthority) NoLiveLease(ctx context.Context) error {
-	_, err := m.lc.CheckVolumeDeletionLease(ctx, m.req())
-	return err
+	_, err := m.lc.ReserveVolumeDeletion(ctx, m.req)
+	return authorityErr(err)
 }
 
-// admissionErr: FailedPrecondition and InvalidArgument are definite
+func (m *masterAuthority) NoLiveLease(ctx context.Context) error {
+	_, err := m.lc.CheckVolumeNoLiveLease(ctx, m.req)
+	return authorityErr(err)
+}
+
+// authorityErr: FailedPrecondition and InvalidArgument are definite
 // refusals; anything else (unavailable, deadline, a lost response) leaves
-// the outcome unknown.
-func admissionErr(err error) error {
+// the outcome unknown and a rerun decides.
+func authorityErr(err error) error {
 	switch status.Code(err) {
 	case codes.OK:
 		return nil
