@@ -164,3 +164,112 @@ func TestBCatalog_CleanClosesOnError(t *testing.T) {
 		t.Fatalf("HEAD after a failed clean: %+v %v; want idle", h.Activity, err)
 	}
 }
+
+// commitImage commits, as cleanHolder in a fresh session, the manifest next
+// (prev is HEAD's current manifest), uploading data, at position, with a
+// named snapshot of it.
+func commitImage(t *testing.T, s *LayoutStore, vol string, session string, prev, next map[uint64]layout.Ref, data map[uint64][]byte, position uint64, snapshot string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := layout.RunBegin(ctx, s, cleanHolder, session); err != nil {
+		t.Fatal(err)
+	}
+	for idx, ref := range next {
+		if b, ok := data[idx]; ok {
+			if err := layout.EnsureObject(ctx, s, ref.Chunk.Path(), b, session); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	root, segs, err := layout.Build(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n, b := range segs {
+		if err := layout.EnsureObject(ctx, s, n.Path(), b, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rn, rb, err := layout.NameRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureObject(ctx, s, rn.Path(), rb, session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.RunCommit(ctx, s, s, vol, cleanHolder, layout.CommitRequest{Session: session, Prev: prev, Next: next, Position: position, Snapshot: snapshot}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Release-blocking (cleaning end to end on the catalog): snapshot s1 of X,
+// overwrite the chunk with Y, snapshot s2, delete s1, clean: X's chunk is
+// gone, the pool shrinks by exactly it, and the current image and s2 still
+// read Y.
+func TestBCatalog_CleanAfterOverwriteAndSnapshotDelete(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewBCatalog(NewMemFiler(), newFakeBlobs(), "/blocks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := newRef(t, "v1")
+	if _, err := c.CreateVolume(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	s, err := c.Store(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{ClaimID: "k", Fresh: true}); err != nil {
+		t.Fatal(err)
+	}
+	x, y := bytes.Repeat([]byte{'X'}, 4096), bytes.Repeat([]byte{'Y'}, 4096)
+	cx, cy := layout.NameChunk(1, x), layout.NameChunk(1, y)
+	m1 := map[uint64]layout.Ref{1: {Owner: v.Name, OwnerID: v.ID, Chunk: cx}}
+	m2 := map[uint64]layout.Ref{1: {Owner: v.Name, OwnerID: v.ID, Chunk: cy}}
+	commitImage(t, s, v.Name, "w1", map[uint64]layout.Ref{}, m1, map[uint64][]byte{1: x}, 1, "s1")
+	commitImage(t, s, v.Name, "w2", m1, m2, map[uint64][]byte{1: y}, 2, "s2")
+	if err := c.f.CreateEntry(ctx, path.Join(c.base, v.Dir(), layout.PoolDir), &filerpb.Entry{Name: "0", IsDirectory: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	// Control: while s1 still names X, the cleaning removes nothing.
+	if res, err := c.Clean(ctx, v, cleanHolder, "c0"); err != nil || res.Removed != 0 || !present(t, s, cx) {
+		t.Fatalf("clean with s1 held: %+v %v; want nothing removed", res, err)
+	}
+	if _, err := c.DeleteSnapshot(ctx, v, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := c.listObjects(ctx, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Clean(ctx, v, cleanHolder, "c1")
+	if err != nil || res.Removed != 1 {
+		t.Fatalf("clean: %+v %v; want exactly X's chunk removed", res, err)
+	}
+	after, err := c.listObjects(ctx, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before)-1 || present(t, s, cx) || !present(t, s, cy) {
+		t.Fatalf("objects %d -> %d, X present %v, Y present %v; want one fewer, X gone, Y kept", len(before), len(after), present(t, s, cx), present(t, s, cy))
+	}
+	h, _, err := c.ReadHead(ctx, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, r, err := c.open(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, rn := range map[string]layout.RootName{"current": *h.Current, "s2": h.Snapshots["s2"].Root} {
+		img, err := r.Open(ctx, rn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch, err := img.Chunk(ctx, 1)
+		if err != nil || !bytes.Equal(ch.Data, y) {
+			t.Fatalf("%s reads chunk 1: %v (Y=%v); want Y intact", name, err, bytes.Equal(ch.Data, y))
+		}
+	}
+}
