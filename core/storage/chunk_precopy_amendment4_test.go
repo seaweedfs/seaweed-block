@@ -40,8 +40,8 @@ func TestPrecopyFixedWindowDecays(t *testing.T) {
 	for i := range l.precopySamples {
 		l.precopySamples[i].at = now.Add(-16 * time.Minute)
 	}
-	if r := l.precopyEstimate(0, 0); r.Reason != "samples_unknown" {
-		t.Fatalf("expired samples admitted: %+v", r)
+	if r := l.precopyEstimate(0, 0); r.Reason != "fit" || r.RateSamples != 0 || r.Estimate != precopyAllowance {
+		t.Fatalf("empty tail retained expired samples: %+v", r)
 	}
 	l.precopySamples = []precopySample{{at: now, fixed: 100 * time.Millisecond}}
 	if r := l.precopyEstimate(0, 0); r.Fixed != 100*time.Millisecond || r.Reason != "fit" {
@@ -107,8 +107,8 @@ func TestPrecopyFixedWindowUsesAvailableFreshSamples(t *testing.T) {
 			}
 			r := l.precopyEstimate(0, 0)
 			if n == 0 {
-				if r.Reason != "samples_unknown" {
-					t.Fatalf("zero fresh admitted: %+v", r)
+				if r.Reason != "fit" || r.RateSamples != 0 || r.Estimate != precopyAllowance {
+					t.Fatalf("empty tail used an unknown rate: %+v", r)
 				}
 				return
 			}

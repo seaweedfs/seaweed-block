@@ -371,16 +371,24 @@ func (l *chunkLayerImpl) precopyEstimate(tail uint64, attempts int) PrecopyRepor
 	if len(rates) > 3 {
 		rates = rates[:3]
 	}
+	if tail == 0 && fixedCount == 0 {
+		// No bytes remain beyond the published HEAD. There is no upload rate
+		// to infer; declare the full ordinary allowance and report an overrun
+		// if the final detach actually exceeds it.
+		r.Estimate = precopyAllowance
+		r.Reason = "fit"
+		return r
+	}
 	if fixedCount == 0 || r.Fixed <= 0 {
 		return r
 	}
 	r.Estimate = r.Fixed + precopyMargin
 	if tail != 0 {
-		if len(rates) < 3 {
+		if len(rates) == 0 {
 			return r
 		}
-		minRate := rates[len(rates)-3]
-		for _, rate := range rates[len(rates)-2:] {
+		minRate := rates[0]
+		for _, rate := range rates[1:] {
 			if rate < minRate {
 				minRate = rate
 			}
@@ -443,7 +451,12 @@ func precopyFixedPartsFromSample(s precopySample) PrecopyFixedParts {
 func (l *chunkLayerImpl) samplePrecopy(st chunkCutStats, fixedNs int64) {
 	// A no-op root read is not a measurement of final CAS + confirmation.
 	if st.CASNs <= 0 {
-		return
+		if st.CASNs != 0 || (st.CASResult != "ok" && st.CASResult != "resolved-by-reread") {
+			return
+		}
+		// A successful CAS can complete below the clock's resolution. Its
+		// measured zero interval is still an observation, unlike a no-op.
+		st.CASNs = 1
 	}
 	s := precopySample{at: time.Now(), fixed: time.Duration(max(int64(1), fixedNs))}
 	s.parts = precopyFixedParts(st, s.fixed)

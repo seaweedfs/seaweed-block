@@ -41,6 +41,7 @@ func TestPrecopyColdNonemptyTailUsesFirstMeasuredRound(t *testing.T) {
 	if _, err := s.Write(1, makeBlock(ctBlockSize, 0x72)); err != nil {
 		t.Fatal(err)
 	}
+	layer.precopySamples = nil
 	rounds := 0
 	layer.testBeforeBarrierLockHook = func() {
 		rounds++
@@ -63,5 +64,19 @@ func TestPrecopyColdNonemptyTailUsesFirstMeasuredRound(t *testing.T) {
 	if err != nil || stopped != 1 || !r.Precopy.Frozen || r.Precopy.RateSamples != 1 || rounds != 2 ||
 		!bytes.Equal(f.imageOf(t, r.Head)[ctBlockSize:2*ctBlockSize], makeBlock(ctBlockSize, 0x73)) {
 		t.Fatalf("first measured round did not admit remaining tail: rounds=%d stopped=%d report=%+v err=%v", rounds, stopped, r.Precopy, err)
+	}
+}
+
+func TestPrecopySuccessfulCASBelowClockResolutionIsMeasured(t *testing.T) {
+	layer := &chunkLayerImpl{}
+	st := chunkCutStats{CASResult: "ok", CASNs: 0, UploadedBytes: ctChunkBytes, PayloadNs: int64(10 * time.Millisecond)}
+	layer.samplePrecopy(st, int64(20*time.Millisecond))
+	if len(layer.precopySamples) != 1 || layer.precopySamples[0].rate <= 0 {
+		t.Fatalf("successful zero-ns CAS lost its measured upload: %+v", layer.precopySamples)
+	}
+	layer.samplePrecopy(chunkCutStats{CASNs: 0, UploadedBytes: ctChunkBytes, PayloadNs: st.PayloadNs}, st.PayloadNs)
+	layer.samplePrecopy(chunkCutStats{CASResult: "precondition", CASNs: 0, UploadedBytes: ctChunkBytes, PayloadNs: st.PayloadNs}, st.PayloadNs)
+	if len(layer.precopySamples) != 1 {
+		t.Fatalf("no-op or refused CAS became a sample: %+v", layer.precopySamples)
 	}
 }
