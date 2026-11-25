@@ -66,6 +66,7 @@ type switchProbe struct {
 	mu           sync.Mutex
 	r3End        uint64
 	fenceSilent  bool // no survivor answers the fencing round
+	fenceCalls   int
 	currentReady bool
 	// currentUnknown: the current primary did not answer (status GET
 	// refused or timed out), so CurrentKnown is false.
@@ -269,6 +270,33 @@ func TestUnsupportedPathFailsOverOnlyOnAFencingRound(t *testing.T) {
 			t.Fatalf("failover line evidence %+v; want fenced at 2", info.Primary)
 		}
 	})
+}
+
+// A primary restarting inside its boot grace is not replaced, so no fencing
+// round cuts its replicas off from it; past the grace it is fenced.
+func TestBootGrace_NoFencingRoundInsideTheGrace(t *testing.T) {
+	h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 600 * time.Millisecond}})
+	defer closeTestMaster(t, h)
+	p := probeOf(t, h)
+	calls := func() int { p.mu.Lock(); defer p.mu.Unlock(); return p.fenceCalls }
+
+	ingestRF3Incarnations(t, h, restarting, readySlot("r2-a"), readySlot("r3-a"))
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls(); n != 0 {
+		t.Fatalf("%d fencing rounds against a primary inside its boot grace", n)
+	}
+	expectLineStaysR1(t, h, "restarted primary inside its boot grace")
+
+	time.Sleep(600 * time.Millisecond)
+	ingestRF3Incarnations(t, h, restarting, readySlot("r2-a"), readySlot("r3-a"))
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	if calls() == 0 {
+		t.Fatal("no fencing round once the grace has passed")
+	}
 }
 
 // An explicit unhealthy current primary gets no grace on this path.

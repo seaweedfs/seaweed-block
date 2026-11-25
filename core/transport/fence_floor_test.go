@@ -144,3 +144,20 @@ func TestFenceFloor_NeverFencesThePrimary(t *testing.T) {
 		t.Fatalf("the primary's floor after a refused fence: %d (record %d); want 3", got, g1Persisted(t, floor))
 	}
 }
+
+// A replica fenced at 4 promised to take nothing below 4: a primary role at
+// 3 (a stale line) is refused, and the listener stays a replica.
+func TestFenceFloor_APrimaryFenceBelowTheFloorIsRefused(t *testing.T) {
+	store := storage.NewBlockStore(16, 4096)
+	floor := g1Fresh(t)
+	ln := g1Listener(t, store, floor)
+	if err := ln.FenceFloor(4); err != nil {
+		t.Fatal(err)
+	}
+	if err := ln.FenceAsPrimary(3); !errors.Is(err, ErrFenceBelowFloor) {
+		t.Fatalf("a primary role at 3 under floor 4: %v; want ErrFenceBelowFloor", err)
+	}
+	if err := ln.FenceFloor(5); err != nil {
+		t.Fatalf("the refused primary fence left the listener a primary: %v", err)
+	}
+}

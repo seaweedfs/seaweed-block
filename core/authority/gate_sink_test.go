@@ -19,7 +19,7 @@ func (g gatedSink) SubmitObservedState(snap ClusterSnapshot, report Supportabili
 		for si := range snap.Volumes[vi].Slots {
 			s := &snap.Volumes[vi].Slots[si]
 			if s.ReadyForPrimary && s.Reachable && s.Eligible && !s.Withdrawn {
-				s.PromotionEvidence = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: s.EvidenceScore}
+				s.PromotionEvidence = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: s.EvidenceScore, Basis: adapter.BasisPlanned}
 			}
 		}
 	}

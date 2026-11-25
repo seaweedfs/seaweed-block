@@ -150,7 +150,7 @@ func (r *t1Route) reassignReplica(replicaID, dataAddr, ctrlAddr string) {
 		CtrlAddr:  ctrlAddr,
 		Intent:    authority.IntentReassign,
 		// The test is the decider here: a primary change carries its kind.
-		Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion},
+		Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned},
 	})
 }
 

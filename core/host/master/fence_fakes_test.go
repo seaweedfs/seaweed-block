@@ -24,6 +24,7 @@ func (s staticPromotionProbe) FencePromotionCandidates(_ string, current authori
 func (p *switchProbe) FencePromotionCandidates(_ string, current authority.AuthorityBasis, survivors []PromotionCandidateEvidence) (PromotionProbeResult, error) {
 	p.mu.Lock()
 	silent := p.fenceSilent
+	p.fenceCalls++
 	p.mu.Unlock()
 	if silent {
 		return PromotionProbeResult{FencedEpoch: current.Epoch + 1}, nil

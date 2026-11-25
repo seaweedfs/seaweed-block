@@ -114,7 +114,7 @@ func seededFailbackPublisher(t *testing.T) *authority.Publisher {
 			DataAddr:  "data-r2",
 			CtrlAddr:  "ctrl-r2",
 			Intent:    authority.IntentReassign,
-			Evidence:  adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion},
+			Evidence:  adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned},
 		},
 	})
 	publisher := authority.NewPublisher(directive)
@@ -148,5 +148,5 @@ func seededFailbackPublisher(t *testing.T) *authority.Publisher {
 
 // opsAllowGate stands in for the master's planned-move decision (allowed).
 func opsAllowGate(string, string) (adapter.PrimaryEvidence, error) {
-	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1}, nil
+	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1, Basis: adapter.BasisPlanned}, nil
 }

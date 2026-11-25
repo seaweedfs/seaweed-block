@@ -1277,12 +1277,12 @@ func TestObservationHost_IdenticalSupportedSnapshots_NoDuplicateAsks(t *testing.
 	secondarySlot := ReplicaCandidate{
 		ReplicaID: "r2", ServerID: "s2", DataAddr: "d2", CtrlAddr: "c2",
 		Reachable: true, ReadyForPrimary: true, Eligible: true,
-		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}, // the gate allowed it
+		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned}, // the gate allowed it
 	}
 	tertiarySlot := ReplicaCandidate{
 		ReplicaID: "r3", ServerID: "s3", DataAddr: "d3", CtrlAddr: "c3",
 		Reachable: true, ReadyForPrimary: true, Eligible: true,
-		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}, // the gate allowed it
+		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned}, // the gate allowed it
 	}
 	snap := ClusterSnapshot{
 		CollectedRevision: 1,

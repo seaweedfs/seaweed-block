@@ -91,7 +91,7 @@ func validAuthorityFailbackRequest() FailbackRuntimeRequest {
 // allowGate stands in for the master's planned-move decision: the target is
 // allowed with the probe round's evidence.
 func allowGate(volumeID, target string) (adapter.PrimaryEvidence, error) {
-	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1}, nil
+	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1, Basis: adapter.BasisPlanned}, nil
 }
 
 // A failback is a primary change: with no gate, or a gate that refuses (the

@@ -30,7 +30,7 @@ func candidate(replicaID, serverID, dataAddr, ctrlAddr string, evidence uint64) 
 		ReadyForPrimary:   true,
 		Eligible:          true,
 		EvidenceScore:     evidence,
-		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: evidence},
+		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: evidence, Basis: adapter.BasisPlanned},
 		// The gate's planned-move guard held (the profile puts the target in
 		// every acknowledgement set).
 		PlannedMoveAllowed: true,

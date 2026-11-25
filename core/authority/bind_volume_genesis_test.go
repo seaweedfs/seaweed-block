@@ -135,6 +135,7 @@ func TestPublisher_AFencedDecisionIsMintedOnlyAtItsFencedEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 	ask := reassignAsk("v1", "r2")
+	ask.Evidence.Basis = adapter.BasisFenced
 	ask.Evidence.FencedEpoch = 3 // fenced for a line at 2; the line is at 1
 	if err := pub.apply(ask); !errors.Is(err, ErrFenceSuperseded) {
 		t.Fatalf("a decision fenced at 3 on a line at 1: %v; want ErrFenceSuperseded", err)

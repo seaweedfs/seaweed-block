@@ -810,6 +810,9 @@ func (r *ReplicaListener) FenceFloor(epoch uint64) error {
 	return r.raiseFloor(epoch)
 }
 
+// ErrFenceBelowFloor: a primary role below this replica's floor.
+var ErrFenceBelowFloor = errors.New("replica listener: a primary role below the epoch floor")
+
 // ErrFencePrimary: a fencing round reached the volume's primary.
 var ErrFencePrimary = errors.New("replica listener: a fencing round never fences the primary")
 
@@ -828,6 +831,11 @@ func (r *ReplicaListener) DurableFloor() uint64 {
 func (r *ReplicaListener) floorAndDrain(epoch uint64, primary bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if primary && epoch < r.epochFloor {
+		// the floor is a promise to take nothing below it: a primary role
+		// at a lower epoch is a stale line
+		return fmt.Errorf("%w: primary at epoch %d under floor %d", ErrFenceBelowFloor, epoch, r.epochFloor)
+	}
 	if primary {
 		r.primary = true
 	} else if r.primary {

@@ -39,7 +39,8 @@ func convTestCtrl(t *testing.T, retryWindow time.Duration) (*TopologyController,
 // healthy. authority is the Authority field on the snapshot
 // (what the observation reports the system thinks is current).
 // gateEvidence is the promotion gate's evidence on a replica it allowed.
-var gateEvidence = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}
+// gateEvidence stands in for the gate's decision (a test basis: planned).
+var gateEvidence = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned}
 
 func failoverSnapForV1(authority AuthorityBasis, rev uint64) ClusterSnapshot {
 	return ClusterSnapshot{
