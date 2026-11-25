@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 )
 
@@ -19,7 +20,7 @@ func TestFailbackExecutorUsesAuthorityRuntimeAdapter(t *testing.T) {
 	result, err := (FailbackExecutorReconciler{
 		Namespace:              "kube-system",
 		Client:                 client,
-		Runtime:                NewAuthorityFailbackRuntime(publisher),
+		Runtime:                NewAuthorityFailbackRuntime(publisher, opsAllowGate),
 		ExecutionRequested:     true,
 		ExecutionPolicyEnabled: true,
 		Now:                    func() time.Time { return time.Date(2026, 6, 26, 15, 0, 0, 0, time.UTC) },
@@ -69,7 +70,7 @@ func TestFailbackAuthorityRuntimeAdapterRejectsStaleExpectedCurrent(t *testing.T
 	result, err := (FailbackExecutorReconciler{
 		Namespace:              "kube-system",
 		Client:                 client,
-		Runtime:                NewAuthorityFailbackRuntime(publisher),
+		Runtime:                NewAuthorityFailbackRuntime(publisher, opsAllowGate),
 		ExecutionRequested:     true,
 		ExecutionPolicyEnabled: true,
 	}).Reconcile(context.Background())
@@ -113,6 +114,7 @@ func seededFailbackPublisher(t *testing.T) *authority.Publisher {
 			DataAddr:  "data-r2",
 			CtrlAddr:  "ctrl-r2",
 			Intent:    authority.IntentReassign,
+			Evidence:  adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion},
 		},
 	})
 	publisher := authority.NewPublisher(directive)
@@ -142,4 +144,9 @@ func seededFailbackPublisher(t *testing.T) *authority.Publisher {
 		case <-ticker.C:
 		}
 	}
+}
+
+// opsAllowGate stands in for the master's planned-move decision (allowed).
+func opsAllowGate(string, string) (adapter.PrimaryEvidence, error) {
+	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1}, nil
 }
