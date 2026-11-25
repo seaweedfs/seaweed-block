@@ -84,17 +84,21 @@ func TestStart_TheClaimRechecksTheSeedRule(t *testing.T) {
 	}
 }
 
-// The kernel never writes a position with no room for a next LSN; a HEAD
-// that carries one (an older or broken writer) is still read.
-func TestHead_EncodeRefusesAPositionWithNoNextLSN(t *testing.T) {
+// No commit produces a position with no room for a next LSN; a HEAD already
+// at that position (an older writer) keeps it and is not re-checked.
+func TestCommit_RefusesToProduceAPositionWithNoNextLSN(t *testing.T) {
+	me := HolderID{Epoch: 3, Holder: "s1/r1", ClaimID: "k3"}
 	h := startHead(3, "s1/r1", "k3")
-	h.State = StateLive
-	h.Position = ^uint64(0) - 1
-	if _, err := h.Encode(); err != nil {
-		t.Fatalf("control, position MaxUint64-1: %v", err)
+	h.State, h.Activity, h.Position = StateLive, Activity{Kind: ActSnap, Session: "s1"}, 9
+	root := RootName{Hash: Hash{1}}
+	if _, _, err := h.Commit(me, "s1", root, 10, "", SnapshotMeta{}, StateLive); err != nil {
+		t.Fatalf("control, commit at 10: %v", err)
+	}
+	if _, _, err := h.Commit(me, "s1", root, ^uint64(0), "", SnapshotMeta{}, StateLive); !errors.Is(err, ErrNoNextPosition) {
+		t.Fatalf("commit at MaxUint64: %v; want ErrNoNextPosition", err)
 	}
 	h.Position = ^uint64(0)
-	if _, err := h.Encode(); !errors.Is(err, ErrNoNextPosition) || !errors.Is(err, ErrMalformed) {
-		t.Fatalf("position MaxUint64: %v; want ErrNoNextPosition (ErrMalformed)", err)
+	if _, _, err := h.Commit(me, "s1", root, ^uint64(0), "", SnapshotMeta{}, StateDetached); err != nil {
+		t.Fatalf("a HEAD already at MaxUint64 stops there (detach): %v", err)
 	}
 }

@@ -92,6 +92,10 @@ func kernelCell(t *testing.T, state, entry string) string {
 		h.Activity, h.State = Activity{Kind: ActIdle}, StateDeleting
 	case "deleted":
 		h.Activity, h.State = Activity{Kind: ActIdle}, StateDeleted
+	case "maxposition": // an older writer left HEAD at the last position
+		h.Activity, h.Position = Activity{Kind: ActIdle}, ^uint64(0)
+	case "maxposition-deleting":
+		h.Activity, h.State, h.Position = Activity{Kind: ActIdle}, StateDeleting, ^uint64(0)
 	}
 	if entry == "ReleaseDependent" && h.Snapshots != nil {
 		d := h.Snapshots["daily"]
@@ -396,4 +400,19 @@ func TestKernelTable_Observe(t *testing.T) {
 		b.WriteString("},\n")
 	}
 	t.Log("\n" + b.String())
+}
+
+// A HEAD an older or broken writer left at position MaxUint64 can still be
+// deleted: the guard against that position sits where a position is
+// produced (Commit), not on every transition, so the operator is never
+// stuck with a HEAD nothing can remove.
+func TestKernelTable_HeadAtMaxPosition(t *testing.T) {
+	for _, c := range []struct{ state, entry, want string }{
+		{"maxposition", "MarkDeleting", "write"},
+		{"maxposition-deleting", "MarkDeleted", "write"},
+	} {
+		if got := kernelCell(t, c.state, c.entry); got != c.want {
+			t.Errorf("%s on a HEAD at position MaxUint64 (%s): %s; want %s", c.entry, c.state, got, c.want)
+		}
+	}
 }
