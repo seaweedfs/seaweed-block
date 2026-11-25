@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -124,4 +125,22 @@ func TestFenceFloor_PersistFailureMakesNoPromise(t *testing.T) {
 		t.Fatal("after a failed fence the epoch-3 barrier was ACKed")
 	}
 
+}
+
+// A fencing round that reaches the volume's primary is refused: the
+// primary's floor stays at the epoch it serves (a higher floor would fence
+// its own writes), and the caller sends no answer.
+func TestFenceFloor_NeverFencesThePrimary(t *testing.T) {
+	store := storage.NewBlockStore(16, 4096)
+	floor := g1Fresh(t)
+	ln := g1Listener(t, store, floor)
+	if err := ln.FenceAsPrimary(3); err != nil {
+		t.Fatal(err)
+	}
+	if err := ln.FenceFloor(4); !errors.Is(err, ErrFencePrimary) {
+		t.Fatalf("a fencing round on the primary: %v; want ErrFencePrimary", err)
+	}
+	if got := ln.DurableFloor(); got != 3 || g1Persisted(t, floor) != 3 {
+		t.Fatalf("the primary's floor after a refused fence: %d (record %d); want 3", got, g1Persisted(t, floor))
+	}
 }

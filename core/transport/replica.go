@@ -3,6 +3,7 @@ package transport
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -798,12 +799,19 @@ func (r *ReplicaListener) fenceAndDrain(epoch uint64) error {
 // caller must not answer the round (no promise was made); frames below epoch
 // stay refused. The role is unchanged: a line re-issued at epoch to the same
 // primary (a failed round's heal) is admitted by AdmitAsReplica as usual.
+// A listener in the primary role refuses the fence (ErrFencePrimary) and
+// changes nothing: the primary serves its epoch, and a floor above it would
+// fence the volume's own writes; whatever the master sends, the node
+// decides this itself.
 func (r *ReplicaListener) FenceFloor(epoch uint64) error {
 	if err := r.floorAndDrain(epoch, false); err != nil {
 		return err
 	}
 	return r.raiseFloor(epoch)
 }
+
+// ErrFencePrimary: a fencing round reached the volume's primary.
+var ErrFencePrimary = errors.New("replica listener: a fencing round never fences the primary")
 
 // DurableFloor is the floor persisted in the volume's floor record (in
 // memory for a listener without one): the epoch below which this replica
@@ -822,6 +830,10 @@ func (r *ReplicaListener) floorAndDrain(epoch uint64, primary bool) error {
 	defer r.mu.Unlock()
 	if primary {
 		r.primary = true
+	} else if r.primary {
+		// checked under the lock that raises the floor: a concurrent
+		// FenceAsPrimary cannot slip between the check and the raise
+		return fmt.Errorf("%w at epoch %d", ErrFencePrimary, epoch)
 	}
 	if epoch > r.epochFloor {
 		r.epochFloor = epoch
