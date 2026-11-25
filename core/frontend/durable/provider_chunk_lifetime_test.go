@@ -130,12 +130,12 @@ func recvErr(t *testing.T, ch <-chan error, what string) error {
 	}
 }
 
-// seededRemote returns a remote whose HEAD publishes 0x33 at LBA 33
+// seededLayoutFixture returns a B HEAD that publishes 0x33 at LBA 33
 // (chunk 2) and 0x64 at LBA 100 (chunk 6).
-func seededRemote(t *testing.T) *storage.MemChunkRemote {
+func seededLayoutFixture(t *testing.T) *testutil.LayoutFixture {
 	t.Helper()
-	remote := storage.NewMemChunkRemote()
-	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := layoutChunkProvider(t, t.TempDir(), fixture, v1View(), 0)
 	s := openRecovered(t, p)
 	for lba, fill := range map[uint32]byte{33: 0x33, 100: 0x64} {
 		if _, err := s.Write(lba, block(fill)); err != nil {
@@ -148,7 +148,87 @@ func seededRemote(t *testing.T) *storage.MemChunkRemote {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return remote
+	return fixture
+}
+
+// Kept for callers in the adjacent takeover fixture until that file joins
+// the B migration. The provider tests below use seededLayoutFixture.
+func seededRemote(t *testing.T) *storage.MemChunkRemote {
+	t.Helper()
+	t.Fatal("takeover_read_ready_test.go must migrate its seeded remote to the B fixture")
+	return nil
+}
+
+func nextSeededView() *stubView {
+	return newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+}
+
+type gatedLayoutStartStore struct {
+	layout.StartStore
+	mu        sync.Mutex
+	failRead  int
+	holdRead  chan struct{}
+	holdAfter bool
+	honourCtx bool
+	entered   chan string
+	once      sync.Once
+}
+
+func (g *gatedLayoutStartStore) ReadHead(ctx context.Context) (layout.Head, bool, error) {
+	g.mu.Lock()
+	fail := g.failRead > 0
+	if fail {
+		g.failRead--
+	}
+	hold, after, honour := g.holdRead, g.holdAfter, g.honourCtx
+	g.mu.Unlock()
+	if fail {
+		return layout.Head{}, false, errors.New("injected ReadHead failure")
+	}
+	read := func() (layout.Head, bool, error) { return g.StartStore.ReadHead(ctx) }
+	var h layout.Head
+	var found bool
+	var err error
+	if after {
+		h, found, err = read()
+	}
+	if hold != nil {
+		g.entered <- "readhead"
+		if honour {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+				return layout.Head{}, false, ctx.Err()
+			}
+		} else {
+			<-hold
+		}
+	}
+	if !after {
+		h, found, err = read()
+	}
+	return h, found, err
+}
+
+func (g *gatedLayoutStartStore) release() {
+	g.once.Do(func() {
+		if g.holdRead != nil {
+			close(g.holdRead)
+		}
+	})
+}
+
+func layoutGatedProvider(t *testing.T, root string, fixture *testutil.LayoutFixture, view *stubView, gated *gatedLayoutStartStore) *durable.DurableProvider {
+	t.Helper()
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks}
+	fixture.Configure(&cfg)
+	cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return gated, nil }
+	p, err := durable.NewDurableProvider(cfg, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	return p
 }
 
 func readEq(t *testing.T, s storage.LogicalStorage, lba uint32, want []byte, what string) {
@@ -165,11 +245,14 @@ func readEq(t *testing.T, s storage.LogicalStorage, lba uint32, want []byte, wha
 // A fresh volume whose first attach fails is still fresh after a normal
 // close and reopen: it reads HEAD, never the untouched local zeros.
 func TestWALStoreChunk_FailedFreshAttachThenReopenReadsHead(t *testing.T) {
-	remote := seededRemote(t)
+	fixture := seededLayoutFixture(t)
 	root := t.TempDir()
-	g := newGated(remote)
-	g.failGetHead = 1
-	p := chunkProvider(t, root, g, v1View(), 0)
+	store, err := fixture.Catalog.Store(fixture.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &gatedLayoutStartStore{StartStore: store, failRead: 1}
+	p := layoutGatedProvider(t, root, fixture, nextSeededView(), g)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +262,7 @@ func TestWALStoreChunk_FailedFreshAttachThenReopenReadsHead(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2 := chunkProvider(t, root, remote, v1View(), 0)
+	p2 := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	s := openRecovered(t, p2)
 	readEq(t, s, 33, block(0x33), "reopen after a failed fresh attach")
 	readEq(t, s, 100, block(0x64), "reopen after a failed fresh attach")
@@ -187,16 +270,16 @@ func TestWALStoreChunk_FailedFreshAttachThenReopenReadsHead(t *testing.T) {
 
 // Interrupted before any attach: created, never recovered, closed.
 func TestWALStoreChunk_CreatedNeverAttachedThenReopenReadsHead(t *testing.T) {
-	remote := seededRemote(t)
+	fixture := seededLayoutFixture(t)
 	root := t.TempDir()
-	p := chunkProvider(t, root, remote, v1View(), 0)
+	p := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2 := chunkProvider(t, root, remote, v1View(), 0)
+	p2 := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	s := openRecovered(t, p2)
 	readEq(t, s, 33, block(0x33), "reopen of a never-attached fresh volume")
 }
@@ -205,9 +288,9 @@ func TestWALStoreChunk_CreatedNeverAttachedThenReopenReadsHead(t *testing.T) {
 // keeps its local writes over HEAD and still reads untouched chunks from
 // HEAD.
 func TestWALStoreChunk_FreshVolumeKeepsLocalWritesAfterRestart(t *testing.T) {
-	remote := seededRemote(t)
+	fixture := seededLayoutFixture(t)
 	root := t.TempDir()
-	p := chunkProvider(t, root, remote, v1View(), 0)
+	p := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	s := openRecovered(t, p)
 	if _, err := s.Write(33, block(0x77)); err != nil {
 		t.Fatal(err)
@@ -218,7 +301,7 @@ func TestWALStoreChunk_FreshVolumeKeepsLocalWritesAfterRestart(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2 := chunkProvider(t, root, remote, v1View(), 0)
+	p2 := layoutChunkProvider(t, root, fixture, nextSeededView(), 0)
 	s2 := openRecovered(t, p2)
 	readEq(t, s2, 33, block(0x77), "restart after a fresh attach")
 	readEq(t, s2, 100, block(0x64), "restart after a fresh attach")
