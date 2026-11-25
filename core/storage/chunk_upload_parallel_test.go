@@ -94,7 +94,11 @@ func TestChunkUploads_ConfiguredBoundAndCancellation(t *testing.T) {
 			if f.stats().cas != 0 {
 				t.Fatal("cancelled upload published root")
 			}
-			assertNoSessionOpen(t, f) // joined abort; no publication can refer to its keys
+			// joined: no publication refers to its keys; its completed
+			// uploads stay reusable, so the session stays for the retry
+			if f.openSession() == "" {
+				t.Fatal("a cancelled cut dropped the session its reusable uploads belong to")
+			}
 		})
 	}
 }
@@ -198,8 +202,8 @@ func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 	if f.stats().cas != 0 {
 		t.Fatal("failed batch published")
 	}
-	assertNoSessionOpen(t, f)
 	cowWaitSignal(t, closed, "upload close")
+	assertNoSessionOpen(t, f) // Close ended the failed cut's session
 	files, err := filepath.Glob(s.path + ".cut-cow-*")
 	if err != nil || len(files) != 0 {
 		t.Fatalf("payload files after join: %v %v", files, err)

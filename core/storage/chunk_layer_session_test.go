@@ -2,8 +2,11 @@ package storage
 
 // The capture path's session: a cut that uploads chunks begins the holder's
 // session before the first upload; the commit (a confirmed HEAD CAS) ends
-// it, and a cut that ends without a commit aborts it. An uncertain commit
-// keeps the session open, and the settlement replays the same commit in it.
+// it. The session lives as long as the staged uploads: a refused cut that
+// keeps them (an upload error, admission, frozen tail) keeps it, and its
+// retry commits them without staging again; dropping them (fenced, a HEAD
+// moved past the commit's base, Close) aborts it. An uncertain commit keeps
+// the session, and the settlement replays the same commit in it.
 
 import (
 	"errors"
@@ -130,7 +133,7 @@ func TestSession_FailedBeginUploadsNothing(t *testing.T) {
 	}
 }
 
-func TestSession_FailedUploadAbortsIt(t *testing.T) {
+func TestSession_FailedUploadKeepsItForTheRetry(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
@@ -143,8 +146,20 @@ func TestSession_FailedUploadAbortsIt(t *testing.T) {
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, errChunkRemoteUnavailable) {
 		t.Fatalf("cut with a failed upload: %v; want a remote-unavailable refusal", err)
 	}
-	if ops := opsSince(f, mark); countOps(ops, "abort:s1") != 1 {
-		t.Fatalf("the failed cut did not abort its session once: ops %q", ops)
+	if ops := opsSince(f, mark); countOps(ops, "abort:") != 0 || f.openSession() != "s1" {
+		t.Fatalf("the failed cut gave up its session: ops %q, open %q", ops, f.openSession())
+	}
+	f.mu.Lock()
+	f.failPut = nil
+	f.mu.Unlock()
+	mark = len(f.stats().ops)
+	if _, err := layer.Cut(ctTimeout(t)); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	ops := opsSince(f, mark)
+	iCAS := indexOf(ops, func(op string) bool { return op == "cas:ok" })
+	if iCAS < 0 || countOps(ops[:iCAS], "begin:s") != 0 || countOps(ops, "abort:") != 0 {
+		t.Fatalf("the retry did not commit in the kept session: ops %q", ops)
 	}
 	assertNoSessionOpen(t, f)
 }
@@ -252,15 +267,24 @@ func TestSession_AdmissionRefusedBeforeCommitKeepsReusableUploads(t *testing.T) 
 	if n := f.stats().cas; n != 0 {
 		t.Fatalf("refused cut issued %d CAS", n)
 	}
-	assertNoSessionOpen(t, f)
-	// Restored admission reuses the exact payload.
+	// The refusal keeps the reusable uploads, so it keeps their session:
+	// aborting it would make the retry's commit find them not prepared and
+	// stage everything again (no convergence under sustained writes).
+	if ops := f.stats().ops; countOps(ops, "abort:") != 0 || f.openSession() != "s1" {
+		t.Fatalf("the admission refusal gave up its session: ops %q, open %q", ops, f.openSession())
+	}
+	// Restored admission reuses the exact payload, in the same session.
 	layer.(*chunkLayerImpl).cfg.CaptureAllowed = nil
 	before := f.stats().puts
+	mark := len(f.stats().ops)
 	if _, err := layer.Cut(ctTimeout(t)); err != nil {
 		t.Fatal(err)
 	}
 	if f.stats().puts != before {
 		t.Fatal("unchanged refused point uploaded again")
+	}
+	if ops := opsSince(f, mark); countOps(ops, "begin:s") != 0 || countOps(ops, "abort:") != 0 {
+		t.Fatalf("the retry did not commit in the kept session: ops %q", ops)
 	}
 	assertNoSessionOpen(t, f)
 }

@@ -429,6 +429,10 @@ func TestLayoutRemote_AnAbandonedNamedCutDropsItsName(t *testing.T) {
 	if _, err := l.Capture(ctx); err == nil {
 		t.Fatal("a cut whose upload failed committed")
 	}
+	// The failed cut keeps its session for the retry; the snapshot request
+	// that failed withdraws its name (SnapshotVolume does), so the retry
+	// names nothing.
+	r.DropSnapshot()
 	fail.armed = false
 	if _, err := l.Capture(ctx); err != nil {
 		t.Fatalf("the cut after the abandoned one: %v", err)
