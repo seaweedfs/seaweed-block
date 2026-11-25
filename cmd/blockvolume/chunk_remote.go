@@ -18,7 +18,6 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
 )
 
@@ -156,10 +155,9 @@ func (s *snapshotSchedule) Set(v string) error {
 }
 
 type chunkWiring struct {
-	remoteFor func(volumeID string) (storage.ChunkRemote, error)
-	catalog   *chunkstore.Catalog
-	bCatalog  *chunkstore.BCatalog
-	close     func() error
+	catalog  *chunkstore.Catalog // geometry reader until the replacement schema lands
+	bCatalog *chunkstore.BCatalog
+	close    func() error
 }
 
 // newChunkWiring dials the filer and refuses unless it is the only filer of
@@ -190,13 +188,6 @@ func newChunkWiring(c chunkFlags, masterTLS grpc.DialOption, master ...string) (
 		return chunkWiring{}, err
 	}
 	return chunkWiring{
-		remoteFor: func(volumeID string) (storage.ChunkRemote, error) {
-			root, err := chunkVolumeRoot(c.path, volumeID)
-			if err != nil {
-				return nil, err
-			}
-			return chunkstore.NewSWFSChunkRemote(client, root)
-		},
 		catalog:  cat,
 		bCatalog: bcat,
 		close:    client.Close,
