@@ -415,14 +415,14 @@ func TestHead_RefusesInvalidUTF8(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("r"))}
 	bad := "a\xff"
 	for name, h := range map[string]Head{
-		"holder":    {Epoch: 1, Holder: bad, Activity: Activity{Kind: ActIdle}},
+		"holder":    {Epoch: 1, Holder: bad, ClaimID: "k", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}},
 		"session":   {Epoch: 1, Holder: "a", ClaimID: "k", VolumeID: idFor("v1"), Activity: Activity{Kind: ActSnap, Session: bad}},
 		"snapshot":  {Epoch: 1, Holder: "a", ClaimID: "k", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{bad: {Root: rn}}},
 		"dependent": {Epoch: 1, Holder: "a", ClaimID: "k", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{"n": {Root: rn, Dependents: []Dependent{{Target: bad, TargetID: idFor("x"), Root: rn}}}}},
 		"claim id":  {Epoch: 1, Holder: "a", ClaimID: bad, VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}},
 	} {
-		if _, err := h.Encode(); !errors.Is(err, ErrMalformed) {
-			t.Errorf("%s %q: %v; want ErrMalformed", name, bad, err)
+		if _, err := h.Encode(); !errors.Is(err, ErrMalformed) || !strings.Contains(err.Error(), "not valid UTF-8") {
+			t.Errorf("%s %q: %v; want the UTF-8 refusal", name, bad, err)
 		}
 	}
 	h := idleHead()

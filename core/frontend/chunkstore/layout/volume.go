@@ -12,6 +12,10 @@ import (
 // identity: written once, never changed.
 const VolumeName = "VOLUME"
 
+// HeadName is the entry, under the volume root, that holds the volume's
+// HEAD; it is never removed (a deleted volume keeps its deleted HEAD).
+const HeadName = "HEAD"
+
 // VolumeID is a volume's identity: random, chosen when the volume is
 // created. A volume's name is a path and can be created again after a
 // delete; its id cannot, so a volume created again satisfies no reference
