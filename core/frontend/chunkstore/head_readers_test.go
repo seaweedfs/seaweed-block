@@ -57,7 +57,6 @@ var headReaders = map[string]string{
 	"core/frontend/durable/provider_chunk.go GetHead -> GetHead":         "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
 	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHead":     "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
 	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHeadRoot": "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
-	"core/frontend/durable/provider_chunk.go newChunkLayer -> GetHead":   "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
 	"core/storage/chunk_head_belt.go confirmChunkHead -> GetHead":        "ErrHeadAbsent from the layout remote: not confirmed (probe LayoutRemote)",
 	"core/storage/chunk_head_belt.go confirmChunkHead -> GetHeadRoot":    "ErrHeadAbsent from the layout remote: not confirmed (probe LayoutRemote)",
 	"core/storage/chunk_head_belt.go readChunkHead -> GetHead":           "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
