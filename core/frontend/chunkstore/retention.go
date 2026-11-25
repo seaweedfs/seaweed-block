@@ -66,36 +66,12 @@ import (
 // it and frees the name.
 
 const (
-	SnapshotClassSemantic  = "semantic"
-	SnapshotClassPinned    = "pinned"
-	SnapshotClassScheduled = "scheduled"
-
-	// LabelScheduleKeep, on a scheduled snapshot, is how many scheduled
-	// snapshots its schedule keeps (a decimal count).
-	LabelScheduleKeep = "swb.schedule.keep"
-	// DefaultScheduleKeep is the count kept when the newest scheduled
-	// snapshot carries no valid LabelScheduleKeep.
-	DefaultScheduleKeep = 7
-
-	CodeInvalidClass  = "invalid_class"
-	CodeInvalidPolicy = "invalid_policy"
-
 	DefaultKeepNewest  = 10
 	DefaultKeepYounger = time.Hour
 
 	extRetention    = "retention"
 	extRetentionRev = "retention_rev"
 )
-
-// ValidateSnapshotClass refuses a class other than "", "semantic",
-// "pinned" and "scheduled" (invalid_class).
-func ValidateSnapshotClass(class string) error {
-	switch class {
-	case "", SnapshotClassSemantic, SnapshotClassPinned, SnapshotClassScheduled:
-		return nil
-	}
-	return catErr(CodeInvalidClass, false, nil, "snapshot class %q: want %q, %q or %q", class, SnapshotClassSemantic, SnapshotClassPinned, SnapshotClassScheduled)
-}
 
 // Pinned reports whether the snapshot is an explicit keep.
 func (s SnapshotInfo) Pinned() bool {
