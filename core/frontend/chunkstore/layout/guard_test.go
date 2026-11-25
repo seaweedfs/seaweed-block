@@ -178,6 +178,11 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 			bad = append(bad, fn+" uses RunClaim: a claim is made only by Start, which first applies the local-root rules")
 		}
 	}
+	for _, fn := range owners(code["CreateDeletedHead"]) {
+		if fn != "OperatorReleaseDependent" {
+			bad = append(bad, fn+" uses CreateDeletedHead: only the operator's release writes a tombstone, for a target never created")
+		}
+	}
 	for _, fn := range owners(code["RunReleaseDependent"]) {
 		if fn != "DeleteVolume" && fn != "OperatorReleaseDependent" {
 			bad = append(bad, fn+" uses RunReleaseDependent: only DeleteVolume (target deleting) and OperatorReleaseDependent (target checked) release")
@@ -456,11 +461,12 @@ func DeleteVolume(ctx context.Context, st HeadStore, id VolumeID, srcs []HeadSto
 		"operator release without reading the target": {file: "delete.go", src: `func OperatorReleaseDependent(ctx context.Context, source HeadStore, id VolumeID) (Head, error) {
 	return RunReleaseDependent(ctx, source, id)
 }`, want: "does not read the target's HEAD"},
-		"unconditional delete":    {file: "remove.go", src: removeVariant(t, "unconditional"), want: "its only removal is DeleteMarked"},
-		"ignored mark":            {file: "remove.go", src: removeVariant(t, "ignored"), want: "without a mark gate immediately before it"},
-		"one mark, two deletes":   {file: "remove.go", src: removeVariant(t, "second"), want: "without a mark gate immediately before it"},
-		"unlisted removal method": {file: "remove.go", src: removeVariant(t, "other"), want: "without a mark gate immediately before it"},
-		"claim outside Start":     {src: `func w(ctx context.Context, st HeadStore, l LeaseWait, me HolderID) { _, _ = RunClaim(ctx, st, l, me) }`, want: "a claim is made only by Start"},
+		"unconditional delete":                     {file: "remove.go", src: removeVariant(t, "unconditional"), want: "its only removal is DeleteMarked"},
+		"ignored mark":                             {file: "remove.go", src: removeVariant(t, "ignored"), want: "without a mark gate immediately before it"},
+		"one mark, two deletes":                    {file: "remove.go", src: removeVariant(t, "second"), want: "without a mark gate immediately before it"},
+		"unlisted removal method":                  {file: "remove.go", src: removeVariant(t, "other"), want: "without a mark gate immediately before it"},
+		"claim outside Start":                      {src: `func w(ctx context.Context, st HeadStore, l LeaseWait, me HolderID) { _, _ = RunClaim(ctx, st, l, me) }`, want: "a claim is made only by Start"},
+		"tombstone outside the operator's release": {src: `func w(ctx context.Context, t TargetStore, h Head) { _ = t.CreateDeletedHead(ctx, h) }`, want: "only the operator's release writes a tombstone"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
 func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable (mark-gated) and DeleteVolume"},
 	} {

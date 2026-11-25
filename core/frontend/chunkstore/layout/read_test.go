@@ -27,6 +27,12 @@ func (s *objStore) fetch(_ context.Context, p string) ([]byte, bool, error) {
 
 const base = "/swblock/chunks"
 
+// The test volumes' directories: <name>-<first 8 hex of the volume id>.
+var (
+	tDir   = VolumeDir("t", idFor("t"))
+	srcDir = VolumeDir("src", idFor("src"))
+)
+
 // readFixture: volume "t" (a restore target) whose root names chunk 3
 // ("own") in its own pool, chunk 10002 ("src data") in the pool of "src",
 // and nothing else; every object is written.
@@ -36,29 +42,29 @@ func readFixture(t *testing.T) (*objStore, RootName, map[uint64]Ref) {
 	put := func(vol, rel string, b []byte) { s.obj[path.Join(base, vol, rel)] = b }
 	own := NameChunk(3, []byte("own"))
 	foreign := NameChunk(10002, []byte("src data"))
-	put("t", own.Path(), []byte("own"))
-	put("src", foreign.Path(), []byte("src data"))
+	put(tDir, own.Path(), []byte("own"))
+	put(srcDir, foreign.Path(), []byte("src data"))
 	m := map[uint64]Ref{3: {Owner: "t", OwnerID: idFor("t"), Chunk: own}, 10002: {Owner: "src", OwnerID: idFor("src"), Chunk: foreign}}
-	putVolume(t, put, "t")
-	putVolume(t, put, "src")
+	putVolume(t, put, "t", tDir)
+	putVolume(t, put, "src", srcDir)
 	root, segs, err := Build(m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for n, b := range segs {
-		put("t", n.Path(), b)
+		put(tDir, n.Path(), b)
 	}
 	rn, rb, err := NameRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	put("t", rn.Path(), rb)
+	put(tDir, rn.Path(), rb)
 	return s, rn, m
 }
 
 func newReader(t *testing.T, s *objStore) *Reader {
 	t.Helper()
-	r, err := NewReader(base, "t", s.fetch)
+	r, err := NewReader(base, tDir, s.fetch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +112,7 @@ func TestRead_AbsentIndexIsZeros(t *testing.T) {
 func TestRead_ForeignChunkFromSourcePool(t *testing.T) {
 	s, rn, m := readFixture(t)
 	// A same-named object in t's own pool must not be what is read.
-	s.obj[path.Join(base, "t", m[10002].Chunk.Path())] = []byte("decoy")
+	s.obj[path.Join(base, tDir, m[10002].Chunk.Path())] = []byte("decoy")
 	r := newReader(t, s)
 	img, err := r.Open(context.Background(), rn)
 	if err != nil {
@@ -117,7 +123,7 @@ func TestRead_ForeignChunkFromSourcePool(t *testing.T) {
 	if err != nil || c.Zero || !bytes.Equal(c.Data, []byte("src data")) || c.Ref.Owner != "src" {
 		t.Fatalf("chunk 10002: %+v %v", c, err)
 	}
-	want := path.Join(base, "src", m[10002].Chunk.Path())
+	want := path.Join(base, srcDir, m[10002].Chunk.Path())
 	if got := s.asked[len(s.asked)-1]; got != want {
 		t.Fatalf("read %s; want the source pool path %s", got, want)
 	}
@@ -129,7 +135,7 @@ func TestRead_MissingObjectIsAnErrorNeverZeros(t *testing.T) {
 	ctx := context.Background()
 	t.Run("root", func(t *testing.T) {
 		s, rn, _ := readFixture(t)
-		delete(s.obj, path.Join(base, "t", rn.Path()))
+		delete(s.obj, path.Join(base, tDir, rn.Path()))
 		if _, err := newReader(t, s).Open(ctx, rn); !errors.Is(err, ErrMissing) {
 			t.Fatalf("open of a missing root: %v; want ErrMissing", err)
 		}
@@ -140,7 +146,7 @@ func TestRead_MissingObjectIsAnErrorNeverZeros(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		delete(s.obj, path.Join(base, "t", img.root.Segments[1].Path()))
+		delete(s.obj, path.Join(base, tDir, img.root.Segments[1].Path()))
 		for _, idx := range []uint64{10002, 10003} { // named, and not named, in that shard
 			c, err := img.Chunk(ctx, idx)
 			if !errors.Is(err, ErrMissing) || c.Zero {
@@ -150,7 +156,7 @@ func TestRead_MissingObjectIsAnErrorNeverZeros(t *testing.T) {
 	})
 	t.Run("own chunk", func(t *testing.T) {
 		s, rn, m := readFixture(t)
-		delete(s.obj, path.Join(base, "t", m[3].Chunk.Path()))
+		delete(s.obj, path.Join(base, tDir, m[3].Chunk.Path()))
 		img, err := newReader(t, s).Open(ctx, rn)
 		if err != nil {
 			t.Fatal(err)
@@ -161,7 +167,7 @@ func TestRead_MissingObjectIsAnErrorNeverZeros(t *testing.T) {
 	})
 	t.Run("foreign chunk", func(t *testing.T) {
 		s, rn, m := readFixture(t)
-		delete(s.obj, path.Join(base, "src", m[10002].Chunk.Path()))
+		delete(s.obj, path.Join(base, srcDir, m[10002].Chunk.Path()))
 		img, err := newReader(t, s).Open(ctx, rn)
 		if err != nil {
 			t.Fatal(err)
@@ -182,14 +188,14 @@ func TestRead_FetchFailureAndCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.fail = path.Join(base, "t", m[3].Chunk.Path())
+	s.fail = path.Join(base, tDir, m[3].Chunk.Path())
 	if _, err := img.Chunk(ctx, 3); err == nil || errors.Is(err, ErrMissing) {
 		t.Fatalf("failed fetch: %v; want an error that is not ErrMissing", err)
 	}
 	s.fail = ""
 	for name, p := range map[string]string{
-		"chunk":   path.Join(base, "t", m[3].Chunk.Path()),
-		"segment": path.Join(base, "t", img.root.Segments[0].Path()),
+		"chunk":   path.Join(base, tDir, m[3].Chunk.Path()),
+		"segment": path.Join(base, tDir, img.root.Segments[0].Path()),
 	} {
 		s2, rn2, _ := readFixture(t)
 		s2.obj[p] = append(append([]byte(nil), s2.obj[p]...), 'x')
@@ -202,7 +208,7 @@ func TestRead_FetchFailureAndCorruption(t *testing.T) {
 		}
 	}
 	s3, rn3, _ := readFixture(t)
-	rp := path.Join(base, "t", rn3.Path())
+	rp := path.Join(base, tDir, rn3.Path())
 	s3.obj[rp] = append(append([]byte(nil), s3.obj[rp]...), 0)
 	if _, err := newReader(t, s3).Open(ctx, rn3); !errors.Is(err, ErrCorrupt) {
 		t.Errorf("root altered: %v; want ErrCorrupt", err)
@@ -220,13 +226,13 @@ func TestRead_SegmentOfAnotherShardRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	lie := SegName{Shard: 0, Hash: sn.Hash}
-	s.obj[path.Join(base, "t", lie.Path())] = sb
+	s.obj[path.Join(base, tDir, lie.Path())] = sb
 	root := Root{Segments: map[uint64]SegName{0: lie}}
 	rn, rb, err := NameRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.obj[path.Join(base, "t", rn.Path())] = rb
+	s.obj[path.Join(base, tDir, rn.Path())] = rb
 	img, err := newReader(t, s).Open(ctx, rn)
 	if err != nil {
 		t.Fatal(err)
@@ -247,13 +253,13 @@ func TestNewReader_RefusesBadInput(t *testing.T) {
 }
 
 // putVolume writes vol's VOLUME record with its test id.
-func putVolume(t *testing.T, put func(vol, rel string, b []byte), vol string) {
+func putVolume(t *testing.T, put func(dir, rel string, b []byte), name, dir string) {
 	t.Helper()
-	b, err := Volume{ID: idFor(vol), Name: vol, Format: VolumeFormat}.Encode()
+	b, err := Volume{ID: idFor(name), Name: name, Format: VolumeFormat}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	put(vol, VolumeName, b)
+	put(dir, VolumeName, b)
 }
 
 // A foreign chunk is read only if its owner's VOLUME carries the id the
@@ -267,7 +273,7 @@ func TestRead_ForeignChunkNeedsTheOwnersVolumeID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.obj[path.Join(base, "src", VolumeName)] = b
+	s.obj[path.Join(base, srcDir, VolumeName)] = b
 	img, err := newReader(t, s).Open(ctx, rn)
 	if err != nil {
 		t.Fatal(err)
@@ -277,11 +283,11 @@ func TestRead_ForeignChunkNeedsTheOwnersVolumeID(t *testing.T) {
 		t.Fatalf("chunk of a re-created source: %v; want ErrIdentity", err)
 	}
 	for _, p := range s.asked {
-		if p == path.Join(base, "src", m[10002].Chunk.Path()) {
+		if p == path.Join(base, srcDir, m[10002].Chunk.Path()) {
 			t.Fatal("the chunk was fetched from a source whose id does not match")
 		}
 	}
-	delete(s.obj, path.Join(base, "src", VolumeName))
+	delete(s.obj, path.Join(base, srcDir, VolumeName))
 	img, _ = newReader(t, s).Open(ctx, rn)
 	if _, err := img.Chunk(ctx, 10002); !errors.Is(err, ErrMissing) {
 		t.Fatalf("chunk of a source without VOLUME: %v; want ErrMissing", err)
