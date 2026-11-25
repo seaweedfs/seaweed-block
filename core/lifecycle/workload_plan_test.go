@@ -5,6 +5,7 @@ import "testing"
 func TestG15d_WorkloadPlan_BlankPoolRF2CreatesReplicaWorkloads(t *testing.T) {
 	volume := VolumeRecord{Spec: VolumeSpec{
 		VolumeID:          "pvc-a",
+		LayoutID:          "1234567890abcdef1234567890abcdef",
 		SizeBytes:         1 << 20,
 		ReplicationFactor: 2,
 		PVCName:           "demo-pvc",
@@ -34,6 +35,9 @@ func TestG15d_WorkloadPlan_BlankPoolRF2CreatesReplicaWorkloads(t *testing.T) {
 	}
 	if plan.PVCName != "demo-pvc" || plan.PVCNamespace != "default" || plan.PVCUID != "uid-123" {
 		t.Fatalf("pvc metadata=%+v", plan)
+	}
+	if plan.LayoutID != "1234567890abcdef1234567890abcdef" {
+		t.Fatal("workload lost master layout identity")
 	}
 	if plan.Replicas[0].ReplicaID != "r1" || plan.Replicas[1].ReplicaID != "r2" {
 		t.Fatalf("replica ids=%q/%q want r1/r2", plan.Replicas[0].ReplicaID, plan.Replicas[1].ReplicaID)

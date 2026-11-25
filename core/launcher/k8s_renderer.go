@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"gopkg.in/yaml.v3"
 )
@@ -195,6 +196,13 @@ func ownerReferences(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8sRenderConfig
 }
 
 func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) ([]string, error) {
+	rootArg := durableRoot(plan, replica, cfg)
+	if plan.LayoutID != "" {
+		if _, err := layout.ParseVolumeID(plan.LayoutID); err != nil {
+			return nil, err
+		}
+		rootArg = path.Join(cfg.DurableRootBase, replica.ReplicaID)
+	}
 	args := []string{
 		"--master=" + cfg.MasterAddr,
 		"--server-id=" + replica.ServerID,
@@ -202,12 +210,15 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		"--replica-id=" + replica.ReplicaID,
 		"--data-addr=" + replica.DataAddr,
 		"--ctrl-addr=" + replica.CtrlAddr,
-		"--durable-root=" + durableRoot(plan, replica, cfg),
+		"--durable-root=" + rootArg,
 		"--durable-impl=" + cfg.DurableImpl,
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
 		"--replication-ack=" + cfg.ReplicationAck,
+	}
+	if plan.LayoutID != "" {
+		args = append(args, "--layout-id="+plan.LayoutID)
 	}
 	if cfg.WALMultiBlockRecords {
 		args = append(args, "--durable-wal-multiblock-records")
@@ -348,6 +359,10 @@ func blockVolumeInitContainers(plan lifecycle.BlockVolumeWorkloadPlan, replica l
 }
 
 func durableRoot(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) string {
+	if plan.LayoutID != "" {
+		id, _ := layout.ParseVolumeID(plan.LayoutID) // blockVolumeArgs validates before rendering.
+		return path.Join(cfg.DurableRootBase, replica.ReplicaID, layout.VolumeDir(plan.VolumeID, id))
+	}
 	return path.Join(cfg.DurableRootBase, plan.VolumeID, replica.ReplicaID)
 }
 

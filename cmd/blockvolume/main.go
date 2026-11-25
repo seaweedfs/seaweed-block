@@ -21,6 +21,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
@@ -45,6 +46,7 @@ type flags struct {
 	masterAddr     string
 	serverID       string
 	volumeID       string
+	layoutID       string
 	replicaID      string
 	dataAddr       string
 	ctrlAddr       string
@@ -181,6 +183,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.masterAddr, "master", "", "master gRPC address (required)")
 	fs.StringVar(&f.serverID, "server-id", "", "this server identity (required)")
 	fs.StringVar(&f.volumeID, "volume-id", "", "served volume (required)")
+	fs.StringVar(&f.layoutID, "layout-id", "", "master-minted layout identity; when set, durable-root is the base for <volume>-<id8>")
 	fs.StringVar(&f.replicaID, "replica-id", "", "served replica (required)")
 	fs.StringVar(&f.dataAddr, "data-addr", "", "data-path address (required)")
 	fs.StringVar(&f.ctrlAddr, "ctrl-addr", "", "control-path address (required)")
@@ -328,6 +331,19 @@ func parseFlags(args []string) (flags, error) {
 		if f.durableImpl != "walstore" {
 			return flags{}, fmt.Errorf("--durable-wal-recovery-test-disable-flusher requires --durable-impl=walstore")
 		}
+	}
+	if f.layoutID != "" {
+		id, err := layout.ParseVolumeID(f.layoutID)
+		if err != nil {
+			return flags{}, fmt.Errorf("--layout-id: %w", err)
+		}
+		if f.durableRoot == "" {
+			return flags{}, fmt.Errorf("--layout-id requires --durable-root")
+		}
+		if _, err := (layout.Volume{ID: id, Name: f.volumeID, Format: layout.VolumeFormat}).Encode(); err != nil {
+			return flags{}, err
+		}
+		f.durableRoot = filepath.Join(f.durableRoot, layout.VolumeDir(f.volumeID, id))
 	}
 	if f.durableRoot != "" {
 		if _, _, err := durableCreateGeometry(f); err != nil {

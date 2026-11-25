@@ -83,6 +83,8 @@ service ClusterEvidenceService {
 // epoch, endpoint_version, readiness, or primary facts.
 service LifecycleService {
     rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+    // Resolve the durable volume identity without creating or changing it.
+    rpc GetVolume(GetLifecycleVolumeRequest) returns (CreateVolumeResponse);
     rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
     // MarkVolumeDeleting admits a chunk volume delete: under the same locks
     // as every assignment, placement and binding write it refuses
@@ -428,6 +430,11 @@ message CreateVolumeResponse {
     string pvc_uid = 7;
     string protocol = 8; // "iscsi" default | "nvme"
     string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
+    string layout_id = 10; // master-minted, immutable 32 lower-case hex digits
+}
+
+message GetLifecycleVolumeRequest {
+    string volume_id = 1; // lifecycle name
 }
 
 message DeleteVolumeRequest {
