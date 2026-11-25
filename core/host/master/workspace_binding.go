@@ -132,7 +132,9 @@ func (h *Host) reconcileWorkspaceBindings() error {
 			continue
 		}
 		for _, m := range state.Moves {
-			if m.Issued {
+			// A move must not retire its own target reservation. A same-host
+			// successor reuses it; a later ACK still retires that epoch below.
+			if m.Issued && m.OldHost != m.NewHost {
 				if err := h.lifecycle.WorkspaceBindings.Retire(volume, m.OldHost, m.OldEpoch); err != nil {
 					return err
 				}
