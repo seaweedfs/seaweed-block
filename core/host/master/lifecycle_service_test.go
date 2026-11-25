@@ -40,6 +40,9 @@ func TestCreateVolumeRetriesFilerCreateBeforeStoreReady(t *testing.T) {
 	if len(calls) != 2 || calls[0] != calls[1] || calls[0].LayoutID != partial.Spec.LayoutID {
 		t.Fatalf("replay changed persisted identity: calls=%+v partial=%+v", calls, partial)
 	}
+	if _, err := svc.CreateVolume(context.Background(), req); err != nil || len(calls) != 2 {
+		t.Fatalf("ready replay must not create an absent HEAD after service: calls=%d err=%v", len(calls), err)
+	}
 }
 
 func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {

@@ -99,6 +99,12 @@ func (h *Host) createLifecycleVolume(ctx context.Context, spec lifecycle.VolumeS
 		}
 		return rec, nil
 	}
+	if rec.StoreReady {
+		// A missing HEAD after the volume was made ready is damage, not a
+		// half-finished create. Start checks the filer and refuses it; a
+		// CreateVolume replay must never seed an empty HEAD over its lineage.
+		return rec, nil
+	}
 	if err := h.cfg.LayoutCreateVolume(ctx, rec.Spec); err != nil {
 		return lifecycle.VolumeRecord{}, fmt.Errorf("%w: %v", errLayoutStoreNotReady, err)
 	}
