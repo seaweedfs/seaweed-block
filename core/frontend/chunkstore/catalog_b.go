@@ -101,23 +101,17 @@ func (c *BCatalog) Restore(ctx context.Context, src VolumeRef, snapshot string, 
 		if err != nil {
 			return err
 		}
-		shards := make([]uint64, 0, len(root.Segments))
-		for sh := range root.Segments {
-			shards = append(shards, sh)
-		}
-		sort.Slice(shards, func(a, b int) bool { return shards[a] < shards[b] })
-		session := "restore-" + target.ID.String()
-		for _, sh := range shards {
-			n := root.Segments[sh]
-			seg, err := c.fetchVerified(ctx, ss, src, n.Path(), n.Hash)
-			if err != nil {
-				return err
-			}
-			if err := layout.EnsureObject(ctx, ts, n.Path(), seg, session); err != nil {
+		segs := map[layout.SegName][]byte{}
+		for _, n := range root.Segments {
+			if segs[n], err = c.fetchVerified(ctx, ss, src, n.Path(), n.Hash); err != nil {
 				return err
 			}
 		}
-		return layout.EnsureObject(ctx, ts, rn.Path(), raw, session)
+		got, err := layout.PrepareRoot(ctx, ts, root, segs, "restore-"+target.ID.String())
+		if err == nil && got != rn {
+			err = fmt.Errorf("%w: root %s re-encodes as %s", layout.ErrCorrupt, rn, got)
+		}
+		return err
 	}
 	source, found, err := ss.ReadVolumeRecord(ctx)
 	if err != nil {
