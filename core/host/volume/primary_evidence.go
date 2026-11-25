@@ -63,13 +63,25 @@ func checkPrimaryEvidence(fact *control.AssignmentFact, st replication.EpochTabl
 			return fmt.Sprintf("promoted at epoch %d on a probed durable LSN %d, the store's durable end is %d", fact.Epoch, fact.EvidenceDurableLsn, end)
 		}
 		var row struct{ epoch, first uint64 }
+		reaches := false
+		replay := false
 		for _, r := range st.Rows {
 			if r.FirstLSN <= fact.EvidenceDurableLsn {
 				row.epoch, row.first = r.Epoch, r.FirstLSN
+				reaches = true
+			}
+			if r.Epoch == fact.Epoch {
+				replay = true
 			}
 		}
 		if len(fact.EvidenceStoreId) != len(store) || string(fact.EvidenceStoreId) != string(store[:]) {
 			return fmt.Sprintf("promoted at epoch %d on a probed store %x, this node's store is %x", fact.Epoch, fact.EvidenceStoreId, store[:])
+		}
+		// A replay on a table that no longer reaches down to the probed LSN
+		// (its oldest rows trimmed at the row cap) has no row to compare;
+		// the store id and the end above still hold it to this line.
+		if replay && !reaches {
+			return ""
 		}
 		if row.epoch != fact.EvidenceEpoch || row.first != fact.EvidenceFirstLsn {
 			return fmt.Sprintf("promoted at epoch %d on the probed row (epoch %d from %d) at LSN %d, the store's row there is (epoch %d from %d)",
