@@ -14,7 +14,7 @@ type fakeRoot struct {
 	seedErr  func(uint64) error
 }
 
-func (r fakeRoot) InstalledBaseLSN() (uint64, bool)   { return r.base, r.complete }
+func (r fakeRoot) InstalledBaseLSN() (uint64, bool)    { return r.base, r.complete }
 func (r fakeRoot) CanSeedChunkFrontier(p uint64) error { return r.seedErr(p) }
 
 var errNoNext = errors.New("no room for a next LSN")
