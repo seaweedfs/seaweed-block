@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestChunkBirthSeededFrontierPreservesInheritedImage(t *testing.T) {
+func TestChunkSeededFrontierPreservesInheritedImage(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	if err := s.SeedChunkFrontier(7); err != nil {
 		t.Fatal(err)
@@ -17,16 +17,13 @@ func TestChunkBirthSeededFrontierPreservesInheritedImage(t *testing.T) {
 	cfg := ctConfig(2)
 	cfg.FreshFromHead = true
 	l := mustAttach(t, s, f, cfg)
-	newest, err := s.Write(0, makeBlock(ctBlockSize, 0x41))
+	_, err := s.Write(0, makeBlock(ctBlockSize, 0x41))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cut, err := l.Cut(ctTimeout(t))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if cut.Head.Chunks[1].BirthLSN != 7 || cut.Head.Chunks[0].BirthLSN != newest {
-		t.Fatalf("seeded image birth lost: %+v", cut.Head)
 	}
 	want := bytes.Clone(image)
 	copy(want, makeBlock(ctBlockSize, 0x41))

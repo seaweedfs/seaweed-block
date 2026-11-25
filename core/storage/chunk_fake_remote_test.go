@@ -378,7 +378,7 @@ func (f *fakeChunkRemote) seedHead(t *testing.T, image []byte, remoteLSN, epoch 
 		key := fmt.Sprintf("seed/%d", idx)
 		f.objs[key] = append([]byte(nil), c...)
 		f.everStored[key] = true
-		head.Chunks[uint64(idx)] = chunkRef{Key: key, SHA256: sha256.Sum256(c), Encoding: "full", BirthLSN: remoteLSN}
+		head.Chunks[uint64(idx)] = chunkRef{Key: key, SHA256: sha256.Sum256(c), Encoding: "full"}
 	}
 	f.installLocked(head)
 }

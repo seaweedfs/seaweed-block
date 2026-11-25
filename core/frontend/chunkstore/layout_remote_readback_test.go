@@ -238,13 +238,12 @@ func TestLayoutRemote_ReusedChunkBirthAfterLostCommitReply(t *testing.T) {
 	lh.readBack("reader", map[uint32][]byte{1: block(1), 9: block(9)})
 }
 
-// A new adapter has no pending birth cache. Hold the engine's unresolved
+// A new adapter keeps no state of the commit. Hold the engine's unresolved
 // proposal while replacing its adapter, as a crash/reopen would do to that
 // adapter state; the durable proposal must still settle as the same image.
 type replacedLayoutRemote struct{ *LayoutRemote }
 
 func TestLayoutRemote_LostCommitReplyRestartKeepsSameProposal(t *testing.T) {
-	t.Skip("red control: adapter birth cache is lost on restart; enable when the engine compares durable proposal identity and image")
 	ctx := context.Background()
 	lh := newLayoutHost(t)
 	s, err := storage.CreateWALStoreWithOptions(lh.dir+"/active", lrBlocks, 4096, storage.WALStoreOptions{ChunkBlocks: lrChunkBlocks})
