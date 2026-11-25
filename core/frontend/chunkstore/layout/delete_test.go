@@ -315,9 +315,11 @@ func operatorCase(t *testing.T, tgtHead *Head, tgtVolume *VolumeID, namesSource 
 // exists and is deleted or no longer names the source: its HEAD deleting
 // or deleted, its name holding another volume (another VOLUME id), or a
 // live HEAD none of whose roots names a chunk of the source. A live target
-// that still names the source, one being created (VOLUME without HEAD) and
-// one never created (no VOLUME, no HEAD: the restore could still create
-// it) are refused and the source is unchanged.
+// that still names the source and one being created (VOLUME without HEAD)
+// are refused and the source is unchanged. A target never created (no
+// VOLUME, no HEAD) gets a deleted HEAD written exclusively in its
+// never-reused directory, so the restore can never create it later, and
+// only then is released.
 func TestOperatorReleaseDependent(t *testing.T) {
 	ctx := context.Background()
 	live := idleHead()
@@ -335,7 +337,7 @@ func TestOperatorReleaseDependent(t *testing.T) {
 		"live target naming the source":   {&live, &tid, true, false, ErrTargetLive},
 		"live target no longer naming it": {&live, &tid, false, true, nil},
 		"target being created":            {nil, &tid, false, false, ErrTargetLive},
-		"target never created":            {nil, nil, false, false, ErrTargetNeverCreated},
+		"target never created":            {nil, nil, false, true, nil},
 		"target deleting":                 {&deleting, &tid, true, true, nil},
 		"name holds another volume":       {nil, &other, false, true, nil},
 	} {
@@ -343,6 +345,9 @@ func TestOperatorReleaseDependent(t *testing.T) {
 		before := src.updates
 		_, err := OperatorReleaseDependent(ctx, src, tgt, r, tid)
 		released := len(src.h.Snapshots["daily"].Dependents) == 0
+		if tc.head == nil && tc.volume == nil && (tgt.h == nil || tgt.h.State != StateDeleted || tgt.h.VolumeID != tid) {
+			t.Errorf("%s: target HEAD %+v; want a deleted HEAD (tombstone) of the target's id written before the release", name, tgt.h)
+		}
 		if tc.release && (err != nil || !released) {
 			t.Errorf("%s: %v, released %t; want released", name, err, released)
 		}
@@ -350,4 +355,31 @@ func TestOperatorReleaseDependent(t *testing.T) {
 			t.Errorf("%s: %v, released %t; want %v and the source unchanged", name, err, released, tc.want)
 		}
 	}
+}
+
+// If the restore creates the target's HEAD between the operator's read and
+// its tombstone, the exclusive create fails and nothing is released.
+func TestOperatorReleaseDependent_TombstoneLosesToTheRestore(t *testing.T) {
+	src, tgt, r := operatorCase(t, nil, nil, false)
+	live := idleHead()
+	live.VolumeID = idFor("t")
+	created := &raceTarget{memHead: tgt, appear: &live}
+	before := src.updates
+	if _, err := OperatorReleaseDependent(context.Background(), src, created, r, idFor("t")); !errors.Is(err, ErrTargetLive) || src.updates != before {
+		t.Fatalf("tombstone after the restore created the HEAD: %v (%d source writes); want ErrTargetLive and none", err, src.updates-before)
+	}
+}
+
+// raceTarget makes a HEAD appear right before the tombstone's create.
+type raceTarget struct {
+	*memHead
+	appear *Head
+}
+
+func (r *raceTarget) CreateDeletedHead(ctx context.Context, h Head) error {
+	if r.appear != nil {
+		n := r.appear.clone()
+		r.memHead.h, r.appear = &n, nil
+	}
+	return r.memHead.CreateDeletedHead(ctx, h)
 }

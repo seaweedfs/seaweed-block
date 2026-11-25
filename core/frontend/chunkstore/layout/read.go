@@ -147,8 +147,9 @@ func (img *Image) Resolve(ctx context.Context, index uint64) (ref Ref, zero bool
 }
 
 // Chunk resolves index and reads its bytes from the pool of the volume
-// that owns it, after checking that volume's VOLUME id is the one the
-// reference carries (ErrIdentity otherwise). A chunk the root names but the
+// that owns it, in that volume's directory (VolumeDir of the reference's
+// owner name and id), after checking the directory's VOLUME id is the one
+// the reference carries (ErrIdentity otherwise). A chunk the root names but the
 // owner's pool lacks is ErrMissing.
 func (img *Image) Chunk(ctx context.Context, index uint64) (Chunk, error) {
 	ref, zero, err := img.Resolve(ctx, index)
@@ -158,14 +159,15 @@ func (img *Image) Chunk(ctx context.Context, index uint64) (Chunk, error) {
 	if zero {
 		return Chunk{Zero: true}, nil
 	}
-	id, err := img.r.VolumeID(ctx, ref.Owner)
+	dir := VolumeDir(ref.Owner, ref.OwnerID)
+	id, err := img.r.VolumeID(ctx, dir)
 	if err != nil {
 		return Chunk{}, err
 	}
 	if id != ref.OwnerID {
 		return Chunk{}, fmt.Errorf("%w: chunk %d names %s id %s, VOLUME has %s", ErrIdentity, index, ref.Owner, ref.OwnerID, id)
 	}
-	b, err := img.r.get(ctx, ref.Owner, ref.Chunk.Path(), ref.Chunk.Hash)
+	b, err := img.r.get(ctx, dir, ref.Chunk.Path(), ref.Chunk.Hash)
 	if err != nil {
 		return Chunk{}, err
 	}

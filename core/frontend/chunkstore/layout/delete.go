@@ -26,10 +26,16 @@ var (
 	// ErrTargetLive: the operator asked to release a dependent whose
 	// target still exists and may still name the source's chunks.
 	ErrTargetLive = errors.New("layout: the dependent's target is live")
-	// ErrTargetNeverCreated: the dependent's target has neither VOLUME nor
-	// HEAD; the restore that registered it could still create it.
-	ErrTargetNeverCreated = errors.New("layout: the dependent's target was never created")
 )
+
+// TargetStore is a restore target's HEAD entry as the operator's
+// remove-dependent sees it: read, and one exclusive create of a deleted
+// HEAD (a tombstone) in the target's never-reused directory; ErrExists if
+// a HEAD is already there.
+type TargetStore interface {
+	ReadHead(ctx context.Context) (h Head, found bool, err error)
+	CreateDeletedHead(ctx context.Context, h Head) error
+}
 
 // HolderGone is the deletion's premise: it returns nil only when no block
 // holds the volume (no line or lease the master grants). DeleteVolume calls
@@ -158,14 +164,15 @@ func DeleteVolume(ctx context.Context, st HeadStore, gone HolderGone, id VolumeI
 // OperatorReleaseDependent is the operator's remove-dependent command: it
 // releases the target from the source's dependents only when the target
 // exists and is deleted or no longer names the source, read first: its
-// HEAD is deleting or deleted; its name now holds another volume (another
-// VOLUME id); or its HEAD is live and no root in it (current or snapshot)
-// names a chunk of the source. A live target that still names the source,
-// or one being created (VOLUME without HEAD), is refused (ErrTargetLive).
-// A target never created (no VOLUME, no HEAD) is refused too
-// (ErrTargetNeverCreated): the restore could still create it after the
-// release. The source is not written when refused.
-func OperatorReleaseDependent(ctx context.Context, source, target HeadStore, r *Reader, targetID VolumeID) (Head, error) {
+// HEAD is deleting or deleted; its directory's VOLUME carries another id;
+// or its HEAD is live and no root in it (current or snapshot) names a
+// chunk of the source. A target never created (no VOLUME, no HEAD) first
+// gets a deleted HEAD written exclusively in its never-reused directory,
+// so the restore that registered it can never create it later, and is
+// then released. A live target that still names the source, one being
+// created (VOLUME without HEAD), and one whose HEAD appeared before the
+// tombstone are refused (ErrTargetLive); the source is not written then.
+func OperatorReleaseDependent(ctx context.Context, source HeadStore, target TargetStore, r *Reader, targetID VolumeID) (Head, error) {
 	sh, found, err := source.ReadHead(ctx)
 	if err != nil {
 		return Head{}, err
@@ -186,7 +193,17 @@ func OperatorReleaseDependent(ctx context.Context, source, target HeadStore, r *
 	case hasHead && (th.State == StateDeleting || th.State == StateDeleted):
 	case hasVolume && id != targetID:
 	case !hasVolume && !hasHead:
-		return Head{}, fmt.Errorf("%w: %s", ErrTargetNeverCreated, r.vol)
+		// Never created: a deleted HEAD written exclusively in the target's
+		// never-reused directory makes sure the restore can never create it
+		// later; only then is the dependent released. If a HEAD appeared
+		// first, the restore got there: refused, re-run decides.
+		tomb := Head{VolumeID: targetID, Activity: Activity{Kind: ActIdle}, State: StateDeleted}
+		if err := target.CreateDeletedHead(ctx, tomb); err != nil {
+			if errors.Is(err, ErrExists) {
+				return Head{}, fmt.Errorf("%w: %s appeared while being tombstoned; run again", ErrTargetLive, r.vol)
+			}
+			return Head{}, err
+		}
 	case hasVolume && hasHead:
 		names, err := namesVolume(ctx, r, th, sh.VolumeID)
 		if err != nil {

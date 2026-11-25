@@ -125,11 +125,16 @@ func (h Head) check() error {
 	default:
 		return fmt.Errorf("%w: activity %q", ErrMalformed, h.Activity.Kind)
 	}
-	if h.Epoch == 0 || h.Holder == "" {
-		return fmt.Errorf("%w: HEAD without epoch or holder", ErrMalformed)
-	}
-	if h.ClaimID == "" {
-		return fmt.Errorf("%w: HEAD holder %q without a claim id", ErrMalformed, h.Holder)
+	// A deleted HEAD written as a tombstone for a restore target never
+	// created has no holder; every other HEAD has an epoch, a holder and
+	// the claim id of its claim.
+	if h.State != StateDeleted || h.Holder != "" {
+		if h.Epoch == 0 || h.Holder == "" {
+			return fmt.Errorf("%w: HEAD without epoch or holder", ErrMalformed)
+		}
+		if h.ClaimID == "" {
+			return fmt.Errorf("%w: HEAD holder %q without a claim id", ErrMalformed, h.Holder)
+		}
 	}
 	if len(h.Snapshots) > MaxSnapshots {
 		return fmt.Errorf("%w: %d snapshots, at most %d", ErrMalformed, len(h.Snapshots), MaxSnapshots)
