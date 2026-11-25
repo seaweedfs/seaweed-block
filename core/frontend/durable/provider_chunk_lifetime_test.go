@@ -132,7 +132,7 @@ func recvErr(t *testing.T, ch <-chan error, what string) error {
 func seededRemote(t *testing.T) *storage.MemChunkRemote {
 	t.Helper()
 	remote := storage.NewMemChunkRemote()
-	p := chunkProvider(t, t.TempDir(), remote, viewAs("r1", 2), 0)
+	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
 	s := openRecovered(t, p)
 	for lba, fill := range map[uint32]byte{33: 0x33, 100: 0x64} {
 		if _, err := s.Write(lba, block(fill)); err != nil {

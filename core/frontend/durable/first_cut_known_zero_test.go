@@ -123,7 +123,7 @@ func TestRedFirstCutOfAFreshVolumeScansOnlyWrittenChunks(t *testing.T) {
 // empty against a HEAD another store already claimed (no data published) is
 // fresh too: every chunk that HEAD does not name starts equal to it (both
 // zero), so the first cut has no candidates. General form of the rule: the
-// marking premise is the fresh marker; takeover also needs a higher issued epoch.
+// premise is the store's fresh marker, not the HEAD's history.
 func TestFirstCutAgainstAClaimedHeadCertifiesUnnamedChunks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -136,7 +136,7 @@ func TestFirstCutAgainstAClaimedHeadCertifiesUnnamedChunks(t *testing.T) {
 	if head, err := remote.GetHead(ctx); err != nil || head.Gen == 0 || len(head.Chunks) != 0 {
 		t.Fatalf("setup: HEAD %+v %v; want a claimed HEAD naming no chunk", head, err)
 	}
-	p := chunkProvider(t, t.TempDir(), remote, viewAs("r1", 4), 0)
+	p := fcutProvider(t, t.TempDir(), remote)
 	fcutOpen(t, ctx, p)
 	if got := fcutStats(t, p).DirtyChunks; got != 0 {
 		t.Fatalf("fresh store against a claimed HEAD naming nothing: %d candidate chunks; want 0", got)
@@ -161,7 +161,7 @@ func TestFirstCutOfARestoreTargetKeepsItsHydrationPath(t *testing.T) {
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p := chunkProvider(t, t.TempDir(), remote, viewAs("r1", 4), 0)
+	p := fcutProvider(t, t.TempDir(), remote)
 	fcutOpen(t, ctx, p)
 	if s := fcutStats(t, p); s.AbsentChunks != 2 || s.DirtyChunks != 0 {
 		t.Fatalf("restore target: %d absent, %d candidate chunks; want 2 absent and 0 candidates", s.AbsentChunks, s.DirtyChunks)

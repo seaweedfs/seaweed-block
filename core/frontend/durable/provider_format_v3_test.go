@@ -15,27 +15,19 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-type formatV3View struct{ epoch uint64 }
+type formatV3View struct{}
 
-func (v formatV3View) Projection() frontend.Projection {
-	epoch := v.epoch
-	if epoch == 0 {
-		epoch = 3
-	}
-	return frontend.Projection{VolumeID: "v1", ReplicaID: "r1", Epoch: epoch, EndpointVersion: 1, Healthy: true}
+func (formatV3View) Projection() frontend.Projection {
+	return frontend.Projection{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1, Healthy: true}
 }
 
-func mappedProviderV3(t *testing.T, root string, remote storage.ChunkRemote, epochs ...uint64) *DurableProvider {
+func mappedProviderV3(t *testing.T, root string, remote storage.ChunkRemote) *DurableProvider {
 	t.Helper()
-	view := formatV3View{}
-	if len(epochs) != 0 {
-		view.epoch = epochs[0]
-	}
 	p, err := NewDurableProvider(ProviderConfig{
 		Impl: ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 		WALRecoveryTestDisableFlusher: true,
 		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, view)
+	}, formatV3View{})
 	if err != nil {
 		t.Fatal(err)
 	}

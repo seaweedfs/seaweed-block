@@ -680,7 +680,7 @@ func runVolume(f flags, exits *processExit) int {
 			WALRetentionLSNs:              f.walRetentionLSNs,
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
-			// V1-SPEC r2.45: one live process per volume per host.
+			// Host-lock rule: one live process per volume per host.
 			HostVolumeLock:        true,
 			VolumeLockDirTestOnly: f.volumeLockDirTestOnly,
 		}
@@ -765,6 +765,9 @@ func runVolume(f flags, exits *processExit) int {
 		err := geometryErr
 		if err == nil {
 			dp, err = durable.NewDurableProvider(cfg, h.ProjectionView())
+			if err == nil {
+				applyBuildTagHold(dp) // a no-op except in a kzhold (test-only) build
+			}
 		}
 		if chunkErr != nil {
 			err = chunkErr

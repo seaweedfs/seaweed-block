@@ -1,4 +1,4 @@
-// V1-SPEC r2.55 side (a), coverage cell P10.6;
+// Takeover data verification, coverage cell P10.6;
 // INV-WS-CLAIM-BEFORE-SERVE-001. The production attach path first claims
 // HEAD, then attaches the chunk layer against that exact claim.
 

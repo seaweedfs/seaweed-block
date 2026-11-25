@@ -24,6 +24,17 @@ type w4WeedCluster struct {
 	procs                        map[string]*w4WeedProc
 }
 
+// testListenHost is the address the test harness binds and advertises for
+// its weed cluster, blockmaster and blockvolume ports: 127.0.0.1 unless
+// SWBLOCK_TEST_LISTEN_HOST names another (a lab run whose processes span two
+// hosts). Unset, every test behaves exactly as before.
+func testListenHost() string {
+	if h := os.Getenv("SWBLOCK_TEST_LISTEN_HOST"); h != "" {
+		return h
+	}
+	return "127.0.0.1"
+}
+
 func w4FreePortPair(t *testing.T, used map[int]bool) int {
 	t.Helper()
 	for i := 0; i < 200; i++ {
@@ -33,7 +44,7 @@ func w4FreePortPair(t *testing.T, used map[int]bool) int {
 		}
 		ok := true
 		for _, q := range []int{p, p + 10000} {
-			l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", q))
+			l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", testListenHost(), q))
 			if err != nil {
 				ok = false
 				break
@@ -92,9 +103,9 @@ func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedClust
 	used := map[int]bool{}
 	mp, vp, fp := w4FreePortPair(t, used), w4FreePortPair(t, used), w4FreePortPair(t, used)
 	c := &w4WeedCluster{
-		master:    fmt.Sprintf("127.0.0.1:%d", mp),
-		filerHTTP: fmt.Sprintf("127.0.0.1:%d", fp),
-		filerGRPC: fmt.Sprintf("127.0.0.1:%d", fp+10000),
+		master:    fmt.Sprintf("%s:%d", testListenHost(), mp),
+		filerHTTP: fmt.Sprintf("%s:%d", testListenHost(), fp),
+		filerGRPC: fmt.Sprintf("%s:%d", testListenHost(), fp+10000),
 		dir:       dir,
 		weed:      weed,
 	}
@@ -121,10 +132,10 @@ func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedClust
 			t.Fatal(err)
 		}
 	}
-	run("master", "master", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", mp), "-mdir="+filepath.Join(dir, "m"), fmt.Sprintf("-volumeSizeLimitMB=%d", o.VolumeSizeLimitMB), "-defaultReplication=000")
+	run("master", "master", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", mp), "-mdir="+filepath.Join(dir, "m"), fmt.Sprintf("-volumeSizeLimitMB=%d", o.VolumeSizeLimitMB), "-defaultReplication=000")
 	w4WaitTCP(t, c.master, 20*time.Second)
-	run("volume", "volume", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+c.master, fmt.Sprintf("-max=%d", o.VolumeMax))
-	run("filer", "filer", "-ip=127.0.0.1", fmt.Sprintf("-port=%d", fp), "-master="+c.master, "-defaultStoreDir="+filepath.Join(dir, "f"))
+	run("volume", "volume", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+c.master, fmt.Sprintf("-max=%d", o.VolumeMax))
+	run("filer", "filer", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", fp), "-master="+c.master, "-defaultStoreDir="+filepath.Join(dir, "f"))
 	w4WaitTCP(t, c.filerGRPC, 30*time.Second)
 
 	// Wait until an assign succeeds (volume registered, volumes growable).

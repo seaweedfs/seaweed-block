@@ -74,6 +74,16 @@ Use the smallest gate that can prove the contract you changed.
 | Kernel initiator, k3s, mounted filesystem, failover, or stale-session behavior | The matching child chain, for example `nvme-p5-csi-protocol-chain` or `csi-rf1-durable-restart-chain` | These require real Linux/K8s/initiator behavior. |
 | Milestone readiness or cross-protocol release confidence | `swblock suite testops/suites/beta-hardening-gate.yaml` plus `swblock validate-bundle --profile beta-hardening` | Slow, evidence-heavy gate. Use for release/milestone claims, not first debugging. |
 
+**Node loss (`node-loss-survival-rf3-reattach-chain`).** This release claims no automatic promotion on node loss:
+the gate cordons the primary's node and stops it, requires that no other replica is promoted during the hold
+(`auto_promotion_while_node_lost=none`), then returns the node and requires the same primary to serve the same
+data. Manual failover (a `SwBlockReplicaFailback` handled by the failback executor, which calls blockmaster's admin
+`ExecuteFailback`) is covered by the existing tests: `TestFailbackExecutorGRPCRuntimeUsesRealMasterService`,
+`TestFailbackServiceEnabledUsesHostRuntime`, `TestHostFailbackAuthorityRuntimeUsesLivePublisher`
+(`core/host/master/failback_runtime_test.go`), `TestFailbackAuthorityRuntimeAdapterRejectsStaleExpectedCurrent`
+(`core/ops/failback_authority_runtime_adapter_test.go`) and `TestFailbackExecutorInvokesRuntimeWhenExplicitlyEnabled`
+(`core/ops/failback_executor_controller_test.go`).
+
 Default ownership:
 
 - Developers run unit/component tests, fast runner-native component gates, and

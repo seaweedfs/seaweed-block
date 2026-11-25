@@ -21,7 +21,7 @@ func (attachLookupProjection) Projection() frontend.Projection {
 	return frontend.Projection{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1, Healthy: true}
 }
 
-// V1-SPEC r2.55 gap 10; INV-WS-CLAIM-BEFORE-SERVE-001.
+// Attach lookup errors fail closed; INV-WS-CLAIM-BEFORE-SERVE-001.
 // Real gRPC lookup errors pass through SWFS and a fresh durable provider.
 // An existing HEAD must never become a bootstrap claim or an I/O-ready volume.
 func TestAttachLookupUnavailableIsNotAnAbsentHead(t *testing.T) {

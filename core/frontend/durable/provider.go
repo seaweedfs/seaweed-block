@@ -169,7 +169,7 @@ type ProviderConfig struct {
 	// HostVolumeLock makes the provider hold an exclusive, nonblocking lock
 	// on HostVolumeLockDir/<volume id>.lock from before the volume's store
 	// opens until Close: one host runs at most one live process per volume
-	// (V1-SPEC r2.45). NewDurableProvider creates the directory (0700) when
+	// under the host-lock rule. NewDurableProvider creates the directory (0700) when
 	// missing and refuses when it cannot create or use it; the tmpfiles.d
 	// entry in deploy/systemd creates it for the unit's user. blockvolume
 	// sets this.
@@ -535,7 +535,7 @@ func (p *DurableProvider) ensureHandle(volumeID string) (*volHandle, error) {
 	}
 	p.mu.Unlock()
 
-	// V1-SPEC r2.45: the host lock is taken before the store opens.
+	// Host-lock rule: the host lock is taken before the store opens.
 	hostLock, err := p.lockVolumeOnHost(volumeID)
 	if err != nil {
 		return nil, err

@@ -13,10 +13,10 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-type regrantStorageView struct{ epoch uint64 }
+type regrantStorageView struct{}
 
-func (v regrantStorageView) Projection() frontend.Projection {
-	return frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: v.epoch, Healthy: true}
+func (regrantStorageView) Projection() frontend.Projection {
+	return frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}
 }
 
 // These component controls obtain the real authority re-grant before opening
@@ -29,7 +29,7 @@ func TestWorkspaceLeaseRegrantCannotUnsealSameEpoch(t *testing.T) {
 	testWorkspaceRegrantStorage(t, true, false)
 }
 
-func TestWorkspaceLeaseRegrantEmptyRootRequiresForcedMove(t *testing.T) {
+func TestWorkspaceLeaseRegrantEmptyRootClaimsOnlyHEAD(t *testing.T) {
 	testWorkspaceRegrantStorage(t, false, true)
 }
 
@@ -42,15 +42,13 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 	bindAndGrant(t, p, "v", "r")
 	remote := storage.NewMemChunkRemote()
 	root := t.TempDir()
-	epoch := uint64(1)
 	open := func() *durable.DurableProvider {
 		t.Helper()
 		provider, err := durable.NewDurableProvider(durable.ProviderConfig{
 			Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64,
 			BlockSize: 4096, ChunkBlocks: 4,
-			ChunkHolder:    "host/r",
 			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-		}, regrantStorageView{epoch})
+		}, regrantStorageView{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,40 +99,10 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 	}
 	if fresh {
 		root = t.TempDir()
+		b = make([]byte, 4096) // the absent local log cannot be claimed as present
 	}
 	second := open()
 	_, err = second.RecoverVolume(ctx, "v")
-	if fresh {
-		if !errors.Is(err, durable.ErrChunkMissingLocalRoot) {
-			t.Fatalf("re-grant silently discarded the local suffix: %v", err)
-		}
-		if after, err := remote.GetHead(ctx); err != nil || !reflect.DeepEqual(after, before) {
-			t.Fatal("refused re-grant changed HEAD", after, err)
-		}
-		if err := second.Backend("v").AdmitsIO(); err == nil {
-			t.Fatal("refused empty root serves")
-		}
-		if err := second.Close(); err != nil {
-			t.Fatal(err)
-		}
-		q := WorkspaceMoveRequest{RequestID: "recover-here", VolumeID: "v", ExpectedReplicaID: "r", ExpectedHost: "host", TargetHost: "host", ExpectedEpoch: 1, TargetReplicaID: "r", TargetDataAddr: "d", TargetCtrlAddr: "c", Kind: "forced", Force: true}
-		if _, err := p.MoveWorkspace(ctx, q, WorkspaceHead{Gen: before.Gen, Epoch: before.Epoch, Holder: before.Holder, RemoteLSN: before.RemoteLSN}); err == nil {
-			t.Fatal("same-host force bypassed the renewed lease")
-		}
-		clock.at(86400)
-		grant, moveErr := p.MoveWorkspace(ctx, q, WorkspaceHead{Gen: before.Gen, Epoch: before.Epoch, Holder: before.Holder, RemoteLSN: before.RemoteLSN})
-		if moveErr != nil {
-			t.Fatal(moveErr)
-		}
-		lost := p.WorkspaceLostRanges("v")
-		if len(lost) != 1 || lost[0].NewEpoch != grant.NewEpoch || lost[0].LostAfterLSN != before.RemoteLSN {
-			t.Fatal("forced successor omitted its loss record", lost)
-		}
-		epoch = grant.NewEpoch
-		second = open()
-		_, err = second.RecoverVolume(ctx, "v")
-		b = make([]byte, 4096) // absent suffix is now explicitly recorded as lost
-	}
 	if sealed {
 		after, readErr := remote.GetHead(ctx)
 		if !errors.Is(err, storage.ErrChunkLayerDetached) || readErr != nil || !reflect.DeepEqual(after, before) {
@@ -163,7 +131,7 @@ func testWorkspaceRegrantStorage(t *testing.T, sealed, fresh bool) {
 		}
 	}
 	claimed, err := remote.GetHead(ctx)
-	if err != nil || claimed.Gen <= before.Gen || claimed.Epoch != epoch || claimed.Holder != before.Holder || claimed.RemoteLSN != before.RemoteLSN {
+	if err != nil || claimed.Gen <= before.Gen || claimed.Epoch != 1 || claimed.Holder != before.Holder || claimed.RemoteLSN != before.RemoteLSN {
 		t.Fatal("return served without the new generation fence", claimed, err)
 	}
 	if _, err := second.CaptureVolume(ctx, "v"); err != nil {

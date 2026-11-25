@@ -172,7 +172,7 @@ func TestWALStoreChunk_ScheduledSnapshotSkipsARestoringVolume(t *testing.T) {
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkSnapshotPeriod: period, ChunkScheduledSnapshot: calls.take,
 		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, viewAs("r1", 4))
+	}, view)
 	if err != nil {
 		t.Fatal(err)
 	}

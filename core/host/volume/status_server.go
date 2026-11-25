@@ -517,7 +517,7 @@ func (s *StatusServer) handleStatusNVMe(w http.ResponseWriter, r *http.Request) 
 }
 
 // NotReadyLeaseNotHeld: a workspace primary without a granted lease holds at
-// the gate (no claim, no listen, not ready); V1-SPEC r2.37.
+// the lease-readiness gate (no claim, no listen, not ready).
 const NotReadyLeaseNotHeld = "lease_not_held"
 
 func (s *StatusServer) statusProjection() StatusProjection {
@@ -543,7 +543,7 @@ func (s *StatusServer) statusProjection() StatusProjection {
 				p.Warnings = append(p.Warnings, st.Warnings...)
 			}
 		}
-		// V1-SPEC r2.39: the backend's one "may serve" function decides; an
+		// The frontend readiness rule: the backend's one "may serve" function decides; an
 		// unopened volume fails closed.
 		if err := src.AdmitsIO(p.VolumeID); err != nil {
 			backendReason = "durable backend admits no I/O: " + err.Error()

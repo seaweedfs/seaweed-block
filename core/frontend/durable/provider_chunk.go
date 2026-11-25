@@ -51,14 +51,9 @@ var (
 // (a workspace that moved away and back), so serving or cutting it would
 // lose the other holder's acknowledged writes. It wraps
 // storage.ErrChunkLayerFenced: the volume is not served and the attach is
-// not retried. A fresh root may restore HEAD at a higher granted epoch;
-// an own-epoch HEAD instead requires the original root or a forced successor.
+// not retried. Removing the local volume lets the next attach start fresh
+// from HEAD.
 var ErrChunkStaleLocalRoot = errors.New("durable: local volume predates a HEAD published by another holder")
-
-// ErrChunkMissingLocalRoot means HEAD already names this holder at its assigned
-// epoch, but the fresh local root cannot retain that holder's acknowledged WAL.
-// Starting from HEAD would silently discard the unpublished suffix.
-var ErrChunkMissingLocalRoot = errors.New("durable: holder local root missing at its assigned epoch")
 
 var (
 	errProviderClosed    = errors.New("durable: provider closed")
@@ -508,8 +503,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 		}
 		cfg.PrepareRestore = func(head storage.ChunkHead) error {
 			if head.Gen != 0 && head.Holder != holder {
-				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; %s",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder, ChunkStaleLocalRootCure)
+				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
+					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
 				// INV-WS-STARTUP-RETRY-001: at or above this assignment,
 				// the foreign holder is a supersede proof. A lower epoch is
 				// the existing move-back/stale-root diagnostic, never 78.
@@ -520,7 +515,7 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
 				return err
 			}
-			// V1-SPEC r2.45: HEAD names this holder, but a root whose local
+			// The durable-reopen rule: HEAD names this holder, but a root whose local
 			// durable LSN is below HEAD's remote_lsn is a rolled-back copy
 			// (a backup taken before a later cut). Restarting cannot cure it.
 			// A crash cannot cause it: a cut syncs its LSN locally before the
@@ -529,8 +524,8 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			if durableLSN, _, _ := ws.Boundaries(); head.Gen != 0 && durableLSN < head.RemoteLSN {
 				log.Printf("durable: refusing to attach volume=%s root=%s: local durable LSN %d is below HEAD gen=%d remote_lsn=%d (remove or quarantine the local root)",
 					volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
-				return fmt.Errorf("%w: %w: %w: volume %s local root %s, local durable LSN %d below HEAD gen %d remote_lsn %d; %s",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkForeignClaim, volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN, ChunkStaleLocalRootCure)
+				return fmt.Errorf("%w: %w: %w: volume %s local root %s, local durable LSN %d below HEAD gen %d remote_lsn %d; remove or quarantine the local root to attach fresh from HEAD",
+					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkForeignClaim, volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
 			}
 			return nil
 		}
@@ -552,13 +547,6 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 				}
 				cfg.FreshFromHead = false
 				return nil
-			}
-			// A fresh marker is not local-lineage evidence, including after a
-			// failed attach is reopened. A forced successor must record any
-			// abandoned suffix before this host may restore the remote image.
-			if head.Gen != 0 && head.Epoch == cfg.Epoch && head.Holder == cfg.Holder {
-				return fmt.Errorf("%w: %w: volume %s local root %s is fresh but HEAD names holder %q at epoch %d; likely wrong or unmounted data directory; %s",
-					ErrChunkMissingLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, cfg.Holder, cfg.Epoch, ChunkMissingLocalRootCure)
 			}
 			// No HEAD is a new lineage; preserve any pre-assignment local
 			// writes instead of replacing their frontier with zero.

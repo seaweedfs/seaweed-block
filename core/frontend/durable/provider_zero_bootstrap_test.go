@@ -92,13 +92,7 @@ func TestRestoreEnsureVolumeZeroHEADPreservesCheckpointedBootstrap(t *testing.T)
 	if got, err := p.CaptureVolume(ctx, "v1"); err != nil || got != lsn {
 		t.Fatalf("capture=%d want=%d err=%v", got, lsn, err)
 	}
-	if err := p.Close(); err != nil {
-		t.Fatal(err)
-	}
-	// Restoring into a fresh root requires a successor epoch.
-	targetView := v1View()
-	targetView.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 1}))
-	fresh := makeProvider(targetView)
+	fresh := makeProvider(v1View())
 	got, err := openRecovered(t, fresh).Read(33)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("checkpointed local bytes lost on remote restore: exact=%v err=%v", bytes.Equal(got, want), err)

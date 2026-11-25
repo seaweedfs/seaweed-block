@@ -153,7 +153,7 @@ phases:
         timeout: 20m
         cmd: |
           cd {{ product_root }}
-          bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/pin_build/alpha-images.env; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/node-specs.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/demo-app-rf3.yaml SW_BLOCK_DEMO_APP_NODE_NAME="$APP_NODE" SW_BLOCK_DEMO_READER_NODE_NAME="$SURVIVOR_APP_NODE" SW_BLOCK_ALPHA_NODE_SPECS="$NODE_SPECS" SW_BLOCK_ALPHA_LOGICAL_SERVERS=3 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=3 SW_BLOCK_ALPHA_REPLICATION_ACK=sync-quorum SW_BLOCK_LAUNCHER_EXTERNAL_ISCSI=1 SW_BLOCK_LAUNCHER_EXTERNAL_STATUS=1 SW_BLOCK_REJECT_LOOPBACK_PUBLISH_TARGETS=1 SW_BLOCK_ISCSI_CHAP_SECRET_NAME=sw-block-node-loss-chap SW_BLOCK_ISCSI_CHAP_USERNAME=testops-node-loss SW_BLOCK_ISCSI_CHAP_SECRET=testops-node-loss-{{ run_id }} SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-node-loss-survival SW_BLOCK_DEMO_REQUIRE_PROMOTION_READY_BEFORE_FAILURE=1 SW_BLOCK_DEMO_FAIL_PRIMARY_BEFORE_READER=cordon-node-scale-primary-to-zero SW_BLOCK_DEMO_STOP_AFTER=reader-verified SW_BLOCK_DEMO_KEEP_ON_STOP=1 bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/exit_code.txt; test "$rc" -eq 44'
+          bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/pin_build/alpha-images.env; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/node-specs.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/demo-app-rf3.yaml SW_BLOCK_DEMO_APP_NODE_NAME="$APP_NODE" SW_BLOCK_DEMO_READER_NODE_NAME="$SURVIVOR_APP_NODE" SW_BLOCK_ALPHA_NODE_SPECS="$NODE_SPECS" SW_BLOCK_ALPHA_LOGICAL_SERVERS=3 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=3 SW_BLOCK_ALPHA_REPLICATION_ACK=sync-quorum SW_BLOCK_LAUNCHER_EXTERNAL_ISCSI=1 SW_BLOCK_DEMO_EXPECT_NO_AUTO_PROMOTION=1 SW_BLOCK_REJECT_LOOPBACK_PUBLISH_TARGETS=1 SW_BLOCK_ISCSI_CHAP_SECRET_NAME=sw-block-node-loss-chap SW_BLOCK_ISCSI_CHAP_USERNAME=testops-node-loss SW_BLOCK_ISCSI_CHAP_SECRET=testops-node-loss-{{ run_id }} SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-node-loss-survival SW_BLOCK_DEMO_REQUIRE_PROMOTION_READY_BEFORE_FAILURE=1 SW_BLOCK_DEMO_FAIL_PRIMARY_BEFORE_READER=cordon-node-scale-primary-to-zero SW_BLOCK_DEMO_STOP_AFTER=reader-verified SW_BLOCK_DEMO_KEEP_ON_STOP=1 bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/exit_code.txt; test "$rc" -eq 44'
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/run.log"
@@ -238,14 +238,14 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
-        pattern: "failover_status: promoted"
+        pattern: "failover_status: recovered_same_primary"
         save_as: failover_promoted_count
       - action: assert_greater
         actual: "{{ failover_promoted_count }}"
         threshold: "0"
       - action: exec
         node: m02
-        cmd: "M=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt; promoted=$(sed -n 's/^promoted_replica=//p' \"$M\" | tail -1); failed=$(sed -n 's/^failed_replica=//p' \"$M\" | head -1); promoted_node=$(sed -n 's/^promoted_replica_node=//p' \"$M\" | tail -1); failed_node=$(sed -n 's/^failed_node=//p' \"$M\" | head -1); test -n \"$promoted\" && test \"$promoted\" != \"$failed\" && test -n \"$promoted_node\" && test \"$promoted_node\" != \"$failed_node\""
+        cmd: "M=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt; recovered=$(sed -n 's/^recovered_replica=//p' \"$M\" | tail -1); failed=$(sed -n 's/^failed_replica=//p' \"$M\" | head -1); test -n \"$recovered\" && test \"$recovered\" = \"$failed\" && grep -q '^auto_promotion_while_node_lost=none$' \"$M\""
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
@@ -328,13 +328,13 @@ phases:
         threshold: "0"
       - action: exec
         node: m02
-        cmd: "M=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt; before=$(sed -n 's/^before_publish_target_frontend=//p' \"$M\" | head -1); portal=$(sed -n 's/^after_publish_target_frontend=//p' \"$M\" | tail -1); test -n \"$portal\" && test \"$portal\" != \"$before\" && ! printf '%s\n' \"$portal\" | grep -q '^127\\.0\\.0\\.1:' && grep -q \"NodeStageVolume: .* staged transport=iscsi portal=${portal}\" /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/blockcsi-node.log"
+        cmd: "M=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt; before=$(sed -n 's/^before_publish_target_frontend=//p' \"$M\" | head -1); portal=$(sed -n 's/^after_publish_target_frontend=//p' \"$M\" | tail -1); test -n \"$portal\" && test \"$portal\" = \"$before\" && ! printf '%s\n' \"$portal\" | grep -q '^127\\.0\\.0\\.1:' && grep -q \"NodeStageVolume: .* staged transport=iscsi portal=${portal}\" /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/blockcsi-node.log"
       - action: exec
         node: m02
         cmd: "test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/node-loss-recovery-boundary.txt && grep -q 'node_loss_recovery_claimed=true' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/node-loss-recovery-boundary.txt"
       - action: exec
         node: m02
-        cmd: "S=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/node-loss-recovery-summary.txt; test -s \"$S\" && grep -q '^node_loss_recovery_summary_version=1$' \"$S\" && grep -q '^result=promoted$' \"$S\" && grep -q '^data_check_after_node_loss=reader_checksum_passed$' \"$S\""
+        cmd: "S=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/node-loss-recovery-summary.txt; test -s \"$S\" && grep -q '^node_loss_recovery_summary_version=1$' \"$S\" && grep -q '^result=recovered_same_primary$' \"$S\" && grep -q '^data_check_after_node_loss=reader_checksum_passed$' \"$S\""
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/control-plane-timeline.txt"
@@ -358,14 +358,6 @@ phases:
         save_as: product_event_candidate_count
       - action: assert_greater
         actual: "{{ product_event_candidate_count }}"
-        threshold: "0"
-      - action: grep_log
-        node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/product-observation/cluster-evidence.json"
-        pattern: "\"event_type\": \"authority_published\""
-        save_as: product_event_authority_count
-      - action: assert_greater
-        actual: "{{ product_event_authority_count }}"
         threshold: "0"
       - action: grep_log
         node: m02

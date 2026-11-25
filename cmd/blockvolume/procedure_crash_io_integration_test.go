@@ -12,7 +12,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 )
 
-// Single-volume coverage, gap 1 (cell A2.4, V1-SPEC r2.55): kill -9 of the
+// Guest I/O crash recovery: kill -9 of the
 // holder WITH guest I/O in flight, then a restart inside the lease. Every
 // write a Flush acknowledged must read back after the restart
 // (INV-WAL-SYNCED-RECOVERED-001); writes not yet acknowledged by a Flush may

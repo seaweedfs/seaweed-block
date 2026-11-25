@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Power loss on a chunk volume (V1-SPEC r2.55 gap 3, INV-FE-FLUSH-SYNC-001),
+// Power loss on a chunk volume (INV-FE-FLUSH-SYNC-001),
 // with real binaries: blockmaster, a real filer (weed, its data off the
 // replayed device) and a walstore-chunk blockvolume whose durable root is on
 // a dm-log-writes device. Each power cut freezes the holder (SIGSTOP), so

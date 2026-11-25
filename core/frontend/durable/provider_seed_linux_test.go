@@ -93,7 +93,7 @@ func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
 	if err := remote.Put(ctx, "seed", data); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 2, Holder: "r1", RemoteLSN: 7,
+	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 3, Holder: "r1", RemoteLSN: 7,
 		Chunks: map[uint64]storage.ChunkRef{0: {Key: "seed", SHA256: sha256.Sum256(data)}}}); err != nil {
 		t.Fatal(err)
 	}
