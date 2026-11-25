@@ -143,6 +143,43 @@ func (s *LayoutStore) object(rel string) (string, string, error) {
 	return path.Dir(p), path.Base(p), nil
 }
 
+// ListChunkCandidates reads one bounded page of a pool shard, in filer name
+// order. These are candidates only: RemoveUnreachable must read their tags and
+// then validate HEAD before marking or deleting any of them. A concurrent new
+// file missed by a page is left for the next cleaning pass.
+func (s *LayoutStore) ListChunkCandidates(ctx context.Context, shard uint64, startAfter string, limit uint32) ([]layout.ChunkName, error) {
+	if limit == 0 {
+		return nil, fmt.Errorf("%w: a pool page needs a positive limit", layout.ErrMalformed)
+	}
+	if startAfter != "" {
+		n, err := layout.ParseChunkName(startAfter)
+		if err != nil || layout.Shard(n.Index) != shard {
+			return nil, fmt.Errorf("%w: invalid pool cursor %q", layout.ErrMalformed, startAfter)
+		}
+	}
+	dir := path.Join(s.root, layout.PoolDir, strconv.FormatUint(shard, 10))
+	entries, err := s.f.ListEntries(ctx, dir, "", startAfter, limit)
+	if err != nil {
+		return nil, err
+	}
+	if uint64(len(entries)) > uint64(limit) {
+		return nil, fmt.Errorf("%w: oversized pool page", layout.ErrCorrupt)
+	}
+	var out []layout.ChunkName
+	for _, e := range entries {
+		if e == nil {
+			return nil, fmt.Errorf("%w: nil pool entry", layout.ErrCorrupt)
+		}
+		n, err := layout.ParseChunkName(e.Name)
+		if err != nil || e.IsDirectory || layout.Shard(n.Index) != shard || e.Name <= startAfter {
+			return nil, fmt.Errorf("%w: invalid pool entry %q", layout.ErrCorrupt, e.Name)
+		}
+		out = append(out, n)
+		startAfter = e.Name
+	}
+	return out, nil
+}
+
 func (s *LayoutStore) Stat(ctx context.Context, rel string) (layout.ObjectMeta, bool, error) {
 	dir, name, err := s.object(rel)
 	if err != nil {
