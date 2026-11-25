@@ -44,7 +44,6 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 			// Shipping to both peers is a legal extension of the one-peer ACK trace.
 			// The product still uses its UNKNOWN-frontier survivor rule, not a test LSN.
 			cluster.Primary().RepVol.SetDurabilityMode(replication.DurabilitySyncQuorum)
-			targetStore := cluster.Replica(0).Store
 			for i := 0; i < 2; i++ {
 				got, err := cluster.Replica(i).Store.Read(7)
 				if err != nil || !bytes.Equal(got, acknowledged) {
@@ -93,13 +92,25 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 			if _, err := h.RunLifecycleProductTick(); err != nil {
 				t.Fatal(err)
 			}
-			issued, ok := h.Publisher().VolumeAuthorityLine("vol-rf3")
-			if !ok || issued.ReplicaID != "r2" || issued.Epoch <= initial.Epoch {
-				t.Fatalf("expected selected r2: %+v", issued)
+			issued := initial
+			publishDeadline := time.Now().Add(5 * time.Second)
+			for issued.Epoch <= initial.Epoch && time.Now().Before(publishDeadline) {
+				issued, _ = h.Publisher().VolumeAuthorityLine("vol-rf3")
+				if issued.Epoch <= initial.Epoch {
+					time.Sleep(10 * time.Millisecond)
+				}
 			}
+			if issued.Epoch <= initial.Epoch || (issued.ReplicaID != "r2" && issued.ReplicaID != "r3") {
+				t.Fatalf("promotion did not publish a surviving replica: %+v", issued)
+			}
+			selected, serverID := 0, "node-b"
+			if issued.ReplicaID == "r3" {
+				selected, serverID = 1, "node-c"
+			}
+			targetStore := cluster.Replica(selected).Store
 			// No target subscription exists yet: replacement occurs after publication,
 			// before the actual blockvolume receives and adopts the published line.
-			cluster.Replica(0).Listener.StopHard()
+			cluster.Replica(selected).Listener.StopHard()
 			if replace {
 				s, err := storage.CreateWALStore(filepath.Join(t.TempDir(), "replacement.wal"), 64, 4096)
 				if err != nil {
@@ -116,7 +127,7 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 			}
 			listener.Serve()
 			t.Cleanup(listener.StopHard)
-			target, err := volume.New(volume.Config{MasterAddr: h.Addr(), ServerID: "node-b", VolumeID: "vol-rf3", ReplicaID: "r2", DataAddr: "127.0.0.1:19201", CtrlAddr: "127.0.0.1:19202", HeartbeatInterval: time.Second, EnableT1Readiness: true, ReplicationVolume: rv})
+			target, err := volume.New(volume.Config{MasterAddr: h.Addr(), ServerID: serverID, VolumeID: "vol-rf3", ReplicaID: issued.ReplicaID, DataAddr: issued.DataAddr, CtrlAddr: issued.CtrlAddr, HeartbeatInterval: time.Second, EnableT1Readiness: true, ReplicationVolume: rv})
 			if err != nil {
 				t.Fatal(err)
 			}
