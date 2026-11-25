@@ -115,6 +115,11 @@ expect_kind 1 "DOCS: a model under docs/spec" DOCS - - M docs/spec/X.tla
 expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS - - M deploy/x.env
 expect_kind 0 "TEST: tests and testdata" TEST - - M core/x/s_test.go A core/x/testdata/in.bin
 expect_kind 1 "TEST: production Go" TEST - - M core/x/s.go
+expect_kind 0 "TEST: a runner scenario only" TEST - - A testops/scenarios/gate.yaml
+expect_kind 0 "TEST: a scenario next to tests" TEST - - M testops/scenarios/gate.yaml M core/x/s_test.go
+expect_kind 1 "TEST: a scenario next to production Go" TEST - - M testops/scenarios/gate.yaml M core/x/s.go
+expect_kind 1 "TEST: a script beside the scenarios" TEST - - A testops/scenarios/run.sh
+expect_kind 1 "TEST: a yaml outside testops/scenarios" TEST - - M testops/gate.yaml
 expect_kind 0 "CI: workflow" CI - - M .github/workflows/w.yml
 expect_kind 1 "CI: scripts/ is shipped" CI - - A scripts/install.sh
 expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" - - M docs/a.md

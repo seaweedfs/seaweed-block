@@ -15,14 +15,14 @@ func TestCutoverCreateFromSnapshot(t *testing.T) {
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	source := startCutoverVolume(t, env, "restore-source", "s1")
 	env.adopt(t, source, "s1")
-	env.writeBlock(t, "s1", 5, pattern("restore-seam-A!"))
+	env.writeBlock(t, "s1", 5, pattern("restore-seam-A!!"))
 	env.snapshot(t, "s1", "v1", "restore-seam")
 	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "restore-seam", "--target", "v2",
 		"--master", env.h.masterAddr)
 	target := startCutoverVolume(t, env, "restored-target", "n-v2")
 	target.waitLog(t, 60*time.Second, "blockvolume: volume v2 adopted as PRIMARY at r1@")
 	poll(t, 60*time.Second, "restored target never ready", func() bool { return volumeFrontendReady(env.hosts["n-v2"].status, "v2") })
-	env.requireBlocks(t, "n-v2", 0, ladderLastBlock+1, map[uint64][]byte{5: pattern("restore-seam-A!")})
+	env.requireBlocks(t, "n-v2", 0, ladderLastBlock+1, map[uint64][]byte{5: pattern("restore-seam-A!!")})
 }
 
 // TestCutoverWriteSnapshotKillRestartRestore follows the public path through

@@ -12,9 +12,10 @@
 #   no behaviour may use, each checked against what it changes:
 #   DOCS (docs outside docs/spec/, tests, and non-test Go whose tokens are
 #   unchanged: BLOBS holds old/<path> and new/<path> for each changed non-test
-#   Go file, compared by sametokens.go), TEST (only tests, testdata and test
-#   helpers), CI (only .github/). NONE is not a kind. Known limit: a docs file
-#   that is go:embed-ed into a binary changes behaviour under DOCS (none today).
+#   Go file, compared by sametokens.go), TEST (only tests, testdata, test
+#   helpers and runner scenarios, testops/scenarios/*.yaml), CI (only
+#   .github/). NONE is not a kind. Known limit: a docs file that is
+#   go:embed-ed into a binary changes behaviour under DOCS (none today).
 # - Simplest: (20+ characters) is present when the PR adds, modifies or
 #   deletes non-test Go under core/ or cmd/.
 #
@@ -81,7 +82,8 @@ if [[ -n $mi && $mi != '<'* ]]; then
 	fi
 fi
 
-is_test() { [[ $1 == *_test.go || $1 == testdata/* || $1 == */testdata/* || $1 == */testutil/* ]]; }
+# A runner scenario under testops/scenarios/ is a test definition.
+is_test() { [[ $1 == *_test.go || $1 == testdata/* || $1 == */testdata/* || $1 == */testutil/* || $1 == testops/scenarios/*.yaml ]]; }
 # docs/spec holds the models: changing one is not a docs change.
 is_doc() { [[ $1 != docs/spec/* ]] && [[ $1 == *.md || $1 == docs/* ]]; }
 core=0

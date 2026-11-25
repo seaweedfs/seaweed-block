@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -162,8 +163,11 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	remounted, _ := makeProvider(oldRoot)
-	if _, err = remounted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrStaleLocalRoot) {
+	if _, err = remounted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrStaleLocalRoot) || !strings.Contains(err.Error(), layout.StaleLocalRootCure) {
 		t.Fatalf("old directory served new lineage: %v", err)
+	}
+	if _, ended := remounted.ChunkStartupOutcome("v1"); ended {
+		t.Fatal("same-holder stale local root was misclassified as superseded")
 	}
 	if remoteCalls != 2 {
 		t.Fatalf("remote constructed before Start/duplicated: %d", remoteCalls)

@@ -26,6 +26,7 @@ import (
 var headReaders = map[string]string{
 	"core/frontend/durable/provider_seal_replay.go readLayoutSeal -> ReadHead":                        "absent, unreadable and foreign layout proof refuse without cached success (TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory)",
 	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                           "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopAbortMustConfirmItsOutcome)",
+	"core/frontend/durable/provider_layout.go startLayoutRoot -> ReadHead":                            "the diagnostic re-read after Start refusal cannot turn an absent HEAD into a claim; Start already refused it (probe TestLayoutStoreMissingHEADRefusesStart)",
 	"cmd/blockvolume/workspace_lease.go workspaceLayoutDetachedGeneration -> ReadHead":                "absent refuses ACK (probe TestWorkspaceLayoutDetachedProof)",
 	"cmd/blockvolume/chunk_remote.go chunkAttachCheck -> ReadHead":                                    "absent refuses attach without creating VOLUME or HEAD (TestChunkAttachCheckAppliesVolumeRules)",
 	"core/frontend/chunkstore/layout_store.go ReadHead -> DecodeLayoutHeadEntry":                      "shared canonical entry decoder; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",
