@@ -56,6 +56,17 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 		"--cluster-spec", spec, "--expected-slots-per-volume", "3", "--lifecycle-product-loop-interval", "200ms",
 		"--freshness-window", "2s", "--launcher-replication-ack", "sync-quorum", "--listen", h.masterAddr)
 	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired")
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		data, _ := os.ReadFile(master.log)
+		for _, l := range strings.Split(string(data), string(rune(10))) {
+			if strings.Contains(l, "rejected") || strings.Contains(l, "authority:") || strings.Contains(l, "published") {
+				t.Logf("DEBUGM %s", l)
+			}
+		}
+	})
 	for i, b := range hosts {
 		lockDir := b.root + ".locks"
 		if err := os.MkdirAll(lockDir, 0o700); err != nil {
