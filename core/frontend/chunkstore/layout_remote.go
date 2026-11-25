@@ -743,6 +743,7 @@ func (l *LayoutRemote) stopCleaningLocked() {
 //   - any other refusal is returned as it is;
 //   - the store does not answer: remote unavailable (the session is
 //     dropped locally; the next cut rolls it back).
+//
 // LayoutErr classifies a layout error from a call made outside the remote
 // (the holder's cleaning) the way the remote classifies its own: an
 // identity-moved refusal is storage.ErrChunkLayerFenced, a volume being
