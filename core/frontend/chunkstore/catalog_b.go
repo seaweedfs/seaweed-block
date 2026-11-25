@@ -155,7 +155,8 @@ func (c *BCatalog) ReleaseTarget(ctx context.Context, src, target VolumeRef) (la
 // DeleteVolume deletes the volume in the kernel's order. The sources it is
 // released from are the volumes its roots name chunks of (read from its
 // references, never from a name given); its objects are every pool,
-// segment and root entry in its directory.
+// segment and root entry in its directory, listed after HEAD is deleting.
+// A re-run on a deleted volume sweeps any object that landed late.
 func (c *BCatalog) DeleteVolume(ctx context.Context, v VolumeRef, auth layout.DeleteAuthority) error {
 	s, r, err := c.open(v)
 	if err != nil {
@@ -180,11 +181,8 @@ func (c *BCatalog) DeleteVolume(ctx context.Context, v VolumeRef, auth layout.De
 		}
 		sources = append(sources, ss)
 	}
-	objects, err := c.listObjects(ctx, v)
-	if err != nil {
-		return err
-	}
-	return layout.DeleteVolume(ctx, s, auth, v.ID, sources, s, objects)
+	list := func(ctx context.Context) ([]string, error) { return c.listObjects(ctx, v) }
+	return layout.DeleteVolume(ctx, s, auth, v.ID, sources, s, list)
 }
 
 // foreignOwners returns the volumes, other than h's own, whose chunks a

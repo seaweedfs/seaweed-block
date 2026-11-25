@@ -65,7 +65,6 @@ var headReaders = map[string]string{
 	// GetHeadRoot, so an absent HEAD reaches them as the zero HEAD (probe GetHead)
 	"cmd/sw-block/chunk_b.go chunkShow -> ReadHead":                      "found=false: prints a null head (probe TestOpsChunk_AbsentVolume)",
 	"cmd/sw-block/chunk_b.go chunkSnapshots -> ReadHead":                 "refuses volume_not_found (probe TestOpsChunk_AbsentVolume)",
-	"cmd/sw-block/chunk_volume_delete.go chunkVolumeDelete -> ReadHead":  "read after a refused delete: absent gives nothing back (the delete refused before the admission; probe TestOpsChunk_AbsentVolume)",
 	"core/frontend/durable/provider_chunk.go GetHead -> GetHead":         "zero HEAD (probe GetHead)",
 	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHead":     "zero HEAD (probe GetHead)",
 	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHeadRoot": "zero HEAD (probe GetHeadRoot)",

@@ -98,6 +98,15 @@ service LifecycleService {
     rpc MarkVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
     rpc AbortVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
     rpc CommitVolumeDeleting(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
+    // ReserveVolumeDeletion is the layout volume delete's reservation: it
+    // commits the delete reservation under the token and stops every later
+    // grant for the volume, refused while an authority line is live. A
+    // committed reservation is never given back.
+    rpc ReserveVolumeDeletion(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
+    // CheckVolumeNoLiveLease is the layout volume delete's check between its
+    // HEAD read and its update: OK only with the committed reservation and
+    // no live lease on any line of the volume (granted lines included).
+    rpc CheckVolumeNoLiveLease(MarkVolumeDeletingRequest) returns (MarkVolumeDeletingResponse);
 }
 
 // FailbackService — disabled-by-default authority failback endpoint.

@@ -6,7 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 func TestVolumeDeleteAuthorityReservationSurvivesRestart(t *testing.T) {
@@ -47,5 +51,36 @@ func TestVolumeDeleteAuthorityReservationSurvivesRestart(t *testing.T) {
 	}
 	if _, err := lc.CreateVolume(ctx, createReq("v")); err == nil {
 		t.Fatal("recreated a reserved volume")
+	}
+}
+
+// The two RPCs the volume delete calls are the in-master authority: the
+// check refuses before the reservation, the reservation commits (a replay
+// is fine, it is never given back), the check then passes.
+func TestVolumeDeleteAuthorityRPCs(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	_, client, stop := hostOn(t, filepath.Join(root, "authority"), filepath.Join(root, "lifecycle"))
+	defer stop()
+	if _, err := client.CreateVolume(ctx, createReq("v")); err != nil {
+		t.Fatal(err)
+	}
+	req := &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "delete-v"}
+	if _, err := client.CheckVolumeNoLiveLease(ctx, req); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("check before the reservation: %v; want FailedPrecondition", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := client.ReserveVolumeDeletion(ctx, req); err != nil {
+			t.Fatalf("reserve #%d: %v", i+1, err)
+		}
+	}
+	if _, err := client.AbortVolumeDeleting(ctx, req); err == nil {
+		t.Fatal("a committed reservation was given back")
+	}
+	if _, err := client.CheckVolumeNoLiveLease(ctx, req); err != nil {
+		t.Fatalf("check after the reservation: %v", err)
+	}
+	if _, err := client.ReserveVolumeDeletion(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("reserve without a token: %v", err)
 	}
 }
