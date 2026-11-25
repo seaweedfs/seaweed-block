@@ -628,8 +628,9 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			if issuedWorkspace != nil {
 				// The store may have written the issuing record before
-				// failing (e.g. a directory sync after the rename): the
-				// move's outcome is unknown, not refused.
+				// failing (a failure after its rename): the move's outcome
+				// is unknown, not refused. The file store fail-stops on a
+				// directory fsync failure there instead (exit 74).
 				return fmt.Errorf("authority: durable Put of a workspace move issue failed: %w: %w", err, ErrWorkspaceOutcomeUncertain)
 			}
 			return fmt.Errorf("authority: durable Put failed, rolling back mint: %w", err)
