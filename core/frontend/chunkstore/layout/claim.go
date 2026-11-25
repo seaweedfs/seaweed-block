@@ -28,7 +28,10 @@ func (h Head) Claim(me HolderID) (next Head, changed bool, err error) {
 	if me.Epoch == 0 || me.Holder == "" || me.ClaimID == "" {
 		return Head{}, false, errors.New("layout: Claim needs an epoch, a holder and a claim id")
 	}
-	if h.State != StateLive {
+	if h.State == StateDetached && me.Epoch <= h.Epoch {
+		return Head{}, false, ErrDetached
+	}
+	if h.State != StateLive && h.State != StateDetached {
 		return Head{}, false, fmt.Errorf("%w: HEAD is %s", ErrVolumeDeleting, h.State)
 	}
 	switch {
@@ -42,6 +45,7 @@ func (h Head) Claim(me HolderID) (next Head, changed bool, err error) {
 	next = h.clone()
 	next.Epoch, next.Holder, next.ClaimID = me.Epoch, me.Holder, me.ClaimID
 	next.Activity = Activity{Kind: ActIdle}
+	next.State = StateLive
 	return next, true, nil
 }
 
