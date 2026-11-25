@@ -38,7 +38,7 @@ func TestIngressPrimaryAdoptionTableStep(t *testing.T) {
 		t.Fatalf("rows after adoption at epoch 2 %v; want [(1,1) (2,5)]", rows)
 	}
 
-	if err := r.EpochTable().Invalidate(); err != nil { // a recovery left it without a history
+	if _, err := r.EpochTable().Invalidate(); err != nil { // a recovery left it without a history
 		t.Fatal(err)
 	}
 	if err := r.FenceAsPrimaryWithPeers(3, false); err != nil {

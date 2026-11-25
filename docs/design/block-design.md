@@ -313,6 +313,20 @@ stateDiagram-v2
 
 (Peer states and allowed transitions are in `core/replication/peer.go` `ReplicaState`, `replicaStateTransitionAllowed`. Every route to `Healthy` from a recovery verdict goes through `ReplicaPeer.HealIfInSync`: a barrier in this session whose (last data epoch, end) the primary's epoch table (`core/transport/epoch_table.go`, `SharedEnd`) finds in sync; diverged history goes to `NeedsRebuild` and is never counted. `NeedsRebuild` is terminal in this state machine; the rebuild itself runs as a separate dual-lane session, and the Kubernetes line drives it through an opt-in operator path, see the [Kubernetes block design](kubernetes-block-design.md#4-replication-and-failover).)
 
+**Epoch table** (`core/transport/epoch_table.go`): each volume's durable record of the first LSN of every epoch it holds data from; an entry's identity is (epoch, LSN). A recovery ships history whose epochs arrive only at its end, so the table is invalid from before its first byte until that end, under a random token held by the newest recovery.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Valid
+  Valid --> Valid: live entry of a new epoch, row noted before the apply; primary role adopted at the next LSN; load drops rows above the next LSN
+  Valid --> Invalid: catch-up lane start or rebuild's first base byte (Invalidate, new token); dual-lane session
+  Invalid --> Invalid: another recovery starts (new token takes the mark); a completion with another token is refused
+  Invalid --> Valid: the token's recovery synced its data, then CompleteRecovery installs the primary's rows cut at its end
+  Invalid --> Valid: primary role adopted over it: exactly [(epoch, next LSN)]
+```
+
+While invalid the volume reports no last data epoch: it reconciles as diverged, is never counted and is rebuilt, and no live entry is noted.
+
 **Invariants.**
 
 | Invariant | Enforced in | Test | Model-checked |

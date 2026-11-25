@@ -24,12 +24,12 @@ var epochTableWriters = []string{
 	"cmd/blockvolume/replication_ingress.go: func newReplicationIngress .TrimAbove",
 	"cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Note",
 	"cmd/blockvolume/replication_ingress.go: func notePrimaryEpoch .Replace", // promoted over an invalid table: exactly [(e, next LSN)]
-	"core/transport/replica.go: func EnterDualLane .Invalidate",               // dual-lane session: before its first byte
+	"core/transport/replica.go: func EnterDualLane .InvalidateDualLane",       // dual-lane session: before its first byte
 	"core/transport/replica.go: func handleConn .Invalidate", // rebuild: before the first base byte
 	"core/transport/replica.go: func handleConn .Invalidate", // catch-up: at the recovery lane start
 	"core/transport/replica.go: func handleConn .Note",       // live-lane entry, before the apply
-	"core/transport/replica.go: func handleConn .Replace",    // rebuild done
-	"core/transport/replica.go: func handleConn .Replace",    // catch-up's final barrier
+	"core/transport/replica.go: func handleConn .CompleteRecovery", // rebuild done, only by the mark's owner
+	"core/transport/replica.go: func handleConn .CompleteRecovery", // catch-up's final barrier, only by the mark's owner
 }
 
 // epochWrites lists the non-test calls of Note, Replace or TrimAbove whose
@@ -145,7 +145,7 @@ func typedWritesIn(f *ast.File, rel string, info *types.Info) []string {
 	return out
 }
 
-var epochWriter = map[string]bool{"Note": true, "Replace": true, "TrimAbove": true, "Invalidate": true}
+var epochWriter = map[string]bool{"Note": true, "Replace": true, "TrimAbove": true, "Invalidate": true, "InvalidateDualLane": true, "CompleteRecovery": true}
 
 func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 	got := epochWrites(t, filepath.Join("..", ".."))
@@ -175,8 +175,8 @@ func TestEpochTableHasExactlyItsListedWriters(t *testing.T) {
 		})
 	}
 	sort.Strings(persisters)
-	if strings.Join(persisters, ",") != "Invalidate,Note,Replace,TrimAbove" {
-		t.Fatalf("methods reaching persistLocked: %v; want Invalidate, Note, Replace, TrimAbove", persisters)
+	if strings.Join(persisters, ",") != "CompleteRecovery,Invalidate,InvalidateDualLane,Note,Replace,TrimAbove" {
+		t.Fatalf("methods reaching persistLocked: %v; want CompleteRecovery, Invalidate, InvalidateDualLane, Note, Replace, TrimAbove", persisters)
 	}
 }
 

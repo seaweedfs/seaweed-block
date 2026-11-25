@@ -354,6 +354,9 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 	// AdvanceFrontier at completion).
 	var install storage.InstallHandle
 	var installBase uint64
+	// recoveryToken is this connection's hold on the epoch table's invalid
+	// mark (0 = none): its recovery completes only under it.
+	var recoveryToken uint64
 	beginInstall := func(hint uint64) error {
 		if install != nil {
 			if hint != installBase {
@@ -363,9 +366,11 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 		}
 		// The base's history arrives only with the done frame: the table is
 		// invalid from before the first base byte until that replace.
-		if err := r.epochs.Invalidate(); err != nil {
+		tok, err := r.epochs.Invalidate()
+		if err != nil {
 			return err
 		}
+		recoveryToken = tok
 		var id [16]byte
 		for id == ([16]byte{}) {
 			if _, err := rand.Read(id[:]); err != nil {
@@ -421,10 +426,12 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// The lane ships history whose epochs arrive only at its
 				// final barrier: invalid from before its first entry until
 				// that replace.
-				if err := r.epochs.Invalidate(); err != nil {
+				tok, err := r.epochs.Invalidate()
+				if err != nil {
 					log.Printf("replica: recovery lane epoch table: %v", err)
 					return true
 				}
+				recoveryToken = tok
 				lane = mutationLaneRecovery
 				r.markPrefixEligibility(lineage, false)
 
@@ -576,7 +583,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						return true
 					}
 					if r.epochs != nil {
-						if err := r.epochs.Replace(RowsThrough(rows, frontier)); err != nil {
+						if err := r.epochs.CompleteRecovery(RowsThrough(rows, frontier), recoveryToken); err != nil {
 							log.Printf("replica: rebuild done epoch table: %v", err)
 							return true
 						}
@@ -627,7 +634,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						return true
 					}
 					if r.epochs != nil {
-						if err := r.epochs.Replace(RowsThrough(rows, frontier)); err != nil {
+						if err := r.epochs.CompleteRecovery(RowsThrough(rows, frontier), recoveryToken); err != nil {
 							log.Printf("replica: catch-up barrier epoch table: %v", err)
 							return true
 						}
@@ -803,7 +810,7 @@ func (r *ReplicaListener) EnterDualLane(epoch uint64) (func(), error) {
 	// table cannot name: invalid before its first byte. Its completion does
 	// not carry rows yet, so the table stays invalid: the replica reconciles
 	// as diverged and is rebuilt, never counted.
-	if err := r.epochs.Invalidate(); err != nil {
+	if err := r.epochs.InvalidateDualLane(); err != nil {
 		r.endMutationFrame()
 		return nil, fmt.Errorf("replica: dual-lane epoch %d: epoch table: %w", epoch, err)
 	}

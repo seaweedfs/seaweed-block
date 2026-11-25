@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -53,7 +54,19 @@ type epochTableRecord struct {
 	// table, the store's data has no known history: no last data row, no
 	// note; it reconciles as diverged at every crash point.
 	Invalid bool `json:"invalid,omitempty"`
+	// Owner is the recovery that holds the invalid mark (the last one to
+	// start); only its completion may make the table valid again.
+	Owner uint64 `json:"owner,omitempty"`
 }
+
+// DualLaneOwner holds the invalid mark for dual-lane sessions, whose
+// completion carries no rows: no completion presents it, so none clears it.
+// A recovery token is never this value (nor 0).
+const DualLaneOwner = ^uint64(0)
+
+// ErrNotRecoveryOwner: a recovery's completion found the invalid mark held
+// by a newer recovery; it must not make the table valid over that one's data.
+var ErrNotRecoveryOwner = errors.New("epoch table: a newer recovery holds the invalid mark")
 
 // EpochTable is the durable table of one volume. The zero path keeps it in
 // memory only (tests and non-durable stores).
@@ -63,6 +76,7 @@ type EpochTable struct {
 	mu      sync.Mutex
 	rows    []EpochRow
 	invalid bool
+	owner   uint64
 }
 
 // LoadEpochTable reads the table at path; a missing record is an empty table.
@@ -104,7 +118,7 @@ func LoadEpochTable(path, volumeID string) (*EpochTable, error) {
 	if err := checkEpochRows(rec.Rows); err != nil {
 		return nil, err
 	}
-	t.rows, t.invalid = rec.Rows, rec.Invalid
+	t.rows, t.invalid, t.owner = rec.Rows, rec.Invalid, rec.Owner
 	return t, nil
 }
 
@@ -150,34 +164,90 @@ func (t *EpochTable) Note(epoch, firstLSN uint64) error {
 		}
 	}
 	next := newestRows(append(append([]EpochRow(nil), t.rows...), EpochRow{Epoch: epoch, FirstLSN: firstLSN}))
-	if err := t.persistLocked(next, false); err != nil {
+	if err := t.persistLocked(next, false, 0); err != nil {
 		return err
 	}
 	t.rows = next
 	return nil
 }
 
-// Invalidate durably marks the table invalid, before a recovery applies
-// any history (a catch-up's lane start, a rebuild's first base block): the
-// history's epochs arrive only at the recovery's end, and until Replace
-// installs them the data must read as diverged, whatever crashes between.
-func (t *EpochTable) Invalidate() error {
+// Invalidate durably marks the table invalid under a fresh random token and
+// returns it, before a recovery applies any history (a catch-up's lane
+// start, a rebuild's first base block): the history's epochs arrive only at
+// the recovery's end, and until CompleteRecovery with this token the data
+// must read as diverged, whatever crashes between. A later Invalidate takes
+// the mark over (the newest bulk apply owns the table); the token of a
+// recovery that died is never presented again, so after a reload the table
+// stays invalid until a new recovery completes under its own token.
+func (t *EpochTable) Invalidate() (token uint64, err error) {
+	if t == nil {
+		return 0, nil
+	}
+	var b [8]byte
+	for token == 0 || token == DualLaneOwner {
+		if _, err := rand.Read(b[:]); err != nil {
+			return 0, fmt.Errorf("epoch table: recovery token: %w", err)
+		}
+		token = binary.BigEndian.Uint64(b[:])
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := t.persistLocked(nil, true, token); err != nil {
+		return 0, err
+	}
+	t.rows, t.invalid, t.owner = nil, true, token
+	return token, nil
+}
+
+// InvalidateDualLane marks the table invalid for dual-lane sessions (it runs
+// for each of their frames: one write, then none while the mark is theirs).
+func (t *EpochTable) InvalidateDualLane() error {
 	if t == nil {
 		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.invalid {
+	if t.invalid && t.owner == DualLaneOwner {
 		return nil
 	}
-	if err := t.persistLocked(nil, true); err != nil {
+	if err := t.persistLocked(nil, true, DualLaneOwner); err != nil {
 		return err
 	}
-	t.rows, t.invalid = nil, true
+	t.rows, t.invalid, t.owner = nil, true, DualLaneOwner
 	return nil
 }
 
-// Replace makes rows the table (after a rebuild from a primary's image).
+// CompleteRecovery makes rows the table and the table valid, at the end of
+// the recovery that holds token once its data is synced: only while the
+// table is invalid and token is still its owner, checked and written under
+// one lock (ErrNotRecoveryOwner otherwise; nothing written).
+func (t *EpochTable) CompleteRecovery(rows []EpochRow, owner uint64) error {
+	if t == nil {
+		return nil
+	}
+	if owner == 0 || owner == DualLaneOwner {
+		return fmt.Errorf("%w (no recovery token)", ErrNotRecoveryOwner)
+	}
+	if err := checkEpochRows(rows); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.invalid || t.owner != owner {
+		return fmt.Errorf("%w (recovery %d, mark held by %d, invalid %t)", ErrNotRecoveryOwner, owner, t.owner, t.invalid)
+	}
+	next := newestRows(append([]EpochRow(nil), rows...))
+	if err := t.persistLocked(next, false, 0); err != nil {
+		return err
+	}
+	t.rows, t.invalid, t.owner = next, false, 0
+	return nil
+}
+
+// Replace makes rows the table and the table valid, whatever recovery holds
+// the invalid mark. Only a node taking the primary role uses it (its fence
+// drained every inbound recovery first); a recovery completes through
+// CompleteRecovery.
 func (t *EpochTable) Replace(rows []EpochRow) error {
 	if err := checkEpochRows(rows); err != nil {
 		return err
@@ -185,10 +255,10 @@ func (t *EpochTable) Replace(rows []EpochRow) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	next := newestRows(append([]EpochRow(nil), rows...))
-	if err := t.persistLocked(next, false); err != nil {
+	if err := t.persistLocked(next, false, 0); err != nil {
 		return err
 	}
-	t.rows, t.invalid = next, false
+	t.rows, t.invalid, t.owner = next, false, 0
 	return nil
 }
 
@@ -207,18 +277,18 @@ func (t *EpochTable) TrimAbove(next uint64) error {
 	if t.invalid || len(keep) == len(t.rows) {
 		return nil
 	}
-	if err := t.persistLocked(keep, false); err != nil {
+	if err := t.persistLocked(keep, false, 0); err != nil {
 		return err
 	}
 	t.rows = keep
 	return nil
 }
 
-func (t *EpochTable) persistLocked(rows []EpochRow, invalid bool) error {
+func (t *EpochTable) persistLocked(rows []EpochRow, invalid bool, owner uint64) error {
 	if t.path == "" {
 		return nil
 	}
-	body, _ := json.Marshal(epochTableRecord{Schema: epochTableSchema, VolumeID: t.volumeID, Rows: rows, Invalid: invalid})
+	body, _ := json.Marshal(epochTableRecord{Schema: epochTableSchema, VolumeID: t.volumeID, Rows: rows, Invalid: invalid, Owner: owner})
 	tmp := t.path + ".tmp"
 	if err := floorFS.writeSynced(tmp, append(body, '\n')); err != nil {
 		_ = floorFS.remove(tmp)
