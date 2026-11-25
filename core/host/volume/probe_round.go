@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // The replica's side of the promotion probe round: it subscribes to the
@@ -85,6 +86,11 @@ func (h *Host) probeAnswer(round uint64) *control.ProbeAnswer {
 					}
 				}
 			}
+		}
+	}
+	if sid, ok := h.getReplication().(interface{ LocalStoreID() storage.StoreID }); ok && sid != nil {
+		if id := sid.LocalStoreID(); !id.IsZero() {
+			a.StoreId = id[:]
 		}
 	}
 	if roles, ok := h.probeRoles.Load().(probeRoleSource); ok && roles != nil {

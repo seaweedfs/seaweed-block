@@ -5,6 +5,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // primaryEvidenceSource is the local store's epoch table and durable end, as
@@ -31,7 +32,7 @@ type primaryEvidenceSource interface {
 // single-replica workspace move starts from the published image and is
 // governed by the layout's own start check and claim id instead. A store
 // without an epoch table has no rows: a probed row cannot match it.
-func checkPrimaryEvidence(fact *control.AssignmentFact, st replication.EpochTableStatus, end uint64, floor uint64, floorKnown bool) string {
+func checkPrimaryEvidence(fact *control.AssignmentFact, st replication.EpochTableStatus, end uint64, floor uint64, floorKnown bool, store storage.StoreID) string {
 	if len(fact.Peers) == 0 {
 		return ""
 	}
@@ -61,6 +62,9 @@ func checkPrimaryEvidence(fact *control.AssignmentFact, st replication.EpochTabl
 			if r.FirstLSN <= fact.EvidenceDurableLsn {
 				row.epoch, row.first = r.Epoch, r.FirstLSN
 			}
+		}
+		if len(fact.EvidenceStoreId) != len(store) || string(fact.EvidenceStoreId) != string(store[:]) {
+			return fmt.Sprintf("promoted at epoch %d on a probed store %x, this node's store is %x", fact.Epoch, fact.EvidenceStoreId, store[:])
 		}
 		if row.epoch != fact.EvidenceEpoch || row.first != fact.EvidenceFirstLsn {
 			return fmt.Sprintf("promoted at epoch %d on the probed row (epoch %d from %d) at LSN %d, the store's row there is (epoch %d from %d)",

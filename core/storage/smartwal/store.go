@@ -563,3 +563,6 @@ func (s *Store) SyncCount() uint64 { return s.syncs.Load() }
 
 // Compile-time assertion: Store satisfies the LogicalStorage contract.
 var _ storage.LogicalStorage = (*Store)(nil)
+
+// StoreID returns the header UUID written when the store was created.
+func (s *Store) StoreID() storage.StoreID { return storage.StoreID(s.hdr.UUID) }

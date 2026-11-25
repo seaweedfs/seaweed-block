@@ -57,6 +57,7 @@ type PrimaryEvidence struct {
 	DurableLSN   uint64
 	DataEpoch    uint64 // the target's epoch-table row at DurableLSN
 	DataFirstLSN uint64
+	StoreID      [16]byte // the probed store's id (its superblock UUID)
 }
 
 // ProbeResult is the outcome of a transport probe.

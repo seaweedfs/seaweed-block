@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
@@ -173,7 +175,7 @@ type Host struct {
 	obsCli control.ObservationServiceClient
 	// probeRoles answers the promotion probe round's role fields (probe_round.go).
 	probeRoles probeRoles
-	asnCli control.AssignmentServiceClient
+	asnCli     control.AssignmentServiceClient
 
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -662,9 +664,10 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 		Reachable: true,
 		Eligible:  true,
 		// Raw identity facts; the master compares them with its own store.
-		MachineId:       h.cfg.StorageIdentity.MachineID,
-		DurableRootDev:  h.cfg.StorageIdentity.Dev,
-		DurableRootFsid: h.cfg.StorageIdentity.FSID,
+		MachineId:        h.cfg.StorageIdentity.MachineID,
+		DurableRootDev:   h.cfg.StorageIdentity.Dev,
+		DurableRootFsid:  h.cfg.StorageIdentity.FSID,
+		StoreAttestation: h.storeAttestation(),
 		Slots: []*control.HeartbeatSlot{
 			{
 				VolumeId:        h.cfg.VolumeID,
@@ -680,6 +683,50 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 			},
 		},
 	}
+}
+
+// storeAttester is the replication slot's view of its write-ACK set
+// (replication.ReplicationVolume).
+type storeAttester interface {
+	LocalStoreID() storage.StoreID
+	AttestedStores() map[string]storage.StoreID
+}
+
+// storeAttestation is this node's attestation of its write-ACK set while it
+// holds the primary role (admitted, at its current epoch): its own store and
+// every Healthy peer's last barrier store. nil on a replica, before the
+// role is admitted, or while the local store carries no id.
+func (h *Host) storeAttestation() *control.StoreAttestation {
+	h.selfFenceMu.Lock()
+	role, epoch := h.selfRole, h.selfEpoch
+	h.selfFenceMu.Unlock()
+	if role != selfRolePrimary || epoch == 0 {
+		return nil
+	}
+	if reason, _ := h.roleAdmissionFailed.Load().(string); reason != "" {
+		return nil
+	}
+	rv, ok := h.getReplication().(storeAttester)
+	if !ok || rv == nil {
+		return nil
+	}
+	own := rv.LocalStoreID()
+	if own.IsZero() {
+		return nil
+	}
+	att := &control.StoreAttestation{VolumeId: h.cfg.VolumeID, ReplicaId: h.cfg.ReplicaID, Epoch: epoch,
+		Stores: []*control.AttestedStore{{ReplicaId: h.cfg.ReplicaID, StoreId: append([]byte(nil), own[:]...)}}}
+	peers := rv.AttestedStores()
+	ids := make([]string, 0, len(peers))
+	for id := range peers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		sid := peers[id]
+		att.Stores = append(att.Stores, &control.AttestedStore{ReplicaId: id, StoreId: append([]byte(nil), sid[:]...)})
+	}
+	return att
 }
 
 // newIncarnation returns a random process incarnation id.
@@ -922,7 +969,11 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		if fr, ok := h.selfFenceFloor(); ok {
 			floor, floorErr = fr.EpochFloor()
 		}
-		if reason := checkPrimaryEvidence(fact, st, end, floor, floorErr == nil && floor > 0); reason != "" {
+		var store storage.StoreID
+		if sid, ok := rv.(interface{ LocalStoreID() storage.StoreID }); ok {
+			store = sid.LocalStoreID()
+		}
+		if reason := checkPrimaryEvidence(fact, st, end, floor, floorErr == nil && floor > 0, store); reason != "" {
 			h.refusePrimary(reason)
 			return
 		}

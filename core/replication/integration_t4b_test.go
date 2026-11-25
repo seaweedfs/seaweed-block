@@ -347,8 +347,8 @@ func TestT4b6_BarrierWire_FullLineageEcho_StillEnforced(t *testing.T) {
 	}
 	sample.LastDataEpoch, sample.LastDataFirstLSN = 7, 31
 	encoded := transport.EncodeBarrierResp(sample)
-	if len(encoded) != 56 {
-		t.Fatalf("BarrierResp encoded length = %d; wire shape (56B = 32B lineage + 8B achievedLSN + 8B lastDataEpoch + 8B lastDataFirstLSN) regressed",
+	if len(encoded) != 72 {
+		t.Fatalf("BarrierResp encoded length = %d; wire shape (72B = 32B lineage + 8B achievedLSN + 8B lastDataEpoch + 8B lastDataFirstLSN + 16B storeID) regressed",
 			len(encoded))
 	}
 

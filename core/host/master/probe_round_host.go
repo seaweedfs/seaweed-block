@@ -47,7 +47,7 @@ func (h *Host) slotServer(volumeID, replicaID string) string {
 // round: the ack profile and the required frontier from the workload plans'
 // configuration, every candidate's evidence from this round's answers.
 func (h *Host) NewRoundPromotionEvidenceProvider(ackProfile string, requiredLSNByVolume map[string]uint64) PromotionEvidenceProvider {
-	return &roundEvidenceProvider{hub: h.probeHub, serverOf: h.slotServer, ackProfile: ackProfile, required: cloneRequiredLSNMap(requiredLSNByVolume), wait: probeRoundWait}
+	return &roundEvidenceProvider{hub: h.probeHub, serverOf: h.slotServer, ackProfile: ackProfile, required: cloneRequiredLSNMap(requiredLSNByVolume), wait: probeRoundWait, attested: h.AttestedStore}
 }
 
 // SubscribeProbeRounds streams the probe rounds for the caller's node.

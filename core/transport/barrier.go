@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // BarrierAck is the validated per-peer barrier outcome surfaced to
@@ -17,12 +19,15 @@ import (
 // Reason is populated by higher-layer aggregation (DurabilityCoordinator)
 // and is empty on successful Barrier returns.
 type BarrierAck struct {
-	Lineage       RecoveryLineage
-	AchievedLSN   uint64
+	Lineage          RecoveryLineage
+	AchievedLSN      uint64
 	LastDataEpoch    uint64 // the replica's last data row's epoch; 0 = no table (see BarrierResponse)
 	LastDataFirstLSN uint64 // that row's first LSN
-	Success     bool
-	Reason      string
+	// StoreID is the replica's store identity (its superblock UUID); zero
+	// from a replica that does not report one.
+	StoreID storage.StoreID
+	Success bool
+	Reason  string
 }
 
 // ErrBarrierLineageMismatch is returned by BlockExecutor.Barrier when
@@ -43,8 +48,10 @@ var ErrBarrierLineageMismatch = errors.New("transport: barrier: response lineage
 // rule, INV-REPL-LINEAGE-BORNE-ON-BARRIER-ACK).
 //
 // Wire: [32B lineage][8B achievedLSN][8B lastDataEpoch][8B lastDataFirstLSN]
-// — 56 bytes. A 40-byte response (a replica from before the epoch table)
-// decodes with LastDataEpoch 0, which the primary reads as "no table".
+// [16B storeID] — 72 bytes. A 40-byte response (a replica from before the
+// epoch table) decodes with LastDataEpoch 0, which the primary reads as "no
+// table"; a 56-byte one (before the store id) with a zero StoreID, which the
+// primary reads as "unknown store" and never attests.
 // Lineage field order inside the 32B slab is strictly
 // SessionID, Epoch, EndpointVersion, frontierHint (matches
 // EncodeLineage). Any deviation MUST be rejected at decode.
@@ -58,27 +65,35 @@ type BarrierResponse struct {
 	// LastDataFirstLSN is that row's first LSN: the primary requires it to
 	// equal its own first LSN for the epoch (the receiver check).
 	LastDataFirstLSN uint64
+	// StoreID is the replica's store identity: the superblock UUID of the
+	// store that synced AchievedLSN. The primary reports it to the master
+	// when this replica counts toward write ACKs; zero = unknown.
+	StoreID storage.StoreID
 }
 
 // barrierRespSize is the exact byte length of a valid encoded
 // BarrierResponse. Short, over-long, or field-misordered payloads
 // are rejected by DecodeBarrierResp and MUST NOT contribute to
 // correctness decisions (round-21 rule).
-const barrierRespSize = 56
+const barrierRespSize = 72
 
 // barrierRespV0Size is the response of a replica from before the epoch table.
 const barrierRespV0Size = 40
 
+// barrierRespV1Size is the response of a replica from before the store id.
+const barrierRespV1Size = 56
+
 // EncodeBarrierResp serializes a barrier response.
 // Wire: [32B lineage (SessionID, Epoch, EndpointVersion, frontierHint)]
 //
-//	[8B achievedLSN][8B lastDataEpoch][8B lastDataFirstLSN]
+//	[8B achievedLSN][8B lastDataEpoch][8B lastDataFirstLSN][16B storeID]
 func EncodeBarrierResp(r BarrierResponse) []byte {
 	buf := make([]byte, barrierRespSize)
 	copy(buf[0:32], EncodeLineage(r.Lineage))
 	binary.BigEndian.PutUint64(buf[32:40], r.AchievedLSN)
 	binary.BigEndian.PutUint64(buf[40:48], r.LastDataEpoch)
 	binary.BigEndian.PutUint64(buf[48:56], r.LastDataFirstLSN)
+	copy(buf[56:72], r.StoreID[:])
 	return buf
 }
 
@@ -93,9 +108,9 @@ func EncodeBarrierResp(r BarrierResponse) []byte {
 // Callers MUST treat any error return as "no valid ack" and MUST NOT
 // fabricate a frontier or count the ack toward durability.
 func DecodeBarrierResp(buf []byte) (BarrierResponse, error) {
-	if len(buf) < barrierRespV0Size || (len(buf) > barrierRespV0Size && len(buf) < barrierRespSize) {
-		return BarrierResponse{}, fmt.Errorf("transport: short barrier response: %d bytes, want %d (or %d from a replica without the epoch table)",
-			len(buf), barrierRespSize, barrierRespV0Size)
+	if len(buf) != barrierRespV0Size && len(buf) != barrierRespV1Size && len(buf) < barrierRespSize {
+		return BarrierResponse{}, fmt.Errorf("transport: short barrier response: %d bytes, want %d (or %d without the store id, %d without the epoch table)",
+			len(buf), barrierRespSize, barrierRespV1Size, barrierRespV0Size)
 	}
 	lineage, err := DecodeLineage(buf[0:32])
 	if err != nil {
@@ -114,9 +129,12 @@ func DecodeBarrierResp(buf []byte) (BarrierResponse, error) {
 		Lineage:     lineage,
 		AchievedLSN: binary.BigEndian.Uint64(buf[32:40]),
 	}
-	if len(buf) >= barrierRespSize {
+	if len(buf) >= barrierRespV1Size {
 		resp.LastDataEpoch = binary.BigEndian.Uint64(buf[40:48])
 		resp.LastDataFirstLSN = binary.BigEndian.Uint64(buf[48:56])
+	}
+	if len(buf) >= barrierRespSize {
+		copy(resp.StoreID[:], buf[56:72])
 	}
 	return resp, nil
 }

@@ -3,6 +3,8 @@ package master
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"fmt"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -59,6 +61,22 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 			if initial.ReplicaID != "r1" {
 				t.Fatalf("initial line=%+v", initial)
 			}
+			// The primary attests its write-ACK set: each replica with the store
+			// its barriers reported (the live ship above ran them).
+			// (the component cluster names its peers replica-0 and replica-1;
+			// the master's placement names them r2 and r3)
+			peers := cluster.Primary().RepVol.AttestedStores()
+			attested := map[string]storage.StoreID{"r1": cluster.Primary().RepVol.LocalStoreID()}
+			for i, id := range []string{"r2", "r3"} {
+				got := peers[fmt.Sprintf("replica-%d", i)]
+				if want := storage.StoreIDOf(cluster.Replica(i).Store); want.IsZero() || got != want {
+					t.Fatalf("primary attests replica-%d as %x, its store is %x", i, got, want)
+				}
+				attested[id] = got
+			}
+			if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", initial.Epoch, attested)); err != nil {
+				t.Fatal(err)
+			}
 			if err := cluster.Primary().RepVol.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -75,7 +93,8 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 						// As the volume's /status/durable reports it: DurableLSN is
 						// R, the store's synced LSN (storage_adapter.go Boundaries).
 						r, _, _ := store.Boundaries()
-						_ = json.NewEncoder(w).Encode(struct{ Volumes []durable.VolumeStatus }{[]durable.VolumeStatus{{VolumeID: "vol-rf3", ReplicaID: id, FrontierKnown: true, DurableLSN: r}}})
+						sid := storage.StoreIDOf(store)
+						_ = json.NewEncoder(w).Encode(struct{ Volumes []durable.VolumeStatus }{[]durable.VolumeStatus{{VolumeID: "vol-rf3", ReplicaID: id, FrontierKnown: true, DurableLSN: r, StoreID: hex.EncodeToString(sid[:])}}})
 					default:
 						http.NotFound(w, r)
 					}
@@ -89,7 +108,7 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 				}
 				routes[host] = servers[i].URL
 			}
-			h.SetPromotionEvidenceProvider(NewWorkloadPlanPromotionEvidenceProvider(plans, WorkloadPlanPromotionProbeConfig{AckProfile: "sync-quorum", HTTPClient: &http.Client{Transport: promotionTraceRoutes(routes), Timeout: time.Second}}))
+			h.SetPromotionEvidenceProvider(NewWorkloadPlanPromotionEvidenceProvider(plans, WorkloadPlanPromotionProbeConfig{AckProfile: "sync-quorum", Attested: h.AttestedStore, HTTPClient: &http.Client{Transport: promotionTraceRoutes(routes), Timeout: time.Second}}))
 			ingestRF3ObservationForServersWithReady(t, h, "vol-rf3", "node-a", "node-b", "node-c", false, false, true, true, true, true)
 			if _, err := h.RunLifecycleProductTick(); err != nil {
 				t.Fatal(err)

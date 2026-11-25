@@ -2,6 +2,7 @@ package master
 
 import (
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"reflect"
 	"strings"
 
@@ -35,6 +36,11 @@ type PromotionCandidateEvidence struct {
 	// TableInvalid: a recovery left the candidate's table without a known
 	// history; such a candidate is never Ready (never a promotion survivor).
 	TableInvalid bool
+	// StoreID is the candidate's probed store (its superblock UUID). A
+	// candidate is Ready only when it equals the store the volume's primary
+	// last attested for it (Host.AttestedStore): a replaced store, or one
+	// never attested, is not a survivor.
+	StoreID storage.StoreID
 }
 
 type PromotionProbeResult struct {
@@ -688,7 +694,7 @@ func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount in
 func promotionEvidenceFor(result PromotionProbeResult, replicaID string) adapter.PrimaryEvidence {
 	for _, c := range result.Candidates {
 		if c.ReplicaID == replicaID {
-			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN}
+			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN, StoreID: c.StoreID}
 		}
 	}
 	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}

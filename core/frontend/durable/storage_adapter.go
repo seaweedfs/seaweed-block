@@ -39,6 +39,7 @@ package durable
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -356,7 +357,12 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		writeProfile.DirtyMapUpdateOps = storageProfile.DirtyMapUpdateOps
 		writeProfile.DirtyMapUpdateDurationNanos = storageProfile.DirtyMapUpdateDurationNanos
 	}
+	var storeID string
+	if id := storage.StoreIDOf(b.storage); !id.IsZero() {
+		storeID = hex.EncodeToString(id[:])
+	}
 	return VolumeStatus{
+		StoreID:               storeID,
 		Warnings:              warnings,
 		HolesSuspected:        holes,
 		VolumeID:              volumeID,
