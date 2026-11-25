@@ -14,6 +14,9 @@ var (
 	// ErrForeignSource: the snapshot names chunks of another volume, so it
 	// cannot be a restore source (dependency depth stays one).
 	ErrForeignSource = errors.New("layout: snapshot names another volume's chunks")
+	// ErrTooManyDependents: a restore from a snapshot that already has
+	// MaxDependents targets.
+	ErrTooManyDependents = errors.New("layout: snapshot has the most restore targets")
 )
 
 // DeleteSnapshot is transition 9: the named snapshot is removed, refused
@@ -57,6 +60,12 @@ func (h Head) AddDependent(name string, target Dependent, root RootName) (next H
 		if d.TargetID == target.TargetID {
 			return h, false, nil
 		}
+	}
+	if len(s.Dependents) >= MaxDependents {
+		return Head{}, false, fmt.Errorf("%w: snapshot %q has %d; delete a restore target, or make it independent (release it), first", ErrTooManyDependents, name, len(s.Dependents))
+	}
+	if h.dependents() >= MaxDependentsPerHead {
+		return Head{}, false, fmt.Errorf("%w: the volume's snapshots have %d; delete a restore target, or make it independent (release it), first", ErrTooManyDependents, h.dependents())
 	}
 	next = h.clone()
 	s = next.Snapshots[name]

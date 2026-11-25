@@ -1,10 +1,12 @@
 package layout
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -200,7 +202,7 @@ func TestSnapshotMeta_WrittenOnceByTheCommit(t *testing.T) {
 		"class":      {Class: "forever"},
 		"time":       {CreatedNs: -1},
 		"labels":     {Labels: map[string]string{"a": "1", "b": "2", "c": "3", "d": "4", "e": "5"}},
-		"long label": {Labels: map[string]string{"k": string(make([]byte, MaxLabelBytes+1))}},
+		"long label": {Labels: map[string]string{"k": strings.Repeat("v", MaxLabelValueBytes+1)}},
 	}
 	for name, m := range bad {
 		if _, _, err := h.Commit(me, "s1", rn, 1, "x", m, StateLive); !errors.Is(err, ErrMalformed) {
@@ -214,28 +216,89 @@ func TestSnapshotMeta_WrittenOnceByTheCommit(t *testing.T) {
 func TestHead_SizeAtTheSnapshotCap(t *testing.T) {
 	h := idleHead()
 	h.Snapshots = map[string]Snapshot{}
-	long := func(c byte) string {
-		b := make([]byte, MaxLabelBytes)
-		for i := range b {
-			b[i] = c
-		}
-		return string(b)
-	}
+	fill := func(c byte, n int) string { return strings.Repeat(string(c), n) }
 	for i := 0; i < MaxSnapshots; i++ {
 		labels := map[string]string{}
 		for j := 0; j < MaxSnapshotLabels; j++ {
-			labels[fmt.Sprintf("%s%02d", long('k')[:MaxLabelBytes-2], j)] = long('v')
+			labels[fmt.Sprintf("%s%02d", fill('k', MaxLabelKeyBytes-2), j)] = fill('v', MaxLabelValueBytes)
 		}
-		name := fmt.Sprintf("%s-%04d", long('n')[:58], i)
-		h.Snapshots[name] = Snapshot{Root: RootName{Hash: Sum([]byte(name))}, Meta: SnapshotMeta{CreatedNs: 1 << 62, Class: ClassScheduled, ExpiresNs: 1 << 62, Labels: labels}}
+		name := fmt.Sprintf("%s%04d", fill('n', MaxSnapshotNameBytes-4), i)
+		rn := RootName{Hash: Sum([]byte(name))}
+		var ds []Dependent
+		for d := 0; d < MaxDependents && i < MaxDependentsPerHead/MaxDependents; d++ {
+			tn := fmt.Sprintf("%s%02d", fill('t', 62), d)
+			ds = append(ds, Dependent{Target: tn, TargetID: idFor(tn + name), Root: rn})
+		}
+		sort.Slice(ds, func(a, b int) bool { return bytes.Compare(ds[a].TargetID[:], ds[b].TargetID[:]) < 0 })
+		h.Snapshots[name] = Snapshot{Root: rn, Meta: SnapshotMeta{CreatedNs: 1 << 62, Class: ClassScheduled, ExpiresNs: 1 << 62, Labels: labels}, Dependents: ds}
 	}
 	b, err := h.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("HEAD at %d snapshots with the largest facts: %d bytes", MaxSnapshots, len(b))
-	if len(b) > 128<<10 {
-		t.Fatalf("HEAD at the cap is %d bytes", len(b))
+	t.Logf("HEAD at %d snapshots with the largest names and labels and %d dependents: %d bytes", MaxSnapshots, MaxDependentsPerHead, len(b))
+	if len(b) > 56<<10 {
+		t.Fatalf("HEAD at the cap is %d bytes; want at most 56 KiB (8 KiB under the inline limit)", len(b))
+	}
+}
+
+// The bounds are refused where they enter (snapshot create, restore) and
+// the codec refuses an oversized HEAD as a backstop.
+func TestHead_BoundsRefused(t *testing.T) {
+	rn := RootName{Hash: Sum([]byte("r"))}
+	h := idleHead()
+	h.Activity = Activity{Kind: ActSnap, Session: "s1"}
+	me := HolderID{Epoch: h.Epoch, Holder: h.Holder, ClaimID: h.ClaimID}
+	if _, _, err := h.Commit(me, "s1", rn, 1, strings.Repeat("n", MaxSnapshotNameBytes+1), SnapshotMeta{}, StateLive); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a %d-byte snapshot name: %v", MaxSnapshotNameBytes+1, err)
+	}
+	for name, m := range map[string]SnapshotMeta{
+		"long key":   {Labels: map[string]string{strings.Repeat("k", MaxLabelKeyBytes+1): "v"}},
+		"long value": {Labels: map[string]string{"k": strings.Repeat("v", MaxLabelValueBytes+1)}},
+	} {
+		if _, _, err := h.Commit(me, "s1", rn, 1, "x", m, StateLive); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	idle := idleHead()
+	idle.Snapshots = map[string]Snapshot{"daily": {Root: rn}}
+	for d := 0; d < MaxDependents; d++ {
+		var err error
+		if idle, _, err = idle.AddDependent("daily", Dependent{Target: fmt.Sprintf("t%d", d), TargetID: idFor(fmt.Sprintf("t%d", d))}, rn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := idle.AddDependent("daily", Dependent{Target: "t9", TargetID: idFor("t9")}, rn); !errors.Is(err, ErrTooManyDependents) || !strings.Contains(err.Error(), "make it independent") {
+		t.Fatalf("a fifth restore target: %v; want ErrTooManyDependents naming the cure", err)
+	}
+	spread := idleHead()
+	spread.Snapshots = map[string]Snapshot{}
+	for i := 0; i < MaxDependentsPerHead/MaxDependents+1; i++ {
+		spread.Snapshots[fmt.Sprintf("s%d", i)] = Snapshot{Root: rn}
+	}
+	k := 0
+	for i := 0; i < MaxDependentsPerHead/MaxDependents; i++ {
+		for d := 0; d < MaxDependents; d++ {
+			tn := fmt.Sprintf("t%d", k)
+			k++
+			var err error
+			if spread, _, err = spread.AddDependent(fmt.Sprintf("s%d", i), Dependent{Target: tn, TargetID: idFor(tn)}, rn); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	last := fmt.Sprintf("s%d", MaxDependentsPerHead/MaxDependents)
+	if _, _, err := spread.AddDependent(last, Dependent{Target: "tx", TargetID: idFor("tx")}, rn); !errors.Is(err, ErrTooManyDependents) {
+		t.Fatalf("restore target %d of the volume: %v; want ErrTooManyDependents", MaxDependentsPerHead+1, err)
+	}
+	big := idleHead()
+	big.Snapshots = map[string]Snapshot{}
+	for i := 0; i < 1000; i++ {
+		n := fmt.Sprintf("%060d", i)
+		big.Snapshots[n] = Snapshot{Root: rn}
+	}
+	if _, err := big.Encode(); err == nil {
+		t.Fatal("a HEAD over its bounds encoded")
 	}
 }
 

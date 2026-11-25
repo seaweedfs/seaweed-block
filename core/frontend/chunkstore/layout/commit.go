@@ -99,6 +99,9 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 			if next.Snapshots == nil {
 				next.Snapshots = map[string]Snapshot{}
 			}
+			if len(snapshot) > MaxSnapshotNameBytes {
+				return Head{}, false, fmt.Errorf("%w: snapshot name %q is %d bytes, at most %d", ErrMalformed, snapshot, len(snapshot), MaxSnapshotNameBytes)
+			}
 			if err := meta.check(snapshot); err != nil {
 				return Head{}, false, err
 			}
