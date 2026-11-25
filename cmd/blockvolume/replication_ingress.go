@@ -141,6 +141,29 @@ func (r *replicationIngress) AdmitAsReplica(epoch uint64) error {
 	}
 	return r.roleLocked(epoch, false)
 }
+// FenceFloor is a fencing round's promise on this replica: the listener
+// makes epoch its durable floor (refusing every frame and ACK below it)
+// before the round is answered. Without a listener (no replica role yet)
+// there is nothing to fence and no promise to give.
+func (r *replicationIngress) FenceFloor(epoch uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.listener == nil {
+		return fmt.Errorf("volume %s has no replica listener to fence at epoch %d", r.volumeID, epoch)
+	}
+	return r.listener.FenceFloor(epoch)
+}
+
+// DurableFloor is the listener's durable floor (0 without a listener).
+func (r *replicationIngress) DurableFloor() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.listener == nil {
+		return 0
+	}
+	return r.listener.DurableFloor()
+}
+
 func (r *replicationIngress) roleLocked(epoch uint64, primary bool) error {
 	listener := r.listener
 	fresh := listener == nil
