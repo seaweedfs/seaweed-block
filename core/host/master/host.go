@@ -122,6 +122,8 @@ type LifecycleStores struct {
 // Host is the composed master-side block product daemon. Lifecycle
 // is: New -> Start -> (serve requests) -> Close.
 type Host struct {
+	probeHub            *probeHub   // the promotion probe round (probe_round.go)
+	probeSlots          slotServers // replica -> server, for the round
 	cfg                 Config
 	healthMu            sync.Mutex // orders replica health events with their accepted heartbeats (#128 rule 6)
 	log                 *log.Logger
@@ -235,12 +237,13 @@ func New(cfg Config) (*Host, error) {
 	ctrl := authority.NewTopologyController(ctrlCfg, holder)
 
 	h := &Host{
-		cfg:     cfg,
-		log:     lg,
-		ctrl:    ctrl,
-		topo:    cfg.Topology,
-		events:  newEventRing(1024),
-		journal: newJournalIsolation(storeident.Identity{}), // sampled once the store exists
+		probeHub: newProbeHub(),
+		cfg:      cfg,
+		log:      lg,
+		ctrl:     ctrl,
+		topo:     cfg.Topology,
+		events:   newEventRing(1024),
+		journal:  newJournalIsolation(storeident.Identity{}), // sampled once the store exists
 	}
 
 	boot, err := bootstrap.BootstrapWithOptions(cfg.AuthorityStoreDir, ctrl, bootstrap.Options{
@@ -424,7 +427,7 @@ func (h *Host) Publisher() *authority.Publisher {
 // the live Publisher. Callers still need an explicit policy gate before using
 // it; constructing the runtime does not execute failback.
 func (h *Host) FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime {
-	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher()}
+	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher(), Gate: h.plannedMoveEvidence}
 }
 
 // Controller exposes the controller for tests.

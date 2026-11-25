@@ -578,6 +578,13 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	return p
 }
 
+// ProbeRoles is this replica's role as the promotion probe round reads it:
+// a replica ready to be promoted, or a primary that serves.
+func (s *StatusServer) ProbeRoles() (replicaReady, primaryReady bool) {
+	p := s.authorityProjection()
+	return p.ReplicationRole == ReplicationRoleReady, p.FrontendPrimaryReady
+}
+
 // authorityProjection preserves the storage/authority gate used by runtime
 // recovery. Listener startup masks presentation only, not recovery admission.
 func (s *StatusServer) authorityProjection() StatusProjection {

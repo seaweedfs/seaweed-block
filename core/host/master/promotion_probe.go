@@ -127,15 +127,20 @@ func (p *workloadPlanPromotionEvidenceProvider) probeCandidate(volumeID, replica
 			best = st
 		}
 	}
-	return PromotionCandidateEvidence{
-		ReplicaID: replicaID,
-		ProbeAddr: statusAddr,
-		Ready: local.VolumeID == volumeID &&
-			local.ReplicaID == replicaID &&
-			strings.EqualFold(local.ReplicationRole, "replica_ready") &&
-			best.FrontierKnown,
+	ev := PromotionCandidateEvidence{
+		ReplicaID:  replicaID,
+		ProbeAddr:  statusAddr,
 		DurableLSN: best.DurableLSN,
-	}, nil
+	}
+	// The candidate's epoch-table row and table validity come from the
+	// authenticated probe round, not from /status (loopback-only under
+	// mutual TLS); until then the evidence carries none.
+	ev.Ready = local.VolumeID == volumeID &&
+		local.ReplicaID == replicaID &&
+		strings.EqualFold(local.ReplicationRole, "replica_ready") &&
+		best.FrontierKnown &&
+		!ev.TableInvalid
+	return ev, nil
 }
 
 func (p *workloadPlanPromotionEvidenceProvider) probeCurrent(volumeID, replicaID, statusAddr string) (PromotionCandidateEvidence, error) {

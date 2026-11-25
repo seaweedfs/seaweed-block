@@ -235,6 +235,32 @@ func (v *ReplicationVolume) SetEpochTable(t *transport.EpochTable) {
 	v.mu.Unlock()
 }
 
+// EpochTableStatus is the volume's epoch table as the promotion probe reads it.
+type EpochTableStatus struct {
+	Rows    []transport.EpochRow
+	Invalid bool // a recovery left the table without a known history
+	Present bool // the volume keeps a table at all
+}
+
+// EpochTableStatus reports the volume's epoch table.
+func (v *ReplicationVolume) EpochTableStatus() EpochTableStatus {
+	v.mu.Lock()
+	t := v.epochs
+	v.mu.Unlock()
+	if t == nil {
+		return EpochTableStatus{}
+	}
+	return EpochTableStatus{Rows: t.Rows(), Invalid: t.Invalid(), Present: true}
+}
+
+// LocalPrimaryEvidence is this volume's epoch table and durable end, as a
+// primary line's target checks them before adopting the role.
+func (v *ReplicationVolume) LocalPrimaryEvidence() (EpochTableStatus, uint64, error) {
+	st := v.EpochTableStatus()
+	end, err := v.store.Sync()
+	return st, end, err
+}
+
 // reconcilePeer asks the peer for its (last data epoch, end) in a barrier
 // to this node's frontier and answers from the epoch table: in sync, diverged
 // (entries this primary never had), or neither (behind, or no answer).
