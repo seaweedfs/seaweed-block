@@ -168,6 +168,14 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 	if decl["RunClaim"] && !code["OldLeaseEnded"]["RunClaim"] {
 		bad = append(bad, "RunClaim is declared and does not wait for the old lease")
 	}
+	for _, fn := range owners(code["NoLiveLease"]) {
+		if fn != "RunMarkDeleting" {
+			bad = append(bad, fn+" uses NoLiveLease; only RunMarkDeleting checks it, between its HEAD read and update")
+		}
+	}
+	if decl["RunMarkDeleting"] && !code["NoLiveLease"]["RunMarkDeleting"] {
+		bad = append(bad, "RunMarkDeleting is declared and does not check the master's live leases")
+	}
 	for fn := range decl {
 		if strings.HasPrefix(fn, "Run") && !code["runTransition"][fn] {
 			bad = append(bad, fn+" is declared and does not go through runTransition")
@@ -183,6 +191,14 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 			bad = append(bad, fn+" uses CreateDeletedHead: only the operator's release writes a tombstone, for a target never created")
 		}
 	}
+	// HEAD creates are exactly three: a new volume's and a restore target's
+	// unclaimed HEAD (createVolume, for CreateVolume and CreateTarget) and
+	// the operator's tombstone (above).
+	for _, fn := range owners(code["CreateHead"]) {
+		if fn != "createVolume" {
+			bad = append(bad, fn+" uses CreateHead: only createVolume creates a HEAD (unclaimed), besides the operator's tombstone")
+		}
+	}
 	for _, fn := range owners(code["RunReleaseDependent"]) {
 		if fn != "DeleteVolume" && fn != "OperatorReleaseDependent" {
 			bad = append(bad, fn+" uses RunReleaseDependent: only DeleteVolume (target deleting) and OperatorReleaseDependent (target checked) release")
@@ -192,6 +208,9 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 		bad = append(bad, "OperatorReleaseDependent does not read the target's HEAD before releasing")
 	}
 	for name, by := range code {
+		if name == "DeleteSnapshot" {
+			continue // a HEAD transition (a snapshot's name leaves HEAD), not a store remover
+		}
 		if strings.HasPrefix(name, "Delete") || strings.HasPrefix(name, "Remove") {
 			for _, fn := range owners(by) {
 				if fn != "RemoveUnreachable" && fn != "DeleteVolume" {
@@ -312,11 +331,11 @@ func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
 
 // deleteOrderFindings checks DeleteVolume's order in the sources: among its
 // top-level statements, the first use of each step comes after the
-// previous step's: NoHolder, RunMarkDeleting, RunReleaseDependent,
+// previous step's: Reserve, RunMarkDeleting, RunReleaseDependent,
 // DeleteOfVolume, RunMarkDeleted.
 func deleteOrderFindings(t *testing.T, srcs map[string]string) []string {
 	t.Helper()
-	steps := []string{"NoHolder", "RunMarkDeleting", "RunReleaseDependent", "DeleteOfVolume", "RunMarkDeleted"}
+	steps := []string{"Reserve", "RunMarkDeleting", "RunReleaseDependent", "DeleteOfVolume", "RunMarkDeleted"}
 	var bad []string
 	for fname, src := range srcs {
 		file, err := parser.ParseFile(token.NewFileSet(), fname, src, 0)
@@ -426,13 +445,13 @@ func w(ctx context.Context, x p) error { return x.DeleteObject(ctx, "o") }`, wan
 }`, want: "does not wait for the old lease", file: "claim.go"},
 		"transition not through runTransition": {src: `func RunZz(ctx context.Context, st HeadStore) (Head, error) { h, _, err := st.ReadHead(ctx); return h, err }`, want: "does not go through runTransition"},
 		"delete removes the pool before releasing dependents": {file: "delete.go", src: `type p interface{ DeleteOfVolume(context.Context, string, VolumeID) error }
-type g interface{ NoHolder(context.Context) error }
-func RunMarkDeleting(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }
+type g interface{ Reserve(context.Context) error; NoLiveLease(context.Context) error }
+func RunMarkDeleting(ctx context.Context, st HeadStore, x g) (Head, error) { _ = x.NoLiveLease(ctx); return runTransition(ctx, st, nil) }
 func RunMarkDeleted(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }
 func RunReleaseDependent(ctx context.Context, st HeadStore, id VolumeID) (Head, error) { return runTransition(ctx, st, nil) }
 func DeleteVolume(ctx context.Context, st HeadStore, x g, id VolumeID, srcs []HeadStore, pool p, objs []string) error {
-	_ = x.NoHolder(ctx)
-	_, _ = RunMarkDeleting(ctx, st)
+	_ = x.Reserve(ctx)
+	_, _ = RunMarkDeleting(ctx, st, x)
 	for _, o := range objs {
 		_ = pool.DeleteOfVolume(ctx, o, id)
 	}
@@ -442,12 +461,13 @@ func DeleteVolume(ctx context.Context, st HeadStore, x g, id VolumeID, srcs []He
 	_, _ = RunMarkDeleted(ctx, st)
 	return nil
 }`, want: "runs DeleteOfVolume before RunReleaseDependent"},
-		"delete without the holder check": {file: "delete.go", src: `type p interface{ DeleteOfVolume(context.Context, string, VolumeID) error }
-func RunMarkDeleting(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }
+		"delete without the reservation": {file: "delete.go", src: `type p interface{ DeleteOfVolume(context.Context, string, VolumeID) error }
+type g interface{ NoLiveLease(context.Context) error }
+func RunMarkDeleting(ctx context.Context, st HeadStore, x g) (Head, error) { _ = x.NoLiveLease(ctx); return runTransition(ctx, st, nil) }
 func RunMarkDeleted(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }
 func RunReleaseDependent(ctx context.Context, st HeadStore, id VolumeID) (Head, error) { return runTransition(ctx, st, nil) }
-func DeleteVolume(ctx context.Context, st HeadStore, id VolumeID, srcs []HeadStore, pool p, objs []string) error {
-	_, _ = RunMarkDeleting(ctx, st)
+func DeleteVolume(ctx context.Context, st HeadStore, x g, id VolumeID, srcs []HeadStore, pool p, objs []string) error {
+	_, _ = RunMarkDeleting(ctx, st, x)
 	for _, s := range srcs {
 		_, _ = RunReleaseDependent(ctx, s, id)
 	}
@@ -456,7 +476,12 @@ func DeleteVolume(ctx context.Context, st HeadStore, id VolumeID, srcs []HeadSto
 	}
 	_, _ = RunMarkDeleted(ctx, st)
 	return nil
-}`, want: "DeleteVolume has no NoHolder"},
+}`, want: "DeleteVolume has no Reserve"},
+		"mark deleting without the live-lease check": {file: "delete.go", src: `func RunMarkDeleting(ctx context.Context, st HeadStore) (Head, error) {
+	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.MarkDeleting() })
+}`, want: "does not check the master's live leases"},
+		"live-lease check outside mark deleting": {src: `type g interface{ NoLiveLease(context.Context) error }
+func w(ctx context.Context, x g) error { return x.NoLiveLease(ctx) }`, want: "only RunMarkDeleting checks it"},
 		"release outside delete and the operator's check": {src: `func w(ctx context.Context, st HeadStore, id VolumeID) { _, _ = RunReleaseDependent(ctx, st, id) }`, want: "only DeleteVolume (target deleting) and OperatorReleaseDependent"},
 		"operator release without reading the target": {file: "delete.go", src: `func OperatorReleaseDependent(ctx context.Context, source HeadStore, id VolumeID) (Head, error) {
 	return RunReleaseDependent(ctx, source, id)
@@ -466,6 +491,7 @@ func DeleteVolume(ctx context.Context, st HeadStore, id VolumeID, srcs []HeadSto
 		"one mark, two deletes":                    {file: "remove.go", src: removeVariant(t, "second"), want: "without a mark gate immediately before it"},
 		"unlisted removal method":                  {file: "remove.go", src: removeVariant(t, "other"), want: "without a mark gate immediately before it"},
 		"claim outside Start":                      {src: `func w(ctx context.Context, st HeadStore, l LeaseWait, me HolderID) { _, _ = RunClaim(ctx, st, l, me) }`, want: "a claim is made only by Start"},
+		"a fourth HEAD create":                     {src: `func w(ctx context.Context, st NewVolumeStore, h Head) { _ = st.CreateHead(ctx, h) }`, want: "only createVolume creates a HEAD"},
 		"tombstone outside the operator's release": {src: `func w(ctx context.Context, t TargetStore, h Head) { _ = t.CreateDeletedHead(ctx, h) }`, want: "only the operator's release writes a tombstone"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
 func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable (mark-gated) and DeleteVolume"},

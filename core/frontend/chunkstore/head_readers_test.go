@@ -44,6 +44,11 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
 	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
 	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
+	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":       "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
+	"core/frontend/chunkstore/catalog_b.go DeleteVolume -> ReadHead":                 "refuses ErrHeadAbsent before any write (probe BCatalog)",
+	"core/frontend/chunkstore/catalog_b.go ReadHead -> ReadHead":                     "found=false to the caller, which reports no HEAD (probe BCatalog)",
+	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
+	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":             "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                          "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":             "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
@@ -54,7 +59,10 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/volume_delete.go volumeGone -> ReadHead":               "absent HEAD = not gone (probe DeleteVolume)",
 	// above the chunk store: they read through storage.ChunkRemote GetHead /
 	// GetHeadRoot, so an absent HEAD reaches them as the zero HEAD (probe GetHead)
-	"cmd/sw-block/chunk.go chunkShow -> ReadHead":                        "ok=false: reports no HEAD (probe ReadHead)",
+	"cmd/sw-block/chunk_b.go chunkShow -> ReadHead":                      "found=false: prints a null head (probe TestOpsChunk_AbsentVolume)",
+	"cmd/sw-block/chunk_b.go chunkRetain -> ReadHead":                    "refuses volume_not_found, deletes nothing (probe TestOpsChunk_AbsentVolume)",
+	"cmd/sw-block/chunk_b.go chunkSnapshots -> ReadHead":                 "refuses volume_not_found (probe TestOpsChunk_AbsentVolume)",
+	"cmd/sw-block/chunk_volume_delete.go chunkVolumeDelete -> ReadHead":  "read after a refused delete: absent gives nothing back (the delete refused before the admission; probe TestOpsChunk_AbsentVolume)",
 	"core/frontend/durable/provider_chunk.go GetHead -> GetHead":         "zero HEAD (probe GetHead)",
 	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHead":     "zero HEAD (probe GetHead)",
 	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHeadRoot": "zero HEAD (probe GetHeadRoot)",
@@ -268,6 +276,39 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatalf("layout transition over an absent HEAD wrote %d times", st.updates)
 		}
 	})
+	t.Run("LayoutAddDependent", func(t *testing.T) {
+		r, err := layout.NewReader("/swblock/chunks", "v1", func(context.Context, string) ([]byte, bool, error) { return nil, false, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := &absentLayoutHead{}
+		if _, err := layout.RunAddDependent(ctx, st, r, "daily", layout.Dependent{Target: "t", TargetID: layout.VolumeID{1}}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
+			t.Fatalf("add dependent over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, st.updates)
+		}
+	})
+	t.Run("BCatalog", func(t *testing.T) {
+		f := newFakeFiler()
+		c, err := NewBCatalog(f, newFakeBlobs(), "/blocks")
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := VolumeRef{Name: "v", ID: layout.VolumeID{1}}
+		if _, found, err := c.ReadHead(ctx, v); found || err != nil {
+			t.Fatalf("catalog read of an absent HEAD: found %t, %v", found, err)
+		}
+		if _, err := c.Usage(ctx, v); !errors.Is(err, layout.ErrHeadAbsent) {
+			t.Fatalf("usage of an absent HEAD: %v; want ErrHeadAbsent", err)
+		}
+		if err := c.DeleteVolume(ctx, v, okDeleteAuthority{}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
+			t.Fatalf("delete of an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
+		}
+	})
+	t.Run("LayoutCreate", func(t *testing.T) {
+		st := &existsButAbsent{}
+		if _, err := layout.CreateVolume(ctx, st, layout.Volume{ID: layout.VolumeID{1}, Name: "v", Format: layout.VolumeFormat}); !errors.Is(err, layout.ErrIdentity) {
+			t.Fatalf("create whose HEAD create found one that then reads absent: %v; want ErrIdentity", err)
+		}
+	})
 	t.Run("LayoutRemoval", func(t *testing.T) {
 		r, err := layout.NewReader("/swblock/chunks", "v1", func(context.Context, string) ([]byte, bool, error) { return nil, false, nil })
 		if err != nil {
@@ -398,3 +439,16 @@ func (p *presentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) err
 type okClaimLease struct{}
 
 func (okClaimLease) OldLeaseEnded(context.Context, uint64) error { return nil }
+
+// existsButAbsent: VOLUME is created; the HEAD create reports one exists,
+// yet HEAD then reads absent (removed in between).
+type existsButAbsent struct{}
+
+func (existsButAbsent) ReadHead(context.Context) (layout.Head, bool, error) {
+	return layout.Head{}, false, nil
+}
+func (existsButAbsent) CreateHead(context.Context, layout.Head) error           { return layout.ErrExists }
+func (existsButAbsent) CreateVolumeRecord(context.Context, layout.Volume) error { return nil }
+func (existsButAbsent) ReadVolumeRecord(context.Context) (layout.Volume, bool, error) {
+	return layout.Volume{}, false, nil
+}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,57 +11,77 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
-	"github.com/seaweedfs/seaweed-block/core/ops"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 )
 
-// chunkVolumeDelete: sw-block ops chunk volume-delete <vol> --chunk-filer
-// host:port --master host:port deletes a chunk volume (Catalog.DeleteVolume)
-// after the blockmaster admits it (MarkVolumeDeleting: refused while the
-// volume has live or pending authority; afterwards nothing assigns, places
-// or binds it again). A failure prints what was done with the error.
+// chunkVolumeDelete: sw-block ops chunk volume-delete --volume v
+// --volume-layout-id id --chunk-filer host:port --master host:port
+// --request-id r deletes a volume in the layout kernel's order after the
+// blockmaster admits it (MarkVolumeDeleting: refused while the volume has
+// a live or pending authority line; from then on nothing assigns, places
+// or binds it again). The admission is committed once HEAD is deleted,
+// and given back if the delete is refused before HEAD is marked deleting.
 func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
-	fs := chunkFlagSet("volume-delete", stderr)
-	var (
-		volumeID, filer, base, master, requestID string
-		timeout                                  time.Duration
-	)
-	fs.StringVar(&requestID, "request-id", "", "this delete's operation id; a rerun with the same id resumes (or gives back) its earlier admission")
-	fs.StringVar(&volumeID, "volume", "", "volume id (or the first argument)")
-	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
-	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
-	fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address (admits the delete)")
-	fs.DurationVar(&timeout, "timeout", time.Minute, "bound for this delete")
-	if err := fs.Parse(args); err != nil {
-		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
+	c := newBCommand("volume-delete", time.Minute, stdout, stderr)
+	var vol volumeFlags
+	var master, requestID string
+	vol.bind(c.fs, "volume", "volume")
+	c.fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address (admits the delete)")
+	c.fs.StringVar(&requestID, "request-id", "", "this delete's operation id; a rerun with the same id resumes its admission")
+	var ref chunkstore.VolumeRef
+	return c.run(args, true, func() (err error) {
+		if master == "" || requestID == "" || c.timeout <= 0 {
+			return errors.New("--master and --request-id are required; --timeout must be positive")
+		}
+		ref, err = vol.ref("volume")
+		return err
+	}, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
+		conn, err := link.Dial(master)
+		if err != nil {
+			return nil, err
+		}
+		defer conn.Close()
+		auth := &masterAuthority{masterAdmission: masterAdmission{lc: control.NewLifecycleServiceClient(conn), token: requestID}, vol: ref.Name}
+		if err := cat.DeleteVolume(ctx, ref, auth); err != nil {
+			if h, found, rerr := cat.ReadHead(ctx, ref); rerr == nil && found && h.State == layout.StateLive && auth.reserved {
+				if aerr := auth.Abort(ctx, ref.Name); aerr != nil {
+					return nil, fmt.Errorf("%w (giving back the admission: %v)", err, aerr)
+				}
+			}
+			return nil, err
+		}
+		if err := auth.Commit(ctx, ref.Name); err != nil {
+			return nil, fmt.Errorf("volume deleted; commit the admission (rerun with the same --request-id): %w", err)
+		}
+		return map[string]string{"volume": ref.Dir(), "state": "deleted"}, nil
+	})
+}
+
+// masterAuthority is the delete authority at the blockmaster: the
+// reservation is MarkVolumeDeleting, which refuses while any authority
+// line is live or pending and after which nothing is granted for the
+// volume, so once this run's admission succeeded no live lease can appear.
+type masterAuthority struct {
+	masterAdmission
+	vol      string
+	reserved bool
+}
+
+func (m *masterAuthority) Reserve(ctx context.Context) error {
+	if err := m.Admit(ctx, m.vol); err != nil {
+		return err
 	}
-	if volumeID == "" && fs.NArg() == 1 {
-		volumeID = fs.Arg(0)
-	} else if fs.NArg() != 0 {
-		return chunkFail("volume-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "give the volume once, as an argument or --volume", false)
+	m.reserved = true
+	return nil
+}
+
+func (m *masterAuthority) NoLiveLease(context.Context) error {
+	if !m.reserved {
+		return errors.New("the blockmaster has not admitted this delete")
 	}
-	if volumeID == "" || master == "" || requestID == "" || timeout <= 0 {
-		return chunkFail("volume-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "a volume, --master and --request-id are required; --timeout must be positive", false)
-	}
-	cat, closeFn, exit := chunkCatalog("volume-delete", filer, base, true, timeout, stdout, stderr)
-	if exit >= 0 {
-		return exit
-	}
-	defer closeFn()
-	conn, err := link.Dial(master)
-	if err != nil {
-		return chunkResult("volume-delete", nil, err, stdout, stderr)
-	}
-	defer conn.Close()
-	admit := &masterAdmission{lc: control.NewLifecycleServiceClient(conn), token: requestID}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	res, err := cat.DeleteVolume(ctx, volumeID, admit)
-	if err != nil {
-		return volumeDeletePartial(res, err, stdout, stderr)
-	}
-	return chunkResult("volume-delete", res, nil, stdout, stderr)
+	return nil
 }
 
 // masterAdmission is the delete's reservation at the blockmaster, held
@@ -104,25 +123,4 @@ func (m *masterAdmission) Commit(ctx context.Context, vol string) error {
 func (m *masterAdmission) Abort(ctx context.Context, vol string) error {
 	_, err := m.lc.AbortVolumeDeleting(ctx, m.req(vol))
 	return err
-}
-
-// volumeDeletePartial prints what a failed delete did, with the error, and
-// fails.
-func volumeDeletePartial(res chunkstore.VolumeDeleteResult, err error, stdout, stderr io.Writer) int {
-	body := chunkErrBody{Code: codeInternalCLI, Message: err.Error()}
-	var ce *chunkstore.CatalogError
-	if errors.As(err, &ce) {
-		body = chunkErrBody{Code: ce.Code, Message: ce.Detail(), Retryable: ce.Retryable}
-	}
-	fmt.Fprintf(stderr, "sw-block ops chunk volume-delete: %s: %s (headMarked=%t completed=%t uncertain=%t)\n", body.Code, body.Message, res.HeadMarked, res.Completed, res.Uncertain)
-	out, mErr := json.Marshal(struct {
-		chunkstore.VolumeDeleteResult
-		Error *chunkErrBody `json:"error"`
-	}{res, &body})
-	if mErr == nil {
-		if wErr := writeAll(stdout, append(out, '\n')); wErr != nil {
-			fmt.Fprintf(stderr, "sw-block ops chunk volume-delete: write the result: %v\n", wErr)
-		}
-	}
-	return chunkExitFailed
 }
