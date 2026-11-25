@@ -45,7 +45,75 @@ type Dependent struct {
 // still name its chunks, ordered by target id.
 type Snapshot struct {
 	Root       RootName
+	Meta       SnapshotMeta
 	Dependents []Dependent
+}
+
+// The retention classes of a snapshot.
+const (
+	ClassSemantic  = "semantic"
+	ClassPinned    = "pinned"
+	ClassScheduled = "scheduled"
+)
+
+// The bounds that keep HEAD inline at its snapshot cap: a snapshot's
+// name, its labels, and its dependents.
+const (
+	MaxSnapshotNameBytes = 64
+	MaxSnapshotLabels    = 4
+	MaxLabelKeyBytes     = 24
+	MaxLabelValueBytes   = 32
+	MaxDependents        = 4
+	// MaxDependentsPerHead bounds the dependents of all snapshots together.
+	MaxDependentsPerHead = 16
+	// MaxHeadBytes is the inline limit: Encode refuses a larger HEAD, so a
+	// bound missed elsewhere fails the write, never stores it.
+	MaxHeadBytes = 64 << 10
+)
+
+// ErrHeadTooLarge: an encoded HEAD above MaxHeadBytes.
+var ErrHeadTooLarge = errors.New("layout: HEAD above its inline limit")
+
+// SnapshotMeta is what retention decides from: written once by the commit
+// that creates the name. The times are wall clock and decide policy only;
+// reachability, dependents and removal never read them.
+type SnapshotMeta struct {
+	CreatedNs int64
+	Class     string // "", ClassSemantic, ClassPinned or ClassScheduled
+	ExpiresNs int64  // pinned until then, when set
+	Labels    map[string]string
+}
+
+// PinnedAt reports whether the snapshot is an explicit keep at nowNs: class
+// pinned, or an expiry not yet passed. An automatic delete refuses it.
+func (m SnapshotMeta) PinnedAt(nowNs int64) bool {
+	return m.Class == ClassPinned || m.ExpiresNs > 0 && nowNs < m.ExpiresNs
+}
+
+func (m SnapshotMeta) check(name string) error {
+	switch m.Class {
+	case "", ClassSemantic, ClassPinned, ClassScheduled:
+	default:
+		return fmt.Errorf("%w: snapshot %q class %q", ErrMalformed, name, m.Class)
+	}
+	if m.CreatedNs < 0 || m.ExpiresNs < 0 {
+		return fmt.Errorf("%w: snapshot %q has a negative time", ErrMalformed, name)
+	}
+	if len(m.Labels) > MaxSnapshotLabels {
+		return fmt.Errorf("%w: snapshot %q has %d labels, at most %d", ErrMalformed, name, len(m.Labels), MaxSnapshotLabels)
+	}
+	for k, v := range m.Labels {
+		if k == "" || len(k) > MaxLabelKeyBytes || len(v) > MaxLabelValueBytes {
+			return fmt.Errorf("%w: snapshot %q label %q: keys 1-%d bytes, values at most %d", ErrMalformed, name, k, MaxLabelKeyBytes, MaxLabelValueBytes)
+		}
+		if err := validName("label", k); err != nil {
+			return err
+		}
+		if err := validName("label", v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Head is the decoded HEAD. Gen is the generation the store holds it at;
@@ -79,8 +147,12 @@ type headDoc struct {
 }
 
 type snapDoc struct {
-	Root       string   `json:"root"`
-	Dependents []depDoc `json:"dependents,omitempty"`
+	Root       string            `json:"root"`
+	CreatedNs  int64             `json:"created_ns,omitempty"`
+	Class      string            `json:"class,omitempty"`
+	ExpiresNs  int64             `json:"expires_ns,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	Dependents []depDoc          `json:"dependents,omitempty"`
 }
 
 type depDoc struct {
@@ -146,11 +218,23 @@ func (h Head) check() error {
 	if len(h.Snapshots) > MaxSnapshots {
 		return fmt.Errorf("%w: %d snapshots, at most %d", ErrMalformed, len(h.Snapshots), MaxSnapshots)
 	}
+	if n := h.dependents(); n > MaxDependentsPerHead {
+		return fmt.Errorf("%w: %d dependents in HEAD, at most %d", ErrMalformed, n, MaxDependentsPerHead)
+	}
 	for n, s := range h.Snapshots {
 		if n == "" {
 			return fmt.Errorf("%w: unnamed snapshot", ErrMalformed)
 		}
 		if err := validName("snapshot", n); err != nil {
+			return err
+		}
+		if len(n) > MaxSnapshotNameBytes {
+			return fmt.Errorf("%w: snapshot name %q is %d bytes, at most %d", ErrMalformed, n, len(n), MaxSnapshotNameBytes)
+		}
+		if len(s.Dependents) > MaxDependents {
+			return fmt.Errorf("%w: snapshot %q has %d dependents, at most %d", ErrMalformed, n, len(s.Dependents), MaxDependents)
+		}
+		if err := s.Meta.check(n); err != nil {
 			return err
 		}
 		for i, d := range s.Dependents {
@@ -186,14 +270,21 @@ func (h Head) Encode() ([]byte, error) {
 	if len(h.Snapshots) > 0 {
 		d.Snapshots = map[string]snapDoc{}
 		for n, s := range h.Snapshots {
-			sd := snapDoc{Root: s.Root.String()}
+			sd := snapDoc{Root: s.Root.String(), CreatedNs: s.Meta.CreatedNs, Class: s.Meta.Class, ExpiresNs: s.Meta.ExpiresNs}
+			if len(s.Meta.Labels) > 0 {
+				sd.Labels = s.Meta.Labels
+			}
 			for _, dep := range s.Dependents {
 				sd.Dependents = append(sd.Dependents, depDoc{Target: dep.Target, TargetID: dep.TargetID.String(), Root: dep.Root.String()})
 			}
 			d.Snapshots[n] = sd
 		}
 	}
-	return json.Marshal(d)
+	b, err := json.Marshal(d)
+	if err == nil && len(b) > MaxHeadBytes {
+		return nil, fmt.Errorf("%w: %d bytes, at most %d", ErrHeadTooLarge, len(b), MaxHeadBytes)
+	}
+	return b, err
 }
 
 // DecodeHead parses canonical HEAD bytes for the volume whose VOLUME
@@ -230,7 +321,7 @@ func DecodeHead(b []byte, gen uint64, volume VolumeID) (Head, error) {
 			if err != nil {
 				return Head{}, err
 			}
-			snap := Snapshot{Root: rn}
+			snap := Snapshot{Root: rn, Meta: SnapshotMeta{CreatedNs: s.CreatedNs, Class: s.Class, ExpiresNs: s.ExpiresNs, Labels: s.Labels}}
 			for _, dep := range s.Dependents {
 				tid, err := ParseVolumeID(dep.TargetID)
 				if err != nil {
@@ -327,7 +418,7 @@ func (h Head) clone() Head {
 	if h.Snapshots != nil {
 		c.Snapshots = make(map[string]Snapshot, len(h.Snapshots))
 		for n, s := range h.Snapshots {
-			c.Snapshots[n] = Snapshot{Root: s.Root, Dependents: append([]Dependent(nil), s.Dependents...)}
+			c.Snapshots[n] = Snapshot{Root: s.Root, Meta: s.Meta.clone(), Dependents: append([]Dependent(nil), s.Dependents...)}
 		}
 	}
 	return c
@@ -407,4 +498,13 @@ func runTransition(ctx context.Context, st HeadStore, t func(Head) (Head, bool, 
 	}
 	next.Gen = h.Gen + 1
 	return next, nil
+}
+
+// dependents counts the dependents of every snapshot.
+func (h Head) dependents() int {
+	n := 0
+	for _, s := range h.Snapshots {
+		n += len(s.Dependents)
+	}
+	return n
 }

@@ -48,7 +48,7 @@ func TestDetachedHEAD_RefusesEveryHolderTransition(t *testing.T) {
 	steps := map[string]func() error{
 		"Begin":      func() error { _, _, e := h.Begin(me, "s"); return e },
 		"Abort":      func() error { _, _, e := h.Abort(me, "s"); return e },
-		"Commit":     func() error { _, _, e := h.Commit(me, "s", rn, h.Position, "", StateLive); return e },
+		"Commit":     func() error { _, _, e := h.Commit(me, "s", rn, h.Position, "", SnapshotMeta{}, StateLive); return e },
 		"BeginClean": func() error { _, _, e := h.BeginClean(me, "c"); return e },
 		"EndClean":   func() error { _, _, e := h.EndClean(me, "c"); return e },
 		"Claim":      func() error { _, _, e := h.Claim(me); return e },

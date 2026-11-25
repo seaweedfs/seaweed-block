@@ -4,6 +4,11 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/retain"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"io"
 	"sort"
 	"strings"
@@ -46,22 +51,41 @@ func bCatalog(name, filer, base string, writes bool, timeout time.Duration, stdo
 	return cat, closeFn, -1
 }
 
-// volumeFlags are a volume's name and layout id, as its master record
-// holds them (sw-block volume status prints both).
-type volumeFlags struct{ name, id string }
+// volumeFlags name a volume; its layout id is resolved through the
+// master's volume record (never minted, never read from the filer).
+type volumeFlags struct {
+	name string
+	cmd  *bCommand
+}
 
-func (v *volumeFlags) bind(fs *flag.FlagSet, prefix, what string) {
-	fs.StringVar(&v.name, prefix, "", what+" name")
-	fs.StringVar(&v.id, prefix+"-layout-id", "", what+" layout id (from the master's volume record)")
+// resolveVolumeID resolves a volume name to its layout id at the master.
+// Tests replace it.
+var resolveVolumeID = func(ctx context.Context, master, name string) (layout.VolumeID, error) {
+	conn, err := link.Dial(master)
+	if err != nil {
+		return layout.VolumeID{}, err
+	}
+	defer conn.Close()
+	return lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), name)
+}
+
+func (c *bCommand) bindVolume(v *volumeFlags, flagName, what string) {
+	v.cmd = c
+	c.fs.StringVar(&v.name, flagName, "", what+" name")
 }
 
 func (v volumeFlags) ref(flagName string) (chunkstore.VolumeRef, error) {
-	if v.name == "" || v.id == "" {
-		return chunkstore.VolumeRef{}, errors.New("--" + flagName + " and --" + flagName + "-layout-id are required")
+	if v.name == "" {
+		return chunkstore.VolumeRef{}, errors.New("--" + flagName + " is required")
 	}
-	id, err := layout.ParseVolumeID(v.id)
+	if v.cmd.master == "" {
+		return chunkstore.VolumeRef{}, errors.New("--master is required (it resolves the volume's layout id)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), v.cmd.timeout)
+	defer cancel()
+	id, err := resolveVolumeID(ctx, v.cmd.master, v.name)
 	if err != nil {
-		return chunkstore.VolumeRef{}, err
+		return chunkstore.VolumeRef{}, fmt.Errorf("resolve --%s %q at the master: %w", flagName, v.name, err)
 	}
 	return chunkstore.VolumeRef{Name: v.name, ID: id}, nil
 }
@@ -69,10 +93,10 @@ func (v volumeFlags) ref(flagName string) (chunkstore.VolumeRef, error) {
 // bCommand parses a catalog command's flags (with --chunk-filer,
 // --chunk-path and --timeout) and opens the catalog.
 type bCommand struct {
-	fs             *flag.FlagSet
-	filer, base    string
-	timeout        time.Duration
-	stdout, stderr io.Writer
+	fs                  *flag.FlagSet
+	filer, base, master string
+	timeout             time.Duration
+	stdout, stderr      io.Writer
 }
 
 func newBCommand(name string, timeout time.Duration, stdout, stderr io.Writer) *bCommand {
@@ -80,6 +104,7 @@ func newBCommand(name string, timeout time.Duration, stdout, stderr io.Writer) *
 	c.fs.StringVar(&c.filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	c.fs.StringVar(&c.base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
 	c.fs.DurationVar(&c.timeout, "timeout", timeout, "filer timeout")
+	c.fs.StringVar(&c.master, "master", "", "blockmaster gRPC address (resolves each volume's layout id)")
 	return c
 }
 
@@ -115,7 +140,7 @@ func chunkSnapshots(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("snapshots", 30*time.Second, stdout, stderr)
 	var vol volumeFlags
 	var prefix string
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	c.fs.StringVar(&prefix, "prefix", "", "only names with this prefix")
 	var ref chunkstore.VolumeRef
 	return c.run(args, false, func() (err error) { ref, err = vol.ref("volume"); return err }, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
@@ -148,7 +173,7 @@ func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("snapshot-delete", 30*time.Second, stdout, stderr)
 	var vol volumeFlags
 	var name string
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	c.fs.StringVar(&name, "name", "", "snapshot name")
 	var ref chunkstore.VolumeRef
 	return c.run(args, true, func() (err error) {
@@ -169,7 +194,7 @@ func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
 func chunkShow(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("show", 30*time.Second, stdout, stderr)
 	var vol volumeFlags
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	var ref chunkstore.VolumeRef
 	return c.run(args, false, func() (err error) { ref, err = vol.ref("volume"); return err }, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
 		s, err := cat.Store(ref)
@@ -199,7 +224,7 @@ func chunkShow(args []string, stdout, stderr io.Writer) int {
 func chunkUsage(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("usage", 60*time.Second, stdout, stderr)
 	var vol volumeFlags
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	var ref chunkstore.VolumeRef
 	return c.run(args, false, func() (err error) { ref, err = vol.ref("volume"); return err }, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
 		return cat.Usage(ctx, ref)
@@ -214,8 +239,8 @@ func chunkRestore(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("restore", 6*time.Minute, stdout, stderr)
 	var src, tgt volumeFlags
 	var snapshot string
-	src.bind(c.fs, "source", "source volume")
-	tgt.bind(c.fs, "target", "new volume")
+	c.bindVolume(&src, "source", "source volume")
+	c.bindVolume(&tgt, "target", "new volume")
 	c.fs.StringVar(&snapshot, "snapshot", "", "source snapshot name")
 	var sref, tref chunkstore.VolumeRef
 	return c.run(args, true, func() (err error) {
@@ -243,8 +268,8 @@ func chunkRestore(args []string, stdout, stderr io.Writer) int {
 func chunkRelease(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("release", 30*time.Second, stdout, stderr)
 	var src, tgt volumeFlags
-	src.bind(c.fs, "source", "source volume")
-	tgt.bind(c.fs, "target", "restore target")
+	c.bindVolume(&src, "source", "source volume")
+	c.bindVolume(&tgt, "target", "restore target")
 	var sref, tref chunkstore.VolumeRef
 	return c.run(args, true, func() (err error) {
 		if sref, err = src.ref("source"); err != nil {
@@ -278,6 +303,7 @@ func layoutCode(err error) string {
 		{layout.ErrTargetLive, "target_live"},
 		{layout.ErrIdentity, "identity_mismatch"},
 		{layout.ErrPrecondition, "conflict"},
+		{retain.ErrInvalidPolicy, "invalid_policy"},
 	} {
 		if errors.Is(err, c.err) {
 			return c.code
@@ -286,31 +312,27 @@ func layoutCode(err error) string {
 	return ""
 }
 
-// RetainResult is what a retention pass deleted and kept.
-type RetainResult struct {
-	Deleted []string `json:"deleted"`
-	Kept    []string `json:"kept"`
-	// Pinned are names the policy would delete that a restore target
-	// depends on; they stay until it is released.
-	Pinned []string `json:"pinned,omitempty"`
-	DryRun bool     `json:"dry_run,omitempty"`
-}
-
-// chunkRetain applies a retention policy: of the snapshots whose names
-// start with --prefix, it keeps the newest --keep-newest (names sort in
-// time order: a schedule names its snapshots <prefix><UTC timestamp>) and
-// deletes the others (transition 9). Names without the prefix are never
-// touched; a snapshot with dependents is kept and reported.
+// chunkRetain: sw-block ops chunk retain --volume v --master m
+// --chunk-filer host:port [--dry-run] applies the volume's retention policy:
+// it deletes the expired snapshots by the automatic snapshot delete, which
+// refuses a pinned snapshot or one a restore target depends on. With
+// --set-policy it stores the policy given by the --keep-* flags in the
+// volume's RETENTION entry instead; a policy change applies from the next
+// pass.
 func chunkRetain(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("retain", 5*time.Minute, stdout, stderr)
 	var vol volumeFlags
-	var prefix string
-	var keep int
-	var dryRun bool
-	vol.bind(c.fs, "volume", "volume")
-	c.fs.StringVar(&prefix, "prefix", "", "the schedule's name prefix; only these names are considered")
-	c.fs.IntVar(&keep, "keep-newest", 0, "keep the newest N names with the prefix")
+	var keepYounger time.Duration
+	var dryRun, setPolicy bool
+	var keepNewest, keepHourly, keepDaily, keepWeekly int
+	c.bindVolume(&vol, "volume", "volume")
 	c.fs.BoolVar(&dryRun, "dry-run", false, "list what would be deleted; write nothing")
+	c.fs.BoolVar(&setPolicy, "set-policy", false, "store the --keep-* policy on the volume instead of applying it")
+	c.fs.IntVar(&keepNewest, "keep-newest", retain.DefaultKeepNewest, "with --set-policy: keep the newest N unpinned snapshots")
+	c.fs.DurationVar(&keepYounger, "keep-younger", retain.DefaultKeepYounger, "with --set-policy: keep every snapshot younger than this")
+	c.fs.IntVar(&keepHourly, "keep-hourly", 0, "with --set-policy: keep the newest snapshot of each of the last N hours")
+	c.fs.IntVar(&keepDaily, "keep-daily", 0, "with --set-policy: keep the newest snapshot of each of the last N days")
+	c.fs.IntVar(&keepWeekly, "keep-weekly", 0, "with --set-policy: keep the newest snapshot of each of the last N weeks")
 	var ref chunkstore.VolumeRef
 	// The start check runs only for a pass that writes.
 	writes := true
@@ -320,46 +342,22 @@ func chunkRetain(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return c.run(args, writes, func() (err error) {
-		if prefix == "" || keep < 1 {
-			return errors.New("--prefix and a positive --keep-newest are required")
+		if setPolicy && dryRun {
+			return errors.New("--set-policy and --dry-run do not combine")
 		}
 		ref, err = vol.ref("volume")
 		return err
 	}, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
-		h, found, err := cat.ReadHead(ctx, ref)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			return nil, layout.ErrHeadAbsent
-		}
-		var names []string
-		for n := range h.Snapshots {
-			if strings.HasPrefix(n, prefix) {
-				names = append(names, n)
+		if setPolicy {
+			p := retain.Policy{KeepNewest: keepNewest, KeepYoungerNs: int64(keepYounger), KeepHourly: keepHourly, KeepDaily: keepDaily, KeepWeekly: keepWeekly}
+			if err := cat.SetRetention(ctx, ref, p); err != nil {
+				return nil, err
 			}
+			return map[string]any{"volume": ref.Dir(), "policy": p, "policySet": true}, nil
 		}
-		sort.Sort(sort.Reverse(sort.StringSlice(names)))
-		res := RetainResult{Deleted: []string{}, Kept: []string{}, DryRun: dryRun}
-		for i, n := range names {
-			switch {
-			case i < keep:
-				res.Kept = append(res.Kept, n)
-			case len(h.Snapshots[n].Dependents) > 0:
-				res.Pinned = append(res.Pinned, n)
-			case dryRun:
-				res.Deleted = append(res.Deleted, n)
-			default:
-				if _, err := cat.DeleteSnapshot(ctx, ref, n); err != nil {
-					if errors.Is(err, layout.ErrHasDependents) {
-						res.Pinned = append(res.Pinned, n)
-						continue
-					}
-					return res, err
-				}
-				res.Deleted = append(res.Deleted, n)
-			}
-		}
-		return res, nil
+		return cat.Retain(ctx, ref, chunkRetainNow(), dryRun)
 	})
 }
+
+// chunkRetainNow is the wall clock retention decides by. Tests replace it.
+var chunkRetainNow = time.Now

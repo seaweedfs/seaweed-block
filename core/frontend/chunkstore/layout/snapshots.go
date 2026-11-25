@@ -14,6 +14,9 @@ var (
 	// ErrForeignSource: the snapshot names chunks of another volume, so it
 	// cannot be a restore source (dependency depth stays one).
 	ErrForeignSource = errors.New("layout: snapshot names another volume's chunks")
+	// ErrTooManyDependents: a restore from a snapshot that already has
+	// MaxDependents targets.
+	ErrTooManyDependents = errors.New("layout: snapshot has the most restore targets")
 )
 
 // DeleteSnapshot is transition 9: the named snapshot is removed, refused
@@ -57,6 +60,12 @@ func (h Head) AddDependent(name string, target Dependent, root RootName) (next H
 		if d.TargetID == target.TargetID {
 			return h, false, nil
 		}
+	}
+	if len(s.Dependents) >= MaxDependents {
+		return Head{}, false, fmt.Errorf("%w: snapshot %q has %d; delete a restore target, or make it independent (release it), first", ErrTooManyDependents, name, len(s.Dependents))
+	}
+	if h.dependents() >= MaxDependentsPerHead {
+		return Head{}, false, fmt.Errorf("%w: the volume's snapshots have %d; delete a restore target, or make it independent (release it), first", ErrTooManyDependents, h.dependents())
 	}
 	next = h.clone()
 	s = next.Snapshots[name]
@@ -117,4 +126,23 @@ func namesOtherThan(ctx context.Context, r *Reader, rn RootName, own VolumeID) (
 		}
 	}
 	return false, nil
+}
+
+// ErrPinned: an automatic delete of a snapshot pinned at its time.
+var ErrPinned = errors.New("layout: snapshot is pinned")
+
+// RetireSnapshot is transition 9 for the automatic caller (retention): as
+// DeleteSnapshot, and also refused for a snapshot pinned at nowNs (class
+// pinned, or an expiry not yet passed), checked on the HEAD the update
+// replaces.
+func (h Head) RetireSnapshot(name string, nowNs int64) (next Head, changed bool, err error) {
+	if s, ok := h.Snapshots[name]; ok && s.Meta.PinnedAt(nowNs) {
+		return Head{}, false, fmt.Errorf("%w: %q", ErrPinned, name)
+	}
+	return h.DeleteSnapshot(name)
+}
+
+// RunRetireSnapshot applies RetireSnapshot by one conditional update.
+func RunRetireSnapshot(ctx context.Context, st HeadStore, name string, nowNs int64) (Head, error) {
+	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.RetireSnapshot(name, nowNs) })
 }

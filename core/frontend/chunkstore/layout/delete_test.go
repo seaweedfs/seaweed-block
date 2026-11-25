@@ -82,7 +82,7 @@ func TestDeleting_RefusesEveryHolderStep(t *testing.T) {
 	for name, step := range map[string]func() error{
 		"Begin":      func() error { _, _, err := h.Begin(me, "s"); return err },
 		"Abort":      func() error { _, _, err := h.Abort(me, "s"); return err },
-		"Commit":     func() error { _, _, err := h.Commit(me, "s", rn, 1, "", StateLive); return err },
+		"Commit":     func() error { _, _, err := h.Commit(me, "s", rn, 1, "", SnapshotMeta{}, StateLive); return err },
 		"BeginClean": func() error { _, _, err := h.BeginClean(me, "c"); return err },
 		"EndClean":   func() error { _, _, err := h.EndClean(me, "c"); return err },
 		"Claim":      func() error { _, _, err := h.Claim(newer); return err },

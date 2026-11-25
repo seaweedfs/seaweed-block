@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -48,12 +49,25 @@ func (m *memChunkStore) Get(_ context.Context, fid string) ([]byte, error) {
 	return append([]byte(nil), b...), nil
 }
 
-// useMemChunkStore makes every ops chunk command dial store.
+// testIDs is the master's volume records the commands resolve against:
+// every volume a test names through volArgs.
+var testIDs sync.Map
+
+// useMemChunkStore makes every ops chunk command dial store and resolve
+// names against testIDs.
 func useMemChunkStore(t *testing.T, store *memChunkStore) {
 	t.Helper()
-	prev := dialChunkFiler
+	prev, prevResolve := dialChunkFiler, resolveVolumeID
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
-	t.Cleanup(func() { dialChunkFiler = prev })
+	resolveVolumeID = testResolve
+	t.Cleanup(func() { dialChunkFiler, resolveVolumeID = prev, prevResolve })
+}
+
+func testResolve(_ context.Context, _ string, name string) (layout.VolumeID, error) {
+	if id, ok := testIDs.Load(name); ok {
+		return id.(layout.VolumeID), nil
+	}
+	return layout.VolumeID{}, status.Error(codes.NotFound, "volume not found")
 }
 
 type okLease struct{}
@@ -106,11 +120,12 @@ func cliVolume(t *testing.T, store *memChunkStore, name, snap string) chunkstore
 }
 
 func volArgs(flag string, v chunkstore.VolumeRef) []string {
-	return []string{"--" + flag, v.Name, "--" + flag + "-layout-id", v.ID.String()}
+	testIDs.Store(v.Name, v.ID)
+	return []string{"--" + flag, v.Name}
 }
 
 func cliArgs(cmd string, parts ...[]string) []string {
-	out := []string{cmd, "--chunk-filer", "filer:18888"}
+	out := []string{cmd, "--chunk-filer", "filer:18888", "--master", "m:1"}
 	for _, p := range parts {
 		out = append(out, p...)
 	}
@@ -150,11 +165,11 @@ func TestOpsChunk_CatalogCommands(t *testing.T) {
 	if code, out, _ := runChunk(cliArgs("restore", volArgs("source", src), volArgs("target", tgt), []string{"--snapshot", "weekly"})...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "snapshot_not_found" {
 		t.Fatalf("restore of a missing snapshot: %d %q", code, out)
 	}
-	if code, out, _ := runChunk(cliArgs("snapshots", []string{"--volume", "src"})...); code != 2 || chunkErrorOut(t, out).Code != "bad_request" {
-		t.Fatalf("snapshots without the layout id: %d %q", code, out)
+	if code, out, _ := runChunk("snapshots", "--chunk-filer", "f:1", "--volume", "src"); code != 2 || !strings.Contains(out, "--master is required") {
+		t.Fatalf("snapshots without --master: %d %q", code, out)
 	}
-	if code, out, _ := runChunk(cliArgs("snapshots", []string{"--volume", "src", "--volume-layout-id", "zz"})...); code != 2 {
-		t.Fatalf("snapshots with a bad layout id: %d %q", code, out)
+	if code, out, _ := runChunk(cliArgs("snapshots", []string{"--volume", "unknown-to-the-master"})...); code != 2 || !strings.Contains(out, "resolve --volume") {
+		t.Fatalf("snapshots of a volume the master does not know: %d %q", code, out)
 	}
 }
 
@@ -252,7 +267,7 @@ func TestOpsChunk_AbsentVolume(t *testing.T) {
 	if code, out, _ := runChunk(cliArgs("show", volArgs("volume", v))...); code != 0 || !strings.Contains(out, `"head":null`) {
 		t.Fatalf("show of an absent volume: %d %q", code, out)
 	}
-	if code, out, _ := runChunk(cliArgs("retain", volArgs("volume", v), []string{"--prefix", "auto-", "--keep-newest", "1"})...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "volume_not_found" {
+	if code, out, _ := runChunk(cliArgs("retain", volArgs("volume", v))...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "volume_not_found" {
 		t.Fatalf("retain of an absent volume: %d %q", code, out)
 	}
 	lc := &fakeLifecycle{}
@@ -264,7 +279,7 @@ func TestOpsChunk_AbsentVolume(t *testing.T) {
 
 // addSnapshot names v's current image again as snapshot name (a new
 // snapshot transaction with no new chunks).
-func addSnapshot(t *testing.T, store *memChunkStore, v chunkstore.VolumeRef, name string, session string, position uint64) {
+func addSnapshot(t *testing.T, store *memChunkStore, v chunkstore.VolumeRef, name string, meta layout.SnapshotMeta, session string, position uint64) {
 	t.Helper()
 	ctx := context.Background()
 	cat, _ := chunkstore.NewBCatalog(store, store, defaultChunkPathCLI)
@@ -292,53 +307,62 @@ func addSnapshot(t *testing.T, store *memChunkStore, v chunkstore.VolumeRef, nam
 			t.Fatal(err)
 		}
 	}
-	if _, err := layout.RunCommit(ctx, s, s, v.Name, me, layout.CommitRequest{Session: session, Prev: m, Next: m, Position: position, Snapshot: name}); err != nil {
+	if _, err := layout.RunCommit(ctx, s, s, v.Name, me, layout.CommitRequest{Session: session, Prev: m, Next: m, Position: position, Snapshot: name, Meta: meta}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// retain keeps the newest N names with the schedule's prefix, deletes the
-// older ones, never touches other names, and keeps (reports) one a restore
-// target depends on; --dry-run writes nothing.
+// retain stores a policy with --set-policy and applies it: the newest
+// unpinned snapshots by creation time are kept, the expired ones deleted,
+// a pinned one kept, one a restore target depends on refused and
+// reported; --dry-run writes nothing.
 func TestOpsChunk_Retain(t *testing.T) {
 	store := newMemChunkStore()
 	useMemChunkStore(t, store)
-	v := cliVolume(t, store, "v", "manual")
-	for i, n := range []string{"auto-20261125T0100Z", "auto-20261125T0200Z", "auto-20261125T0300Z", "auto-20261125T0400Z"} {
-		addSnapshot(t, store, v, n, fmt.Sprintf("s%d", i+2), uint64(i+2))
+	v := cliVolume(t, store, "v", "")
+	now := time.Unix(20_000_000, 0)
+	prevNow := chunkRetainNow
+	chunkRetainNow = func() time.Time { return now }
+	t.Cleanup(func() { chunkRetainNow = prevNow })
+	for i, f := range []struct {
+		name  string
+		hours int
+		class string
+	}{{"n1", 1, layout.ClassSemantic}, {"n2", 2, layout.ClassSemantic}, {"n3", 3, layout.ClassSemantic}, {"n4", 4, layout.ClassSemantic}, {"keep", 9, layout.ClassPinned}} {
+		addSnapshot(t, store, v, f.name, layout.SnapshotMeta{CreatedNs: now.Add(-time.Duration(f.hours) * time.Hour).UnixNano(), Class: f.class}, fmt.Sprintf("s%d", i+2), uint64(i+2))
 	}
 	tid, _ := layout.NewVolumeID()
-	if code, out, errs := runChunk(cliArgs("restore", volArgs("source", v), volArgs("target", chunkstore.VolumeRef{Name: "t", ID: tid}), []string{"--snapshot", "auto-20261125T0100Z"})...); code != 0 {
+	if code, out, errs := runChunk(cliArgs("restore", volArgs("source", v), volArgs("target", chunkstore.VolumeRef{Name: "t", ID: tid}), []string{"--snapshot", "n4"})...); code != 0 {
 		t.Fatalf("restore: %d %q %q", code, out, errs)
 	}
-	retain := func(extra ...string) RetainResult {
+	if code, out, errs := runChunk(cliArgs("retain", volArgs("volume", v), []string{"--set-policy", "--keep-newest", "2", "--keep-younger", "0s"})...); code != 0 || !strings.Contains(out, `"policySet":true`) {
+		t.Fatalf("set policy: %d %q %q", code, out, errs)
+	}
+	run := func(extra ...string) chunkstore.RetainResult {
 		t.Helper()
-		code, out, errs := runChunk(cliArgs("retain", volArgs("volume", v), append([]string{"--prefix", "auto-", "--keep-newest", "2"}, extra...))...)
-		var r RetainResult
+		code, out, errs := runChunk(cliArgs("retain", volArgs("volume", v), extra)...)
+		var r chunkstore.RetainResult
 		if code != 0 || json.Unmarshal([]byte(out), &r) != nil {
 			t.Fatalf("retain %v: %d %q %q", extra, code, out, errs)
 		}
 		return r
 	}
-	dry := retain("--dry-run")
-	if strings.Join(dry.Deleted, ",") != "auto-20261125T0200Z" || strings.Join(dry.Pinned, ",") != "auto-20261125T0100Z" || strings.Join(dry.Kept, ",") != "auto-20261125T0400Z,auto-20261125T0300Z" {
+	if dry := run("--dry-run"); strings.Join(dry.Deleted, ",") != "n3,n4" {
 		t.Fatalf("dry run: %+v", dry)
+	}
+	got := run()
+	if strings.Join(got.Deleted, ",") != "n3" || strings.Join(got.Refused, ",") != "n4" {
+		t.Fatalf("retain: deleted %v refused %v; want n3 and n4 refused", got.Deleted, got.Refused)
 	}
 	code, out, _ := runChunk(cliArgs("snapshots", volArgs("volume", v))...)
 	var list []SnapshotEntry
-	if code != 0 || json.Unmarshal([]byte(out), &list) != nil || len(list) != 5 {
-		t.Fatalf("a dry run deleted something: %d %q", code, out)
+	if code != 0 || json.Unmarshal([]byte(out), &list) != nil || len(list) != 4 {
+		t.Fatalf("after retain: %d %q; want keep,n1,n2,n4", code, out)
 	}
-	got := retain()
-	if strings.Join(got.Deleted, ",") != "auto-20261125T0200Z" || strings.Join(got.Pinned, ",") != "auto-20261125T0100Z" {
-		t.Fatalf("retain: %+v", got)
+	if code, out, _ := runChunk(cliArgs("retain", volArgs("volume", v), []string{"--set-policy", "--dry-run"})...); code != 2 {
+		t.Fatalf("--set-policy with --dry-run: %d %q", code, out)
 	}
-	code, out, _ = runChunk(cliArgs("snapshots", volArgs("volume", v))...)
-	list = nil
-	if code != 0 || json.Unmarshal([]byte(out), &list) != nil || len(list) != 4 || list[len(list)-1].Name != "manual" {
-		t.Fatalf("after retain: %d %q; want 4 left, manual untouched", code, out)
-	}
-	if code, out, _ := runChunk(cliArgs("retain", volArgs("volume", v), []string{"--keep-newest", "2"})...); code != 2 {
-		t.Fatalf("retain without --prefix: %d %q", code, out)
+	if code, out, _ := runChunk(cliArgs("retain", volArgs("volume", v), []string{"--set-policy", "--keep-newest", "-1"})...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "invalid_policy" {
+		t.Fatalf("negative policy: %d %q", code, out)
 	}
 }
