@@ -72,8 +72,10 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 					case "/status":
 						_ = json.NewEncoder(w).Encode(volume.StatusProjection{Projection: frontend.Projection{VolumeID: "vol-rf3", ReplicaID: id}, ReplicationRole: "replica_ready"})
 					case "/status/durable":
-						_, s, _ := store.Boundaries()
-						_ = json.NewEncoder(w).Encode(struct{ Volumes []durable.VolumeStatus }{[]durable.VolumeStatus{{VolumeID: "vol-rf3", ReplicaID: id, FrontierKnown: true, DurableLSN: s}}})
+						// As the volume's /status/durable reports it: DurableLSN is
+						// R, the store's synced LSN (storage_adapter.go Boundaries).
+						r, _, _ := store.Boundaries()
+						_ = json.NewEncoder(w).Encode(struct{ Volumes []durable.VolumeStatus }{[]durable.VolumeStatus{{VolumeID: "vol-rf3", ReplicaID: id, FrontierKnown: true, DurableLSN: r}}})
 					default:
 						http.NotFound(w, r)
 					}
