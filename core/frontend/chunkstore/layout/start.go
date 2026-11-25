@@ -15,13 +15,20 @@ var (
 	ErrStaleLocalRoot = errors.New("layout: local root is from an earlier claim")
 )
 
+// StaleLocalRootCure is the way back a stale-root refusal names: after a
+// clean stop the published image holds everything the old directory does.
+const StaleLocalRootCure = "another root claimed this volume since this directory's last claim (for example a planned move away and back); after a clean stop the directory holds nothing the published image lacks: clear it and start again on a fresh root"
+
 // MissingLocalRootCure is the way back the refusal names.
 const MissingLocalRootCure = "check for a wrong or unmounted data directory; if the local data is gone, a forced move (also to the same host) records the lost range and restarts from the published image"
 
 // LocalRoot is what a starting holder knows of its local data: the claim
 // id its local root's marker carries (written before any claim, so it is
-// durable before HEAD can name it), whether the root is fresh (just
-// created, holding no data), and the position it holds synced.
+// durable before HEAD can name it), whether the root is fresh, and the
+// position it holds synced. A root is fresh from its creation until the
+// base of its restore from HEAD is durable, across any crash in between:
+// reported non-fresh before that, its position below HEAD's would be
+// refused as an old copy.
 type LocalRoot struct {
 	ClaimID  string
 	Fresh    bool
@@ -62,11 +69,11 @@ func Start(ctx context.Context, st HeadStore, lease LeaseWait, line HolderID, lo
 		case local.Fresh:
 			return Head{}, fmt.Errorf("%w at epoch %d: %s", ErrMissingLocalRoot, h.Epoch, MissingLocalRootCure)
 		default:
-			return Head{}, fmt.Errorf("%w (%w): HEAD holds claim %q at epoch %d, the local root carries %q", ErrStaleLocalRoot, ErrNotHolder, h.ClaimID, h.Epoch, local.ClaimID)
+			return Head{}, fmt.Errorf("%w (%w): HEAD holds claim %q at epoch %d, the local root carries %q: %s", ErrStaleLocalRoot, ErrNotHolder, h.ClaimID, h.Epoch, local.ClaimID, StaleLocalRootCure)
 		}
 	}
 	if line.Epoch > h.Epoch && !local.Fresh && local.ClaimID != h.ClaimID {
-		return Head{}, fmt.Errorf("%w (%w): the local root carries claim %q, HEAD's lineage is %q; a root that is not the continuing lineage starts fresh", ErrStaleLocalRoot, ErrNotHolder, local.ClaimID, h.ClaimID)
+		return Head{}, fmt.Errorf("%w (%w): the local root carries claim %q, HEAD's lineage is %q: %s", ErrStaleLocalRoot, ErrNotHolder, local.ClaimID, h.ClaimID, StaleLocalRootCure)
 	}
 	return RunClaim(ctx, st, lease, me)
 }

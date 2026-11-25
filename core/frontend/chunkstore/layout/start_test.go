@@ -180,3 +180,49 @@ func TestStart_InterruptAtTheClaim(t *testing.T) {
 		}
 	}
 }
+
+// A fresh root stays fresh until its restore's base is durable: claimed at
+// a higher epoch, crashed before the base is down, restarted at the same
+// epoch with the same marker and still fresh, it continues the restore.
+// Reported as non-fresh at position 0 under HEAD's published position, the
+// same root would be refused as an old copy; the caller reports Fresh until
+// the base is durable.
+func TestStart_FreshAcrossACrashContinuesTheRestore(t *testing.T) {
+	h := startHead(3, "s1/r1", "k-prev")
+	h.Position = 50
+	st := &memHead{h: &h}
+	line := HolderID{Epoch: 4, Holder: "s1/r1"}
+	if _, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{ClaimID: "k4", Fresh: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{ClaimID: "k4", Fresh: true})
+	if err != nil || got.ClaimID != "k4" || got.Epoch != 4 {
+		t.Fatalf("restart of a still-fresh root: %+v %v; want continue", got, err)
+	}
+	if _, err := Start(context.Background(), st, &fakeLease{ended: true}, line, LocalRoot{ClaimID: "k4", Position: 0}); !errors.Is(err, ErrStaleLocalRoot) {
+		t.Fatalf("the same root reported non-fresh at 0 under 50: %v; want ErrStaleLocalRoot", err)
+	}
+}
+
+// A deleting volume does not start: at the holder's own epoch Start falls
+// through to the claim, which refuses a deleting HEAD.
+func TestStart_DeletingVolumeRefused(t *testing.T) {
+	h := startHead(3, "s1/r1", "k3")
+	h.State = StateDeleting
+	for _, line := range []HolderID{{Epoch: 3, Holder: "s1/r1"}, {Epoch: 4, Holder: "s1/r1"}} {
+		st, _, err := start(t, h, line, LocalRoot{ClaimID: "k3"})
+		if !errors.Is(err, ErrVolumeDeleting) || st.updates != 0 {
+			t.Fatalf("start at epoch %d of a deleting volume: %v (%d writes); want ErrVolumeDeleting", line.Epoch, err, st.updates)
+		}
+	}
+}
+
+// A planned move away and back finds the old directory on the first host:
+// another root claimed in between, so it is refused as stale, and the
+// error names the cure.
+func TestStart_StaleRootNamesTheCure(t *testing.T) {
+	_, _, err := start(t, startHead(5, "s2/r1", "k5"), HolderID{Epoch: 6, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3"})
+	if !errors.Is(err, ErrStaleLocalRoot) || !strings.Contains(err.Error(), StaleLocalRootCure) {
+		t.Fatalf("old directory after a move away and back: %v; want ErrStaleLocalRoot naming %q", err, StaleLocalRootCure)
+	}
+}

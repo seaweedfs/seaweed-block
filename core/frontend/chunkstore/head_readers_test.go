@@ -42,7 +42,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":                     "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target with no HEAD and no VOLUME was never created and is refused, one with VOLUME and no HEAD is being created and is refused; nothing is written (probe LayoutOperatorRelease)",
 	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
-	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and deletes nothing (probe LayoutRemoval)",
+	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                          "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":             "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
@@ -273,11 +273,11 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatal(err)
 		}
 		pool := &countingPool{}
-		if _, err := layout.RemoveUnreachable(ctx, &absentLayoutHead{}, r, pool, okLease{}, layout.HolderID{Epoch: 1, Holder: "h"}, "c", 0, []layout.ChunkName{layout.NameChunk(1, []byte("x"))}); !errors.Is(err, layout.ErrHeadAbsent) {
+		if _, err := layout.RemoveUnreachable(ctx, &absentLayoutHead{}, r, pool, layout.HolderID{Epoch: 1, Holder: "h"}, "c", 0, []layout.ChunkName{layout.NameChunk(1, []byte("x"))}); !errors.Is(err, layout.ErrHeadAbsent) {
 			t.Fatalf("layout removal over an absent HEAD: %v; want ErrHeadAbsent", err)
 		}
-		if pool.deletes != 0 {
-			t.Fatalf("layout removal over an absent HEAD deleted %d objects", pool.deletes)
+		if pool.writes != 0 {
+			t.Fatalf("layout removal over an absent HEAD wrote %d times to the objects", pool.writes)
 		}
 	})
 	t.Run("LayoutOperatorRelease", func(t *testing.T) {
@@ -347,13 +347,27 @@ func (a *absentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) erro
 	return nil
 }
 
-type countingPool struct{ deletes int }
+// countingPool is a layout object store that counts writes and holds
+// nothing.
+type countingPool struct{ writes int }
 
-func (p *countingPool) DeleteObject(context.Context, string) error { p.deletes++; return nil }
-
-type okLease struct{}
-
-func (okLease) StillHeld(context.Context) error { return nil }
+func (p *countingPool) Stat(context.Context, string) (layout.ObjectMeta, bool, error) {
+	return layout.ObjectMeta{}, false, nil
+}
+func (p *countingPool) Create(context.Context, string, []byte, string) error { p.writes++; return nil }
+func (p *countingPool) Reuse(context.Context, string, layout.ObjectMeta, string) error {
+	p.writes++
+	return nil
+}
+func (p *countingPool) Mark(context.Context, string, layout.ObjectMeta, string) error {
+	p.writes++
+	return nil
+}
+func (p *countingPool) DeleteMarked(context.Context, string, string) error { p.writes++; return nil }
+func (p *countingPool) DeleteOfVolume(context.Context, string, layout.VolumeID) error {
+	p.writes++
+	return nil
+}
 
 // presentLayoutHead is a layout HEAD store whose HEAD is present (a live,
 // idle volume); it counts updates.
@@ -361,7 +375,7 @@ type presentLayoutHead struct{ updates int }
 
 func (p *presentLayoutHead) ReadHead(context.Context) (layout.Head, bool, error) {
 	id, _ := layout.NewVolumeID()
-	return layout.Head{Gen: 1, VolumeID: id, Epoch: 1, Holder: "h", Activity: layout.Activity{Kind: layout.ActIdle}}, true, nil
+	return layout.Head{Gen: 1, VolumeID: id, Epoch: 1, Holder: "h", ClaimID: "k", Activity: layout.Activity{Kind: layout.ActIdle}}, true, nil
 }
 
 func (p *presentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) error {
