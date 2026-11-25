@@ -12,7 +12,7 @@
 # validated before use. The verified product commit and weed digest are
 # recorded in result.json (emit_provenance) whether or not the entries pass.
 #
-# Entries (select with -env tests="..."):
+# Entries (all six by default; select a subset with -env tests="..."):
 #   move         TestIntegrationWorkspaceLayoutMove (clean and forced move)
 #   lease        TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown
 #   systemd      TestSystemdExpiredStartupExits75ThenRegrantServes
@@ -27,7 +27,8 @@
 #   swblock run \
 #     -env product_repo=/path/to/seaweed-block -env head=<40-hex commit> \
 #     -env weed_binary=/path/to/weed -env weed_sha256=<sha256> \
-#     -env go_bin=/path/to/go/bin -env tests="move lease systemd catalog" \
+#     -env go_bin=/path/to/go/bin \
+#     -env tests="move lease systemd catalog cutover-e2e cutover-create" \
 #     testops/scenarios/layout-realcluster-integration-gate.yaml
 
 name: layout-realcluster-integration-gate
@@ -40,7 +41,7 @@ env:
   weed_binary: "/path/to/weed"
   weed_sha256: ""
   go_bin: "/usr/local/go/bin"
-  tests: "move lease systemd catalog"
+  tests: "move lease systemd catalog cutover-e2e cutover-create"
   scratch_root: "/tmp/sw-layout-gate"
 
 topology:
