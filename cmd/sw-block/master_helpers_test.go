@@ -8,7 +8,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/host/master"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
@@ -24,6 +27,22 @@ func lifecycleClient(t *testing.T, addr string) control.LifecycleServiceClient {
 
 func startDeleteMaster(t *testing.T, cfg master.Config) (*master.Host, func()) {
 	t.Helper()
+	if cfg.WorkspaceRPC && cfg.LayoutCreateVolume == nil {
+		store := newMemChunkStore()
+		catalog, err := chunkstore.NewBCatalog(store, store, defaultChunkPathCLI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.LayoutCreateVolume = func(ctx context.Context, spec lifecycle.VolumeSpec) error {
+			id, err := layout.ParseVolumeID(spec.LayoutID)
+			if err != nil {
+				return err
+			}
+			_, err = catalog.CreateVolume(ctx, chunkstore.VolumeRef{Name: spec.VolumeID, ID: id},
+				layout.Geometry{SizeBytes: spec.SizeBytes, BlockSize: spec.BlockSize, ChunkBytes: spec.ChunkBytes})
+			return err
+		}
+	}
 	h, err := master.New(cfg)
 	if err != nil {
 		t.Fatal(err)
