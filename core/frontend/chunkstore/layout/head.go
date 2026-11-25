@@ -197,6 +197,9 @@ func validName(field, v string) error {
 var ErrNoNextPosition = fmt.Errorf("%w: HEAD position leaves no room for a next LSN", ErrMalformed)
 
 func (h Head) check() error {
+	if h.Position == ^uint64(0) {
+		return ErrNoNextPosition
+	}
 	if h.VolumeID.IsZero() {
 		return fmt.Errorf("%w: HEAD without a volume id", ErrMalformed)
 	}

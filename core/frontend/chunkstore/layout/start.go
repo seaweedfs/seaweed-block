@@ -115,6 +115,24 @@ func Start(ctx context.Context, st StartStore, lease LeaseWait, line HolderID, l
 // and server a root without HEAD's claim id, and above HEAD's epoch a
 // non-fresh root of another lineage.
 func startCheck(h Head, line HolderID, local LocalRoot) error {
+	if err := startLineageCheck(h, line, local); err != nil {
+		return err
+	}
+	// A fresh root seeds its frontier at HEAD's position once it starts:
+	// refused here, before any claim, when its store cannot take it (a
+	// deleting volume is refused by the claim as such).
+	if local.Fresh && h.State != StateDeleting && h.State != StateDeleted {
+		if local.Seedable == nil {
+			return fmt.Errorf("%w: a fresh local root must say which positions it can seed", ErrUnseedablePosition)
+		}
+		if err := local.Seedable(h.Position); err != nil {
+			return fmt.Errorf("%w: HEAD position %d: %w", ErrUnseedablePosition, h.Position, err)
+		}
+	}
+	return nil
+}
+
+func startLineageCheck(h Head, line HolderID, local LocalRoot) error {
 	if h.State == StateDetached && line.Epoch == h.Epoch {
 		return ErrDetached
 	}
