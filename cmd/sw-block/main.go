@@ -1882,7 +1882,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 		Network: helmValuesNetwork{
 			ExternalISCSI:                externalISCSI,
 			ExternalNVMe:                 externalNVMe,
-			ExternalStatus:               multiNode || nvmeTransport == "rdma",
+			ExternalStatus:               false, // blockmaster runs with mutual TLS: volume status stays on loopback
 			RejectLoopbackPublishTargets: multiNode || nvmeTransport == "rdma",
 		},
 		Compat: helmValuesCompat{

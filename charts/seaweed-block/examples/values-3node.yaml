@@ -14,7 +14,7 @@ csiImage:
 network:
   externalISCSI: true
   externalNVMe: false
-  externalStatus: true
+  externalStatus: false # not supported with mutual TLS (the volume status stays on loopback)
   rejectLoopbackPublishTargets: true
 
 compat:

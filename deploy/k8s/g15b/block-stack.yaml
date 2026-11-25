@@ -43,18 +43,34 @@ spec:
             - "--cluster-spec=/config/cluster-spec.yaml"
             - "--lifecycle-product-loop-interval=100ms"
             - "--listen=0.0.0.0:9333"
-            - "--insecure-external-bind"
+            - "--tls-cert=/etc/sw-block/tls/tls.crt"
+            - "--tls-key=/etc/sw-block/tls/tls.key"
+            - "--tls-client-ca=/etc/sw-block/tls/ca.crt"
+            - "--role-file=/etc/sw-block/roles/roles"
+            - "--audit-log=/var/lib/sw-block/audit.log"
             - "--expected-slots-per-volume=2"
           ports:
             - name: grpc
               containerPort: 9333
           volumeMounts:
+            - name: tls
+              mountPath: /etc/sw-block/tls
+              readOnly: true
+            - name: roles
+              mountPath: /etc/sw-block/roles
+              readOnly: true
             - name: cluster-spec
               mountPath: /config
               readOnly: true
             - name: state
               mountPath: /var/lib/sw-block
       volumes:
+        - name: tls
+          secret:
+            secretName: sw-block-master-tls
+        - name: roles
+          secret:
+            secretName: sw-block-roles
         - name: cluster-spec
           configMap:
             name: sw-block-cluster-spec
@@ -99,6 +115,9 @@ spec:
           args:
             - "--master=blockmaster.kube-system.svc.cluster.local:9333"
             - "--server-id=s1"
+            - "--master-tls-cert=/etc/sw-block/master-tls/tls.crt"
+            - "--master-tls-key=/etc/sw-block/master-tls/tls.key"
+            - "--master-ca=/etc/sw-block/master-tls/ca.crt"
             - "--volume-id=v1"
             - "--replica-id=r1"
             - "--data-addr=127.0.0.1:19101"
@@ -113,9 +132,15 @@ spec:
             - "--iscsi-listen=127.0.0.1:3260"
             - "--iscsi-iqn=iqn.2026-05.io.seaweedfs:g15b-v1"
           volumeMounts:
+            - name: master-tls
+              mountPath: /etc/sw-block/master-tls
+              readOnly: true
             - name: state
               mountPath: /var/lib/sw-block
       volumes:
+        - name: master-tls
+          secret:
+            secretName: sw-block-node-tls-s1
         - name: state
           emptyDir: {}
 ---
@@ -144,6 +169,9 @@ spec:
           args:
             - "--master=blockmaster.kube-system.svc.cluster.local:9333"
             - "--server-id=s2"
+            - "--master-tls-cert=/etc/sw-block/master-tls/tls.crt"
+            - "--master-tls-key=/etc/sw-block/master-tls/tls.key"
+            - "--master-ca=/etc/sw-block/master-tls/ca.crt"
             - "--volume-id=v1"
             - "--replica-id=r2"
             - "--data-addr=127.0.0.1:19201"
@@ -156,8 +184,14 @@ spec:
             - "--t1-readiness"
             - "--recovery-mode=dual-lane"
           volumeMounts:
+            - name: master-tls
+              mountPath: /etc/sw-block/master-tls
+              readOnly: true
             - name: state
               mountPath: /var/lib/sw-block
       volumes:
+        - name: master-tls
+          secret:
+            secretName: sw-block-node-tls-s2
         - name: state
           emptyDir: {}

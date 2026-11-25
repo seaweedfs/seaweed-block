@@ -119,7 +119,7 @@ Single-node behavior:
 Multi-node behavior:
 
 - multiple selected nodes,
-- non-loopback iSCSI/status addresses,
+- non-loopback iSCSI addresses (volume status stays on loopback),
 - CHAP enabled,
 - loopback publish-target rejection recorded in values.
 
@@ -157,6 +157,19 @@ Mutable `:alpha` is a smoke/demo tag only. Do not use it as release evidence
 unless the publish commit is known.
 
 ## Step 2 — Install Seaweed Block With Helm
+
+blockmaster listens on the pod network only with mutual TLS, so create its
+Secrets first. For a trial, the helper issues a development CA and one node
+certificate per server id (the `blockNodes[]` names, or their `serverID`):
+
+```bash
+bash scripts/k8s-alpha-certs.sh kube-system ~/.sw-block-alpha-tls node-a node-b node-c
+```
+
+It applies `sw-block-master-tls`, `sw-block-client-tls`, `sw-block-roles` and
+`sw-block-node-tls-<server id>`. Keep the directory private: a node key controls
+that host's volumes. For production, issue them from your own CA
+([operator guide](operator-guide.md#authenticate-the-control-api)).
 
 ```bash
 helm install sw-block charts/seaweed-block \

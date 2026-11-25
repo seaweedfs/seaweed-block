@@ -257,19 +257,25 @@ func TestNodeLoss_AlphaScriptsCanRejectLoopbackPublishTargets(t *testing.T) {
 	}
 }
 
-func TestNodeLoss_AlphaScriptsCanExposeExternalStatusForPromotionProbes(t *testing.T) {
-	for _, script := range []string{"install-k8s-alpha.sh", "run-alpha-app-demo.sh"} {
+// The alpha scripts install the mutual-TLS Secrets before the stack, and
+// refuse external status: an authenticated volume's status stays on loopback.
+func TestAlphaScriptsInstallTLSAndRefuseExternalStatus(t *testing.T) {
+	for _, script := range []string{"install-k8s-alpha.sh", "run-alpha-app-demo.sh", "run-g15d-k8s-dynamic.sh", "run-g15b-k8s-static.sh"} {
 		t.Run(script, func(t *testing.T) {
 			body := g15dReadFile(t, "scripts", script)
-			for _, want := range []string{
-				"SW_BLOCK_LAUNCHER_EXTERNAL_STATUS",
-				"SW_BLOCK_LAUNCHER_EXTERNAL_STATUS requires SW_BLOCK_LAUNCHER_EXTERNAL_ISCSI=1",
-				"--launcher-external-status",
-				"launcher_external_status=",
-			} {
-				if !strings.Contains(body, want) {
-					t.Fatalf("%s missing %q", script, want)
-				}
+			certs := strings.Index(body, "scripts/k8s-alpha-certs.sh")
+			stack := strings.Index(body, "kubectl apply -f \"$STACK_RENDERED\"")
+			if stack < 0 {
+				stack = strings.Index(body, "kubectl apply -f \"$ROOT/deploy/k8s/g15b/block-stack.yaml\"")
+			}
+			if certs < 0 || stack < 0 || certs > stack {
+				t.Fatalf("%s must apply the TLS Secrets before the block stack (certs at %d, stack at %d)", script, certs, stack)
+			}
+			if strings.Contains(body, "--launcher-external-status") {
+				t.Fatalf("%s still renders --launcher-external-status", script)
+			}
+			if strings.Contains(body, "SW_BLOCK_LAUNCHER_EXTERNAL_STATUS") && !strings.Contains(body, "SW_BLOCK_LAUNCHER_EXTERNAL_STATUS is not supported") {
+				t.Fatalf("%s accepts SW_BLOCK_LAUNCHER_EXTERNAL_STATUS without refusing it", script)
 			}
 		})
 	}

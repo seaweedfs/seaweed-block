@@ -38,4 +38,10 @@ spec:
             - "--namespace={{ .Release.Namespace }}"
             - "--cluster-name={{ .Values.operatorStatus.clusterName }}"
             - "--interval={{ .Values.operatorStatus.interval }}"
+          env:
+            {{- include "seaweed-block.masterTLSClientEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "seaweed-block.masterTLSClientMount" . | nindent 12 }}
+      volumes:
+        {{- include "seaweed-block.masterTLSClientVolume" . | nindent 8 }}
 {{- end }}

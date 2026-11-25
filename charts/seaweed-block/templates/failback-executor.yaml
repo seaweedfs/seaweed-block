@@ -63,4 +63,10 @@ spec:
             - "--failback-runtime-url={{ .Values.failbackExecutor.execution.failbackRuntimeURL }}"
             {{- end }}
             - "--interval={{ .Values.failbackExecutor.interval }}"
+          env:
+            {{- include "seaweed-block.masterTLSClientEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "seaweed-block.masterTLSClientMount" . | nindent 12 }}
+      volumes:
+        {{- include "seaweed-block.masterTLSClientVolume" . | nindent 8 }}
 {{- end }}

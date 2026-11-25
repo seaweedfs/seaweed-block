@@ -55,3 +55,32 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- .Values.storageClass.replicationFactor -}}
 {{- end -}}
 {{- end -}}
+
+{{/* Mutual TLS toward blockmaster for an in-cluster client: the Secret
+     .Values.tls.clientSecret mounted at /etc/sw-block/master-tls. */}}
+{{- define "seaweed-block.masterTLSClientFlags" -}}
+- "--master-tls-cert=/etc/sw-block/master-tls/tls.crt"
+- "--master-tls-key=/etc/sw-block/master-tls/tls.key"
+- "--master-ca=/etc/sw-block/master-tls/ca.crt"
+{{- end -}}
+
+{{- define "seaweed-block.masterTLSClientEnv" -}}
+- name: SW_BLOCK_TLS_CERT
+  value: /etc/sw-block/master-tls/tls.crt
+- name: SW_BLOCK_TLS_KEY
+  value: /etc/sw-block/master-tls/tls.key
+- name: SW_BLOCK_TLS_CA
+  value: /etc/sw-block/master-tls/ca.crt
+{{- end -}}
+
+{{- define "seaweed-block.masterTLSClientMount" -}}
+- name: master-tls
+  mountPath: /etc/sw-block/master-tls
+  readOnly: true
+{{- end -}}
+
+{{- define "seaweed-block.masterTLSClientVolume" -}}
+- name: master-tls
+  secret:
+    secretName: {{ .Values.tls.clientSecret }}
+{{- end -}}

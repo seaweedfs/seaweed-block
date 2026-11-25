@@ -197,11 +197,11 @@ bash scripts/uninstall-k8s-alpha.sh "$PWD" && bash scripts/verify-helm-cleanup.s
 Full table and conditions: [Kubernetes status](docs/kubernetes-status.md);
 run evidence: [release notes](docs/releases/README.md).
 
-**Upgrade note:** blockmaster now refuses a non-loopback `--listen` (and a
-non-loopback `--frontend-publication-runtime-listen` when that API is on)
-unless `--insecure-external-bind` is given, because its control API is
-unauthenticated. The Helm chart and the shipped manifests already pass it;
-a launcher of your own that binds blockmaster to a node address must add it.
+**Upgrade note:** blockmaster listens off loopback only with mutual TLS
+(`--tls-cert`, `--tls-key`, `--tls-client-ca`, `--role-file`); the runtime HTTP
+listener always stays on loopback, and `--insecure-external-bind` is refused.
+The Helm chart and the shipped manifests run with mutual TLS; create their
+Secrets first ([quickstart](docs/quickstart-kubernetes.md)).
 
 ### Not claimed yet
 

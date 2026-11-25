@@ -59,6 +59,15 @@
         "stateHostPath": { "type": "string" }
       }
     },
+    "tls": {
+      "type": "object",
+      "properties": {
+        "masterSecret": { "type": "string", "minLength": 1 },
+        "roleSecret": { "type": "string", "minLength": 1 },
+        "clientSecret": { "type": "string", "minLength": 1 },
+        "nodeSecretPrefix": { "type": "string", "minLength": 1 }
+      }
+    },
     "network": {
       "type": "object",
       "properties": {
