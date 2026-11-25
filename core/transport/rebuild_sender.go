@@ -146,7 +146,11 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, fron
 	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
 		return 0, fmt.Errorf("rebuild set deadline: %w", err)
 	}
-	if err := WriteMsg(conn, MsgRebuildDone, EncodeLineage(session.lineage)); err != nil {
+	done := EncodeLineage(session.lineage)
+	if e.epochs != nil {
+		done = append(done, EncodeEpochRows(e.epochs.Rows())...)
+	}
+	if err := WriteMsg(conn, MsgRebuildDone, done); err != nil {
 		return 0, fmt.Errorf("rebuild done: %w", err)
 	}
 	resp, err := recvBarrierResp(conn, recoveryConnTimeout)

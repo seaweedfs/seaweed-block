@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,6 +173,10 @@ func (t *EpochTable) persistLocked(rows []EpochRow) error {
 // before Serve.
 func (r *ReplicaListener) SetEpochTable(t *EpochTable) { r.epochs = t }
 
+// SetEpochTable installs the primary's epoch table on the executor, whose
+// rebuild-done frame then carries its rows.
+func (e *BlockExecutor) SetEpochTable(t *EpochTable) { e.epochs = t }
+
 // LastEpoch is the epoch of the last row; 0 = no rows.
 func (t *EpochTable) LastEpoch() uint64 {
 	t.mu.Lock()
@@ -198,6 +203,50 @@ func (t *EpochTable) LastDataEpochAt(end uint64) uint64 {
 		}
 	}
 	return 0
+}
+
+// EncodeEpochRows is the wire form of rows: [4B count][count x (8B epoch,
+// 8B first LSN)]. It follows the lineage in a rebuild-done frame.
+func EncodeEpochRows(rows []EpochRow) []byte {
+	buf := make([]byte, 4+16*len(rows))
+	binary.BigEndian.PutUint32(buf[0:4], uint32(len(rows)))
+	for i, r := range rows {
+		binary.BigEndian.PutUint64(buf[4+16*i:], r.Epoch)
+		binary.BigEndian.PutUint64(buf[12+16*i:], r.FirstLSN)
+	}
+	return buf
+}
+
+// DecodeEpochRows parses EncodeEpochRows strictly: the exact length and
+// ordered rows.
+func DecodeEpochRows(buf []byte) ([]EpochRow, error) {
+	if len(buf) < 4 {
+		return nil, errors.New("epoch rows: short")
+	}
+	n := binary.BigEndian.Uint32(buf[0:4])
+	if uint64(len(buf)) != 4+16*uint64(n) {
+		return nil, fmt.Errorf("epoch rows: %d bytes for %d rows", len(buf), n)
+	}
+	rows := make([]EpochRow, n)
+	for i := range rows {
+		rows[i] = EpochRow{Epoch: binary.BigEndian.Uint64(buf[4+16*i:]), FirstLSN: binary.BigEndian.Uint64(buf[12+16*i:])}
+	}
+	if err := checkEpochRows(rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// RowsThrough is the rows whose first LSN is at or below end: the primary's
+// history cut at a rebuild end.
+func RowsThrough(rows []EpochRow, end uint64) []EpochRow {
+	var out []EpochRow
+	for _, r := range rows {
+		if r.FirstLSN <= end {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Rows is a copy of the table.

@@ -548,6 +548,23 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: sync after rebuild done: %v", err)
 					return true
 				}
+				// The rebuilt image is the primary's history up to frontier:
+				// its rows cut there replace this table before the ack. A crash
+				// before the replace leaves the old rows, which reconcile as
+				// diverged: another rebuild, never a wrong count.
+				if len(payload) > 32 {
+					rows, err := DecodeEpochRows(payload[32:])
+					if err != nil {
+						log.Printf("replica: rebuild done epoch rows: %v", err)
+						return true
+					}
+					if r.epochs != nil {
+						if err := r.epochs.Replace(RowsThrough(rows, frontier)); err != nil {
+							log.Printf("replica: rebuild done epoch table: %v", err)
+							return true
+						}
+					}
+				}
 				// A completed full BASE supplies the covered starting image.
 				r.markPrefixEligibility(lineage, true)
 				// Echo the request's full lineage in the rebuild-done ack

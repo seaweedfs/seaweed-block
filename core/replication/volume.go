@@ -467,6 +467,7 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		})
 		if v.epochs != nil {
 			peer.setReconcile(func(ctx context.Context) (bool, bool, string) { return v.reconcilePeer(ctx, peer) })
+			executor.SetEpochTable(v.epochs)
 		}
 		// Push the volume-level probe cooldown config onto the fresh
 		// peer. A new peer (whether first add or post-lineage-bump

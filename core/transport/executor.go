@@ -34,6 +34,11 @@ type BlockExecutor struct {
 	// probe + fence always use the legacy path on replicaAddr.
 	dualLane *DualLaneConfig
 
+	// epochs is the primary's epoch table (nil = none); a rebuild-done frame
+	// carries its rows so the rebuilt replica's table names the history of
+	// the image it now holds.
+	epochs *EpochTable
+
 	mu              sync.Mutex
 	onSessionStart  adapter.OnSessionStart
 	onSessionClose  adapter.OnSessionClose
