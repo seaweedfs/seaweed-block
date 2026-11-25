@@ -111,20 +111,20 @@ type f1Sample struct {
 
 // f1Round is one volume's measurements in one round.
 type f1Round struct {
-	Volume          string  `json:"volume"`
-	Round           int     `json:"round"`
-	SnapshotMs      float64 `json:"snapshot_request_to_commit_ms"`
-	CutTotalMs      float64 `json:"cut_total_ms"`
-	BarrierPauseMs  float64 `json:"cut_barrier_pause_ms"`
-	UploadedChunks  int     `json:"uploaded_chunks"`
-	UploadedBytes   int64   `json:"uploaded_bytes"`
-	HostSlotWaits   uint64  `json:"host_slot_waits"`
-	SlotRetries     int     `json:"snapshot_slot_refusals_retried"`
-	SlotWaitMs      float64 `json:"snapshot_slot_wait_ms"`
-	RestoreMs       float64 `json:"restore_ms"`
+	Volume         string  `json:"volume"`
+	Round          int     `json:"round"`
+	SnapshotMs     float64 `json:"snapshot_request_to_commit_ms"`
+	CutTotalMs     float64 `json:"cut_total_ms"`
+	BarrierPauseMs float64 `json:"cut_barrier_pause_ms"`
+	UploadedChunks int     `json:"uploaded_chunks"`
+	UploadedBytes  int64   `json:"uploaded_bytes"`
+	HostSlotWaits  uint64  `json:"host_slot_waits"`
+	SlotRetries    int     `json:"snapshot_slot_refusals_retried"`
+	SlotWaitMs     float64 `json:"snapshot_slot_wait_ms"`
+	RestoreMs      float64 `json:"restore_ms"`
 	// RestoreExact is true or false for a snapshot that ran, "not_run" for
 	// one that was never admitted.
-	RestoreExact any `json:"restore_exact"`
+	RestoreExact    any     `json:"restore_exact"`
 	LoadPrefix      int     `json:"load_prefix_blocks"`
 	WritesIn        int     `json:"writes_in_window"`
 	WritesOut       int     `json:"writes_outside_window"`
@@ -140,15 +140,15 @@ type f1Round struct {
 }
 
 type f1Report struct {
-	Config      f1Config  `json:"config"`
-	Limiter     string    `json:"limiter"`
-	StartedAt   time.Time `json:"started_at"`
-	Rounds      []f1Round `json:"rounds"`
+	Config      f1Config   `json:"config"`
+	Limiter     string     `json:"limiter"`
+	StartedAt   time.Time  `json:"started_at"`
+	Rounds      []f1Round  `json:"rounds"`
 	Health      []f1Health `json:"heartbeat_health"`
-	CommitBound float64   `json:"commit_bound_ms"`
-	WriteErrors int       `json:"write_errors"`
-	Verdict     string    `json:"verdict"`
-	Failures    []string  `json:"failures,omitempty"`
+	CommitBound float64    `json:"commit_bound_ms"`
+	WriteErrors int        `json:"write_errors"`
+	Verdict     string     `json:"verdict"`
+	Failures    []string   `json:"failures,omitempty"`
 }
 
 func TestSnapshotLadderF1VolumesOneHost(t *testing.T) {
@@ -236,7 +236,7 @@ func f1StartEnv(t *testing.T, cfg f1Config) (*handoffEnv, *daemon) {
 	mstate := filepath.Join(h.dir, "master")
 	env.masterArgs = []string{"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://" + env.cluster.filerHTTP + env.chunkPath}
+		"--workspace-rpc", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
 	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
 	env.masterProcess = master

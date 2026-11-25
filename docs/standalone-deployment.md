@@ -168,8 +168,8 @@ listener before it has an assignment. Without one, the status shows
 | blockmaster logs `authority: rejected ask ...: workspace publication: no lifecycle VolumeRecord for v1; register it (CreateVolume) before publishing` | blockmaster runs with `--lifecycle-store`: a topology slot is then not enough, the volume also needs a volume record (below) |
 
 **Workspace lease volumes (`--workspace-lease`).** Besides the steps above,
-blockmaster needs `--workspace-rpc`, `--workspace-head-base-url` and
-`--lifecycle-store`, and the volume needs a single-replica volume record in
+blockmaster needs `--workspace-rpc`, `--chunk-filer` (and blockvolume's
+`--chunk-path`, when not the default) and `--lifecycle-store`, and the volume needs a single-replica volume record in
 that store. This release has no `sw-block` command that creates that record. Check with `sw-block ops workspace show --master 127.0.0.1:9180
 --volume v1`; it names the first missing piece: `workspace RPC disabled`,
 `lifecycle store unavailable`, or `workspace move requires an existing RF1
@@ -186,8 +186,7 @@ with `move target node "s2" is not registered`.
 | `SWB_MASTER_EXPECTED_SLOTS` | `--expected-slots-per-volume` | `3` | Replica slots per volume; `1` for a single replica |
 | `SWB_MASTER_FRESHNESS_WINDOW` | `--freshness-window` | `30s` | How long a heartbeat stays fresh |
 | `SWB_MASTER_PENDING_GRACE` | `--pending-grace` | `1s` | Startup grace before a missing observation is unsupported |
-| `SWB_MASTER_WORKSPACE_RPC` | `--workspace-rpc` | `false` | Workspace lease, revocation and move RPCs |
-| `SWB_MASTER_WORKSPACE_HEAD_BASE_URL` | `--workspace-head-base-url` | empty | Filer HTTP directory of HEAD files; required with `--workspace-rpc` |
+| `SWB_MASTER_WORKSPACE_RPC` | `--workspace-rpc` | `false` | Workspace lease, revocation and move RPCs; HEAD is read through the layout catalog (`--chunk-filer`, `--chunk-path` in `SWB_MASTER_EXTRA_ARGS`) |
 | `SWB_MASTER_WORKSPACE_MAX_CLOCK_SKEW` | `--workspace-max-clock-skew` | `20s` | Clock-skew bound for workspace leases and forced moves; must be >10.1s and <60s so half-skew exceeds the configured fence-exit budget, assuming normal scheduling |
 | `SWB_MASTER_EXTRA_ARGS` | any | empty | Other flags; the Kubernetes `--launcher-*` and `--lifecycle-*` flags are set by the Helm chart |
 

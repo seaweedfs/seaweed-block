@@ -63,7 +63,6 @@ type flags struct {
 	failbackRuntimeRPC                    bool
 	workspaceMaxClockSkew                 time.Duration
 	workspaceRPC                          bool
-	workspaceHEADBase                     string
 	chunkFiler                            string
 	chunkPath                             string
 	chunkCollection                       string
@@ -127,7 +126,6 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.failbackRuntimeRPC, "failback-runtime-rpc", false, "enable disabled-by-default authority failback RPC; requires expected-current and terminal evidence")
 	fs.DurationVar(&f.workspaceMaxClockSkew, "workspace-max-clock-skew", 20*time.Second, "maximum workspace clock skew; host lease shortens by half, forced moves wait the full bound")
 	fs.BoolVar(&f.workspaceRPC, "workspace-rpc", false, "enable RF1 workspace lease/revocation/move RPCs")
-	fs.StringVar(&f.workspaceHEADBase, "workspace-head-base-url", "", "filer HTTP base containing <name>-<layout-id-prefix>/HEAD; required with --workspace-rpc")
 	chunkstore.RegisterSWFSFlags(fs, &f.chunkFiler, &f.chunkPath, &f.chunkCollection, &f.chunkReplication)
 	fs.BoolVar(&f.frontendPublicationRuntimeHTTP, "frontend-publication-runtime-http", false, "enable disabled-by-default frontend publication HTTP runtime; confirms post-failback authority publication only")
 	fs.StringVar(&f.frontendPublicationRuntimeListen, "frontend-publication-runtime-listen", "127.0.0.1:9334", "HTTP listen address for --frontend-publication-runtime-http")
@@ -244,6 +242,9 @@ func run(f flags) int {
 		return 1
 	}
 	cfg.Auth, cfg.ServerOptions = authn, serverOpts
+	// The layout catalog is the master's one HEAD source (create, restore and
+	// the workspace reader all read through it).
+	var layoutCat *chunkstore.BCatalog
 	if f.workspaceRPC {
 		cat, client, err := chunkstore.DialBCatalog(context.Background(), chunkstore.SWFSConfig{
 			FilerGRPC: f.chunkFiler, Collection: f.chunkCollection,
@@ -258,6 +259,7 @@ func run(f flags) int {
 		cfg.LayoutReadVolume = layoutVolumeReader(cat)
 		cfg.LayoutReadHead = layoutHeadReader(cat)
 		cfg.LayoutCreateTarget = layoutTargetCreator(cat)
+		layoutCat = cat
 	}
 	if authn != nil {
 		if days, until, err := certDaysLeft(f.auth.tlsCert, f.auth.tlsKey, time.Now()); err == nil {
@@ -269,7 +271,7 @@ func run(f flags) int {
 	// New starts no loops: bind h before Start permits any HEAD request.
 	var h *master.Host
 	if f.workspaceRPC {
-		reader, err := master.NewLayoutWorkspaceHEADReader(f.workspaceHEADBase, func(ctx context.Context, name string) (chunkstore.VolumeRef, error) {
+		reader, err := master.NewLayoutWorkspaceHEADReader(layoutCat, func(ctx context.Context, name string) (chunkstore.VolumeRef, error) {
 			return h.WorkspaceLayoutVolume(ctx, name)
 		})
 		if err != nil {

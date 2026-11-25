@@ -45,20 +45,34 @@ var _ layout.HeadStore = (*LayoutStore)(nil)
 var _ layout.ObjectStore = (*LayoutStore)(nil)
 
 func (s *LayoutStore) ReadHead(ctx context.Context) (layout.Head, bool, error) {
+	h, _, found, err := s.ReadHeadObserved(ctx)
+	return h, found, err
+}
+
+// ReadHeadObserved is ReadHead with the HEAD entry's modification time as
+// the filer reports it on the same lookup (seconds resolution; the commit
+// that wrote HEAD set it), in nanoseconds; 0 when the entry carries none.
+func (s *LayoutStore) ReadHeadObserved(ctx context.Context) (h layout.Head, mtimeNS int64, found bool, err error) {
 	e, err := s.f.LookupEntry(ctx, s.root, layout.HeadName)
 	if errors.Is(err, ErrNotFound) {
-		return layout.Head{}, false, nil
+		return layout.Head{}, 0, false, nil
 	}
 	if err != nil {
-		return layout.Head{}, false, err
+		return layout.Head{}, 0, false, err
 	}
-	h, err := DecodeLayoutHeadEntry(e, s.id)
-	return h, err == nil, err
+	h, err = DecodeLayoutHeadEntry(e, s.id)
+	if err != nil {
+		return layout.Head{}, 0, false, err
+	}
+	if sec := e.GetAttributes().GetMtime(); sec > 0 {
+		mtimeNS = sec * int64(1e9)
+	}
+	return h, mtimeNS, true, nil
 }
 
 // DecodeLayoutHeadEntry validates the inline entry as one observation: its
 // generation and volume attributes must describe the canonical HEAD content.
-// Both filer RPC and HTTP metadata readers use this boundary.
+// Every HEAD reader (the holder's and the master's) uses this boundary.
 func DecodeLayoutHeadEntry(e *filerpb.Entry, id layout.VolumeID) (layout.Head, error) {
 	if e == nil || e.IsDirectory {
 		return layout.Head{}, fmt.Errorf("%w: HEAD is not a file", layout.ErrCorrupt)
