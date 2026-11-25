@@ -50,8 +50,10 @@ func rf3Primary(t *testing.T, h *Host) authority.AuthorityBasis {
 
 // The reference store of a replica is set only by the volume's primary
 // line holder at that line's epoch; a replica's own claim, a stale epoch or
-// another server is dropped; a later attestation without a replica drops
-// it; the record survives a master restart.
+// another server is dropped; a replica the primary stops attesting keeps
+// its last reference (it may hold the only copy of an acknowledged write),
+// a new attestation after its rebuild replaces it; the record survives a
+// master restart.
 func TestStoreAttestationOnlyFromThePrimaryLine(t *testing.T) {
 	dir := t.TempDir()
 	h, err := New(Config{AuthorityStoreDir: dir, LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0",
@@ -85,12 +87,19 @@ func TestStoreAttestationOnlyFromThePrimaryLine(t *testing.T) {
 	if got, ok := h.AttestedStore("vol-rf3", "r2"); !ok || got != s1 {
 		t.Fatalf("primary's attestation: r2 -> %x %t, want %x", got, ok, s1)
 	}
-	// r2 left the write-ACK set (its store was replaced, it is catching up).
+	// r2 left the write-ACK set: its reference stays S1.
 	if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", line.Epoch, map[string]storage.StoreID{"r1": storeID(1), "r3": t1})); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := h.AttestedStore("vol-rf3", "r2"); ok {
-		t.Fatal("a replica dropped from the primary's attestation is still attested")
+	if got, ok := h.AttestedStore("vol-rf3", "r2"); !ok || got != s1 {
+		t.Fatalf("r2 dropped from the ack set: reference %x %t; want its last attested store %x kept", got, ok, s1)
+	}
+	// r2 rebuilt onto a new store S2 and rejoined: S2 replaces S1.
+	if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", line.Epoch, map[string]storage.StoreID{"r1": storeID(1), "r2": s2, "r3": t1})); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := h.AttestedStore("vol-rf3", "r2"); !ok || got != s2 {
+		t.Fatalf("r2 rebuilt and attested again: reference %x %t; want %x", got, ok, s2)
 	}
 	reloaded, err := loadStoreAttestations(dir)
 	if err != nil {
@@ -99,8 +108,8 @@ func TestStoreAttestationOnlyFromThePrimaryLine(t *testing.T) {
 	if got, ok := reloaded.lookup("vol-rf3", "r3"); !ok || got != t1 {
 		t.Fatalf("after restart: r3 -> %x %t, want %x", got, ok, t1)
 	}
-	if _, ok := reloaded.lookup("vol-rf3", "r2"); ok {
-		t.Fatal("after restart: the dropped r2 is attested again")
+	if got, ok := reloaded.lookup("vol-rf3", "r2"); !ok || got != s2 {
+		t.Fatalf("after restart: r2 -> %x %t, want %x", got, ok, s2)
 	}
 }
 
@@ -212,4 +221,44 @@ var testStoreHex = hex.EncodeToString(testStoreID[:])
 
 func attestEvery(id storage.StoreID) func(string, string) (storage.StoreID, bool) {
 	return func(string, string) (storage.StoreID, bool) { return id, true }
+}
+
+// The record merges: a replica an attestation does not name keeps its last
+// reference (through a reload); one it names gets the new store; a lower
+// epoch changes nothing.
+func TestStoreAttestationsKeepADroppedReplicasReference(t *testing.T) {
+	dir := t.TempDir()
+	s, err := loadStoreAttestations(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1, s2, t1 := storeID(0x11), storeID(0x22), storeID(0x33)
+	for _, att := range []*control.StoreAttestation{
+		attestation("v", "r1", 5, map[string]storage.StoreID{"r2": s1, "r3": t1}),
+		attestation("v", "r1", 5, map[string]storage.StoreID{"r3": t1}),            // r2 dropped
+		attestation("v", "r1", 4, map[string]storage.StoreID{"r3": storeID(0x44)}), // deposed primary
+	} {
+		if err := s.record(att); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, ok := s.lookup("v", "r2"); !ok || got != s1 {
+		t.Fatalf("dropped r2: %x %t; want %x kept", got, ok, s1)
+	}
+	if got, _ := s.lookup("v", "r3"); got != t1 {
+		t.Fatalf("r3 after a lower-epoch report: %x; want %x", got, t1)
+	}
+	if err := s.record(attestation("v", "r1", 6, map[string]storage.StoreID{"r2": s2})); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := loadStoreAttestations(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := reloaded.lookup("v", "r2"); got != s2 {
+		t.Fatalf("r2 after its rebuild, reloaded: %x; want %x", got, s2)
+	}
+	if got, _ := reloaded.lookup("v", "r3"); got != t1 {
+		t.Fatalf("r3 not named at epoch 6, reloaded: %x; want %x kept", got, t1)
+	}
 }

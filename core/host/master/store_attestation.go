@@ -60,9 +60,9 @@ func loadStoreAttestations(dir string) (*storeAttestations, error) {
 	return s, nil
 }
 
-// lookup returns the store the volume's primary last attested for replica;
-// false when that replica is not in the attestation (never attested, or
-// dropped from the write-ACK set since).
+// lookup returns the store a primary of the volume last attested for
+// replica; false when none ever did. A replica dropped from the write-ACK
+// set since keeps it.
 func (s *storeAttestations) lookup(volumeID, replicaID string) (storage.StoreID, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -79,9 +79,11 @@ func (s *storeAttestations) lookup(volumeID, replicaID string) (storage.StoreID,
 	return id, !id.IsZero()
 }
 
-// record replaces the volume's attestation with att, in one write. An
-// attestation from a lower epoch than the recorded one is ignored (a
-// deposed primary's late report); an unchanged one writes nothing.
+// record merges att into the volume's record, in one write: each replica it
+// names gets that store as its reference; a replica it does not name keeps
+// its last one. An attestation from a lower epoch than the recorded one is
+// ignored (a deposed primary's late report); an unchanged one writes
+// nothing.
 func (s *storeAttestations) record(att *control.StoreAttestation) error {
 	next := attestedStores{Primary: att.GetReplicaId(), Epoch: att.GetEpoch(), Stores: map[string]string{}}
 	for _, st := range att.GetStores() {
@@ -100,6 +102,14 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 	cur, had := s.vols[att.GetVolumeId()]
 	if had && next.Epoch < cur.Epoch {
 		return nil
+	}
+	// A replica the primary no longer attests keeps its last reference: it
+	// may be the only holder of an acknowledged write, and only that store
+	// can still prove it. A new attestation (after a rebuild) replaces it.
+	for id, sid := range cur.Stores {
+		if _, again := next.Stores[id]; !again {
+			next.Stores[id] = sid
+		}
 	}
 	if had && sameAttestation(cur, next) {
 		return nil
