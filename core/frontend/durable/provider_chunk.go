@@ -8,9 +8,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -483,15 +480,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	}
 	bound.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer bound.setAttach(nil)
-	var remote storage.ChunkRemote = bound
-	if builder, ok := inner.(storage.ChunkManifestBuilder); ok {
-		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
-	}
 	keyer, ok := inner.(storage.ChunkKeyer)
 	if !ok {
 		return nil, errors.New("durable: layout remote lacks content keys")
 	}
-	remote = &layoutBoundRemote{closeBoundRemote: bound, keyer: keyer}
+	var remote storage.ChunkRemote = &layoutBoundRemote{closeBoundRemote: bound, keyer: keyer}
 	cfg := storage.ChunkLayerConfig{
 		OnPublishSettled:    p.publishSettledHook(volumeID),
 		ChunkBlocks:         p.cfg.ChunkBlocks,
@@ -648,52 +641,6 @@ func (r *closeBoundRemote) ListIntents(ctx context.Context) ([]storage.ChunkInte
 	c, end := r.bind(ctx)
 	defer end()
 	return r.ChunkRemote.ListIntents(c)
-}
-
-// The fresh marker: <volume path>.chunkfresh.
-
-func chunkFreshMarker(path string) string { return path + ".chunkfresh" }
-
-func writeChunkFreshMarker(path string) error {
-	m := chunkFreshMarker(path)
-	f, err := os.OpenFile(m, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("durable: fresh marker: %w", err)
-	}
-	_, werr := f.WriteString("fresh\n")
-	serr := f.Sync()
-	cerr := f.Close()
-	if err := errors.Join(werr, serr, cerr); err != nil {
-		return fmt.Errorf("durable: fresh marker: %w", err)
-	}
-	return syncParentDir(m)
-}
-
-func removeChunkFreshMarker(path string) error {
-	m := chunkFreshMarker(path)
-	if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("durable: remove fresh marker: %w", err)
-	}
-	return syncParentDir(m)
-}
-
-// syncParentDir makes a create or remove in path's directory durable. A
-// directory cannot be fsynced on Windows; there it is a no-op (no Windows
-// crash-durability claim).
-func syncParentDir(path string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("durable: open directory: %w", err)
-	}
-	serr := d.Sync()
-	cerr := d.Close()
-	if err := errors.Join(serr, cerr); err != nil {
-		return fmt.Errorf("durable: fsync directory: %w", err)
-	}
-	return nil
 }
 
 // Cut scheduler constants (B9 W3 ruling).
@@ -1472,19 +1419,6 @@ func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer
 	return fmt.Errorf("%w: %w", ErrDetachAborted, cause)
 }
 
-// Preserve the optional manifest capability only when the inner remote has it;
-// legacy in-memory/flat remotes keep their existing no-op cut behavior.
-type manifestBoundRemote struct {
-	*closeBoundRemote
-	builder storage.ChunkManifestBuilder
-}
-
-func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, []string, error) {
-	c, end := r.bind(ctx)
-	defer end()
-	return r.builder.PrepareManifest(c, base, next, chunkBytes)
-}
-
 // publishSettledHook adapts ChunkOnPublishSettled to one volume's layer.
 func (p *DurableProvider) publishSettledHook(volumeID string) func(context.Context, storage.ChunkHead, storage.ChunkHead) {
 	hook := p.cfg.ChunkOnPublishSettled
@@ -1526,10 +1460,4 @@ func (w *cutWaitSlot) status(cutSeq uint64) CutScheduleStatus {
 		st.HostSlotWaitSinceNs = 0
 	}
 	return st
-}
-
-// INV-WS-STARTUP-RETRY-001: a displaced lower-epoch claim fences this
-// attempt, but cannot prove the assigned holder was superseded.
-func claimHeadSupersedes(head storage.ChunkHead, cfg storage.ChunkLayerConfig) bool {
-	return head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder && head.Epoch >= cfg.Epoch
 }

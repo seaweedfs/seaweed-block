@@ -352,7 +352,7 @@ type chunkLayerConfig struct {
 	// and durably seeded. A changed read refuses before hooks/readiness; the
 	// next recovery must repeat claim and seed. Nil is for direct layer users.
 	RestoreGuard *chunkHeadVersion
-	// PrepareRestore runs after ClaimChunkHead validates its observed HEAD
+	// PrepareRestore runs after layout.Start validates its observed HEAD
 	// and before any ownership CAS (also for an idempotent claim). The owner
 	// durably seeds the local frontier and rebases cached ship cursors here,
 	// while its frontend is gated. An error leaves remote ownership unchanged.

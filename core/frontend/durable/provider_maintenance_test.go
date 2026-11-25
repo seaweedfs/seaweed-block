@@ -209,7 +209,9 @@ func TestCutDeadlineIncludesUploadWithBackgroundCaller(t *testing.T) {
 		t.Fatalf("whole cut did not expire: %v", err)
 	}
 	h, found, err := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
-	if err != nil || !found || h.Gen != claimed.Gen {
+	// BeginSnap may advance HEAD's generation before the upload. The
+	// deadline must still prevent the content and position from committing.
+	if err != nil || !found || h.Current != nil || h.Position != claimed.Position || len(h.Snapshots) != len(claimed.Snapshots) {
 		t.Fatalf("expired upload published: %+v %v", h, err)
 	}
 }

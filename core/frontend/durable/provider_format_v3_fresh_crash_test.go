@@ -22,6 +22,9 @@ type freshCrashImage struct {
 	Objects map[string][]byte
 }
 
+// Legacy format test fixture only; B records fresh state in the WAL descriptor.
+func chunkFreshMarker(path string) string { return path + ".chunkfresh" }
+
 func freshCrashRemote(t *testing.T, path string) *storage.MemChunkRemote {
 	t.Helper()
 	raw, err := os.ReadFile(path)
