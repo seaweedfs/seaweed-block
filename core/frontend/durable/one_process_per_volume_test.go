@@ -8,18 +8,20 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // lockedProvider is a chunk provider whose host volume-lock directory is dir.
-func lockedProvider(t *testing.T, root, lockDir string, remote storage.ChunkRemote) *durable.DurableProvider {
+func lockedProvider(t *testing.T, root, lockDir string, fixture *testutil.LayoutFixture) *durable.DurableProvider {
 	t.Helper()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root,
 		HostVolumeLock: true, VolumeLockDirTestOnly: lockDir,
 		BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, v1View())
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatalf("NewDurableProvider: %v", err)
 	}
@@ -32,9 +34,9 @@ func lockedProvider(t *testing.T, root, lockDir string, remote storage.ChunkRemo
 // the same host lock directory) is refused before its store opens; once the
 // first closes, the volume can be opened again.
 func TestOneLiveProcessPerVolumePerHost(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	lockDir := t.TempDir()
-	a := lockedProvider(t, t.TempDir(), lockDir, remote)
+	a := lockedProvider(t, t.TempDir(), lockDir, fixture)
 	if _, err := a.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -43,21 +45,21 @@ func TestOneLiveProcessPerVolumePerHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	bRoot := t.TempDir()
-	b := lockedProvider(t, bRoot, lockDir, remote)
+	b := lockedProvider(t, bRoot, lockDir, fixture)
 	if _, err := b.EnsureStorage("v1"); !errors.Is(err, storage.ErrWALStoreLocked) {
 		t.Fatalf("a second provider for the same volume on this host opened: %v; want %v", err, storage.ErrWALStoreLocked)
 	}
 	if left, err := os.ReadDir(bRoot); err != nil || len(left) != 0 {
 		t.Fatalf("the refused second provider touched its root: %v %v", left, err)
 	}
-	other := lockedProvider(t, t.TempDir(), lockDir, remote)
+	other := lockedProvider(t, t.TempDir(), lockDir, fixture)
 	if _, err := other.EnsureStorage("v2"); err != nil {
 		t.Fatalf("another volume was refused by v1's lock: %v", err)
 	}
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
-	c := lockedProvider(t, t.TempDir(), lockDir, remote)
+	c := lockedProvider(t, t.TempDir(), lockDir, fixture)
 	if _, err := c.EnsureStorage("v1"); err != nil {
 		t.Fatalf("the volume could not be opened after its first owner closed: %v", err)
 	}
