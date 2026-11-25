@@ -31,6 +31,9 @@ func candidate(replicaID, serverID, dataAddr, ctrlAddr string, evidence uint64) 
 		Eligible:          true,
 		EvidenceScore:     evidence,
 		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: evidence},
+		// The gate's planned-move guard held (the profile puts the target in
+		// every acknowledgement set).
+		PlannedMoveAllowed: true,
 	}
 }
 
@@ -516,5 +519,43 @@ func TestTopologyController_NoPrimaryChangeWithoutTheGatesEvidence(t *testing.T)
 	defer cancel()
 	if ask, err := c.Next(ctx); err == nil && ask.Intent == IntentReassign {
 		t.Fatalf("a primary change without the gate's evidence: %+v", ask)
+	}
+}
+
+// A rebalance moves the primary while it is alive: a planned move. With the
+// gate's evidence but not its planned-move guard (RF3 sync_quorum, or
+// best_effort), the controller publishes no rebalance.
+func TestTopologyController_RebalanceNeedsThePlannedMoveGuard(t *testing.T) {
+	for _, guard := range []bool{true, false} {
+		t.Run(map[bool]string{true: "guard held", false: "guard refused"}[guard], func(t *testing.T) {
+			planned := func(c ReplicaCandidate) ReplicaCandidate { c.PlannedMoveAllowed = guard; return c }
+			reader := newFakeBasisReader()
+			reader.Set("v1", "v1r1", AuthorityBasis{Assigned: true, ReplicaID: "v1r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d11", CtrlAddr: "c11"})
+			reader.Set("v2", "v2r1", AuthorityBasis{Assigned: true, ReplicaID: "v2r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d21", CtrlAddr: "c21"})
+			reader.Set("v3", "v3r2", AuthorityBasis{Assigned: true, ReplicaID: "v3r2", Epoch: 1, EndpointVersion: 1, DataAddr: "d32", CtrlAddr: "c32"})
+			ctrl := NewTopologyController(TopologyControllerConfig{RebalanceSkew: 1}, reader)
+			snap := ClusterSnapshot{
+				CollectedRevision: 3,
+				Servers:           []ServerObservation{{ServerID: "s1", Reachable: true, Eligible: true}, {ServerID: "s2", Reachable: true, Eligible: true}, {ServerID: "s3", Reachable: true, Eligible: true}},
+				Volumes: []VolumeTopologySnapshot{
+					clusterVolume("v1", AuthorityBasis{Assigned: true, ReplicaID: "v1r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d11", CtrlAddr: "c11"},
+						candidate("v1r1", "s1", "d11", "c11", 10), planned(candidate("v1r2", "s2", "d12", "c12", 10)), planned(candidate("v1r3", "s3", "d13", "c13", 30))),
+					clusterVolume("v2", AuthorityBasis{Assigned: true, ReplicaID: "v2r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d21", CtrlAddr: "c21"},
+						candidate("v2r1", "s1", "d21", "c21", 10), planned(candidate("v2r2", "s2", "d22", "c22", 10)), planned(candidate("v2r3", "s3", "d23", "c23", 10))),
+					clusterVolume("v3", AuthorityBasis{Assigned: true, ReplicaID: "v3r2", Epoch: 1, EndpointVersion: 1, DataAddr: "d32", CtrlAddr: "c32"},
+						planned(candidate("v3r1", "s1", "d31", "c31", 10)), candidate("v3r2", "s2", "d32", "c32", 10), planned(candidate("v3r3", "s3", "d33", "c33", 10))),
+				},
+			}
+			if err := ctrl.SubmitClusterSnapshot(snap); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			ask, err := ctrl.Next(ctx)
+			moved := err == nil && ask.Intent == IntentReassign
+			if moved != guard {
+				t.Fatalf("guard=%t: ask=%+v err=%v", guard, ask, err)
+			}
+		})
 	}
 }

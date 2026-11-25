@@ -496,8 +496,10 @@ func (c *TopologyController) decideVolume(
 		}
 		if target, ok := chooseRebalanceCandidate(vol, current, serverIndex, currentLoad, projectedLoad, c.config.RebalanceSkew); ok {
 			// A primary change goes out only with the promotion gate's
-			// evidence for its target (one decider): none, no rebalance.
-			if target.PromotionEvidence.Kind != adapter.PrimaryKindPromotion {
+			// evidence for its target (one decider): none, no rebalance. The
+			// current primary is alive, so it is a planned move: the same
+			// guard as a failback (the target in every acknowledgement set).
+			if target.PromotionEvidence.Kind != adapter.PrimaryKindPromotion || !target.PlannedMoveAllowed {
 				return AssignmentAsk{}, "", false
 			}
 			return AssignmentAsk{

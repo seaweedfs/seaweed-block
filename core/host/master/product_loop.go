@@ -262,10 +262,12 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 			if allowed[slot.ReplicaID] {
 				slot.ReadyForPrimary = true
 				slot.PromotionEvidence = promotionEvidenceFor(result, slot.ReplicaID)
+				slot.PlannedMoveAllowed = plannedMoveAllowed(result.AckProfile, len(vol.Slots)) == nil
 				enabledCandidate = true
 			} else {
 				slot.ReadyForPrimary = false
 				slot.PromotionEvidence = adapter.PrimaryEvidence{}
+				slot.PlannedMoveAllowed = false
 			}
 		}
 		// After the (blocking) probe, judge the current primary from its
