@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"io"
 	"sort"
 	"strings"
@@ -46,22 +50,41 @@ func bCatalog(name, filer, base string, writes bool, timeout time.Duration, stdo
 	return cat, closeFn, -1
 }
 
-// volumeFlags are a volume's name and layout id, as its master record
-// holds them (sw-block volume status prints both).
-type volumeFlags struct{ name, id string }
+// volumeFlags name a volume; its layout id is resolved through the
+// master's volume record (never minted, never read from the filer).
+type volumeFlags struct {
+	name string
+	cmd  *bCommand
+}
 
-func (v *volumeFlags) bind(fs *flag.FlagSet, prefix, what string) {
-	fs.StringVar(&v.name, prefix, "", what+" name")
-	fs.StringVar(&v.id, prefix+"-layout-id", "", what+" layout id (from the master's volume record)")
+// resolveVolumeID resolves a volume name to its layout id at the master.
+// Tests replace it.
+var resolveVolumeID = func(ctx context.Context, master, name string) (layout.VolumeID, error) {
+	conn, err := link.Dial(master)
+	if err != nil {
+		return layout.VolumeID{}, err
+	}
+	defer conn.Close()
+	return lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), name)
+}
+
+func (c *bCommand) bindVolume(v *volumeFlags, flagName, what string) {
+	v.cmd = c
+	c.fs.StringVar(&v.name, flagName, "", what+" name")
 }
 
 func (v volumeFlags) ref(flagName string) (chunkstore.VolumeRef, error) {
-	if v.name == "" || v.id == "" {
-		return chunkstore.VolumeRef{}, errors.New("--" + flagName + " and --" + flagName + "-layout-id are required")
+	if v.name == "" {
+		return chunkstore.VolumeRef{}, errors.New("--" + flagName + " is required")
 	}
-	id, err := layout.ParseVolumeID(v.id)
+	if v.cmd.master == "" {
+		return chunkstore.VolumeRef{}, errors.New("--master is required (it resolves the volume's layout id)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), v.cmd.timeout)
+	defer cancel()
+	id, err := resolveVolumeID(ctx, v.cmd.master, v.name)
 	if err != nil {
-		return chunkstore.VolumeRef{}, err
+		return chunkstore.VolumeRef{}, fmt.Errorf("resolve --%s %q at the master: %w", flagName, v.name, err)
 	}
 	return chunkstore.VolumeRef{Name: v.name, ID: id}, nil
 }
@@ -69,10 +92,10 @@ func (v volumeFlags) ref(flagName string) (chunkstore.VolumeRef, error) {
 // bCommand parses a catalog command's flags (with --chunk-filer,
 // --chunk-path and --timeout) and opens the catalog.
 type bCommand struct {
-	fs             *flag.FlagSet
-	filer, base    string
-	timeout        time.Duration
-	stdout, stderr io.Writer
+	fs                  *flag.FlagSet
+	filer, base, master string
+	timeout             time.Duration
+	stdout, stderr      io.Writer
 }
 
 func newBCommand(name string, timeout time.Duration, stdout, stderr io.Writer) *bCommand {
@@ -80,6 +103,7 @@ func newBCommand(name string, timeout time.Duration, stdout, stderr io.Writer) *
 	c.fs.StringVar(&c.filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	c.fs.StringVar(&c.base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
 	c.fs.DurationVar(&c.timeout, "timeout", timeout, "filer timeout")
+	c.fs.StringVar(&c.master, "master", "", "blockmaster gRPC address (resolves each volume's layout id)")
 	return c
 }
 
@@ -115,7 +139,7 @@ func chunkSnapshots(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("snapshots", 30*time.Second, stdout, stderr)
 	var vol volumeFlags
 	var prefix string
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	c.fs.StringVar(&prefix, "prefix", "", "only names with this prefix")
 	var ref chunkstore.VolumeRef
 	return c.run(args, false, func() (err error) { ref, err = vol.ref("volume"); return err }, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
@@ -148,7 +172,7 @@ func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("snapshot-delete", 30*time.Second, stdout, stderr)
 	var vol volumeFlags
 	var name string
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	c.fs.StringVar(&name, "name", "", "snapshot name")
 	var ref chunkstore.VolumeRef
 	return c.run(args, true, func() (err error) {
@@ -169,7 +193,7 @@ func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
 func chunkShow(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("show", 30*time.Second, stdout, stderr)
 	var vol volumeFlags
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	var ref chunkstore.VolumeRef
 	return c.run(args, false, func() (err error) { ref, err = vol.ref("volume"); return err }, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
 		s, err := cat.Store(ref)
@@ -199,7 +223,7 @@ func chunkShow(args []string, stdout, stderr io.Writer) int {
 func chunkUsage(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("usage", 60*time.Second, stdout, stderr)
 	var vol volumeFlags
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	var ref chunkstore.VolumeRef
 	return c.run(args, false, func() (err error) { ref, err = vol.ref("volume"); return err }, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
 		return cat.Usage(ctx, ref)
@@ -214,8 +238,8 @@ func chunkRestore(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("restore", 6*time.Minute, stdout, stderr)
 	var src, tgt volumeFlags
 	var snapshot string
-	src.bind(c.fs, "source", "source volume")
-	tgt.bind(c.fs, "target", "new volume")
+	c.bindVolume(&src, "source", "source volume")
+	c.bindVolume(&tgt, "target", "new volume")
 	c.fs.StringVar(&snapshot, "snapshot", "", "source snapshot name")
 	var sref, tref chunkstore.VolumeRef
 	return c.run(args, true, func() (err error) {
@@ -243,8 +267,8 @@ func chunkRestore(args []string, stdout, stderr io.Writer) int {
 func chunkRelease(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("release", 30*time.Second, stdout, stderr)
 	var src, tgt volumeFlags
-	src.bind(c.fs, "source", "source volume")
-	tgt.bind(c.fs, "target", "restore target")
+	c.bindVolume(&src, "source", "source volume")
+	c.bindVolume(&tgt, "target", "restore target")
 	var sref, tref chunkstore.VolumeRef
 	return c.run(args, true, func() (err error) {
 		if sref, err = src.ref("source"); err != nil {
@@ -307,7 +331,7 @@ func chunkRetain(args []string, stdout, stderr io.Writer) int {
 	var prefix string
 	var keep int
 	var dryRun bool
-	vol.bind(c.fs, "volume", "volume")
+	c.bindVolume(&vol, "volume", "volume")
 	c.fs.StringVar(&prefix, "prefix", "", "the schedule's name prefix; only these names are considered")
 	c.fs.IntVar(&keep, "keep-newest", 0, "keep the newest N names with the prefix")
 	c.fs.BoolVar(&dryRun, "dry-run", false, "list what would be deleted; write nothing")

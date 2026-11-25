@@ -48,12 +48,25 @@ func (m *memChunkStore) Get(_ context.Context, fid string) ([]byte, error) {
 	return append([]byte(nil), b...), nil
 }
 
-// useMemChunkStore makes every ops chunk command dial store.
+// testIDs is the master's volume records the commands resolve against:
+// every volume a test names through volArgs.
+var testIDs sync.Map
+
+// useMemChunkStore makes every ops chunk command dial store and resolve
+// names against testIDs.
 func useMemChunkStore(t *testing.T, store *memChunkStore) {
 	t.Helper()
-	prev := dialChunkFiler
+	prev, prevResolve := dialChunkFiler, resolveVolumeID
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
-	t.Cleanup(func() { dialChunkFiler = prev })
+	resolveVolumeID = testResolve
+	t.Cleanup(func() { dialChunkFiler, resolveVolumeID = prev, prevResolve })
+}
+
+func testResolve(_ context.Context, _ string, name string) (layout.VolumeID, error) {
+	if id, ok := testIDs.Load(name); ok {
+		return id.(layout.VolumeID), nil
+	}
+	return layout.VolumeID{}, status.Error(codes.NotFound, "volume not found")
 }
 
 type okLease struct{}
@@ -106,11 +119,12 @@ func cliVolume(t *testing.T, store *memChunkStore, name, snap string) chunkstore
 }
 
 func volArgs(flag string, v chunkstore.VolumeRef) []string {
-	return []string{"--" + flag, v.Name, "--" + flag + "-layout-id", v.ID.String()}
+	testIDs.Store(v.Name, v.ID)
+	return []string{"--" + flag, v.Name}
 }
 
 func cliArgs(cmd string, parts ...[]string) []string {
-	out := []string{cmd, "--chunk-filer", "filer:18888"}
+	out := []string{cmd, "--chunk-filer", "filer:18888", "--master", "m:1"}
 	for _, p := range parts {
 		out = append(out, p...)
 	}
@@ -150,11 +164,11 @@ func TestOpsChunk_CatalogCommands(t *testing.T) {
 	if code, out, _ := runChunk(cliArgs("restore", volArgs("source", src), volArgs("target", tgt), []string{"--snapshot", "weekly"})...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "snapshot_not_found" {
 		t.Fatalf("restore of a missing snapshot: %d %q", code, out)
 	}
-	if code, out, _ := runChunk(cliArgs("snapshots", []string{"--volume", "src"})...); code != 2 || chunkErrorOut(t, out).Code != "bad_request" {
-		t.Fatalf("snapshots without the layout id: %d %q", code, out)
+	if code, out, _ := runChunk("snapshots", "--chunk-filer", "f:1", "--volume", "src"); code != 2 || !strings.Contains(out, "--master is required") {
+		t.Fatalf("snapshots without --master: %d %q", code, out)
 	}
-	if code, out, _ := runChunk(cliArgs("snapshots", []string{"--volume", "src", "--volume-layout-id", "zz"})...); code != 2 {
-		t.Fatalf("snapshots with a bad layout id: %d %q", code, out)
+	if code, out, _ := runChunk(cliArgs("snapshots", []string{"--volume", "unknown-to-the-master"})...); code != 2 || !strings.Contains(out, "resolve --volume") {
+		t.Fatalf("snapshots of a volume the master does not know: %d %q", code, out)
 	}
 }
 

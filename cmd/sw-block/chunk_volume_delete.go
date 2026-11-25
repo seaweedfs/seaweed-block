@@ -17,7 +17,7 @@ import (
 )
 
 // chunkVolumeDelete: sw-block ops chunk volume-delete --volume v
-// --volume-layout-id id --chunk-filer host:port --master host:port
+// --chunk-filer host:port --master host:port
 // --request-id r deletes a volume in the layout kernel's order after the
 // blockmaster admits it (MarkVolumeDeleting: refused while the volume has
 // a live or pending authority line; from then on nothing assigns, places
@@ -26,19 +26,18 @@ import (
 func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("volume-delete", time.Minute, stdout, stderr)
 	var vol volumeFlags
-	var master, requestID string
-	vol.bind(c.fs, "volume", "volume")
-	c.fs.StringVar(&master, "master", "", "authoritative blockmaster gRPC address (admits the delete)")
+	var requestID string
+	c.bindVolume(&vol, "volume", "volume")
 	c.fs.StringVar(&requestID, "request-id", "", "this delete's operation id; a rerun with the same id resumes its admission")
 	var ref chunkstore.VolumeRef
 	return c.run(args, true, func() (err error) {
-		if master == "" || requestID == "" || c.timeout <= 0 {
+		if c.master == "" || requestID == "" || c.timeout <= 0 {
 			return errors.New("--master and --request-id are required; --timeout must be positive")
 		}
 		ref, err = vol.ref("volume")
 		return err
 	}, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
-		conn, err := link.Dial(master)
+		conn, err := link.Dial(c.master)
 		if err != nil {
 			return nil, err
 		}

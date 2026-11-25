@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
 // Every ops chunk command that writes chunk metadata runs the
@@ -19,9 +20,12 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 	prevDial, prevCheck := dialChunkFiler, checkSingleFiler
 	t.Cleanup(func() { dialChunkFiler, checkSingleFiler = prevDial, prevCheck })
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
-	id := []string{"--volume-layout-id", "00112233445566778899aabbccddeeff"}
-	src := []string{"--source", "v1", "--source-layout-id", "00112233445566778899aabbccddeeff"}
-	tgt := []string{"--target", "v2", "--target-layout-id", "ffeeddccbbaa99887766554433221100"}
+	prevResolve := resolveVolumeID
+	t.Cleanup(func() { resolveVolumeID = prevResolve })
+	resolveVolumeID = func(context.Context, string, string) (layout.VolumeID, error) { return layout.VolumeID{1}, nil }
+	id := []string{"--master", "m:1"}
+	src := []string{"--source", "v1", "--master", "m:1"}
+	tgt := []string{"--target", "v2"}
 	checks := 0
 	checkSingleFiler = func(context.Context, chunkstore.Filer) error {
 		checks++
@@ -69,8 +73,9 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 // the command at the timeout, as a retryable refusal.
 func TestOpsChunk_StartCheckIsBoundedByTheTimeout(t *testing.T) {
 	mem := chunkstore.NewMemFiler()
-	prevDial, prevCheck := dialChunkFiler, checkSingleFiler
-	t.Cleanup(func() { dialChunkFiler, checkSingleFiler = prevDial, prevCheck })
+	prevDial, prevCheck, prevResolve := dialChunkFiler, checkSingleFiler, resolveVolumeID
+	t.Cleanup(func() { dialChunkFiler, checkSingleFiler, resolveVolumeID = prevDial, prevCheck, prevResolve })
+	resolveVolumeID = func(context.Context, string, string) (layout.VolumeID, error) { return layout.VolumeID{1}, nil }
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
 	checkSingleFiler = func(ctx context.Context, _ chunkstore.Filer) error {
 		<-ctx.Done()
@@ -78,7 +83,7 @@ func TestOpsChunk_StartCheckIsBoundedByTheTimeout(t *testing.T) {
 	}
 	filer := []string{"--chunk-filer", "filer:18888", "--timeout", "200ms"}
 	for name, args := range map[string][]string{
-		"snapshot-delete": append([]string{"ops", "chunk", "snapshot-delete", "--volume", "v1", "--volume-layout-id", "00112233445566778899aabbccddeeff", "--name", "s1"}, filer...),
+		"snapshot-delete": append([]string{"ops", "chunk", "snapshot-delete", "--volume", "v1", "--master", "m:1", "--name", "s1"}, filer...),
 		"gc --apply":      append([]string{"ops", "chunk", "gc", "--master", "m:1", "--apply"}, filer...),
 	} {
 		done := make(chan struct{})
