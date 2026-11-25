@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
@@ -505,5 +506,27 @@ func TestLayoutRemote_StagedUploadsOfAnEndedSessionAreRedone(t *testing.T) {
 	}
 	if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h1.Gen, Epoch: 1}, next); err != nil {
 		t.Fatalf("the retry after uploading again: %v", err)
+	}
+}
+
+// A snapshot name the commit would refuse for its form (too long, here) is
+// refused before the commit, and the cut commits unnamed; a malformed
+// manifest is never reported as a name refusal.
+func TestLayoutRemote_ABadSnapshotNameIsRefusedBeforeTheCommit(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{1: block(1)})
+	r.SetSnapshot(strings.Repeat("n", layout.MaxSnapshotNameBytes+1), layout.SnapshotMeta{})
+	h, err := l.Capture(ctx)
+	if err != nil {
+		t.Fatalf("cut with a too-long snapshot name: %v", err)
+	}
+	if err := r.TakeSnapshotErr(); !errors.Is(err, layout.ErrMalformed) {
+		t.Fatalf("name refusal: %v; want ErrMalformed", err)
+	}
+	if hd := lh.head(); hd.Position != h || len(hd.Snapshots) != 0 {
+		t.Fatalf("HEAD after the refused name: %+v", hd)
 	}
 }

@@ -301,7 +301,13 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 		req.State = layout.StateDetached
 	}
 	if l.pending != nil {
-		req.Snapshot, req.Meta = l.pending.name, l.pending.meta
+		if err := layout.CheckSnapshot(l.pending.name, l.pending.meta); err != nil {
+			// A name or facts the commit would refuse: the cut commits
+			// unnamed and the request gets the refusal.
+			l.snapErr, l.pending = err, nil
+		} else {
+			req.Snapshot, req.Meta = l.pending.name, l.pending.meta
+		}
 	}
 	got, err := layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
 	if err != nil && req.Snapshot != "" && snapshotRefusal(err) {
@@ -407,9 +413,10 @@ func (l *LayoutRemote) Delete(context.Context, string) error { return nil }
 // name hashes the stored bytes, which must be the logical bytes).
 var ErrUnsupportedEncoding = errors.New("chunkstore: unsupported chunk encoding on the layout")
 
-// snapshotRefusal reports a kernel refusal of the snapshot name alone.
+// snapshotRefusal reports a commit-time refusal of the snapshot name alone
+// (the name's own form is checked before the commit, CheckSnapshot).
 func snapshotRefusal(err error) bool {
-	return errors.Is(err, layout.ErrTooManySnapshots) || errors.Is(err, layout.ErrSnapshotExists) || errors.Is(err, layout.ErrMalformed)
+	return errors.Is(err, layout.ErrTooManySnapshots) || errors.Is(err, layout.ErrSnapshotExists)
 }
 
 // kernelRefusals are answers of the store (a condition failed), as opposed
@@ -448,7 +455,9 @@ func (l *LayoutRemote) LastCommit() layout.Head {
 // Clean runs one cleaning of this holder between sessions: clean(c) opens
 // HEAD, run removes unreachable names under session c, and clean(c) ends.
 // A cut or a stop that needs HEAD meanwhile cancels run's context and
-// waits for it to end: neither waits on a cleaning nor fails busy.
+// waits for it to end: neither waits on a cleaning nor fails busy. A pass
+// cancelled between its mark and its delete leaves a mark the next
+// cleaning takes over (the removal plans every found name).
 func (l *LayoutRemote) Clean(ctx context.Context, run func(ctx context.Context, me layout.HolderID, session string) error) error {
 	l.mu.Lock()
 	if l.session != "" || l.cleaning != "" {

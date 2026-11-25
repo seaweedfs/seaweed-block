@@ -90,6 +90,23 @@ func (m SnapshotMeta) PinnedAt(nowNs int64) bool {
 	return m.Class == ClassPinned || m.ExpiresNs > 0 && nowNs < m.ExpiresNs
 }
 
+// CheckSnapshot refuses a snapshot name or facts the commit would refuse
+// (ErrMalformed): the name's bounds and encoding, the class, the times and
+// the labels. Callers check before the commit, so a refusal there is never
+// confused with a malformed manifest.
+func CheckSnapshot(name string, meta SnapshotMeta) error {
+	if name == "" {
+		return fmt.Errorf("%w: unnamed snapshot", ErrMalformed)
+	}
+	if err := validName("snapshot", name); err != nil {
+		return err
+	}
+	if len(name) > MaxSnapshotNameBytes {
+		return fmt.Errorf("%w: snapshot name %q is %d bytes, at most %d", ErrMalformed, name, len(name), MaxSnapshotNameBytes)
+	}
+	return meta.check(name)
+}
+
 func (m SnapshotMeta) check(name string) error {
 	switch m.Class {
 	case "", ClassSemantic, ClassPinned, ClassScheduled:
