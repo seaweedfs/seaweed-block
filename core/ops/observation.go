@@ -23,7 +23,11 @@ const (
 	ReasonNoPromotionReadyCandidate       = "no_promotion_ready_candidate"
 	// A fencing round ended without a publication and the line's primary
 	// did not answer ready to continue: the volume waits for either.
-	ReasonFenceRoundIncomplete          = "fence_round_incomplete"
+	ReasonFenceRoundIncomplete = "fence_round_incomplete"
+	// The highest end of a fencing round is held only by a replica that is
+	// not ready for primary: the volume waits for it (or for a ready one to
+	// catch up from it).
+	ReasonHighestEndNotReady            = "highest_end_not_ready"
 	ReasonDurableFrontierMissing        = "durable_frontier_missing"
 	ReasonCandidateFrontierBehind       = "candidate_frontier_behind"
 	ReasonStatusEndpointUnreachable     = "status_endpoint_unreachable"

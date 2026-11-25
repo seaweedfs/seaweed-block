@@ -94,6 +94,15 @@ func TestPromotionGate_DecidesOnTheFencingRound(t *testing.T) {
 		{"one answered without the fence (another store: its floor did not move)",
 			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: 1}),
 			map[string]uint64{}},
+		{"r3 lagging (not ready) with a lower fenced end: counted, r2 is the target",
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 8, Floor: 2}),
+			map[string]uint64{"r2": 10}},
+		{"r3 lagging (not ready) holds the highest fenced end: wait",
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 12, Floor: 2}),
+			map[string]uint64{}},
+		{"r3 on an invalid table: not counted",
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 8, Floor: 2, TableInvalid: true}),
+			map[string]uint64{}},
 		{"the fencing round failed",
 			func(authority.AuthorityBasis, []PromotionCandidateEvidence) (PromotionProbeResult, error) {
 				return PromotionProbeResult{}, errors.New("no stream")
@@ -108,7 +117,7 @@ func TestPromotionGate_DecidesOnTheFencingRound(t *testing.T) {
 			snap := rf3DeadPrimary()
 			h.applyPromotionEvidenceGate(&snap)
 			if len(p.survivors) != 2 {
-				t.Fatalf("fenced %v; want the plain round's ready survivors r2, r3", p.survivors)
+				t.Fatalf("fenced %v; want every replica that answered the plain round: r2, r3", p.survivors)
 			}
 			got := allowedSlots(snap)
 			if len(got) != len(c.want) {
@@ -166,8 +175,9 @@ func TestPromotionGate_HealsAFailedFencingRoundOnTheCurrentPrimary(t *testing.T)
 	}
 }
 
-// The round sends a fencing ask with the fenced epoch and the probed store,
-// and reads each answer's floor.
+// The round sends a fencing ask with the fenced epoch and the reference store
+// (the last attested), and reads each answer's floor; an answer from another
+// store carries no floor.
 func TestProbeRound_FencingAskCarriesTheEpochAndStore(t *testing.T) {
 	hub := newProbeHub()
 	p := &roundEvidenceProvider{hub: hub, serverOf: func(_, r string) string { return "s2" }, wait: 300 * time.Millisecond, attested: attestedAs}
@@ -188,5 +198,23 @@ func TestProbeRound_FencingAskCarriesTheEpochAndStore(t *testing.T) {
 	}
 	if res.FencedEpoch != 5 || len(res.Candidates) != 1 || res.Candidates[0].Floor != 5 || !res.Candidates[0].Ready {
 		t.Fatalf("fencing result %+v", res)
+	}
+}
+
+func TestProbeRound_FencingAnswerFromAnotherStoreIsNotCounted(t *testing.T) {
+	hub := newProbeHub()
+	p := &roundEvidenceProvider{hub: hub, serverOf: func(_, r string) string { return "s2" }, wait: 300 * time.Millisecond, attested: attestedAs}
+	roundNode(t, hub, "s2", func(r *control.ProbeRound) *control.ProbeAnswer {
+		a := readyAnswer("s2")(r)
+		a.StoreId = []byte("another-store-16")
+		a.Floor = r.FenceEpoch
+		return a
+	})
+	res, err := p.FencePromotionCandidates("v1", authority.AuthorityBasis{ReplicaID: "r1", Epoch: 4}, []PromotionCandidateEvidence{{ReplicaID: "r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Candidates) != 1 || res.Candidates[0].Floor != 0 {
+		t.Fatalf("an answer from another store kept its floor: %+v", res.Candidates)
 	}
 }

@@ -328,19 +328,22 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 	return probeCount, blockedCount, directAsks
 }
 
-// fencedDecision runs the fencing round for the survivors the plain round
-// found ready and decides on its answers alone: at least
-// unknownFrontierSurvivorsNeeded of them must have made the line's next
-// epoch their durable floor (an answer with a higher floor was fenced by a
-// newer decision and does not count), and the target is the highest durable
-// end among those. Too few: nothing is allowed this tick.
+// fencedDecision runs the fencing round for every replica that answered the
+// plain round, ready or not, and decides on its answers alone. An answer
+// counts when it made the line's next epoch its durable floor (a higher
+// floor was fenced by a newer decision), from the reference store, on a
+// valid epoch table: a lagging replica counts, since it may be the only
+// holder of an acknowledged write. At least unknownFrontierSurvivorsNeeded
+// must count. The target holds the highest counted end and is ready; when
+// only a replica that is not ready holds it, nothing is promoted (a lower
+// ready one would drop what only that replica has) and the volume waits.
 func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis, plain PromotionProbeResult, peerCount int) (PromotionProbeResult, map[string]bool) {
 	h.promotionMu.RLock()
 	prober := h.promotionProber
 	h.promotionMu.RUnlock()
 	var survivors []PromotionCandidateEvidence
 	for _, c := range plain.Candidates {
-		if c.Ready {
+		if c.ReplicaID != "" && c.ProbeAddr != "no answer" {
 			survivors = append(survivors, c)
 		}
 	}
@@ -352,10 +355,14 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 	fenced.AckProfile, fenced.SyncAckLSN, fenced.SyncAckKnown = plain.AckProfile, plain.SyncAckLSN, plain.SyncAckKnown
 	fenced.CurrentKnown, fenced.Current = plain.CurrentKnown, plain.Current
 	counted := map[string]bool{}
+	var highest uint64
 	for i := range fenced.Candidates {
 		c := &fenced.Candidates[i]
-		if c.Ready && c.Floor == fenced.FencedEpoch {
+		if c.ReplicaID != "" && c.Floor == fenced.FencedEpoch && !c.TableInvalid {
 			counted[c.ReplicaID] = true
+			if c.DurableLSN > highest {
+				highest = c.DurableLSN
+			}
 		} else {
 			c.Ready = false
 		}
@@ -364,7 +371,26 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d: %d fenced survivors, need %d; nothing published", volumeID, fenced.FencedEpoch, len(counted), need)
 		return fenced, map[string]bool{}
 	}
-	return fenced, promotionAllowedReplicas(fenced, true, peerCount, counted)
+	allowed := map[string]bool{}
+	var holders []string
+	for _, c := range fenced.Candidates {
+		if !counted[c.ReplicaID] || c.DurableLSN != highest {
+			continue
+		}
+		holders = append(holders, c.ReplicaID)
+		if c.Ready && (fenced.SyncAckLSN == 0 || c.DurableLSN >= fenced.SyncAckLSN) && c.DurableLSN > 0 {
+			allowed[c.ReplicaID] = true
+		}
+	}
+	if len(allowed) == 0 {
+		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d: the highest fenced end %d is held by %v, none ready; waiting for it", volumeID, fenced.FencedEpoch, highest, holders)
+		h.recordVolumeWaitingEvent(volumeID, ops.ReasonHighestEndNotReady, fmt.Sprintf("the highest fenced end %d is held by %v, not ready for primary", highest, holders))
+	}
+	return fenced, allowed
+}
+
+func (h *Host) recordVolumeWaitingEvent(volumeID, reason, message string) {
+	h.events.append(ops.ClusterEvent{VolumeID: volumeID, Type: "volume_blocked", Severity: "warning", Reason: reason, Message: message})
 }
 
 // healAfterFailedFence continues the line's own primary at e+1 after a

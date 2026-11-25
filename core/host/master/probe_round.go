@@ -140,11 +140,24 @@ func (p *roundEvidenceProvider) FencePromotionCandidates(volumeID string, curren
 	stores := map[string]storage.StoreID{}
 	for _, s := range survivors {
 		candidates = append(candidates, authority.ReplicaCandidate{ReplicaID: s.ReplicaID})
-		stores[s.ReplicaID] = s.StoreID
+		// The reference store: the one a primary last attested for it.
+		if p.attested != nil {
+			if ref, ok := p.attested(volumeID, s.ReplicaID); ok {
+				stores[s.ReplicaID] = ref
+			}
+		}
 	}
 	result, err := p.round(volumeID, authority.AuthorityBasis{}, candidates, func(roundID uint64, r *openRound, serverID, replicaID string) bool {
 		return p.hub.askFence(roundID, r, serverID, replicaID, fence, stores[replicaID])
 	})
+	// An answer from another store than the reference, or on an invalid
+	// table, is no evidence: it carries no floor for the gate to count.
+	for i := range result.Candidates {
+		c := &result.Candidates[i]
+		if ref, ok := stores[c.ReplicaID]; !ok || ref.IsZero() || c.StoreID != ref || c.TableInvalid {
+			c.Floor = 0
+		}
+	}
 	result.FencedEpoch = fence
 	return result, err
 }
