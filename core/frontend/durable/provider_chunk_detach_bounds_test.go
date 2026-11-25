@@ -19,8 +19,8 @@ import (
 
 func TestWALStoreChunk_TimedOutDetachRetriesShareOneDrain(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p, view := parkedProvider(t, remote)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p, view := parkedLayoutProvider(t, fixture)
 	openRecovered(t, p)
 	b, err := p.Open(ctx, "v1")
 	if err != nil {
@@ -54,7 +54,7 @@ func TestWALStoreChunk_TimedOutDetachRetriesShareOneDrain(t *testing.T) {
 	if err != nil || r.Head.State != storage.ChunkHeadDetached {
 		t.Fatalf("detach once the write finished: %+v %v", r, err)
 	}
-	if acked && !bytesEqual(headBlock(t, remote, 1), block(4)) {
+	if acked && !bytesEqual(layoutHeadBlock(t, fixture, 1), block(4)) {
 		t.Fatal("the held write was acknowledged but is not in the detached HEAD")
 	}
 }
