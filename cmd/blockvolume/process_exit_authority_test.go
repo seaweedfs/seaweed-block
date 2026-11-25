@@ -7,6 +7,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -315,13 +316,25 @@ func TestWorkspaceForeignHeadClaimChoosesNoRetry(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				h, _ := exitAuthorityHost(t)
-				remote := storage.NewMemChunkRemote()
-				if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 2, Holder: tc.holder, State: storage.ChunkHeadActive}); err != nil {
+				fixture := testutil.NewLayoutFixture(t, "v", 64, 4)
+				st, err := fixture.Catalog.Store(fixture.Ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, found, err := st.ReadHead(ctx)
+				if err != nil || !found {
+					t.Fatalf("HEAD found=%v err=%v", found, err)
+				}
+				foreign := before
+				foreign.Epoch, foreign.Holder, foreign.ClaimID = 2, tc.holder, "foreign-claim"
+				if err := st.UpdateHead(ctx, before.Gen, foreign); err != nil {
 					t.Fatal(err)
 				}
 				view := &claimExitView{}
 				view.assigned.Store(!deferred)
-				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
+				cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4}
+				fixture.Configure(&cfg)
+				p, err := durable.NewDurableProvider(cfg, view)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -362,9 +375,9 @@ func TestWorkspaceForeignHeadClaimChoosesNoRetry(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal(ctx.Err())
 				}
-				head, err := remote.GetHead(ctx)
-				if err != nil || head.Gen != 1 || head.Holder != tc.holder || remote.Puts() != 0 {
-					t.Fatalf("refused claim mutated remote: %+v puts=%d err=%v", head, remote.Puts(), err)
+				head, found, err := st.ReadHead(ctx)
+				if err != nil || !found || head.Gen != before.Gen+1 || head.Holder != tc.holder || head.Current != nil {
+					t.Fatalf("refused claim mutated HEAD: %+v found=%v err=%v", head, found, err)
 				}
 				for _, status := range p.DurableStatuses() {
 					if status.Operational {
@@ -385,12 +398,18 @@ func TestWorkspaceOldLocalHolderForeignHeadChoosesNoRetry(t *testing.T) {
 			defer cancel()
 			h, _ := exitAuthorityHost(t)
 			root := t.TempDir()
-			remote := storage.NewMemChunkRemote()
+			fixture := testutil.NewLayoutFixture(t, "v", 64, 4)
+			st, err := fixture.Catalog.Store(fixture.Ref)
+			if err != nil {
+				t.Fatal(err)
+			}
 			view := &claimExitView{}
 			view.assigned.Store(true)
 			open := func() *durable.DurableProvider {
 				t.Helper()
-				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
+				cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4}
+				fixture.Configure(&cfg)
+				p, err := durable.NewDurableProvider(cfg, view)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -414,11 +433,13 @@ func TestWorkspaceOldLocalHolderForeignHeadChoosesNoRetry(t *testing.T) {
 			if err := first.Close(); err != nil {
 				t.Fatal(err)
 			}
-			before, err := remote.GetHead(ctx)
-			if err != nil {
-				t.Fatal(err)
+			before, found, err := st.ReadHead(ctx)
+			if err != nil || !found {
+				t.Fatalf("HEAD found=%v err=%v", found, err)
 			}
-			if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: before.Gen, Epoch: before.Epoch}, storage.ChunkHead{Epoch: 2, Holder: "other", State: storage.ChunkHeadActive}); err != nil {
+			foreign := before
+			foreign.Epoch, foreign.Holder, foreign.ClaimID = 2, "other", "foreign-claim"
+			if err := st.UpdateHead(ctx, before.Gen, foreign); err != nil {
 				t.Fatal(err)
 			}
 			view.assigned.Store(!deferred)
@@ -447,9 +468,9 @@ func TestWorkspaceOldLocalHolderForeignHeadChoosesNoRetry(t *testing.T) {
 			if got, err := second.LogicalStorage("v").Read(0); err != nil || !bytes.Equal(got, want) {
 				t.Fatalf("refusal lost local acknowledged bytes: %v", err)
 			}
-			after, err := remote.GetHead(ctx)
-			if err != nil || after.Gen != before.Gen+1 || after.Holder != "other" || remote.Puts() != 0 {
-				t.Fatalf("refusal mutated HEAD/payload: %+v puts=%d err=%v", after, remote.Puts(), err)
+			after, found, err := st.ReadHead(ctx)
+			if err != nil || !found || after.Gen != before.Gen+1 || after.Holder != "other" || after.Current != before.Current {
+				t.Fatalf("refusal mutated HEAD/payload: %+v found=%v err=%v", after, found, err)
 			}
 
 		})
@@ -458,21 +479,22 @@ func TestWorkspaceOldLocalHolderForeignHeadChoosesNoRetry(t *testing.T) {
 
 // The real claim reads E1/A; a late E2/C wins before E3/B's CAS.
 // The displaced HEAD is a fence for this attempt, not proof E3 was superseded.
-type displacedClaimExitRemote struct {
-	storage.ChunkRemote
+type displacedClaimExitStore struct {
+	layout.StartStore
 	epoch uint64
 	raced bool
 }
 
-func (r *displacedClaimExitRemote) CASHead(ctx context.Context, prev storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+func (r *displacedClaimExitStore) UpdateHead(ctx context.Context, prev uint64, next layout.Head) error {
 	if !r.raced {
 		r.raced = true
-		late := storage.ChunkHead{Epoch: r.epoch, Holder: "C", State: storage.ChunkHeadActive}
-		if _, err := r.ChunkRemote.CASHead(ctx, prev, late); err != nil {
-			return 0, err
+		late := next
+		late.Epoch, late.Holder, late.ClaimID = r.epoch, "C", "late-claim"
+		if err := r.StartStore.UpdateHead(ctx, prev, late); err != nil {
+			return err
 		}
 	}
-	return r.ChunkRemote.CASHead(ctx, prev, next)
+	return r.StartStore.UpdateHead(ctx, prev, next)
 }
 
 type displacedClaimExitView struct{}
@@ -492,12 +514,25 @@ func TestWorkspaceDisplacedClaimUsesAssignedEpoch(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			h, _ := exitAuthorityHost(t)
-			base := storage.NewMemChunkRemote()
-			if _, err := base.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "A", State: storage.ChunkHeadActive}); err != nil {
+			fixture := testutil.NewLayoutFixture(t, "v", 64, 4)
+			base, err := fixture.Catalog.Store(fixture.Ref)
+			if err != nil {
 				t.Fatal(err)
 			}
-			remote := &displacedClaimExitRemote{ChunkRemote: base, epoch: tc.epoch}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, displacedClaimExitView{})
+			before, found, err := base.ReadHead(ctx)
+			if err != nil || !found {
+				t.Fatalf("HEAD found=%v err=%v", found, err)
+			}
+			initial := before
+			initial.Epoch, initial.Holder, initial.ClaimID = 1, "A", "initial-claim"
+			if err := base.UpdateHead(ctx, before.Gen, initial); err != nil {
+				t.Fatal(err)
+			}
+			raced := &displacedClaimExitStore{StartStore: base, epoch: tc.epoch}
+			cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4}
+			fixture.Configure(&cfg)
+			cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return raced, nil }
+			p, err := durable.NewDurableProvider(cfg, displacedClaimExitView{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -512,7 +547,7 @@ func TestWorkspaceDisplacedClaimUsesAssignedEpoch(t *testing.T) {
 			if _, err = p.RecoverVolume(ctx, "v"); !errors.Is(err, storage.ErrChunkLayerFenced) {
 				t.Fatalf("claim error=%v", err)
 			}
-			if !remote.raced {
+			if !raced.raced {
 				t.Fatal("controlled CAS did not run")
 			}
 			e := newProcessExit(ctx)
@@ -527,9 +562,9 @@ func TestWorkspaceDisplacedClaimUsesAssignedEpoch(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}
-			head, err := base.GetHead(ctx)
-			if err != nil || head.Gen != 2 || head.Epoch != tc.epoch || head.Holder != "C" || base.Puts() != 0 {
-				t.Fatalf("refused claim mutated HEAD/payload: %+v puts=%d err=%v", head, base.Puts(), err)
+			head, found, err := base.ReadHead(ctx)
+			if err != nil || !found || head.Gen != before.Gen+2 || head.Epoch != tc.epoch || head.Holder != "C" || head.Current != nil {
+				t.Fatalf("refused claim mutated HEAD/payload: %+v found=%v err=%v", head, found, err)
 			}
 			for _, status := range p.DurableStatuses() {
 				if status.Operational {
