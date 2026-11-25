@@ -63,7 +63,7 @@ type Head struct {
 	Current   *RootName // nil: no image committed yet
 	Position  uint64
 	Snapshots map[string]Snapshot
-	State     string // StateLive, StateDeleting or StateDeleted
+	State     string // StateLive, StateDetached, StateDeleting or StateDeleted
 }
 
 type headDoc struct {
@@ -104,7 +104,7 @@ func (h Head) check() error {
 		return fmt.Errorf("%w: HEAD without a volume id", ErrMalformed)
 	}
 	switch h.State {
-	case StateLive, StateDeleting, StateDeleted:
+	case StateLive, StateDetached, StateDeleting, StateDeleted:
 	default:
 		return fmt.Errorf("%w: HEAD state %q", ErrMalformed, h.State)
 	}
@@ -124,6 +124,9 @@ func (h Head) check() error {
 		}
 	default:
 		return fmt.Errorf("%w: activity %q", ErrMalformed, h.Activity.Kind)
+	}
+	if h.State == StateDetached && (h.Activity.Kind != ActIdle || h.Current == nil) {
+		return fmt.Errorf("%w: detached HEAD needs an idle, committed image", ErrMalformed)
 	}
 	// A HEAD no one has claimed yet (a new volume or restore target, or a
 	// tombstone) has epoch 0, no holder, no claim id and no activity; a
@@ -261,6 +264,7 @@ var (
 	ErrNotHolder  = errors.New("layout: not the holder at HEAD's epoch")
 	ErrBusy       = errors.New("layout: another transaction is open")
 	ErrNoSession  = errors.New("layout: the session is not open")
+	ErrDetached   = errors.New("layout: detached; a new grant is needed")
 )
 
 // HolderID is the identity a transition acts as: the epoch of the line it
@@ -281,6 +285,9 @@ func (h Head) heldBy(me HolderID) bool {
 // deleted or is deleted (ErrVolumeDeleting), or the caller is not the
 // holder at HEAD's epoch (ErrNotHolder); nil when it may act.
 func (h Head) holderErr(me HolderID) error {
+	if h.State == StateDetached {
+		return ErrDetached
+	}
 	if h.State != StateLive {
 		return fmt.Errorf("%w: HEAD is %s", ErrVolumeDeleting, h.State)
 	}

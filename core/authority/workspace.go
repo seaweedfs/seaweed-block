@@ -186,13 +186,14 @@ func (p *Publisher) RecordWorkspaceDeletion(ctx context.Context, volume string, 
 }
 
 func validateWorkspaceMoveRequest(req WorkspaceMoveRequest) error {
-	// INV-WS-SAME-HOST-CLEAN-MOVE-001: clean moves may reuse the host,
-	// but every move preserves its logical replica slot.
+	// A same-host clean move still needs its seal/ACK; a forced recovery
+	// still needs its expired lease barrier and persisted lost range.
+	// Every move preserves its logical replica slot.
 	// Refuse before locking or persisting a reservation/authority epoch.
 	if req.ExpectedReplicaID != req.TargetReplicaID {
 		return fmt.Errorf("workspace move: v1 requires the same logical replica id")
 	}
-	if req.RequestID == "" || req.VolumeID == "" || req.ExpectedHost == "" || req.TargetHost == "" || (req.ExpectedHost == req.TargetHost && (req.Kind != "clean" || req.Force)) || req.ExpectedReplicaID == "" || req.ExpectedEpoch == 0 || req.TargetReplicaID == "" ||
+	if req.RequestID == "" || req.VolumeID == "" || req.ExpectedHost == "" || req.TargetHost == "" || req.ExpectedReplicaID == "" || req.ExpectedEpoch == 0 || req.TargetReplicaID == "" ||
 		req.TargetDataAddr == "" || req.TargetCtrlAddr == "" || (req.Kind != "clean" && req.Kind != "forced") || req.Force != (req.Kind == "forced") {
 		return fmt.Errorf("workspace move: invalid request")
 	}
@@ -326,6 +327,31 @@ func (p *Publisher) WorkspaceState(volume string) *WorkspaceState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return cloneWorkspace(p.workspace[volume])
+}
+
+// WorkspaceSourceMoved proves that a subscribing server was the source of an
+// issued move and the current line now belongs to another known server. A new
+// target with no prior line is not a moved source. This startup-only read takes
+// the publisher lock; lease renewals keep their separate nonblocking view.
+func (p *Publisher) WorkspaceSourceMoved(volume, replica, server string) (PublishedLine, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.workspaceUncertain[volume] || server == "" {
+		return PublishedLine{}, false
+	}
+	line, found := p.PublishedAuthorityLine(volume)
+	owner, moved := line.Owner()
+	if !found || !moved || owner == "" || owner == server {
+		return PublishedLine{}, false
+	}
+	if s := p.workspace[volume]; s != nil {
+		for _, r := range s.Moves {
+			if r.Issued && r.OldHost == server && r.OldReplicaID == replica && r.OldEpoch < line.Epoch {
+				return line, true
+			}
+		}
+	}
+	return PublishedLine{}, false
 }
 
 func (p *Publisher) workspaceLineLocked(volume string) (subKey, assignmentState, bool) {

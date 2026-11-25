@@ -76,6 +76,9 @@ func Start(ctx context.Context, st HeadStore, lease LeaseWait, line HolderID, lo
 // and server a root without HEAD's claim id, and above HEAD's epoch a
 // non-fresh root of another lineage.
 func startCheck(h Head, line HolderID, local LocalRoot) error {
+	if h.State == StateDetached && line.Epoch == h.Epoch {
+		return ErrDetached
+	}
 	if !local.Fresh && local.ClaimID == h.ClaimID && local.Position < h.Position && line.Epoch >= h.Epoch {
 		return fmt.Errorf("%w (%w): the local root holds position %d, HEAD published %d: an old copy of this lineage", ErrStaleLocalRoot, ErrNotHolder, local.Position, h.Position)
 	}

@@ -333,6 +333,7 @@ sequenceDiagram
     M->>M: wait for expiry, restart deadline and skew bound, then mint epoch e+1
   end
   M->>M: the issue write also starts B's lease (horizon issue+1.5·TTL, deadline issue+TTL)
+  Note over M,B: target B may be source A; the same clean proof or forced barrier applies
   M->>B: assignment at epoch e+1 and a lease
   opt B dies before renewing or claiming (HEAD still at epoch e)
     M->>M: wait for B's lease expiry, deadline and skew bound
@@ -371,7 +372,7 @@ stateDiagram-v2
 
 **Return after lease expiry.** A new process of the unchanged holder and epoch may obtain one durable re-grant after the existing forced-move barrier: both the persisted horizon and granted/restart deadline plus full skew have passed. Re-grant and forced issue serialize under the publisher lock; the winner prevents the competing operation. Revocation, a pending move or uncertain persistence refuses a usable grant. Existing fenced guards remain terminal. The returning process claims a new HEAD generation before I/O, keeps its local acknowledged WAL, and publishes it on the first cut. An empty local root restores only HEAD; a same-epoch sealed HEAD remains detached.
 
-**Same-host planned return.** A sealed volume can be moved cleanly back to its source host after the exact detached-generation ACK was recorded. The move issues a higher epoch even when the host and endpoints are unchanged. The returning process claims the sealed HEAD before serving; a same-epoch reopen remains detached. Forced moves to the source host remain refused. Re-preparing the binding preserves the old retired-epoch tag, so replaying that retirement cannot retire the new binding.
+**Same-host planned return.** A sealed volume can be moved cleanly back to its source host after the exact detached-generation ACK was recorded. The move issues a higher epoch even when the host and endpoints are unchanged. The returning process claims the sealed HEAD before serving; a same-epoch reopen remains detached. A forced recovery can also target the same host after the normal expired-lease, restart and skew barriers; it issues a higher epoch and records the abandoned suffix. Bindings identify a volume/server, not its epoch: the old process is fenced by its expired lease and a shared host-volume lock excludes a simultaneous successor. Re-preparing the binding preserves the old retired-epoch tag, so replaying that retirement cannot retire the new binding.
 
 **Moving back to a host with a surviving local file.** A fresh volume claims HEAD before serving. A non-fresh attach reads HEAD first; if another holder published it, the attach fails closed with `ErrChunkStaleLocalRoot` (`core/frontend/durable/provider_chunk.go`): the volume is not served, and one log line and the status evidence name the local root to remove or quarantine, after which the next attach starts fresh from HEAD (#167).
 

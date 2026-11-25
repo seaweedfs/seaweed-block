@@ -71,6 +71,82 @@ func TestLayoutStoreObjectsAreFilerFiles(t *testing.T) {
 	}
 }
 
+func TestLayoutStoreListsOnePoolPageAtATime(t *testing.T) {
+	s, _, _ := layoutStoreFixture(t)
+	ctx := context.Background()
+	var want []layout.ChunkName
+	for _, idx := range []uint64{2, 3, 4, 10000} {
+		n := layout.NameChunk(idx, []byte("bytes"))
+		if err := s.Create(ctx, n.Path(), []byte("bytes"), "writer"); err != nil {
+			t.Fatal(err)
+		}
+		if layout.Shard(idx) == 0 {
+			want = append(want, n)
+		}
+	}
+	after := ""
+	for _, n := range want {
+		got, err := s.ListChunkCandidates(ctx, 0, after, 1)
+		if err != nil || len(got) != 1 || got[0] != n {
+			t.Fatalf("page after %q: %v %v; want %v", after, got, err, n)
+		}
+		after = n.String()
+	}
+	if got, err := s.ListChunkCandidates(ctx, 0, after, 1); err != nil || len(got) != 0 {
+		t.Fatal("page crossed into the next shard", got, err)
+	}
+	if _, err := s.ListChunkCandidates(ctx, 0, "", 0); !errors.Is(err, layout.ErrMalformed) {
+		t.Fatal("unbounded page accepted", err)
+	}
+	for _, cursor := range []string{"../HEAD", layout.NameChunk(10000, []byte("bytes")).String()} {
+		if _, err := s.ListChunkCandidates(ctx, 0, cursor, 1); !errors.Is(err, layout.ErrMalformed) {
+			t.Fatalf("unsafe cursor %q: %v", cursor, err)
+		}
+	}
+}
+
+type layoutListFiler struct {
+	Filer
+	entries []*filerpb.Entry
+	err     error
+}
+
+func (f layoutListFiler) ListEntries(context.Context, string, string, string, uint32) ([]*filerpb.Entry, error) {
+	return f.entries, f.err
+}
+
+func TestLayoutStoreListErrorsAreNotAnEmptyPool(t *testing.T) {
+	s, f, _ := layoutStoreFixture(t)
+	ctx := context.Background()
+	n := layout.NameChunk(1, []byte("bytes"))
+	unreachable := errors.New("filer unreachable")
+	for _, tc := range []struct {
+		name    string
+		entries []*filerpb.Entry
+		err     error
+		want    error
+	}{
+		{"transport", nil, unreachable, unreachable},
+		{"wrong shard", []*filerpb.Entry{{Name: layout.NameChunk(10000, nil).String()}}, nil, layout.ErrCorrupt},
+		{"directory", []*filerpb.Entry{{Name: n.String(), IsDirectory: true}}, nil, layout.ErrCorrupt},
+		{"noncanonical", []*filerpb.Entry{{Name: "garbage"}}, nil, layout.ErrCorrupt},
+		{"nil entry", []*filerpb.Entry{nil}, nil, layout.ErrCorrupt},
+		{"repeated cursor", []*filerpb.Entry{{Name: n.String()}}, nil, layout.ErrCorrupt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s.f = layoutListFiler{Filer: f, entries: tc.entries, err: tc.err}
+			after := ""
+			if tc.name == "repeated cursor" {
+				after = n.String()
+			}
+			got, err := s.ListChunkCandidates(ctx, 0, after, 10)
+			if !errors.Is(err, tc.want) || len(got) != 0 {
+				t.Fatalf("got %v %v; want no candidates and %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestLayoutStoreLateCleanCannotDeleteReusedFile(t *testing.T) {
 	s, _, _ := layoutStoreFixture(t)
 	ctx := context.Background()
@@ -203,5 +279,29 @@ func TestLayoutStoreRecreatedVolumeRefusesOldDelete(t *testing.T) {
 	got, found, err := next.Fetch(ctx, path.Join(next.root, n.Path()))
 	if err != nil || !found || !bytes.Equal(got, raw) {
 		t.Fatal("new volume image lost", found, err)
+	}
+}
+
+func TestLayoutStoreDeleteNeverRemovesControlRecords(t *testing.T) {
+	s, f, _ := layoutStoreFixture(t)
+	ctx := context.Background()
+	for _, name := range []string{"HEAD", "VOLUME"} {
+		if err := f.CreateEntry(ctx, s.root, &filerpb.Entry{Name: name, Content: []byte("keep")}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rel := range []string{"HEAD", "VOLUME", ".", "pool", "pool/0", "seg", "root", "../other/HEAD"} {
+		if err := s.DeleteMarked(ctx, rel, "clean"); !errors.Is(err, layout.ErrMalformed) {
+			t.Fatalf("marked deletion of %q: %v", rel, err)
+		}
+		if err := s.DeleteOfVolume(ctx, rel, s.id); !errors.Is(err, layout.ErrMalformed) {
+			t.Fatalf("volume deletion of %q: %v", rel, err)
+		}
+	}
+	for _, name := range []string{"HEAD", "VOLUME"} {
+		got, err := f.LookupEntry(ctx, s.root, name)
+		if err != nil || string(got.Content) != "keep" {
+			t.Fatal("control record changed", name, err)
+		}
 	}
 }

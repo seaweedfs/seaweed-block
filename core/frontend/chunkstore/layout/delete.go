@@ -8,9 +8,10 @@ import (
 	"strings"
 )
 
-// HEAD states: a live volume, one being deleted, one deleted.
+// HEAD states: a live volume, a cleanly stopped one, one being deleted, one deleted.
 const (
 	StateLive     = ""
+	StateDetached = "detached"
 	StateDeleting = "deleting"
 	StateDeleted  = "deleted"
 )
@@ -78,8 +79,8 @@ func (h Head) MarkDeleted() (next Head, changed bool, err error) {
 	switch h.State {
 	case StateDeleted:
 		return h, false, nil
-	case StateLive:
-		return Head{}, false, fmt.Errorf("layout: HEAD is live; a delete marks it deleting first")
+	case StateLive, StateDetached:
+		return Head{}, false, fmt.Errorf("layout: HEAD is %q; a delete marks it deleting first", h.State)
 	}
 	next = h.clone()
 	next.State = StateDeleted
