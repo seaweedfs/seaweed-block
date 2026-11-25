@@ -612,7 +612,7 @@ func TestLayoutRemote_AbortOpenSession(t *testing.T) {
 	if _, err := r.GetHead(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if r.pending != nil || r.StopSession() != "" {
+	if r.pending != nil || r.session != "" {
 		t.Fatal("the aborted session or its pending name is still held after the next call")
 	}
 	// A dead process's session.

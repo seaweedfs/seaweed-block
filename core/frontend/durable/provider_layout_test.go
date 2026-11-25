@@ -55,6 +55,7 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 	}
 	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}))
 	remoteCalls := 0
+	var createdRemote storage.ChunkRemote
 	lostReply := false
 	makeProvider := func(root string) (*durable.DurableProvider, *storage.WALStore) {
 		t.Helper()
@@ -68,7 +69,9 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 			},
 			ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
 				remoteCalls++
-				return chunkstore.NewLayoutRemote(cat, v, me)
+				r, err := chunkstore.NewLayoutRemote(cat, v, me)
+				createdRemote = r
+				return r, err
 			},
 		}, view)
 		if err != nil {
@@ -101,6 +104,11 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 	if err != nil || me.ClaimID != claim || me.Epoch != 1 {
 		t.Fatalf("handover=%+v %v", me, err)
 	}
+	for i := 0; i < 2; i++ {
+		if got, err := p.LayoutRemote(ctx, "v1"); err != nil || got != createdRemote {
+			t.Fatalf("cached remote changed: %T %v", got, err)
+		}
+	}
 	if _, fresh, _ = ws.LayoutIdentity(); fresh {
 		t.Fatal("serving with a fresh descriptor")
 	}
@@ -126,6 +134,9 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 	}
 	if _, err = empty.LayoutHolder(ctx, "v1"); err == nil {
 		t.Fatal("failed Start exposed cleaning identity")
+	}
+	if _, err = empty.LayoutRemote(ctx, "v1"); err == nil {
+		t.Fatal("failed Start exposed a remote")
 	}
 	if err = empty.Close(); err != nil {
 		t.Fatal(err)

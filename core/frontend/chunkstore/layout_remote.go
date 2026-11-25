@@ -42,7 +42,7 @@ type LayoutRemote struct {
 	me  layout.HolderID
 
 	mu      sync.Mutex
-	session atomic.Pointer[string]
+	session string
 	// visible is the HEAD generation the engine sees: it moves with this
 	// remote's commits and with writes of anyone else, never with this
 	// remote's own Begin, Abort or cleaning; ownGen is HEAD's generation
@@ -141,7 +141,7 @@ func (l *LayoutRemote) own(idx uint64, sum [32]byte) layout.Ref {
 // openSessionLocked opens this cut's session if none is open: a session of
 // this holder left open by a crash is rolled back first.
 func (l *LayoutRemote) openSessionLocked(ctx context.Context) error {
-	if l.StopSession() != "" {
+	if l.session != "" {
 		return nil
 	}
 	l.stopCleaningLocked()
@@ -157,8 +157,7 @@ func (l *LayoutRemote) openSessionLocked(ctx context.Context) error {
 	if err != nil {
 		return layoutRemoteErr(err)
 	}
-	l.setSession(s)
-	l.ownGen = h.Gen
+	l.session, l.ownGen = s, h.Gen
 	return nil
 }
 
@@ -176,7 +175,7 @@ func (l *LayoutRemote) rollBackLocked(ctx context.Context) (layout.Head, error) 
 	l.viewLocked(h)
 	mine := h.Epoch == l.me.Epoch && h.Holder == l.me.Holder && h.ClaimID == l.me.ClaimID
 	switch {
-	case mine && h.Activity.Kind == layout.ActSnap && h.Activity.Session != l.StopSession():
+	case mine && h.Activity.Kind == layout.ActSnap && h.Activity.Session != l.session:
 		if h, err = layout.RunAbort(ctx, l.st, l.me, h.Activity.Session); err != nil {
 			return layout.Head{}, layoutRemoteErr(err)
 		}
@@ -206,7 +205,7 @@ func (l *LayoutRemote) Put(ctx context.Context, key string, data []byte) error {
 	if err := l.openSessionLocked(ctx); err != nil {
 		return err
 	}
-	return layoutRemoteErr(layout.EnsureObject(ctx, l.st, ref.Chunk.Path(), data, l.StopSession()))
+	return layoutRemoteErr(layout.EnsureObject(ctx, l.st, ref.Chunk.Path(), data, l.session))
 }
 
 // Get reads a chunk by its key through the volume's reader: the owner's
@@ -305,7 +304,7 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 	if err := l.writeRootLocked(ctx, nextM); err != nil {
 		return 0, err
 	}
-	req := layout.CommitRequest{Session: l.StopSession(), Prev: prev, Next: nextM, Position: next.RemoteLSN, State: layout.StateLive}
+	req := layout.CommitRequest{Session: l.session, Prev: prev, Next: nextM, Position: next.RemoteLSN, State: layout.StateLive}
 	if next.State == "detached" {
 		req.State = layout.StateDetached
 	}
@@ -341,8 +340,7 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 		// which also re-derives this session from HEAD (syncSessionLocked).
 		return 0, layoutRemoteErr(err)
 	}
-	l.setSession("")
-	l.pending, l.lastCommit = nil, got
+	l.session, l.pending, l.lastCommit = "", nil, got
 	l.ownGen, l.visible, l.seen = got.Gen, got.Gen, imageOf(got)
 	return got.Gen, nil
 }
@@ -389,7 +387,7 @@ func (l *LayoutRemote) writeRootLocked(ctx context.Context, next map[uint64]layo
 	}
 	sort.Slice(names, func(a, b int) bool { return names[a].Shard < names[b].Shard })
 	for _, n := range names {
-		if err := layout.EnsureObject(ctx, l.st, n.Path(), segs[n], l.StopSession()); err != nil {
+		if err := layout.EnsureObject(ctx, l.st, n.Path(), segs[n], l.session); err != nil {
 			return layoutRemoteErr(err)
 		}
 	}
@@ -397,7 +395,7 @@ func (l *LayoutRemote) writeRootLocked(ctx context.Context, next map[uint64]layo
 	if err != nil {
 		return err
 	}
-	return layoutRemoteErr(layout.EnsureObject(ctx, l.st, rn.Path(), rb, l.StopSession()))
+	return layoutRemoteErr(layout.EnsureObject(ctx, l.st, rn.Path(), rb, l.session))
 }
 
 // The engine's intents are the session on the layout: these exist on the
@@ -543,7 +541,7 @@ func (l *LayoutRemote) LastCommit() layout.Head {
 func (l *LayoutRemote) Clean(ctx context.Context, run func(ctx context.Context, me layout.HolderID, session string) error) error {
 	l.mu.Lock()
 	l.takeAbandonLocked()
-	if l.StopSession() != "" || l.cleaning != "" {
+	if l.session != "" || l.cleaning != "" {
 		l.mu.Unlock()
 		return layout.ErrBusy
 	}
@@ -589,9 +587,8 @@ func (l *LayoutRemote) Clean(ctx context.Context, run func(ctx context.Context, 
 // open: a commit that applied and then lost its reply, or a session another
 // actor ended, never leaves a stale session behind.
 func (l *LayoutRemote) syncSessionLocked(h layout.Head) {
-	if l.StopSession() != "" && h.Activity != (layout.Activity{Kind: layout.ActSnap, Session: l.StopSession()}) {
-		l.setSession("")
-		l.forceView = true
+	if l.session != "" && h.Activity != (layout.Activity{Kind: layout.ActSnap, Session: l.session}) {
+		l.session, l.forceView = "", true
 	}
 }
 
@@ -638,8 +635,7 @@ func (l *LayoutRemote) takeAbandonLocked() {
 	if l.abandoned.Swap(false) {
 		// Uploads the engine staged in the dropped session are caught by the
 		// commit (not prepared), which forces the view then.
-		l.setSession("")
-		l.pending = nil
+		l.session, l.pending = "", nil
 	}
 }
 
@@ -686,21 +682,4 @@ func layoutRemoteErr(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w: %w", storage.ErrChunkRemoteUnavailable, err)
-}
-
-// StopSession is the pending session a stop must cancel before resuming.
-// It remains readable while a conditional Commit is in flight under mu.
-// This is the same session field used by Begin/Commit, not a second copy.
-func (l *LayoutRemote) StopSession() string {
-	if p := l.session.Load(); p != nil {
-		return *p
-	}
-	return ""
-}
-func (l *LayoutRemote) setSession(s string) {
-	if s == "" {
-		l.session.Store(nil)
-	} else {
-		l.session.Store(&s)
-	}
 }
