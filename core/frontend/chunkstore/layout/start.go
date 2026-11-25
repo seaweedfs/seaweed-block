@@ -13,6 +13,9 @@ var (
 	// ErrStaleLocalRoot: the local root belongs to an earlier claim of this
 	// server (a same-host forced move published past it).
 	ErrStaleLocalRoot = errors.New("layout: local root is from an earlier claim")
+	// ErrUnseedablePosition: a fresh local root cannot seed its frontier at
+	// HEAD's position; nothing is written.
+	ErrUnseedablePosition = errors.New("layout: the local root cannot seed HEAD's position")
 )
 
 // StaleLocalRootCure is the way back a stale-root refusal names: after a
@@ -34,6 +37,10 @@ type LocalRoot struct {
 	ClaimID  string
 	Fresh    bool
 	Position uint64 // the position the local root holds synced
+	// Seedable reports whether a fresh root can seed its frontier at a
+	// HEAD position (the local store's own seed precondition). A fresh
+	// root without it is refused: the check is never skipped.
+	Seedable func(position uint64) error
 }
 
 // Start is the HEAD side of a holder's start on the line it was granted
@@ -108,24 +115,40 @@ func Start(ctx context.Context, st StartStore, lease LeaseWait, line HolderID, l
 // and server a root without HEAD's claim id, and above HEAD's epoch a
 // non-fresh root of another lineage.
 func startCheck(h Head, line HolderID, local LocalRoot) error {
-	if h.State == StateDetached && line.Epoch == h.Epoch {
-		return ErrDetached
-	}
-	if !local.Fresh && local.ClaimID == h.ClaimID && local.Position < h.Position && line.Epoch >= h.Epoch {
-		return fmt.Errorf("%w (%w): the local root holds position %d, HEAD published %d: an old copy of this lineage", ErrStaleLocalRoot, ErrNotHolder, local.Position, h.Position)
-	}
-	if h.Epoch == line.Epoch && h.Holder == line.Holder && h.State == StateLive {
-		switch {
-		case h.ClaimID == local.ClaimID:
-			return nil
-		case local.Fresh:
-			return fmt.Errorf("%w at epoch %d: %s", ErrMissingLocalRoot, h.Epoch, MissingLocalRootCure)
-		default:
-			return fmt.Errorf("%w (%w): HEAD holds claim %q at epoch %d, the local root carries %q: %s", ErrStaleLocalRoot, ErrNotHolder, h.ClaimID, h.Epoch, local.ClaimID, StaleLocalRootCure)
+	if err := func() error {
+		if h.State == StateDetached && line.Epoch == h.Epoch {
+			return ErrDetached
 		}
+		if !local.Fresh && local.ClaimID == h.ClaimID && local.Position < h.Position && line.Epoch >= h.Epoch {
+			return fmt.Errorf("%w (%w): the local root holds position %d, HEAD published %d: an old copy of this lineage", ErrStaleLocalRoot, ErrNotHolder, local.Position, h.Position)
+		}
+		if h.Epoch == line.Epoch && h.Holder == line.Holder && h.State == StateLive {
+			switch {
+			case h.ClaimID == local.ClaimID:
+				return nil
+			case local.Fresh:
+				return fmt.Errorf("%w at epoch %d: %s", ErrMissingLocalRoot, h.Epoch, MissingLocalRootCure)
+			default:
+				return fmt.Errorf("%w (%w): HEAD holds claim %q at epoch %d, the local root carries %q: %s", ErrStaleLocalRoot, ErrNotHolder, h.ClaimID, h.Epoch, local.ClaimID, StaleLocalRootCure)
+			}
+		}
+		if line.Epoch > h.Epoch && !local.Fresh && local.ClaimID != h.ClaimID {
+			return fmt.Errorf("%w (%w): the local root carries claim %q, HEAD's lineage is %q: %s", ErrStaleLocalRoot, ErrNotHolder, local.ClaimID, h.ClaimID, StaleLocalRootCure)
+		}
+		return nil
+	}(); err != nil {
+		return err
 	}
-	if line.Epoch > h.Epoch && !local.Fresh && local.ClaimID != h.ClaimID {
-		return fmt.Errorf("%w (%w): the local root carries claim %q, HEAD's lineage is %q: %s", ErrStaleLocalRoot, ErrNotHolder, local.ClaimID, h.ClaimID, StaleLocalRootCure)
+	// A fresh root seeds its frontier at HEAD's position once it starts:
+	// refused here, before any claim, when its store cannot take it (a
+	// deleting volume is refused by the claim as such).
+	if local.Fresh && h.State != StateDeleting && h.State != StateDeleted {
+		if local.Seedable == nil {
+			return fmt.Errorf("%w: a fresh local root must say which positions it can seed", ErrUnseedablePosition)
+		}
+		if err := local.Seedable(h.Position); err != nil {
+			return fmt.Errorf("%w: HEAD position %d: %w", ErrUnseedablePosition, h.Position, err)
+		}
 	}
 	return nil
 }

@@ -152,7 +152,6 @@ type chunkRef struct {
 	Key      string
 	SHA256   [32]byte
 	Encoding string
-	BirthLSN uint64
 }
 
 // chunkHeadVersion is the CAS guard of HEAD.

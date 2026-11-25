@@ -649,7 +649,6 @@ type capturedChunk struct {
 	sum     [32]byte
 	zero    bool
 	key     string // staged: already uploaded under this key (data is nil)
-	birth   uint64
 	size    int
 	missing []uint64 // local copy awaits the pinned HEAD, after the local entry is released
 }
@@ -885,9 +884,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	l.cutLSN = h
 	baseHead := copyHead(l.head)
 	l.stMu.Unlock()
-	// Candidates, mutation versions and births belong to the same barrier.
+	// Candidates, mutation versions and the copy-order hint belong to the same barrier.
 	// Do not sample the owned map after COW writers are admitted again.
-	births := l.captureBirths(candidates, h)
+	recent := l.chunkRecency(candidates, h)
 	st.CandidateNs += time.Since(candidateStart).Nanoseconds()
 	// The authoritative candidate set is fixed with mutation admission closed.
 	// The owner callback is nonblocking and may stop only an already drained
@@ -930,7 +929,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		copyStart = time.Now()
 		if copyErr == nil {
 			var copied []capturedChunk
-			copied, copyErr = l.copyCOWWindow(ctx, w, births, capturedVersions, baseHead)
+			copied, copyErr = l.copyCOWWindow(ctx, w, recent, capturedVersions, baseHead)
 			for _, c := range copied {
 				if c.key != "" {
 					st.UploadedChunks++
@@ -976,7 +975,6 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	var uploads []upload
 	for _, c := range captured {
-		c.birth = births[c.idx]
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
 		case c.zero && !had, unchangedFromHead(c, ref, had):
@@ -989,7 +987,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			continue
 		}
 		if c.key != "" { // staged: uploaded before the barrier
-			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full", BirthLSN: c.birth}
+			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full"}
 			newKeys[c.idx] = c.key
 			changed = append(changed, c.idx)
 			if useStaged[c.idx] {
@@ -1023,7 +1021,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	prepareStart = time.Now()
 	for _, u := range uploads {
-		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
+		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full"}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
 		st.UploadedChunks++
@@ -1273,6 +1271,11 @@ func (l *chunkLayerImpl) supersededBy(cur chunkHead) bool {
 	return cur.Epoch > l.cfg.Epoch || (cur.Epoch == l.cfg.Epoch && cur.Holder != l.cfg.Holder && cur.Gen != 0)
 }
 
+// sameProposal reports whether HEAD cur is the image next proposed, by
+// durable identity and image only: epoch, holder, position, detached state
+// and who detached; the segments; per chunk its key, content hash and
+// encoding. A value the store does not keep (a chunk's birth) or that it
+// owns (a generation) would make an applied commit look foreign.
 func sameProposal(cur, next chunkHead) bool {
 	if (cur.Segments == nil) != (next.Segments == nil) || cur.ChunkBytes != next.ChunkBytes || cur.ManifestChunkCount != next.ManifestChunkCount || len(cur.Segments) != len(next.Segments) {
 		return false
@@ -1286,12 +1289,17 @@ func sameProposal(cur, next chunkHead) bool {
 	if cur.Epoch != next.Epoch || cur.Holder != next.Holder || cur.RemoteLSN != next.RemoteLSN || len(cur.Chunks) != len(next.Chunks) {
 		return false
 	}
+	// Who detached is identity; the detach's generation is the store's, not
+	// part of the proposal.
 	if chunkHeadIsDetached(cur) != chunkHeadIsDetached(next) || (cur.DetachedBy == nil) != (next.DetachedBy == nil) ||
-		(cur.DetachedBy != nil && *cur.DetachedBy != *next.DetachedBy) {
+		(cur.DetachedBy != nil && (cur.DetachedBy.Holder != next.DetachedBy.Holder || cur.DetachedBy.Epoch != next.DetachedBy.Epoch)) {
 		return false
 	}
+	// A chunk is its key, content hash and encoding. Its birth is not a fact
+	// the store keeps (the layout records none), so it is never compared.
 	for k, v := range next.Chunks {
-		if cur.Chunks[k] != v {
+		c, ok := cur.Chunks[k]
+		if !ok || c.Key != v.Key || c.SHA256 != v.SHA256 || c.Encoding != v.Encoding {
 			return false
 		}
 	}

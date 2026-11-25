@@ -19,7 +19,6 @@ import (
 //	open      session s held; HEAD snap(s)
 //	abandoned session s held, the engine's Abort notice taken; HEAD snap(s)
 //	pending   no session, a snapshot name set; HEAD idle
-//	births-pending commit reply lost; HEAD idle, adapter still holds the old session and birth refs
 //	dead      no session, nothing read yet; HEAD snap(d) of this holder (a dead process's)
 //	cleaning  this remote's cleaning tick running; HEAD clean(c)
 //
@@ -69,13 +68,6 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 			"CASHead": {act: layout.ActIdle, named: true}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle, named: true},
 		},
-		"births-pending": {
-			"Clean":   {err: "busy", act: layout.ActIdle},
-			"Abort":   {act: layout.ActIdle},
-			"GetHead": {act: layout.ActIdle}, "Begin": {act: layout.ActIdle}, "Put": {act: layout.ActIdle},
-			"CASHead": {err: "precondition", act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
-			"CommitPendingSnapshot": {act: layout.ActIdle},
-		},
 		"cleaning": {
 			"Clean":   {err: "busy", act: layout.ActClean},
 			"Abort":   {act: layout.ActClean},
@@ -114,26 +106,6 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 			r.Abort()
 		case "pending":
 			r.SetSnapshot("p", layout.SnapshotMeta{CreatedNs: 1})
-		case "births-pending":
-			if _, err := r.Begin(ctx); err != nil {
-				t.Fatal(err)
-			}
-			data := block(9)
-			key := r.ChunkKey(0, layout.Sum(data))
-			if err := r.Put(ctx, key, data); err != nil {
-				t.Fatal(err)
-			}
-			lost := &lostReplyStore{sessionStore: r.st, armed: true}
-			r.st = lost
-			_, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: r.visible, Epoch: lh.me.Epoch}, storage.ChunkHead{
-				Epoch: lh.me.Epoch, RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{
-					0: {Key: key, SHA256: layout.Sum(data), Encoding: "full", BirthLSN: 1},
-				},
-			})
-			if err == nil || lost.armed || len(r.pendingRefs) != 1 {
-				t.Fatalf("lost reply did not leave births pending: err=%v armed=%t refs=%d", err, lost.armed, len(r.pendingRefs))
-			}
-			r.st = lost.sessionStore
 		case "cleaning":
 			// a cleaning tick that runs until a session's call stops it
 			// (or the test ends)

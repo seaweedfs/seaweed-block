@@ -112,7 +112,7 @@ func cliVolume(t *testing.T, store *memChunkStore, name, snap string) chunkstore
 	}
 	s, _ := cat.Store(v)
 	me := layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
-	if _, err := layout.Start(ctx, s, okLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true}); err != nil {
+	if _, err := layout.Start(ctx, s, okLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true, Seedable: anySeedable}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := layout.RunBegin(ctx, s, me, "s1"); err != nil {
