@@ -1,7 +1,9 @@
 package layout
 
 import (
+	"bytes"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -16,13 +18,15 @@ import (
 // own comparisons; literal-zero presence probes stay legal. Scalar aliases are
 // followed, but whole-struct comparisons carrying generations are NOT detected:
 // this syntax guard has no type/dataflow analysis across aggregate values.
-func headGenerationComparisons(name string, src []byte) ([]string, error) {
+type generationSite struct{ location, key string }
+
+func headGenerationComparisons(name string, src []byte) ([]generationSite, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, name, src, 0)
 	if err != nil {
 		return nil, err
 	}
-	var bad []string
+	var bad []generationSite
 	cacheExceptions := 0
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -98,12 +102,16 @@ func headGenerationComparisons(name string, src []byte) ([]string, error) {
 								}
 							}
 						}
-						bad = append(bad, fset.Position(x.Pos()).String()+" "+fn.Name.Name)
+						var expr bytes.Buffer
+						_ = format.Node(&expr, fset, x)
+						bad = append(bad, generationSite{fset.Position(x.Pos()).String(), name + " " + fn.Name.Name + " " + expr.String()})
 					}
 				}
 			case *ast.SwitchStmt:
 				if x.Tag != nil && usesGen(x.Tag) && switchHasGenerationCase(x, usesGen) {
-					bad = append(bad, fset.Position(x.Pos()).String()+" "+fn.Name.Name)
+					var expr bytes.Buffer
+					_ = format.Node(&expr, fset, x.Tag)
+					bad = append(bad, generationSite{fset.Position(x.Pos()).String(), name + " " + fn.Name.Name + " switch " + expr.String()})
 				}
 			}
 			return true
@@ -171,6 +179,20 @@ func TestHeadGenerationCacheExceptionIsSingular(t *testing.T) {
 func TestHeadGenerationComparedOnlyByConditionalUpdate(t *testing.T) {
 	root := filepath.Clean("../../../..")
 	exceptions := 0
+	// These engine comparisons use the adapter's synthetic image-view token,
+	// not raw filer HEAD generation. Pin both syntax and count: a new or removed
+	// site forces review. No no-op-cut authority comparison is allowed here.
+	allowed := map[string]int{
+		"core/storage/chunk_head_belt.go confirmChunkHead got.Gen != want.Gen":   1, // publication confirmation
+		"core/storage/chunk_layer.go captureLocked sc.headGen == l.head.Gen":     1, // staged image cache
+		"core/storage/chunk_layer.go captureLocked cur.Gen == expected.Gen":      1, // unresolved CAS base
+		"core/storage/chunk_layer.go SettleDetach cur.Gen == base.Gen":           2, // pending and cancelled CAS base
+		"core/storage/chunk_layer.go resolvePending cur.Gen == base.Gen":         2, // pending and cancelled CAS base
+		"core/storage/chunk_layer.go stage sc.headGen == l.head.Gen":             1, // staged image cache
+		"core/storage/chunk_memremote.go CASHead expected.Gen != m.head.Gen":     1, // in-memory conditional update
+		"core/storage/chunk_publish_settled.go noteSettled next.Gen == prev.Gen": 1, // publication notification deduplication
+	}
+	seen := map[string]int{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -199,12 +221,21 @@ func TestHeadGenerationComparedOnlyByConditionalUpdate(t *testing.T) {
 			return err
 		}
 		for _, site := range bad {
-			t.Errorf("HEAD generation comparison outside conditional update: %s", site)
+			if _, ok := allowed[site.key]; ok {
+				seen[site.key]++
+			} else {
+				t.Errorf("HEAD generation comparison outside conditional update: %s %s", site.location, site.key)
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for key, count := range allowed {
+		if seen[key] != count {
+			t.Errorf("generation site %s: count %d, want %d", key, seen[key], count)
+		}
 	}
 	if exceptions != 1 {
 		t.Fatalf("cache exception tags = %d, want exactly 1", exceptions)
