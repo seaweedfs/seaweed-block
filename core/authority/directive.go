@@ -5,10 +5,10 @@
 // (VolumeID, ReplicaID).
 //
 // Three boundaries hold:
-//   1. The authority package owns publication of assignment truth.
-//   2. The authority package does NOT own failover policy.
-//   3. Engine and adapter remain consumers, not producers, of
-//      assignment truth.
+//  1. The authority package owns publication of assignment truth.
+//  2. The authority package does NOT own failover policy.
+//  3. Engine and adapter remain consumers, not producers, of
+//     assignment truth.
 package authority
 
 import (
@@ -16,6 +16,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // AskIntent is the only control knob a Directive has. The publisher
@@ -67,7 +69,15 @@ type AssignmentAsk struct {
 	DataAddr  string
 	CtrlAddr  string
 	Intent    AskIntent
+	// Evidence is the kind and probed evidence a reassign carries to its
+	// target (a bind is always a bootstrap); see adapter.PrimaryEvidence. It
+	// is a probe fact about the target, never an authority fact.
+	Evidence adapter.PrimaryEvidence
 }
+
+// ErrReassignWithoutKind: a primary change was asked without a kind (no
+// promotion-gate evidence, not a forced move); the publisher mints no line.
+var ErrReassignWithoutKind = errors.New("authority: a reassign needs a primary kind (promotion evidence or a forced move)")
 
 // Directive is the input side of the authority route. A Directive
 // emits one AssignmentAsk at a time. The publisher's Run loop calls

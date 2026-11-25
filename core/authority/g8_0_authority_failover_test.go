@@ -91,7 +91,7 @@ func TestG8_0_Publisher_ReassignAdvancesPerVolumeEpochAcrossReplicaSlots(t *test
 		t.Fatalf("bind r1: %v", err)
 	}
 	if err := pub.apply(AssignmentAsk{
-		VolumeID: "v1", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign,
+		VolumeID: "v1", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign, Evidence: testPromotion,
 	}); err != nil {
 		t.Fatalf("reassign r2: %v", err)
 	}
