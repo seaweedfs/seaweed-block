@@ -2,12 +2,16 @@ package chunkstore
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"google.golang.org/protobuf/proto"
 )
 
 type filerBlobs struct {
@@ -72,9 +76,13 @@ func verifyFixtureVolume(t *testing.T) (filerBlobs, layout.VolumeID) {
 func TestVerifyLayoutThroughTheAdapter(t *testing.T) {
 	fb, _ := verifyFixtureVolume(t)
 	ctx := context.Background()
+	before := snapshotStore(fb)
 	r, err := VerifyLayout(ctx, fb, "/blocks", "v", layout.VerifyOptions{Depth: layout.DepthFull, Orphans: true})
 	if err != nil || !r.Complete || len(r.Findings) != 0 || r.Chunks != 2 || !r.OrphansChecked {
 		t.Fatalf("clean: %+v %v", r, err)
+	}
+	if after := snapshotStore(fb); after != before {
+		t.Fatalf("verify changed the store:\nbefore %s\nafter  %s", before, after)
 	}
 	extra := layout.NameChunk(9, []byte("zz"))
 	putFile(t, fb.fakeFiler, path.Join("/blocks/v", extra.Path()), []byte("zz"))
@@ -124,4 +132,19 @@ func TestVerifyLayoutNeedsBlobs(t *testing.T) {
 	if _, err := VerifyLayout(context.Background(), newFakeFiler(), "/blocks", "v", layout.VerifyOptions{}); err == nil {
 		t.Fatal("a filer without blobs must be refused")
 	}
+}
+
+// snapshotStore is every filer entry (path and bytes) and the blob counters
+// except reads, as one comparable string.
+func snapshotStore(fb filerBlobs) string {
+	fb.fakeFiler.mu.Lock()
+	var keys []string
+	for p, e := range fb.fakeFiler.entries {
+		raw, _ := proto.Marshal(e)
+		keys = append(keys, fmt.Sprintf("%s=%x", p, sha256.Sum256(raw)))
+	}
+	fb.fakeFiler.mu.Unlock()
+	sort.Strings(keys)
+	puts, _, stored := fb.fakeBlobs.counts()
+	return fmt.Sprintf("puts=%d stored=%d %s", puts, stored, strings.Join(keys, ","))
 }
