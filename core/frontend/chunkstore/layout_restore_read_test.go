@@ -36,7 +36,7 @@ func TestLayoutRemote_RestoreTargetReadsItsSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	tme := layout.HolderID{Epoch: 1, Holder: "b", ClaimID: "k-b"}
-	if _, err := layout.Start(ctx, ts, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "b"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: lrBlocks * 4096, BlockSize: 4096, ChunkBytes: lrChunkBlocks * 4096}, ClaimID: "k-b", Fresh: true, Seedable: anySeedable}); err != nil {
+	if _, err := layout.Start(ctx, ts, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "b"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: lrBlocks * 4096, BlockSize: 4096, ChunkBytes: lrChunkBlocks * 4096}, ClaimID: "k-b", Fresh: true, CanStartFrom: anyStart}); err != nil {
 		t.Fatalf("start the target: %v", err)
 	}
 	tgt := &layoutHost{t: t, cat: src.cat, v: tv, me: tme, dir: t.TempDir()}

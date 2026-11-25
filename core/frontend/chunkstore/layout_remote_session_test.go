@@ -63,7 +63,7 @@ func TestLayoutRemote_AbortNeverEndsAnotherHoldersSession(t *testing.T) {
 	}
 	st, _ := lh.cat.Store(lh.v)
 	newer := layout.HolderID{Epoch: 2, Holder: "b", ClaimID: "k-b"}
-	if _, err := layout.Start(ctx, st, okClaimLease{}, layout.HolderID{Epoch: 2, Holder: "b"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 8 * 4096}, ClaimID: "k-b", Fresh: true, Seedable: anySeedable}); err != nil {
+	if _, err := layout.Start(ctx, st, okClaimLease{}, layout.HolderID{Epoch: 2, Holder: "b"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 8 * 4096}, ClaimID: "k-b", Fresh: true, CanStartFrom: anyStart}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := layout.RunBegin(ctx, st, newer, "s-b"); err != nil {

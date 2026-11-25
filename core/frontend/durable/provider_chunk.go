@@ -540,16 +540,20 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return nil
 		},
 	}
-	// The kernel already claimed and validated this root. Seed only a fresh
-	// root; an existing root keeps its acknowledged WAL and synced position.
-	if h.fresh {
-		if base, complete := ws.InstalledBaseLSN(); complete {
-			if layoutHead.Position > base {
-				return nil, errors.New("durable: completed BASE behind layout HEAD")
-			}
-			cfg.FreshFromHead = false
-		} else if err := h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(layoutHead.Position) }); err != nil {
+	if p.cfg.ChunkLayoutHeadFor != nil {
+		// The kernel already claimed and validated this root. Seed only a fresh
+		// root; an existing root keeps its acknowledged WAL and synced position.
+		path, err := canStartFrom(ws, h.fresh, layoutHead)
+		if err != nil {
 			return nil, err
+		}
+		switch path {
+		case startAttachBase:
+			cfg.FreshFromHead = false
+		case startSeed:
+			if err := h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(layoutHead.Position) }); err != nil {
+				return nil, err
+			}
 		}
 	}
 	layer, err := storage.AttachChunkLayer(ws, remote, cfg)
