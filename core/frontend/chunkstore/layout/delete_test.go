@@ -232,3 +232,90 @@ func TestDeleteVolume_InterruptAtEveryStep(t *testing.T) {
 		}
 	}
 }
+
+// operatorCase: source src (id of "src") lists target t as a dependent;
+// t's VOLUME, HEAD and root objects are as the case sets them. When the
+// target names chunks, namesSource decides whether one of them is src's.
+func operatorCase(t *testing.T, tgtHead *Head, tgtVolume *VolumeID, namesSource bool) (*memHead, *memHead, *Reader) {
+	t.Helper()
+	w := newDeleteWorld()
+	objs := map[string][]byte{}
+	put := func(rel string, b []byte) { objs[path.Join(removeBase, "t", rel)] = b }
+	if tgtVolume != nil {
+		b, err := Volume{ID: *tgtVolume, Name: "t", Format: VolumeFormat}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		put(VolumeName, b)
+	}
+	if tgtHead != nil {
+		m := manifest(Ref{Owner: "t", OwnerID: idFor("t"), Chunk: NameChunk(1, []byte("own"))})
+		if namesSource {
+			m[2] = Ref{Owner: "src", OwnerID: idFor("src"), Chunk: NameChunk(2, []byte("from src"))}
+		}
+		root, segs, err := Build(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for n, b := range segs {
+			put(n.Path(), b)
+		}
+		rn, rb, err := NameRoot(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put(rn.Path(), rb)
+		h := *tgtHead
+		h.Current = &rn
+		tgtHead = &h
+	}
+	r, err := NewReader(removeBase, "t", func(_ context.Context, p string) ([]byte, bool, error) {
+		b, ok := objs[p]
+		return b, ok, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w.src, &memHead{h: tgtHead}, r
+}
+
+// The operator's remove-dependent releases a target only when the target
+// exists and is deleted or no longer names the source: its HEAD deleting
+// or deleted, its name holding another volume (another VOLUME id), or a
+// live HEAD none of whose roots names a chunk of the source. A live target
+// that still names the source, one being created (VOLUME without HEAD) and
+// one never created (no VOLUME, no HEAD: the restore could still create
+// it) are refused and the source is unchanged.
+func TestOperatorReleaseDependent(t *testing.T) {
+	ctx := context.Background()
+	live := idleHead()
+	live.VolumeID = idFor("t")
+	deleting := live
+	deleting.State = StateDeleting
+	tid, other := idFor("t"), idFor("t again")
+	for name, tc := range map[string]struct {
+		head        *Head
+		volume      *VolumeID
+		namesSource bool
+		release     bool
+		want        error
+	}{
+		"live target naming the source":   {&live, &tid, true, false, ErrTargetLive},
+		"live target no longer naming it": {&live, &tid, false, true, nil},
+		"target being created":            {nil, &tid, false, false, ErrTargetLive},
+		"target never created":            {nil, nil, false, false, ErrTargetNeverCreated},
+		"target deleting":                 {&deleting, &tid, true, true, nil},
+		"name holds another volume":       {nil, &other, false, true, nil},
+	} {
+		src, tgt, r := operatorCase(t, tc.head, tc.volume, tc.namesSource)
+		before := src.updates
+		_, err := OperatorReleaseDependent(ctx, src, tgt, r, tid)
+		released := len(src.h.Snapshots["daily"].Dependents) == 0
+		if tc.release && (err != nil || !released) {
+			t.Errorf("%s: %v, released %t; want released", name, err, released)
+		}
+		if !tc.release && (!errors.Is(err, tc.want) || released || src.updates != before) {
+			t.Errorf("%s: %v, released %t; want %v and the source unchanged", name, err, released, tc.want)
+		}
+	}
+}

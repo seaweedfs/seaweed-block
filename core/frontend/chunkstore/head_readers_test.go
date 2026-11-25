@@ -24,31 +24,32 @@ import (
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
 	// chunkstore: the two raw reads every other reader goes through
-	"core/frontend/chunkstore/catalog.go ReadHead -> LookupEntry":              "ok=false, no error (probe ReadHead)",
-	"core/frontend/chunkstore/chunk_remote.go getHeadRoot -> LookupEntry":      "zero HEAD, no error (probe GetHead)",
-	"core/frontend/chunkstore/catalog.go headExists -> LookupEntry":            "false (probe EnsureVolume)",
-	"core/frontend/chunkstore/chunk_remote.go GetHead -> getHeadRoot":          "zero HEAD, no error (probe GetHead)",
-	"core/frontend/chunkstore/chunk_remote.go GetHeadRoot -> getHeadRoot":      "zero HEAD, no error (probe GetHeadRoot)",
-	"core/frontend/chunkstore/chunk_remote.go CASHead -> getHeadRoot":          "GAP: expected gen 0 creates a HEAD over existing keys (probe CASHead)",
-	"core/frontend/chunkstore/catalog.go ensureInitialHead -> headExists":      "GAP: creates an empty gen-1 HEAD over existing keys (probe EnsureVolume)",
-	"core/frontend/chunkstore/catalog.go EnsureVolume -> ReadHead":             "GAP: attaches the recreated empty HEAD (probe EnsureVolume)",
-	"core/frontend/chunkstore/catalog.go fork -> ReadHead":                     "replay falls through and publishes the fork-time HEAD (probe ForkReplay)",
-	"core/frontend/chunkstore/catalog.go AbortFork -> ReadHead":                "GAP: exclusive-creates an aborted HEAD (probe AbortFork)",
-	"core/frontend/chunkstore/gc.go run -> GetHead":                            "GAP: zero HEAD roots nothing; the volume's keys become candidates (probe GCMark)",
-	"core/frontend/chunkstore/gc_copy.go SweepCopies -> ReadHead":              "after AbortFork: settles from the HEAD it created (probe AbortFork)",
-	"core/frontend/chunkstore/restore.go MarkIndependent -> ReadHead":          "refuses (not a restore / no HEAD) (probe MarkIndependent)",
-	"core/frontend/chunkstore/share_guard.go beginShare -> ReadHead":           "refuses outcome_unknown: the HEAD to share is no longer current",
-	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                      "GAP: reports an empty image, no error (probe Usage)",
-	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":               "finding ROOT_INVALID (probe Verify)",
-	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":  "refuses ErrHeadAbsent and deletes nothing (probe LayoutRemoval)",
-	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":        "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
-	"core/frontend/chunkstore/verify.go run -> LookupEntry":                    "finding ROOT_INVALID (probe Verify)",
-	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":       "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go markHeadDeleting -> ReadHead":   "zero HEAD: creates the deleting HEAD (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go commitHeadPurging -> ReadHead":  "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go finishHeadDeleted -> ReadHead":  "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go revertHeadDeleting -> ReadHead": "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go volumeGone -> ReadHead":         "absent HEAD = not gone (probe DeleteVolume)",
+	"core/frontend/chunkstore/catalog.go ReadHead -> LookupEntry":                    "ok=false, no error (probe ReadHead)",
+	"core/frontend/chunkstore/chunk_remote.go getHeadRoot -> LookupEntry":            "zero HEAD, no error (probe GetHead)",
+	"core/frontend/chunkstore/catalog.go headExists -> LookupEntry":                  "false (probe EnsureVolume)",
+	"core/frontend/chunkstore/chunk_remote.go GetHead -> getHeadRoot":                "zero HEAD, no error (probe GetHead)",
+	"core/frontend/chunkstore/chunk_remote.go GetHeadRoot -> getHeadRoot":            "zero HEAD, no error (probe GetHeadRoot)",
+	"core/frontend/chunkstore/chunk_remote.go CASHead -> getHeadRoot":                "GAP: expected gen 0 creates a HEAD over existing keys (probe CASHead)",
+	"core/frontend/chunkstore/catalog.go ensureInitialHead -> headExists":            "GAP: creates an empty gen-1 HEAD over existing keys (probe EnsureVolume)",
+	"core/frontend/chunkstore/catalog.go EnsureVolume -> ReadHead":                   "GAP: attaches the recreated empty HEAD (probe EnsureVolume)",
+	"core/frontend/chunkstore/catalog.go fork -> ReadHead":                           "replay falls through and publishes the fork-time HEAD (probe ForkReplay)",
+	"core/frontend/chunkstore/catalog.go AbortFork -> ReadHead":                      "GAP: exclusive-creates an aborted HEAD (probe AbortFork)",
+	"core/frontend/chunkstore/gc.go run -> GetHead":                                  "GAP: zero HEAD roots nothing; the volume's keys become candidates (probe GCMark)",
+	"core/frontend/chunkstore/gc_copy.go SweepCopies -> ReadHead":                    "after AbortFork: settles from the HEAD it created (probe AbortFork)",
+	"core/frontend/chunkstore/restore.go MarkIndependent -> ReadHead":                "refuses (not a restore / no HEAD) (probe MarkIndependent)",
+	"core/frontend/chunkstore/share_guard.go beginShare -> ReadHead":                 "refuses outcome_unknown: the HEAD to share is no longer current",
+	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                            "GAP: reports an empty image, no error (probe Usage)",
+	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":                     "finding ROOT_INVALID (probe Verify)",
+	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target with no HEAD and no VOLUME was never created and is refused, one with VOLUME and no HEAD is being created and is refused; nothing is written (probe LayoutOperatorRelease)",
+	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and deletes nothing (probe LayoutRemoval)",
+	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
+	"core/frontend/chunkstore/verify.go run -> LookupEntry":                          "finding ROOT_INVALID (probe Verify)",
+	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":             "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
+	"core/frontend/chunkstore/volume_delete.go markHeadDeleting -> ReadHead":         "zero HEAD: creates the deleting HEAD (probe DeleteVolume)",
+	"core/frontend/chunkstore/volume_delete.go commitHeadPurging -> ReadHead":        "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
+	"core/frontend/chunkstore/volume_delete.go finishHeadDeleted -> ReadHead":        "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
+	"core/frontend/chunkstore/volume_delete.go revertHeadDeleting -> ReadHead":       "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
+	"core/frontend/chunkstore/volume_delete.go volumeGone -> ReadHead":               "absent HEAD = not gone (probe DeleteVolume)",
 	// above the chunk store: they read through storage.ChunkRemote GetHead /
 	// GetHeadRoot, so an absent HEAD reaches them as the zero HEAD (probe GetHead)
 	"cmd/sw-block/chunk.go chunkShow -> ReadHead":                        "ok=false: reports no HEAD (probe ReadHead)",
@@ -278,6 +279,33 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatalf("layout removal over an absent HEAD deleted %d objects", pool.deletes)
 		}
 	})
+	t.Run("LayoutOperatorRelease", func(t *testing.T) {
+		tid, err := layout.NewVolumeID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		vb, err := layout.Volume{ID: tid, Name: "t", Format: layout.VolumeFormat}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		withVolume := func(context.Context, string) ([]byte, bool, error) { return vb, true, nil }
+		r, err := layout.NewReader("/swblock/chunks", "t", withVolume)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := &presentLayoutHead{}
+		if _, err := layout.OperatorReleaseDependent(ctx, src, &absentLayoutHead{}, r, tid); !errors.Is(err, layout.ErrTargetLive) || src.updates != 0 {
+			t.Fatalf("operator release of a target with VOLUME and no HEAD: %v, %d writes; want ErrTargetLive and none", err, src.updates)
+		}
+		none, _ := layout.NewReader("/swblock/chunks", "t", func(context.Context, string) ([]byte, bool, error) { return nil, false, nil })
+		if _, err := layout.OperatorReleaseDependent(ctx, src, &absentLayoutHead{}, none, tid); !errors.Is(err, layout.ErrTargetNeverCreated) || src.updates != 0 {
+			t.Fatalf("operator release of a target never created: %v, %d writes; want ErrTargetNeverCreated and none", err, src.updates)
+		}
+		absent := &absentLayoutHead{}
+		if _, err := layout.OperatorReleaseDependent(ctx, absent, &absentLayoutHead{}, r, tid); !errors.Is(err, layout.ErrHeadAbsent) || absent.updates != 0 {
+			t.Fatalf("operator release with the source HEAD absent: %v; want ErrHeadAbsent", err)
+		}
+	})
 	t.Run("ForkReplay", func(t *testing.T) {
 		f, b := headReaderForkFixture(t)
 		c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
@@ -319,3 +347,17 @@ func (p *countingPool) DeleteObject(context.Context, string) error { p.deletes++
 type okLease struct{}
 
 func (okLease) StillHeld(context.Context) error { return nil }
+
+// presentLayoutHead is a layout HEAD store whose HEAD is present (a live,
+// idle volume); it counts updates.
+type presentLayoutHead struct{ updates int }
+
+func (p *presentLayoutHead) ReadHead(context.Context) (layout.Head, bool, error) {
+	id, _ := layout.NewVolumeID()
+	return layout.Head{Gen: 1, VolumeID: id, Epoch: 1, Holder: "h", Activity: layout.Activity{Kind: layout.ActIdle}}, true, nil
+}
+
+func (p *presentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) error {
+	p.updates++
+	return nil
+}

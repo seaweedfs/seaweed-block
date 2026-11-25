@@ -123,6 +123,9 @@ func owners(m map[string]bool) []string {
 //   - Lease, claim half: OldLeaseEnded is used only in RunClaim, and
 //     RunClaim, when it is declared, uses it.
 //   - Every declared exported Run function goes through runTransition.
+//   - Release of a dependent: RunReleaseDependent is used only by
+//     DeleteVolume (its own HEAD is deleting) and OperatorReleaseDependent,
+//     which reads the target's HEAD before it releases.
 //   - Pool: a name starting with Delete or Remove is used only in
 //     RemoveUnreachable, where every delete is preceded, in the same loop
 //     body, by the remover's own lease check (StillHeld), and in
@@ -167,6 +170,14 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 		if strings.HasPrefix(fn, "Run") && !code["runTransition"][fn] {
 			bad = append(bad, fn+" is declared and does not go through runTransition")
 		}
+	}
+	for _, fn := range owners(code["RunReleaseDependent"]) {
+		if fn != "DeleteVolume" && fn != "OperatorReleaseDependent" {
+			bad = append(bad, fn+" uses RunReleaseDependent: only DeleteVolume (target deleting) and OperatorReleaseDependent (target checked) release")
+		}
+	}
+	if decl["OperatorReleaseDependent"] && !code["ReadHead"]["OperatorReleaseDependent"] {
+		bad = append(bad, "OperatorReleaseDependent does not read the target's HEAD before releasing")
 	}
 	for name, by := range code {
 		if strings.HasPrefix(name, "Delete") || strings.HasPrefix(name, "Remove") {
@@ -428,6 +439,10 @@ func DeleteVolume(ctx context.Context, st HeadStore, id VolumeID, srcs []HeadSto
 	_, _ = RunMarkDeleted(ctx, st)
 	return nil
 }`, want: "DeleteVolume has no NoHolder"},
+		"release outside delete and the operator's check": {src: `func w(ctx context.Context, st HeadStore, id VolumeID) { _, _ = RunReleaseDependent(ctx, st, id) }`, want: "only DeleteVolume (target deleting) and OperatorReleaseDependent"},
+		"operator release without reading the target": {file: "delete.go", src: `func OperatorReleaseDependent(ctx context.Context, source HeadStore, id VolumeID) (Head, error) {
+	return RunReleaseDependent(ctx, source, id)
+}`, want: "does not read the target's HEAD"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
 func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable (after its lease re-check) and DeleteVolume"},
 	} {
