@@ -477,7 +477,9 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 		lastEpoch uint64
 		lastEV    uint64
 		sentAny   bool
-		lastInfo  adapter.AssignmentInfo
+		// current rebuilds the fact of the last line sent (no local copy of
+		// the assignment: only the publisher mints one).
+		current func() *control.AssignmentFact
 	)
 	// A change of the volume's store record re-sends the current fact: its
 	// descriptors carry the recorded stores (the same generation; the
@@ -492,8 +494,8 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 			return nil
 		case <-storesChanged:
 			storesChanged = s.host.attest.watch(req.VolumeId)
-			if sentAny {
-				if err := stream.Send(s.assignmentFact(lastInfo)); err != nil {
+			if current != nil {
+				if err := stream.Send(current()); err != nil {
 					return err
 				}
 			}
@@ -530,7 +532,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 
 			lastEpoch = info.Epoch
 			lastEV = info.EndpointVersion
-			lastInfo = info
+			current = func() *control.AssignmentFact { return s.assignmentFact(info) }
 			sentAny = true
 			fact := s.assignmentFact(info)
 			if err := stream.Send(fact); err != nil {
