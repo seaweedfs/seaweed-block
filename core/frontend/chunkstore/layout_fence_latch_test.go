@@ -57,6 +57,10 @@ func TestLayoutFenceLatchesAtEverySite(t *testing.T) {
 			_, err := l.Detach(ctx)
 			return err
 		}},
+		// The holder's cleaning runs outside the layer; its refusal is
+		// classified (LayoutErr) and handed to the layer, as the provider's
+		// maintenance loop does.
+		{"cleaning", false, nil},
 	}
 	for sigName, move := range signals {
 		for _, st := range sites {
@@ -103,7 +107,15 @@ func TestLayoutFenceLatchesAtEverySite(t *testing.T) {
 				if !st.onPut {
 					moveHead()
 				}
-				err = st.observe(ctx, s, l)
+				if st.observe == nil { // cleaning
+					_, cerr := lh.cat.Clean(ctx, lh.v, lh.me, "clean-x")
+					err = LayoutErr(cerr)
+					if obs, ok := l.(interface{ ObserveRemoteError(error) error }); ok {
+						_ = obs.ObserveRemoteError(err)
+					}
+				} else {
+					err = st.observe(ctx, s, l)
+				}
 				if err == nil {
 					t.Fatalf("%s did not observe the moved HEAD", st.name)
 				}

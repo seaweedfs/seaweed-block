@@ -2,10 +2,13 @@ package durable
 
 import (
 	"context"
-	"github.com/seaweedfs/seaweed-block/core/frontend"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type maintenanceStubLayer struct{ storage.ChunkLayer }
@@ -88,5 +91,39 @@ func TestMaintenanceSameHandleRearmsAfterJoinedStop(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("stopped owner did not join")
 		}
+	}
+}
+
+// observingLayer records what the maintenance loop hands it.
+type observingLayer struct {
+	maintenanceStubLayer
+	seen chan error
+}
+
+func (l *observingLayer) ObserveRemoteError(err error) error {
+	select {
+	case l.seen <- err:
+	default:
+	}
+	return err
+}
+
+// The holder's cleaning may be the first call to see HEAD move away: the
+// maintenance loop hands its refusal to the layer, which latches the fence.
+func TestMaintenanceRefusalReachesTheLayer(t *testing.T) {
+	layer := &observingLayer{seen: make(chan error, 1)}
+	p := &DurableProvider{cfg: ProviderConfig{ChunkMaintenanceInterval: time.Millisecond, ChunkMaintenance: func(context.Context, string) error {
+		return fmt.Errorf("%w: cleaning refused", storage.ErrChunkLayerFenced)
+	}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go p.chunkMaintenanceLoop(ctx, "v1", layer, func() bool { return true })
+	select {
+	case err := <-layer.seen:
+		if !errors.Is(err, storage.ErrChunkLayerFenced) {
+			t.Fatalf("the layer saw %v; want the fence", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the cleaning refusal never reached the layer")
 	}
 }
