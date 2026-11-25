@@ -233,6 +233,18 @@ func run(f flags) int {
 		return 1
 	}
 	cfg.Auth, cfg.ServerOptions = authn, serverOpts
+	if f.workspaceRPC {
+		cat, client, err := chunkstore.DialBCatalog(context.Background(), chunkstore.SWFSConfig{
+			FilerGRPC: f.chunkFiler, Collection: f.chunkCollection,
+			Replication: f.chunkReplication, AssignPath: f.chunkPath,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster: layout filer:", err)
+			return 1
+		}
+		defer client.Close()
+		cfg.LayoutCreateVolume = layoutVolumeCreator(cat)
+	}
 	if authn != nil {
 		if days, until, err := certDaysLeft(f.auth.tlsCert, f.auth.tlsKey, time.Now()); err == nil {
 			fmt.Fprintln(os.Stderr, fmt.Sprintf("blockmaster: mutual TLS on; role file %s; own certificate expires %s (%d days)", f.auth.roleFile, until.UTC().Format(time.RFC3339), days))
