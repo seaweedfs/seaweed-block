@@ -25,7 +25,7 @@ func promoteOver(t *testing.T, tb *EpochTable, epoch, next uint64) {
 	}
 }
 
-// codex03's schedule: a catch-up's data sync succeeds and its table replace
+// A catch-up's data sync succeeds and its table replace
 // fails. The data is durable; the table must not keep naming it epoch 1. After
 // a reload and a forced promotion at epoch 3, an epoch-1 survivor whose 6..10
 // may differ must reconcile as diverged.
