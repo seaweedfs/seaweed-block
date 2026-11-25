@@ -161,6 +161,9 @@ type Host struct {
 	// even on a host that was healthy at its prior epoch; only a later
 	// successful role call for the current role and epoch clears it.
 	roleAdmissionFailed atomic.Value // string reason; "" = not failed
+	// storesAwaited: the primary fact's (awaited<<32 | initial) replica
+	// store count (ReplicaStoresAwaited).
+	storesAwaited atomic.Uint64
 	// RF1Only admission state, one unit under rf1Mu (field access only, no
 	// calls): the highest refused epoch with its reason ("" = cleared), and the
 	// highest epoch an RF1 fact was admitted at. A clear removes only the
@@ -384,6 +387,11 @@ func (h *Host) SetReplicationVolume(rv *replication.ReplicationVolume) {
 // goroutine has visibility yet).
 func (h *Host) setReplicationLocked(rv replicaSetUpdater) {
 	h.replication = rv
+	// This host attests its peers' stores to the master: a peer counts only
+	// while its store is the one the master recorded.
+	if c, ok := rv.(storeRequirer); ok && c != nil {
+		c.RequireAttestedStores()
+	}
 }
 
 func (h *Host) storeLocalReadinessReplayFact(fact *control.AssignmentFact) {
@@ -692,6 +700,13 @@ type storeAttester interface {
 	AttestedStores() map[string]storage.StoreID
 }
 
+// storeRequirer is the replication slot's switch that makes peers count
+// only with the store the master recorded (replication.ReplicationVolume).
+type storeRequirer interface {
+	RequireAttestedStores()
+}
+
+
 // storeAttestation is this node's attestation of its write-ACK set while it
 // holds the primary role (admitted, at its current epoch): its own store and
 // every Healthy peer's last barrier store. nil on a replica, before the
@@ -926,6 +941,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	}
 
 	h.recordSelfAssignment(fact)
+	h.noteReplicaStores(fact)
 	h.reportAssignmentEndpoints(fact)
 
 	// The recovery watchdog runs from the primary assignment, before any

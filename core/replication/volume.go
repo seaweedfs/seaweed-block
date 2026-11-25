@@ -93,6 +93,9 @@ type ReplicationVolume struct {
 	updateMu              sync.Mutex // serializes membership replacement with Close
 	mu                    sync.Mutex // protects membership, lineage, and lifecycle snapshots
 	peers                 map[string]*ReplicaPeer
+	// requireAttest: peers count toward write ACKs only while their barrier
+	// store is the one the master recorded (RequireAttestedStores).
+	requireAttest bool
 	executors             map[string]*transport.BlockExecutor
 	peerQueues            map[string]*peerWorkQueue
 	peerQueueDepth        int
@@ -407,6 +410,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		// peer ID set; `got` is the incoming set. Equal sets are the
 		// normal replay case; unequal sets indicate a master-side
 		// oddity worth a grep.
+		// The master's store record for a peer may change without a new
+		// generation (it records a rebuilt replica's store): apply it.
+		v.applyExpectedStoresLocked(targets)
 		had := peerIDSet(v.peers)
 		got := targetIDSet(targets)
 		if !stringSetEqual(had, got) {
@@ -494,6 +500,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		peer.setOnHealthy(func() {
 			v.resetTerminalPeerQueue(peer)
 		})
+		if v.requireAttest {
+			peer.setRequireAttest()
+		}
 		if v.epochs != nil {
 			peer.setReconcile(func(ctx context.Context) (bool, bool, string) { return v.reconcilePeer(ctx, peer) })
 			executor.SetEpochTable(v.epochs)
@@ -522,7 +531,8 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		addedPeers = append(addedPeers, peer)
 	}
 
-	v.seedNewPeerLiveCursorsLocked(addedPeers)
+	learn := v.seedNewPeerLiveCursorsLocked(addedPeers)
+	v.applyExpectedStoresLocked(targets)
 
 	// Advance the monotonic guard only for real (non-zero) generations.
 	if generation > 0 {
@@ -530,7 +540,29 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 	}
 	v.membershipUpdating = false
 	v.mu.Unlock()
+	v.learnPeerStores(learn)
 	return nil
+}
+
+// learnPeerStores runs a barrier at LSN 0 to each peer, in parallel and
+// without v.mu (only the UpdateReplicaSet call waits, at most one barrier
+// timeout): the answer carries the peer's store. A peer that does not answer
+// is degraded like any failed barrier; its store is learned at the barrier
+// that heals it.
+func (v *ReplicationVolume) learnPeerStores(peers []*ReplicaPeer) {
+	var wg sync.WaitGroup
+	for _, peer := range peers {
+		wg.Add(1)
+		go func(peer *ReplicaPeer) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), promotionSeedBarrierTimeout)
+			defer cancel()
+			if _, err := peer.Barrier(ctx, 0); err != nil {
+				log.Printf("replication: volume %s store barrier peer=%s: %v", v.volumeID, peer.Target().ReplicaID, err)
+			}
+		}(peer)
+	}
+	wg.Wait()
 }
 
 func (v *ReplicationVolume) closePeerQueueLocked(replicaID string) {
@@ -585,18 +617,28 @@ func (v *ReplicationVolume) replaceTerminalPeerQueueLocked(id string, old *peerW
 // cannot satisfy sync-quorum/sync-all write acknowledgement. A peer that
 // answers above the frontier holds a divergent old-epoch tail and is
 // degraded too (it needs a rebuild, never counts by length).
-func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
+//
+// It returns the peers whose store is still to be learned (a new volume
+// where stores are required): the caller runs learnPeerStores on them after
+// releasing v.mu.
+func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) []*ReplicaPeer {
 	if len(peers) == 0 {
-		return
+		return nil
 	}
 	frontier, err := v.store.Sync()
 	if err != nil {
 		log.Printf("replication: volume %s live cursor seed skipped: local sync failed: %v",
 			v.volumeID, err)
-		return
+		return nil
 	}
 	if frontier == 0 {
-		return
+		// Nothing to seed. Where stores are required, a barrier at 0 still
+		// teaches the primary each new peer's store, so it can attest it
+		// before any write (a new volume serves nothing until then).
+		if v.requireAttest {
+			return peers
+		}
+		return nil
 	}
 	for _, peer := range peers {
 		if peer == nil {
@@ -640,6 +682,7 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 		}
 		peer.SeedLiveShipCursor(frontier, "assignment frontier barrier")
 	}
+	return nil
 }
 
 // peerIDSet extracts the set of peer IDs from the current peers map.
@@ -1112,6 +1155,33 @@ func replicationDurationNanos(d time.Duration) uint64 {
 // LocalStoreID is the id of the store this volume replicates from (zero
 // when the store carries none).
 func (v *ReplicationVolume) LocalStoreID() storage.StoreID { return storage.StoreIDOf(v.store) }
+
+// applyExpectedStoresLocked sets each kept peer's expected store from its
+// target, when the target names the peer's current lineage.
+func (v *ReplicationVolume) applyExpectedStoresLocked(targets []ReplicaTarget) {
+	for _, t := range targets {
+		p, ok := v.peers[t.ReplicaID]
+		if !ok {
+			continue
+		}
+		cur := p.Target()
+		if cur.Epoch == t.Epoch && cur.EndpointVersion == t.EndpointVersion && cur.DataAddr == t.DataAddr {
+			p.setExpectedStore(t.StoreID)
+		}
+	}
+}
+
+// RequireAttestedStores makes every peer count toward write ACKs only while
+// its barrier reports the store the master recorded for it (the target's
+// StoreID). A host that attests its stores to a master sets it.
+func (v *ReplicationVolume) RequireAttestedStores() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.requireAttest = true
+	for _, p := range v.peers {
+		p.setRequireAttest()
+	}
+}
 
 // AttestedStores is the primary's attestation of its write-ACK set: each
 // Healthy peer with the store its last barrier reported (replica id ->

@@ -30,6 +30,10 @@ type ReplicaTarget struct {
 	ControlAddr     string
 	Epoch           uint64
 	EndpointVersion uint64
+	// StoreID is the replica's store the master recorded. Where stores are
+	// required, the peer counts toward write ACKs only while its barrier
+	// reports this store; zero never matches.
+	StoreID storage.StoreID
 }
 
 // ReplicaState is the coarse peer health state. The state machine
@@ -166,6 +170,11 @@ type ReplicaPeer struct {
 	// cleared whenever the peer leaves Healthy: a store is attested only
 	// by a barrier it answered while counting toward write ACKs.
 	storeID storage.StoreID
+	// requireAttest: the peer counts toward write ACKs only while its
+	// barrier-reported store equals expected, the store the master recorded
+	// for it (set by the volume when a host attests).
+	requireAttest bool
+	expected      storage.StoreID
 	// onHealthy lets the owning ReplicationVolume reopen a terminal work
 	// queue only after recovery has returned this peer to Healthy.
 	onHealthy func()
@@ -239,6 +248,7 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 		lineage:     lineage,
 		state:       ReplicaHealthy,
 		cooldownCfg: DefaultPeerProbeCooldown(),
+		expected:    target.StoreID,
 	}, nil
 }
 
@@ -793,6 +803,35 @@ func (p *ReplicaPeer) AttestedStore() (storage.StoreID, bool) {
 		return storage.StoreID{}, false
 	}
 	return p.storeID, true
+}
+
+// countsTowardAcks reports whether a write or barrier this peer answers
+// counts toward the volume's write ACKs: it is Healthy and, where stores
+// are required, its barrier-reported store is the one the master recorded
+// for it. A peer rebuilt onto a new store answers barriers (that is how its
+// store is learned) but does not count until the master records that store:
+// otherwise it could hold the only copy of an acknowledged write that no
+// promotion could verify.
+func (p *ReplicaPeer) countsTowardAcks() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.state != ReplicaHealthy {
+		return false
+	}
+	return !p.requireAttest || (!p.storeID.IsZero() && p.expected == p.storeID)
+}
+
+func (p *ReplicaPeer) setRequireAttest() {
+	p.mu.Lock()
+	p.requireAttest = true
+	p.mu.Unlock()
+}
+
+// setExpectedStore replaces the store the master recorded for this peer.
+func (p *ReplicaPeer) setExpectedStore(id storage.StoreID) {
+	p.mu.Lock()
+	p.expected = id
+	p.mu.Unlock()
 }
 
 func (p *ReplicaPeer) setOnHealthy(fn func()) {

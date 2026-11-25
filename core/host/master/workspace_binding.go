@@ -200,6 +200,11 @@ func (s *services) PlaceWorkspace(ctx context.Context, q *control.WorkspacePlace
 // admitWorkspacePublication owns the last local boundary before an ordinary
 // Publisher mint. Guarded Move already owns workspaceMu in its RPC path.
 func (h *Host) admitWorkspacePublication(ask authority.AssignmentAsk, publish func() error) error {
+	// A volume's first bind records its initial replicas before the line
+	// exists, so its primary is never served without the wait.
+	if err := h.openStoreRecord(ask.VolumeID); err != nil {
+		return err
+	}
 	if h.lifecycle == nil {
 		return publish()
 	}

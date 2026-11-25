@@ -243,6 +243,11 @@ message ReplicaDescriptor {
     uint64 endpoint_version = 3;
     string data_addr = 4;
     string ctrl_addr = 5;
+    // store_id is the replica's store the master recorded (16 bytes; its
+    // superblock UUID): the primary counts this peer's acks only while the
+    // store the peer states in its replication session is this one. Empty
+    // never matches.
+    bytes store_id = 6;
 }
 
 // AssignmentFact — master-minted AssignmentInfo fact carried to a
@@ -296,6 +301,12 @@ message AssignmentFact {
     // The probed store's id (its superblock UUID, 16 bytes): the target
     // adopts a promotion only on that same store.
     bytes evidence_store_id = 14;
+    // A new volume's initial replicas whose attested store the master has
+    // not recorded yet (0: none awaited). While it is non-zero the primary
+    // serves no frontend I/O: its peers' acks cannot count yet.
+    uint32 replica_stores_awaited = 15;
+    // The number of initial replicas (the N of "n of N" in its status).
+    uint32 replica_stores_initial = 16;
 }
 
 // PrimaryKind is how a line made its primary the primary.
