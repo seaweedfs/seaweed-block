@@ -244,6 +244,8 @@ func run(f flags) int {
 		}
 		defer client.Close()
 		cfg.LayoutCreateVolume = layoutVolumeCreator(cat)
+		cfg.LayoutReadVolume = layoutVolumeReader(cat)
+		cfg.LayoutCreateTarget = layoutTargetCreator(cat)
 	}
 	if authn != nil {
 		if days, until, err := certDaysLeft(f.auth.tlsCert, f.auth.tlsKey, time.Now()); err == nil {

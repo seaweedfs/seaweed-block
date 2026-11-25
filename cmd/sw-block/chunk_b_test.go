@@ -57,10 +57,29 @@ var testIDs sync.Map
 // names against testIDs.
 func useMemChunkStore(t *testing.T, store *memChunkStore) {
 	t.Helper()
-	prev, prevResolve := dialChunkFiler, resolveVolumeID
+	prev, prevResolve, prevRestore := dialChunkFiler, resolveVolumeID, restoreCreateRPC
 	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return store, func() error { return nil }, nil }
 	resolveVolumeID = testResolve
-	t.Cleanup(func() { dialChunkFiler, resolveVolumeID = prev, prevResolve })
+	restoreCreateRPC = func(ctx context.Context, _ string, req *control.CreateVolumeRequest) (*control.CreateVolumeResponse, error) {
+		sid, err := testResolve(ctx, "", req.GetSourceVolume())
+		if err != nil {
+			return nil, err
+		}
+		tid, err := testResolve(ctx, "", req.GetVolumeId())
+		if err != nil {
+			return nil, err
+		}
+		cat, err := chunkstore.NewBCatalog(store, store, defaultChunkPathCLI)
+		if err != nil {
+			return nil, err
+		}
+		_, err = cat.Restore(ctx, chunkstore.VolumeRef{Name: req.GetSourceVolume(), ID: sid}, req.GetSourceSnapshot(), chunkstore.VolumeRef{Name: req.GetVolumeId(), ID: tid})
+		if err != nil {
+			return nil, err
+		}
+		return &control.CreateVolumeResponse{VolumeId: req.GetVolumeId(), LayoutId: tid.String(), StoreReady: true}, nil
+	}
+	t.Cleanup(func() { dialChunkFiler, resolveVolumeID, restoreCreateRPC = prev, prevResolve, prevRestore })
 }
 
 func testResolve(_ context.Context, _ string, name string) (layout.VolumeID, error) {

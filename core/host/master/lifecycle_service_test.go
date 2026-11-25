@@ -6,11 +6,61 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestRestoreCreateVolumePersistsRequestBeforeTargetAndHealsRetry(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	svc := newServices(h)
+	h.cfg.LayoutCreateVolume = func(context.Context, lifecycle.VolumeSpec) error { return nil }
+	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "source", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+		t.Fatal(err)
+	}
+	g := layout.Geometry{SizeBytes: 1 << 20, BlockSize: 4096, ChunkBytes: 4 << 20}
+	h.cfg.LayoutReadVolume = func(_ context.Context, source lifecycle.VolumeSpec) (layout.Volume, error) {
+		id, err := layout.ParseVolumeID(source.LayoutID)
+		return layout.Volume{ID: id, Name: source.VolumeID, Geometry: g, Format: layout.VolumeFormat}, err
+	}
+	var targetID string
+	var calls int
+	h.cfg.LayoutCreateTarget = func(_ context.Context, source, target lifecycle.VolumeSpec, snapshot string) error {
+		calls++
+		rec, ok := h.Lifecycle().Volumes.GetVolume(target.VolumeID)
+		if !ok || rec.StoreReady || rec.Spec != target || snapshot != "daily" || source.VolumeID != "source" {
+			t.Fatalf("target called before durable request: %+v, source=%+v snapshot=%s", rec, source, snapshot)
+		}
+		if targetID == "" {
+			targetID = target.LayoutID
+		}
+		if target.LayoutID != targetID || target.SizeBytes != g.SizeBytes || target.BlockSize != g.BlockSize || target.ChunkBytes != g.ChunkBytes {
+			t.Fatalf("target replay changed id or source geometry: %+v", target)
+		}
+		if calls == 1 {
+			return errors.New("interrupted after AddDependent")
+		}
+		return nil
+	}
+	req := &control.CreateVolumeRequest{VolumeId: "target", SourceVolume: "source", SourceSnapshot: "daily", CreateRequestId: "restore-1"}
+	if _, err := svc.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+		t.Fatalf("interrupted restore: %v; want retryable unavailable", err)
+	}
+	if rec, _ := h.Lifecycle().Volumes.GetVolume("target"); rec.StoreReady {
+		t.Fatal("interrupted restore became placeable")
+	}
+	resp, err := svc.CreateVolume(context.Background(), req)
+	if err != nil || !resp.GetStoreReady() || resp.GetLayoutId() != targetID || calls != 2 {
+		t.Fatalf("replay: %+v %v, calls=%d", resp, err, calls)
+	}
+	req.SourceSnapshot = "weekly"
+	if _, err := svc.CreateVolume(context.Background(), req); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("rebound request: %v; want conflict", err)
+	}
+}
 
 func TestCreateVolumeRetriesFilerCreateBeforeStoreReady(t *testing.T) {
 	h := newTestMaster(t, t.TempDir())

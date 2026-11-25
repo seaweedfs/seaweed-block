@@ -11,6 +11,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/auth"
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -69,12 +70,51 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	if stores.Deletions.Reserved(spec.VolumeID) {
 		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
 	}
+	if spec.SourceVolume != "" || spec.SourceSnapshot != "" || spec.CreateRequestID != "" {
+		if spec.SourceVolume == "" || spec.SourceSnapshot == "" || spec.CreateRequestID == "" || spec.SourceVolume == spec.VolumeID {
+			return nil, status.Error(codes.InvalidArgument, "restore needs a distinct source volume, snapshot and request id")
+		}
+		source, ok := stores.Volumes.GetVolume(spec.SourceVolume)
+		if !ok || !source.StoreReady {
+			return nil, status.Errorf(codes.FailedPrecondition, "restore source %q is not store-ready", spec.SourceVolume)
+		}
+		if s.host.cfg.LayoutReadVolume == nil || s.host.cfg.LayoutCreateTarget == nil {
+			return nil, status.Error(codes.FailedPrecondition, "master has no restore store")
+		}
+		v, err := s.host.cfg.LayoutReadVolume(ctx, source.Spec)
+		if err != nil {
+			return nil, status.Errorf(codes.Unavailable, "read restore source VOLUME: %v", err)
+		}
+		id, err := layout.ParseVolumeID(source.Spec.LayoutID)
+		if err != nil || v.ID != id || v.Name != source.Spec.VolumeID || v.CheckIdentity() != nil || v.Geometry.Check() != nil {
+			return nil, status.Error(codes.FailedPrecondition, "restore source VOLUME identity or geometry is invalid")
+		}
+		if (spec.SizeBytes != 0 && spec.SizeBytes != v.Geometry.SizeBytes) || (spec.BlockSize != 0 && spec.BlockSize != v.Geometry.BlockSize) || (spec.ChunkBytes != 0 && spec.ChunkBytes != v.Geometry.ChunkBytes) {
+			return nil, status.Error(codes.InvalidArgument, "restore target geometry must match source VOLUME")
+		}
+		spec.SizeBytes, spec.BlockSize, spec.ChunkBytes = v.Geometry.SizeBytes, v.Geometry.BlockSize, v.Geometry.ChunkBytes
+		if spec.ReplicationFactor == 0 {
+			spec.ReplicationFactor = source.Spec.ReplicationFactor
+		}
+		if spec.Protocol == "" {
+			spec.Protocol = source.Spec.Protocol
+		}
+		if spec.FrontendTransport == "" {
+			spec.FrontendTransport = source.Spec.FrontendTransport
+		}
+	}
 	if createVolumeHook != nil {
 		createVolumeHook(spec.VolumeID)
 	}
 	s.host.log.Printf("blockmaster: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
 	rec, err := s.host.createLifecycleVolume(ctx, spec)
 	if err != nil {
+		if errors.Is(err, layout.ErrNoSnapshot) {
+			return nil, status.Errorf(codes.NotFound, "restore snapshot: %v", err)
+		}
+		if errors.Is(err, layout.ErrForeignSource) || errors.Is(err, layout.ErrVolumeDeleting) || errors.Is(err, layout.ErrExists) {
+			return nil, status.Errorf(codes.FailedPrecondition, "restore target: %v", err)
+		}
 		if errors.Is(err, errLayoutStoreNotReady) {
 			return nil, status.Errorf(codes.Unavailable, "create volume: created, store not ready; retry: %v", err)
 		}
@@ -93,7 +133,7 @@ func (h *Host) createLifecycleVolume(ctx context.Context, spec lifecycle.VolumeS
 	if err != nil {
 		return lifecycle.VolumeRecord{}, err
 	}
-	if h.cfg.LayoutCreateVolume == nil {
+	if h.cfg.LayoutCreateVolume == nil && rec.Spec.SourceVolume == "" {
 		if h.cfg.WorkspaceRPC {
 			return lifecycle.VolumeRecord{}, fmt.Errorf("%w: master has no filer writer", errLayoutStoreNotReady)
 		}
@@ -105,8 +145,18 @@ func (h *Host) createLifecycleVolume(ctx context.Context, spec lifecycle.VolumeS
 		// CreateVolume replay must never seed an empty HEAD over its lineage.
 		return rec, nil
 	}
-	if err := h.cfg.LayoutCreateVolume(ctx, rec.Spec); err != nil {
-		return lifecycle.VolumeRecord{}, fmt.Errorf("%w: %v", errLayoutStoreNotReady, err)
+	var createErr error
+	if rec.Spec.SourceVolume != "" {
+		source, ok := h.lifecycle.Volumes.GetVolume(rec.Spec.SourceVolume)
+		if !ok || h.cfg.LayoutCreateTarget == nil {
+			return lifecycle.VolumeRecord{}, fmt.Errorf("%w: restore source or target creator is unavailable", errLayoutStoreNotReady)
+		}
+		createErr = h.cfg.LayoutCreateTarget(ctx, source.Spec, rec.Spec, rec.Spec.SourceSnapshot)
+	} else {
+		createErr = h.cfg.LayoutCreateVolume(ctx, rec.Spec)
+	}
+	if createErr != nil {
+		return lifecycle.VolumeRecord{}, fmt.Errorf("%w: %w", errLayoutStoreNotReady, createErr)
 	}
 	return h.lifecycle.Volumes.MarkStoreReady(rec.Spec.VolumeID, rec.Spec.LayoutID)
 }
@@ -414,6 +464,9 @@ func lifecycleSpecFromWire(req *control.CreateVolumeRequest) lifecycle.VolumeSpe
 		PVCNamespace:      req.GetPvcNamespace(),
 		PVCUID:            req.GetPvcUid(),
 		PVName:            req.GetPvName(),
+		SourceVolume:      req.GetSourceVolume(),
+		SourceSnapshot:    req.GetSourceSnapshot(),
+		CreateRequestID:   req.GetCreateRequestId(),
 	}
 }
 

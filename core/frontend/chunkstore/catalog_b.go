@@ -60,6 +60,26 @@ func (c *BCatalog) CreateVolume(ctx context.Context, v VolumeRef, geometry layou
 	return layout.CreateVolume(ctx, s, layout.Volume{ID: v.ID, Name: v.Name, Format: layout.VolumeFormat, Geometry: geometry})
 }
 
+// ReadVolume returns the source's immutable VOLUME record; a restore takes
+// its geometry from this record rather than operator flags.
+func (c *BCatalog) ReadVolume(ctx context.Context, v VolumeRef) (layout.Volume, error) {
+	s, err := c.Store(v)
+	if err != nil {
+		return layout.Volume{}, err
+	}
+	got, found, err := s.ReadVolumeRecord(ctx)
+	if err != nil {
+		return layout.Volume{}, err
+	}
+	if !found {
+		return layout.Volume{}, layout.ErrMissing
+	}
+	if got.ID != v.ID || got.Name != v.Name {
+		return layout.Volume{}, layout.ErrIdentity
+	}
+	return got, nil
+}
+
 // ReadHead reads the volume's HEAD.
 func (c *BCatalog) ReadHead(ctx context.Context, v VolumeRef) (layout.Head, bool, error) {
 	s, err := c.Store(v)
