@@ -509,7 +509,9 @@ func (v *ReplicationVolume) replaceTerminalPeerQueueLocked(id string, old *peerW
 // ship cursor so the first post-promotion write starts at frontier+1.
 // This is the promoted-primary handoff proof: peers that cannot answer
 // the barrier, or answer below the frontier, are degraded and therefore
-// cannot satisfy sync-quorum/sync-all write acknowledgement.
+// cannot satisfy sync-quorum/sync-all write acknowledgement. A peer that
+// answers above the frontier holds a divergent old-epoch tail and is
+// degraded too (it needs a rebuild, never counts by length).
 func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 	if len(peers) == 0 {
 		return
@@ -541,6 +543,16 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 			peer.Invalidate(fmt.Sprintf("promotion seed barrier below frontier: achieved=%d required=%d",
 				ack.AchievedLSN, frontier))
 			log.Printf("replication: volume %s live cursor seed rejected peer=%s achieved=%d required=%d",
+				v.volumeID, peer.Target().ReplicaID, ack.AchievedLSN, frontier)
+			continue
+		}
+		if ack.AchievedLSN > frontier {
+			// Above this node's frontier the survivor holds entries this
+			// node never had: a tail of the old epoch that was never
+			// acknowledged. Length is not agreement; it needs a rebuild.
+			peer.Invalidate(fmt.Sprintf("promotion seed barrier above frontier: divergent tail achieved=%d frontier=%d",
+				ack.AchievedLSN, frontier))
+			log.Printf("replication: volume %s live cursor seed rejected peer=%s: divergent tail achieved=%d above frontier=%d",
 				v.volumeID, peer.Target().ReplicaID, ack.AchievedLSN, frontier)
 			continue
 		}
