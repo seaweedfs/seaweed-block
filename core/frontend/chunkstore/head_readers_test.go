@@ -27,10 +27,10 @@ var headReaders = map[string]string{
 	"core/frontend/durable/provider_seal_replay.go readLayoutSeal -> ReadHead":                        "absent, unreadable and foreign layout proof refuse without cached success (TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory)",
 	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                           "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopAbortMustConfirmItsOutcome)",
 	"cmd/blockvolume/workspace_lease.go workspaceLayoutDetachedGeneration -> ReadHead":                "absent refuses ACK (probe TestWorkspaceLayoutDetachedProof)",
-	"cmd/blockvolume/chunk_remote.go chunkAttachCheck -> ReadHead":                                  "absent refuses attach without creating VOLUME or HEAD (TestChunkAttachCheckAppliesVolumeRules)",
+	"cmd/blockvolume/chunk_remote.go chunkAttachCheck -> ReadHead":                                    "absent refuses attach without creating VOLUME or HEAD (TestChunkAttachCheckAppliesVolumeRules)",
 	"core/frontend/chunkstore/layout_store.go ReadHead -> DecodeLayoutHeadEntry":                      "shared canonical entry decoder; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",
 	"core/host/master/workspace_layout_head.go NewLayoutWorkspaceHEADReader -> DecodeLayoutHeadEntry": "any missing/failed metadata refuses; identity comes from master intent (TestWorkspaceLayoutHEADRefusalsAndStates)",
-	"cmd/blockmaster/layout_create.go layoutHeadReader -> ReadHead": "absent refuses restore before target persistence (TestMasterLayoutHeadReaderRefusesAbsentHead)",
+	"cmd/blockmaster/layout_create.go layoutHeadReader -> ReadHead":                                   "absent refuses restore before target persistence (TestMasterLayoutHeadReaderRefusesAbsentHead)",
 	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":                                     "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",
 	"core/frontend/chunkstore/layout_store.go ReadHead -> LookupEntry":                                "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
 	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead":                  "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
@@ -62,7 +62,6 @@ var headReaders = map[string]string{
 	"core/storage/chunk_head_belt.go confirmChunkHead -> GetHeadRoot":    "ErrHeadAbsent from the layout remote: not confirmed (probe LayoutRemote)",
 	"core/storage/chunk_head_belt.go readChunkHead -> GetHead":           "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
 	"core/storage/chunk_layer.go attachChunkLayerImpl -> GetHead":        "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
-	"core/storage/chunk_restore.go ClaimChunkHead -> GetHead":            "ErrHeadAbsent from the layout remote: no claim (probe LayoutRemote)",
 }
 
 // TestHeadReaders_Enumeration lists every HEAD reader in core/ and cmd/ from
