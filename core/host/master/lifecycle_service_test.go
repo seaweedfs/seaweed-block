@@ -74,6 +74,17 @@ func TestRestoreCreateVolumePersistsRequestBeforeTargetAndHealsRetry(t *testing.
 	if _, ok := h.Lifecycle().Volumes.GetVolume("wrong"); ok {
 		t.Fatal("missing snapshot created a target record")
 	}
+	h.cfg.LayoutReadHead = func(_ context.Context, source lifecycle.VolumeSpec) (layout.Head, error) {
+		id, _ := layout.ParseVolumeID(source.LayoutID)
+		return layout.Head{VolumeID: id, State: layout.StateDeleting, Snapshots: map[string]layout.Snapshot{"daily": {}}}, nil
+	}
+	deleting := &control.CreateVolumeRequest{VolumeId: "from-deleting", SourceVolume: "source", SourceSnapshot: "daily", CreateRequestId: "restore-deleting"}
+	if _, err := svc.CreateVolume(context.Background(), deleting); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("deleting source: %v; want refusal", err)
+	}
+	if _, ok := h.Lifecycle().Volumes.GetVolume("from-deleting"); ok {
+		t.Fatal("deleting source created a target record")
+	}
 	unsafe := &control.CreateVolumeRequest{VolumeId: "net-target", SourceVolume: "source", SourceSnapshot: "daily", CreateRequestId: "restore-net", ReplicationFactor: 2}
 	if _, err := svc.CreateVolume(context.Background(), unsafe); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("RF2 restore: %v; want refusal", err)
