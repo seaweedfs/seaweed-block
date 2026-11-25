@@ -79,10 +79,10 @@ func TestPrecopyFreezeDoesNotWaitForAdmittedIO(t *testing.T) {
 func precopyProvider(t *testing.T, remote storage.ChunkRemote, view *parkView, hooks ...*detachHooks) *durable.DurableProvider {
 	t.Helper()
 	_ = remote // Other legacy callers migrate to the layout fixture separately.
-	return precopyLayoutProvider(t, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), view, nil, hooks...)
+	return precopyBProvider(t, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), view, nil, hooks...)
 }
 
-func precopyLayoutProvider(t *testing.T, fixture *testutil.LayoutFixture, view *parkView, delayed *precopyFixedSampleRemote, hooks ...*detachHooks) *durable.DurableProvider {
+func precopyBProvider(t *testing.T, fixture *testutil.LayoutFixture, view *parkView, delayed *precopyLayoutDelayedRemote, hooks ...*detachHooks) *durable.DurableProvider {
 	t.Helper()
 	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
@@ -113,7 +113,7 @@ func precopyLayoutProvider(t *testing.T, fixture *testutil.LayoutFixture, view *
 
 func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
-	p := precopyLayoutProvider(t, fixture, &parkView{stubView: v1View()}, nil)
+	p := precopyBProvider(t, fixture, &parkView{stubView: v1View()}, nil)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
@@ -139,11 +139,29 @@ func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 }
 
 type precopyFixedSampleRemote struct {
-	*chunkstore.LayoutRemote
+	*storage.MemChunkRemote
 	nextDelay atomic.Int64
 }
 
 func (r *precopyFixedSampleRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	if delay := time.Duration(r.nextDelay.Swap(0)); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return r.MemChunkRemote.CASHead(ctx, expected, next)
+}
+
+type precopyLayoutDelayedRemote struct {
+	*chunkstore.LayoutRemote
+	nextDelay atomic.Int64
+}
+
+func (r *precopyLayoutDelayedRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	if delay := time.Duration(r.nextDelay.Swap(0)); delay > 0 {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
@@ -167,10 +185,10 @@ func TestPrecopyProviderBusyOwnerRetryRetainsSlowFixedSample(t *testing.T) {
 func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 	t.Helper()
 	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
-	remote := &precopyFixedSampleRemote{}
+	remote := &precopyLayoutDelayedRemote{}
 	view := &parkView{stubView: v1View()}
 	k := &detachHooks{}
-	p := precopyLayoutProvider(t, fixture, view, remote, k)
+	p := precopyBProvider(t, fixture, view, remote, k)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {

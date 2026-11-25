@@ -19,7 +19,10 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -715,13 +718,14 @@ func TestCorruptWALWrite_NoncePayloadOverlap(t *testing.T) {
 func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 	root := t.TempDir()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, view)
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -796,12 +800,14 @@ func TestWALStoreChunk_StaleWaiterCannotOverrideFailedRecovery(t *testing.T) {
 func TestWALStoreChunk_FailedRecoveryRetiresAuthorityWait(t *testing.T) {
 	root := t.TempDir()
 	view := newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
-	}, view)
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -898,13 +904,23 @@ func (c *countingRemote) GetHead(ctx context.Context) (storage.ChunkHead, error)
 func TestWALStoreChunk_StaleWaiterPastTickCheckCannotAttach(t *testing.T) {
 	root := t.TempDir()
 	view := &parkingView{stubView: newStubView(frontend.Projection{VolumeID: "v1", ReplicaID: "r1"})}
-	remote := &countingRemote{ChunkRemote: storage.NewMemChunkRemote()}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, view)
+	}
+	fixture.Configure(&cfg)
+	remote := &countingRemote{}
+	cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+		inner, err := chunkstore.NewLayoutRemote(fixture.Catalog, fixture.Ref, me)
+		if err != nil {
+			return nil, err
+		}
+		remote.ChunkRemote = inner
+		return remote, nil
+	}
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}
