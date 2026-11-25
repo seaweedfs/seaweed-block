@@ -19,6 +19,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/launcher"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 )
 
@@ -71,6 +72,7 @@ type flags struct {
 	// bound, so L2 subprocess tests can parse the ready event.
 	// Not operator-facing; documented in the T0 smoke scenario.
 	printReadyLine bool
+	auth           authFlags
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -81,6 +83,11 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.lifecyclePlacementSeed, "lifecycle-placement-seed", "", "placement-only seed JSON; lifecycle volumes must already be registered (CreateVolume)")
 	fs.StringVar(&f.clusterSpec, "cluster-spec", "", "cluster spec YAML; positive size_bytes imports desired volumes before topology/placement publication")
 	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180); non-loopback requires --insecure-external-bind")
+	fs.StringVar(&f.auth.tlsCert, "tls-cert", "", "blockmaster's TLS certificate (PEM): with --tls-key, --tls-client-ca and --role-file, every gRPC call needs mutual TLS")
+	fs.StringVar(&f.auth.tlsKey, "tls-key", "", "the key of --tls-cert (PEM)")
+	fs.StringVar(&f.auth.tlsClientCA, "tls-client-ca", "", "CA (PEM) every client certificate must verify against")
+	fs.StringVar(&f.auth.auditLog, "audit-log", "", "append-only audit log (JSON lines): every operator and admin call, refused node calls, role-file reloads")
+	fs.StringVar(&f.auth.roleFile, "role-file", "", "role file: lines 'sha256:<fingerprint> <viewer|operator|admin|node> <id>'; SIGHUP reloads it")
 	fs.BoolVar(&f.insecureExternalBind, "insecure-external-bind", false, "allow the unauthenticated control listeners (--listen, --frontend-publication-runtime-listen) on non-loopback addresses")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
@@ -119,6 +126,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.strictJournalIsolation, "strict-journal-isolation", false, "refuse new work on nodes whose durable root shares the authority store's file system (one journal): their heartbeats are refused until they serve a volume, and no placement or move targets them; off = alarm only")
 	fs.StringVar(&f.statusListen, "status-listen", "", "loopback HTTP address for the read-only GET /status/workspace-lease endpoint; empty = off")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
+	fs.DurationVar(&f.auth.connectionAge, "tls-connection-age-test-only", link.MasterConnectionAge, "internal test-only: how long a client connection lives before a reconnect (a fresh handshake)")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -146,8 +154,13 @@ func parseFlags(args []string) (flags, error) {
 	if err := master.ValidateStatusListen(f.statusListen); err != nil {
 		return flags{}, err
 	}
-	if err := master.ValidateControlListen("listen", f.listen, f.insecureExternalBind); err != nil {
+	if err := f.auth.validate(f.insecureExternalBind); err != nil {
 		return flags{}, err
+	}
+	if !f.auth.enabled() {
+		if err := master.ValidateControlListen("listen", f.listen, f.insecureExternalBind); err != nil {
+			return flags{}, err
+		}
 	}
 	if f.frontendPublicationRuntimeHTTP {
 		if err := master.ValidateControlListen("frontend-publication-runtime-listen", f.frontendPublicationRuntimeListen, f.insecureExternalBind); err != nil {
@@ -208,6 +221,19 @@ func run(f flags) int {
 		StrictJournalIsolation:           f.strictJournalIsolation,
 		StatusListen:                     f.statusListen,
 	}
+	authn, serverOpts, err := f.auth.build()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "blockmaster:", err)
+		return 1
+	}
+	cfg.Auth, cfg.ServerOptions = authn, serverOpts
+	if authn != nil {
+		if days, until, err := certDaysLeft(f.auth.tlsCert, f.auth.tlsKey, time.Now()); err == nil {
+			fmt.Fprintln(os.Stderr, fmt.Sprintf("blockmaster: mutual TLS on; role file %s; own certificate expires %s (%d days)", f.auth.roleFile, until.UTC().Format(time.RFC3339), days))
+		}
+	} else {
+		warnUnauthenticated(f.listen)
+	}
 	if f.workspaceRPC {
 		reader, err := master.NewWorkspaceHEADReader(f.workspaceHEADBase)
 		if err != nil {
@@ -260,6 +286,9 @@ func run(f flags) int {
 	}
 
 	h.Start()
+	if authn != nil {
+		reloadRolesOnSIGHUP(authn, f.auth.roleFile)
+	}
 	if f.lifecycleLoop > 0 {
 		go runLifecycleProductLoop(h, f.lifecycleLoop)
 	}

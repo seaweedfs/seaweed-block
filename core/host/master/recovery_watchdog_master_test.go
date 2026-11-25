@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/seaweedfs/seaweed-block/core/auth"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -32,7 +33,7 @@ func reportRF3(t *testing.T, svc *services, r1, r2, r3 wireSlot) {
 	}{
 		{"node-a", "r1", r1}, {"node-b", "r2", r2}, {"node-c", "r3", r3},
 	} {
-		_, err := svc.ReportHeartbeat(context.Background(), &control.HeartbeatReport{
+		_, err := svc.ReportHeartbeat(auth.DevCall(context.Background()), &control.HeartbeatReport{
 			ServerId: s.server, SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
 			Slots: []*control.HeartbeatSlot{{
 				VolumeId:        "vol-rf3",
@@ -72,7 +73,7 @@ func watchdogMaster(t *testing.T) (*Host, *services) {
 
 func unhealthyReplicas(t *testing.T, svc *services) map[string]string {
 	t.Helper()
-	resp, err := svc.QueryVolumeStatus(context.Background(), &control.StatusRequest{VolumeId: "vol-rf3"})
+	resp, err := svc.QueryVolumeStatus(auth.DevCall(context.Background()), &control.StatusRequest{VolumeId: "vol-rf3"})
 	if err != nil {
 		t.Fatalf("QueryVolumeStatus: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestRecoveryWatchdog_MasterLaterDegradationFollowsNormalRules(t *testing.T)
 
 func reportR1(t *testing.T, svc *services, slot wireSlot, sentAt time.Time) {
 	t.Helper()
-	_, err := svc.ReportHeartbeat(context.Background(), &control.HeartbeatReport{
+	_, err := svc.ReportHeartbeat(auth.DevCall(context.Background()), &control.HeartbeatReport{
 		ServerId: "node-a", SentAt: timestamppb.New(sentAt), Reachable: true, Eligible: true,
 		Slots: []*control.HeartbeatSlot{{
 			VolumeId: "vol-rf3", ReplicaId: "r1", DataAddr: "127.0.0.1:19101", CtrlAddr: "127.0.0.1:19102",
@@ -276,7 +277,7 @@ func TestRecoveryWatchdog_MasterDuplicateSlotHeartbeatRefused(t *testing.T) {
 		{slot(""), slot("recovery_timeout")},                 // conflicting
 		{slot("recovery_timeout"), slot("recovery_timeout")}, // identical
 	} {
-		_, err := svc.ReportHeartbeat(context.Background(), &control.HeartbeatReport{
+		_, err := svc.ReportHeartbeat(auth.DevCall(context.Background()), &control.HeartbeatReport{
 			ServerId: "node-a", SentAt: timestamppb.New(t0.Add(time.Duration(i+1) * time.Millisecond)),
 			Reachable: true, Eligible: true, Slots: slots,
 		})

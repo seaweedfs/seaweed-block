@@ -76,7 +76,7 @@ func TestMaintenanceRetentionFailureNeverStartsGC(t *testing.T) {
 				}
 				now = time.Now()
 			}
-			pass, closeFn, err := newChunkMaintenance(cat, maintenanceBlobs{}, true, "unused-master:1234")
+			pass, closeFn, err := newChunkMaintenance(cat, maintenanceBlobs{}, true, "unused-master:1234", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,7 +103,7 @@ func TestMaintenanceDefaultRetainNeedsNoEpochClient(t *testing.T) {
 	if _, err = cat.EnsureVolume(context.Background(), "v", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
 		t.Fatal(err)
 	}
-	pass, closeFn, err := newChunkMaintenance(cat, nil, false, "")
+	pass, closeFn, err := newChunkMaintenance(cat, nil, false, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

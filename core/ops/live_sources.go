@@ -94,7 +94,7 @@ func NewLiveVolumeStatusReportCollector(cfg LiveVolumeStatusConfig) VolumeStatus
 }
 
 func queryLiveMasterStatus(ctx context.Context, masterAddr, volumeID string) (*control.StatusResponse, error) {
-	conn, err := link.Dial(masterAddr)
+	conn, err := link.DialMasterFromEnv(masterAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial master: %w", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/seaweedfs/seaweed-block/core/auth/authtest"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -440,4 +441,26 @@ func buildBlockCSIBinary(t *testing.T) string {
 		t.Fatalf("build blockcsi: %v\n%s", err, b)
 	}
 	return out
+}
+
+// The master TLS flags come as a set, need --master, and every file is read
+// at parse time.
+func TestParseFlags_MasterTLS(t *testing.T) {
+	dir := t.TempDir()
+	ca := authtest.NewCA(t, "ca")
+	caPath := ca.WriteCA(t, dir)
+	cert, key := ca.Issue(t, "csi", time.Now().Add(time.Hour)).WriteFiles(t, dir, "csi")
+	base := []string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a"}
+	tlsArgs := []string{"--master-tls-cert", cert, "--master-tls-key", key, "--master-ca", caPath}
+
+	f, err := parseFlags(append(append(base, "--master", "blockmaster:9333"), tlsArgs...))
+	if err != nil || !f.masterTLS.Enabled() {
+		t.Fatalf("full set: %v (enabled=%t)", err, f.masterTLS.Enabled())
+	}
+	if _, err := parseFlags(append(base, tlsArgs...)); err == nil || !strings.Contains(err.Error(), "require --master") {
+		t.Fatalf("TLS without --master: %v", err)
+	}
+	if _, err := parseFlags(append(base, "--master", "blockmaster:9333", "--master-tls-cert", cert)); err == nil {
+		t.Fatal("a partial TLS set was accepted")
+	}
 }

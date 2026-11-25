@@ -1157,7 +1157,7 @@ func liveNodeEvidenceNamespace(namespace string) string {
 }
 
 func readMasterClusterEvidence(ctx context.Context, masterAddr string) (ops.ClusterEvidence, error) {
-	conn, err := link.Dial(masterAddr)
+	conn, err := link.DialMasterFromEnv(masterAddr)
 	if err != nil {
 		return ops.ClusterEvidence{}, err
 	}

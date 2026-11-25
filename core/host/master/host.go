@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/auth"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/host/bootstrap"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
@@ -39,6 +40,14 @@ import (
 // Config holds the master host construction inputs. Flag parsing
 // lives in cmd/blockmaster; this type is the testable seam.
 type Config struct {
+	// Auth authenticates and authorizes every gRPC call (phase 0): nil is
+	// development mode (plaintext; every call is marked so, and the node
+	// checks admit it).
+	Auth *auth.Authenticator
+	// ServerOptions are added to the gRPC server (transport credentials,
+	// connection age).
+	ServerOptions []grpc.ServerOption
+
 	// AuthorityStoreDir is the directory passed to
 	// authority.AcquireStoreLock + NewFileAuthorityStore. Must be
 	// non-empty.
@@ -320,7 +329,7 @@ func New(cfg Config) (*Host, error) {
 			WriteTimeout: statusWriteTimeout, IdleTimeout: statusIdleTimeout}
 	}
 
-	grpcSrv := link.NewServer(link.ServerConfig{})
+	grpcSrv := link.NewServer(serverAuth(cfg.Auth), cfg.ServerOptions...)
 	svc := newServices(h)
 	control.RegisterObservationServiceServer(grpcSrv, svc)
 	control.RegisterAssignmentServiceServer(grpcSrv, svc)
