@@ -39,10 +39,10 @@ func TestAuthorityStore_ConcurrentWriteReload_100Cycles(t *testing.T) {
 	defer store.Close()
 
 	const (
-		cycles   = 100
-		writers  = 4
-		readers  = 4
-		volCount = 8 // 8 distinct volumes share the store
+		cycles    = 100
+		writers   = 4
+		readers   = 4
+		volCount  = 8 // 8 distinct volumes share the store
 	)
 
 	// Each volume has a monotonically-growing WriteSeq that we
