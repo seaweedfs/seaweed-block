@@ -72,8 +72,17 @@ func TestChunkControlUsesTheBoundLayoutIdentity(t *testing.T) {
 		t.Fatalf("another incarnation fell back: %v", err)
 	}
 	h.Snapshots["a"] = layout.Snapshot{Root: r, Dependents: []layout.Dependent{{Target: "child", TargetID: layout.VolumeID{2}, Root: r}}}
+	h.Snapshots["a"] = layout.Snapshot{Root: r, Meta: layout.SnapshotMeta{CreatedNs: 7, Class: layout.ClassPinned, ExpiresNs: 20, Labels: map[string]string{"kind": "backup"}}, Dependents: h.Snapshots["a"].Dependents}
 	if err := s.UpdateHead(ctx, h.Gen, h); err != nil {
 		t.Fatal(err)
+	}
+	list, _, err = ctl.ListSnapshots(ctx, "v1", chunkstore.ListOptions{Prefix: "a"})
+	if err != nil || len(list) != 1 || list[0].CreatedNs != 7 || list[0].Class != layout.ClassPinned || list[0].ExpiresAtNs != 20 || list[0].Labels["kind"] != "backup" {
+		t.Fatalf("retention facts dropped from listing: %+v %v", list, err)
+	}
+	w = serve(t, server, http.MethodGet, "/chunk/snapshots?volume=v1&prefix=a", "", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != http.StatusOK || len(body.Snapshots) != 1 || body.Snapshots[0].CreatedNs != 7 || body.Snapshots[0].Class != layout.ClassPinned || body.Snapshots[0].ExpiresAtNs != 20 || body.Snapshots[0].Labels["kind"] != "backup" {
+		t.Fatalf("HTTP retention facts: %d %s %v", w.Code, w.Body, err)
 	}
 	if _, err := ctl.DeleteSnapshot(ctx, "v1", "a"); !errors.Is(err, layout.ErrHasDependents) {
 		t.Fatalf("dependent snapshot deleted: %v", err)
@@ -84,6 +93,27 @@ func TestChunkControlUsesTheBoundLayoutIdentity(t *testing.T) {
 	u, err = ctl.Usage(ctx, "v1")
 	if err != nil || u.Dependents != 1 {
 		t.Fatalf("dependents missing: %+v %v", u, err)
+	}
+}
+
+func TestChunkControlPassesRetentionFactsToTheNamedCommit(t *testing.T) {
+	fp, ctl := adapterFixture(t)
+	labels := map[string]string{"a": "1", "b": "2", "c": "3", "d": "4"}
+	info, err := ctl.Snapshot(context.Background(), "v1", ChunkSnapshotRequest{Name: "daily", Class: layout.ClassPinned, ExpiresAtNs: 123, Labels: labels})
+	if err != nil || fp.snapshotName != "daily" || fp.snapshotMeta.CreatedNs <= 0 || fp.snapshotMeta.Class != layout.ClassPinned || fp.snapshotMeta.ExpiresNs != 123 || len(fp.snapshotMeta.Labels) != 4 {
+		t.Fatalf("capture lost retention facts: %+v %v", fp.snapshotMeta, err)
+	}
+	if info.CreatedNs != fp.snapshotMeta.CreatedNs || info.ExpiresAtNs != 123 || info.Class != layout.ClassPinned {
+		t.Fatalf("capture changed sampled facts: %+v", info)
+	}
+	fp.snapshotMeta.Labels["a"] = "changed"
+	if labels["a"] != "1" {
+		t.Fatal("the data path aliases the request's labels")
+	}
+	labels["e"] = "5"
+	before := fp.cuts
+	if _, err := ctl.Snapshot(context.Background(), "v1", ChunkSnapshotRequest{Name: "five", Labels: labels}); chunkstore.CodeOf(err) != chunkstore.CodeInvalidLabel || fp.cuts != before {
+		t.Fatalf("five labels admitted a capture: %v cuts=%d", err, fp.cuts)
 	}
 }
 

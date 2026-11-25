@@ -11,6 +11,8 @@ import (
 
 // SnapshotListItem is one listed snapshot, exactly §3.3's fields.
 type SnapshotListItem struct {
+	Class       string             `json:"class,omitempty"`
+	ExpiresAtNs int64              `json:"expiresAtNs,omitempty"`
 	Root        string             `json:"root,omitempty"`
 	Dependents  []layout.Dependent `json:"dependents,omitempty"`
 	Name        string             `json:"name"`
@@ -37,7 +39,7 @@ type SnapshotListBody struct {
 func NewSnapshotListBody(vol string, list []SnapshotInfo, next string) SnapshotListBody {
 	body := SnapshotListBody{VolumeID: vol, Snapshots: make([]SnapshotListItem, 0, len(list)), Next: next}
 	for _, s := range list {
-		body.Snapshots = append(body.Snapshots, SnapshotListItem{Name: s.Name, Root: s.Root, Dependents: s.Dependents, HeadGen: s.HeadGen, HeadEpoch: s.HeadEpoch,
+		body.Snapshots = append(body.Snapshots, SnapshotListItem{Name: s.Name, Root: s.Root, Dependents: s.Dependents, Class: s.Class, ExpiresAtNs: s.ExpiresAtNs, HeadGen: s.HeadGen, HeadEpoch: s.HeadEpoch,
 			CutLSN: s.CutLSN, CreatedNs: s.CreatedNs, State: s.State, ChunkCount: s.ChunkCount, Labels: s.Labels,
 			Consistency: s.Consistency, Parent: s.Parent})
 	}

@@ -125,7 +125,7 @@ flowchart LR
   Data[Named snapshot data path] --> Commit[Commit snapshot name in HEAD]
 ```
 
-Listings carry each snapshot's root and dependents. Usage reports snapshot/dependent counts and own/foreign current chunks; it does not synthesize the removed catalog's retention or byte accounting. Attach creates the identified VOLUME and unclaimed HEAD idempotently and never creates the legacy name-only directory. Snapshot creation belongs to the data path's HEAD commit, rather than a post-cut catalog write. The runtime cutover remains incomplete while scheduled snapshots, geometry checks and cleaning still reference the old catalog; those references must be removed before that catalog is deleted or this branch ships.
+Listings carry each snapshot's root and dependents. Usage reports snapshot/dependent counts and own/foreign current chunks; it does not synthesize byte accounting. Retention policy is read separately through the catalog. Snapshot entries carry their creation time, class, expiry and bounded labels, sampled once for a named capture and supplied as `CommitRequest.Meta`. A replay keeps the facts already in HEAD. Attach creates the identified VOLUME and unclaimed HEAD idempotently and never creates the legacy name-only directory. Snapshot creation belongs to the data path's HEAD commit, rather than a post-cut catalog write. The runtime cutover remains incomplete while scheduled snapshots, geometry checks and cleaning still reference the old catalog; those references must be removed before that catalog is deleted or this branch ships.
 
 ## 4. Dirty tracking
 

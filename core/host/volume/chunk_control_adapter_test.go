@@ -16,13 +16,15 @@ import (
 )
 
 type fakeChunkProvider struct {
-	cut      storage.ChunkCutResult
-	cutErr   error
-	cutCheck func(context.Context) error
-	detach   storage.ChunkCutResult
-	last     uint64
-	cuts     int
-	lastMin  uint64
+	cut          storage.ChunkCutResult
+	cutErr       error
+	cutCheck     func(context.Context) error
+	detach       storage.ChunkCutResult
+	last         uint64
+	cuts         int
+	lastMin      uint64
+	snapshotMeta layout.SnapshotMeta
+	snapshotName string
 }
 
 type adapterManifestFiler struct {
@@ -83,12 +85,14 @@ func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	return fp, NewChunkControl(fp, cat, v)
 }
 
-func (f *fakeChunkProvider) SnapshotVolume(ctx context.Context, name string, req chunkstore.SnapshotRequest) (chunkstore.SnapshotInfo, error) {
-	r, err := f.CutVolume(ctx, name, 0)
+func (f *fakeChunkProvider) SnapshotVolume(ctx context.Context, volumeID string, name string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
+	f.snapshotName = name
+	f.snapshotMeta = meta
+	r, err := f.CutVolume(ctx, volumeID, 0)
 	if err != nil {
 		return chunkstore.SnapshotInfo{}, err
 	}
-	return chunkstore.SnapshotInfo{VolumeID: name, Name: req.Name, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, CutLSN: r.H, Class: req.Class}, nil
+	return chunkstore.SnapshotInfo{VolumeID: volumeID, Name: name, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, CutLSN: r.H, Class: meta.Class, CreatedNs: meta.CreatedNs, ExpiresAtNs: meta.ExpiresNs, Labels: meta.Labels}, nil
 }
 
 // adapterCatalog is a catalog holding volume v1 and a provider whose cut

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"sort"
 	"strconv"
@@ -661,15 +662,19 @@ func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkS
 	if err := chunkstore.ValidateSnapshotClass(req.Class); err != nil {
 		return chunkstore.SnapshotInfo{}, err
 	}
+	if len(req.Labels) > layout.MaxSnapshotLabels {
+		return chunkstore.SnapshotInfo{}, &chunkstore.CatalogError{Code: chunkstore.CodeInvalidLabel, Message: fmt.Sprintf("snapshot has %d labels; at most %d", len(req.Labels), layout.MaxSnapshotLabels)}
+	}
 	p, ok := c.p.(interface {
-		SnapshotVolume(context.Context, string, chunkstore.SnapshotRequest) (chunkstore.SnapshotInfo, error)
+		SnapshotVolume(context.Context, string, string, layout.SnapshotMeta) (chunkstore.SnapshotInfo, error)
 	})
 	if !ok {
 		return chunkstore.SnapshotInfo{}, errors.New("chunk snapshot data path is not configured")
 	}
-	return p.SnapshotVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, chunkstore.SnapshotRequest{
-		Name: req.Name, RequestID: req.RequestID, Labels: req.Labels, Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, Class: req.Class,
-	})
+	// Sample once for this capture. The provider carries this value unchanged in
+	// CommitRequest.Meta; a replay returns the facts already recorded in HEAD.
+	meta := layout.SnapshotMeta{CreatedNs: time.Now().UnixNano(), Class: req.Class, ExpiresNs: req.ExpiresAtNs, Labels: maps.Clone(req.Labels)}
+	return p.SnapshotVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, req.Name, meta)
 }
 
 func (c *chunkControl) ListSnapshots(ctx context.Context, volumeID string, opts chunkstore.ListOptions) ([]chunkstore.SnapshotInfo, string, error) {
@@ -699,7 +704,7 @@ func (c *chunkControl) ListSnapshots(ctx context.Context, volumeID string, opts 
 	out := make([]chunkstore.SnapshotInfo, 0, len(names))
 	for _, name := range names {
 		sn := h.Snapshots[name]
-		out = append(out, chunkstore.SnapshotInfo{VolumeID: volumeID, Name: name, Root: sn.Root.String(), Dependents: sn.Dependents})
+		out = append(out, chunkstore.SnapshotInfo{VolumeID: volumeID, Name: name, Root: sn.Root.String(), Dependents: sn.Dependents, CreatedNs: sn.Meta.CreatedNs, Class: sn.Meta.Class, ExpiresAtNs: sn.Meta.ExpiresNs, Labels: maps.Clone(sn.Meta.Labels)})
 	}
 	return out, next, nil
 }
