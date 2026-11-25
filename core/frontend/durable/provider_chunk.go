@@ -1229,6 +1229,9 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	}
 	h.attachMu.Lock()
 	defer h.attachMu.Unlock()
+	if h.settling {
+		return storage.ChunkCutResult{}, 0, ErrDetachOutcomeUnknown
+	}
 	layer, err := p.chunkLayer(volumeID)
 	if err != nil {
 		return storage.ChunkCutResult{}, 0, err
@@ -1461,6 +1464,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	}
 	switch {
 	case serr != nil:
+		p.retryUnknownDetach(volumeID, h, layer, resumed)
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w (settle: %w)", ErrDetachOutcomeUnknown, err, serr)
 	case how == storage.DetachApplied:
 		return dr, h.storage.NextLSN() - 1, nil
@@ -1469,6 +1473,78 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	default:
 		return storage.ChunkCutResult{}, 0, p.resumeAfterDetach(volumeID, h, layer, err, resumed)
 	}
+}
+
+// retryUnknownDetach owns one stopped volume until the filer can decide the
+// outcome. It never infers an abort from time passing: only the existing
+// conditional abort and HEAD read may allow serving again.
+func (p *DurableProvider) retryUnknownDetach(volumeID string, h *volHandle, layer storage.ChunkLayer, resumed func()) {
+	if h.settling { // attachMu is held by detachVolume
+		return
+	}
+	p.mu.Lock()
+	if p.closed || h.chunk != layer {
+		p.mu.Unlock()
+		return
+	}
+	h.settling = true
+	p.inflight.Add(1) // under p.mu, before Close can join
+	p.mu.Unlock()
+	go func() {
+		defer p.inflight.Done()
+		defer func() {
+			h.attachMu.Lock()
+			h.settling = false
+			h.attachMu.Unlock()
+		}()
+		backoff := 100 * time.Millisecond
+		for {
+			select {
+			case <-p.closeCtx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			h.attachMu.Lock()
+			p.mu.Lock()
+			active := !p.closed && h.chunk == layer && h.chunkDetach
+			p.mu.Unlock()
+			if !active {
+				h.attachMu.Unlock()
+				return
+			}
+			ctx, cancel := context.WithTimeout(p.closeCtx, 2*time.Second)
+			var how storage.DetachSettlement
+			var err error
+			if h.layoutHead != nil {
+				if remote, ok := h.layoutRemote.(layoutStopRemote); ok {
+					how, _, err = settleLayoutStop(ctx, remote, h.layoutHolder)
+				} else {
+					err = errors.New("durable: layout remote cannot settle its open stop session")
+				}
+			} else {
+				how, _, err = layer.SettleDetach(ctx)
+			}
+			cancel()
+			switch {
+			case err == nil && how == storage.DetachApplied:
+				log.Printf("durable: unknown stop of volume=%s resolved: detached", volumeID)
+				h.attachMu.Unlock()
+				return
+			case err == nil && how == storage.DetachFenced:
+				log.Printf("durable: unknown stop of volume=%s resolved: fenced", volumeID)
+				h.attachMu.Unlock()
+				return
+			case err == nil && how == storage.DetachNotPublished:
+				if e := p.resumeAfterDetach(volumeID, h, layer, ErrDetachOutcomeUnknown, resumed); e != nil {
+					log.Printf("durable: unknown stop of volume=%s resolved: %v", volumeID, e)
+				}
+				h.attachMu.Unlock()
+				return
+			}
+			h.attachMu.Unlock()
+			backoff = min(backoff*2, 2*time.Second)
+		}
+	}()
 }
 
 const (
