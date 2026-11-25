@@ -22,6 +22,9 @@
 #                kill, restart, restore)
 #   cutover-create  TestCutoverCreateFromSnapshot (the master creates the
 #                target identity and its restored image in one request)
+#   fence-heal   TestFencingRoundHealContinuesThePrimary (a failed fencing
+#                round heals by continuing the primary). Not in the default
+#                set until the promotion fence is on the base.
 #
 # Expected invocation (on the Linux host):
 #   swblock run \
@@ -77,7 +80,7 @@ phases:
           case "$GATE_TESTS" in *[!0-9a-z\ -]*|'') fail 'tests must be entry names separated by spaces' ;; esac
           n=0
           for t in $GATE_TESTS; do
-            case "$t" in move|lease|systemd|catalog|cutover-e2e|cutover-create) ;; *) fail "unknown entry: $t" ;; esac
+            case "$t" in move|lease|systemd|catalog|cutover-e2e|cutover-create|fence-heal) ;; *) fail "unknown entry: $t" ;; esac
             n=$((n + 1))
           done
           [ "$n" -gt 0 ] || fail 'tests names no entry'
@@ -127,15 +130,26 @@ phases:
         timeout: 20m
         env.GATE_DIR: "{{ scratch_root }}/{{ run_id }}"
         env.GATE_GO: "{{ go_bin }}"
+        env.GATE_TESTS: "{{ tests }}"
         cmd: |
           set -eu
           d="$GATE_DIR"
           export PATH="$GATE_GO:$PATH"
           cd "$d/source"
           for b in blockmaster blockvolume sw-block; do go build -o "$d/bin/$b" "./cmd/$b"; done
-          go test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/blockvolume.test" ./cmd/blockvolume
-          go test -c -tags 'subprocess chunkstore_integration systemd_integration' -o "$d/bin/blockvolume-systemd.test" ./cmd/blockvolume
-          go test -c -tags 'chunkstore_integration' -o "$d/bin/chunkstore.test" ./core/frontend/chunkstore
+          # Only the test binaries the selected entries run: a package that
+          # no selected entry uses cannot fail the build of the others.
+          bv=0 sd=0 cs=0
+          for t in $GATE_TESTS; do
+            case "$t" in
+              systemd) sd=1 ;;
+              catalog) cs=1 ;;
+              *) bv=1 ;;
+            esac
+          done
+          [ "$bv" = 0 ] || go test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/blockvolume.test" ./cmd/blockvolume
+          [ "$sd" = 0 ] || go test -c -tags 'subprocess chunkstore_integration systemd_integration' -o "$d/bin/blockvolume-systemd.test" ./cmd/blockvolume
+          [ "$cs" = 0 ] || go test -c -tags 'chunkstore_integration' -o "$d/bin/chunkstore.test" ./core/frontend/chunkstore
           sha256sum "$d/bin/"* > "$d/evidence/binaries.sha256"
 
   - name: run_tests
@@ -165,6 +179,7 @@ phases:
               catalog)     pkg=core/frontend/chunkstore bin=chunkstore.test name=TestIntegration_CatalogRestoreAndDelete to=9m ;;
               cutover-e2e) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverWriteSnapshotKillRestartRestore to=40m ;;
               cutover-create) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverCreateFromSnapshot to=20m ;;
+              fence-heal)  pkg=cmd/blockvolume bin=blockvolume.test name=TestFencingRoundHealContinuesThePrimary to=10m ;;
               *) echo "unknown entry: $t" >&2; exit 2 ;;
             esac
             log="$d/evidence/$t.log"
