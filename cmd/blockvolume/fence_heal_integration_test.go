@@ -19,7 +19,8 @@ import (
 // TestFencingRoundHealContinuesThePrimary runs the heal of a failed fencing
 // round through the production binaries: an RF3 sync-quorum volume whose
 // primary r1 stops long enough to be judged lost. The fencing round reaches
-// r2, but r3 cannot make its floor durable (its durable root is read-only),
+// r2, but r3 cannot make its floor durable (a regular file stands where its
+// durable root was, so the floor record write fails with ENOTDIR, root too),
 // so it does not answer: one fenced survivor, two needed, nothing is
 // published, and r1 does not answer the heal. When r1 resumes, the master
 // continues it at epoch 2 on its own evidence; a write after that reads back
@@ -33,10 +34,7 @@ func TestFencingRoundSurvivorRejoins(t *testing.T) { fencingRoundHeal(t, true) }
 
 func fencingRoundHeal(t *testing.T, rejoin bool) {
 	if isWindows() {
-		t.Skip("SIGSTOP and directory permissions: Linux only")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("a read-only directory does not stop root from writing the floor record")
+		t.Skip("SIGSTOP: Linux only")
 	}
 	bins := buildG54Binaries(t)
 	h := &plannedHandoffHarness{dir: t.TempDir(), t: t}
@@ -80,7 +78,32 @@ func fencingRoundHeal(t *testing.T, rejoin bool) {
 		t.Cleanup(func() { _ = d.proc.Signal(syscall.SIGCONT) })
 	}
 	r1, r2, r3 := hosts[0], hosts[1], hosts[2]
-	t.Cleanup(func() { _ = os.Chmod(r3.root, 0o755) })
+	// r3's floor fault: its durable root moved aside and a regular file put
+	// at its path, so a new file under it fails with ENOTDIR (for root as
+	// well); the files r3 already holds open keep working.
+	aside := r3.root + ".aside"
+	breakFloor := func() {
+		if err := os.Rename(r3.root, aside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(r3.root, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	healFloor := func() {
+		if err := os.Remove(r3.root); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(aside, r3.root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		if st, err := os.Stat(aside); err == nil && st.IsDir() {
+			_ = os.Remove(r3.root)
+			_ = os.Rename(aside, r3.root)
+		}
+	})
 
 	// 1. r1 serves at epoch 1 with both replicas healthy behind it.
 	h.waitPrimaryAt(t, r1.status, 1)
@@ -107,9 +130,7 @@ func fencingRoundHeal(t *testing.T, rejoin bool) {
 
 	// 2. r3 can no longer persist a floor; r1 stops: a fencing round at 2
 	// gets only r2, publishes nothing, and r1 cannot answer the heal.
-	if err := os.Chmod(r3.root, 0o555); err != nil {
-		t.Fatal(err)
-	}
+	breakFloor()
 	if err := r1.d.proc.Signal(syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
@@ -149,9 +170,7 @@ func fencingRoundHeal(t *testing.T, rejoin bool) {
 		return
 	}
 	// 5. r3 can persist again: both replicas rejoin r1 at epoch 2.
-	if err := os.Chmod(r3.root, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	healFloor()
 	waitPeersHealthy(t, r1.status, 2)
 }
 
