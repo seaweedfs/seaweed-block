@@ -51,9 +51,6 @@ func (s *services) ReserveVolumeDeletion(ctx context.Context, req *control.MarkV
 		return nil, status.Error(codes.InvalidArgument, "volume_id and token are required")
 	}
 	if err := s.host.VolumeDeleteAuthority(req.GetVolumeId(), req.GetToken()).Reserve(ctx); err != nil {
-		if ctx.Err() != nil {
-			return nil, workspaceError(ctx.Err())
-		}
 		return nil, status.Errorf(codes.Unavailable, "reserve volume deletion: %v", err)
 	}
 	_, known := s.host.lifecycle.Volumes.GetVolume(req.GetVolumeId())
@@ -69,5 +66,6 @@ func (s *services) CheckVolumeNoLiveLease(ctx context.Context, req *control.Mark
 	if err := s.host.VolumeDeleteAuthority(req.GetVolumeId(), req.GetToken()).NoLiveLease(ctx); err != nil {
 		return nil, workspaceError(err)
 	}
-	return &control.MarkVolumeDeletingResponse{State: lifecycle.ReservationCommitted}, nil
+	_, known := s.host.lifecycle.Volumes.GetVolume(req.GetVolumeId())
+	return &control.MarkVolumeDeletingResponse{Known: known, State: lifecycle.ReservationCommitted}, nil
 }

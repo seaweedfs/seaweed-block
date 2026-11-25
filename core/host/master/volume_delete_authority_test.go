@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -85,5 +86,38 @@ func TestVolumeDeleteAuthorityRPCs(t *testing.T) {
 	}
 	if _, err := client.ReserveVolumeDeletion(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "v"}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("reserve without a token: %v", err)
+	}
+	for _, tc := range []struct {
+		volume string
+		known  bool
+	}{{"v", true}, {"unknown", false}} {
+		q := &control.MarkVolumeDeletingRequest{VolumeId: tc.volume, Token: "delete-v"}
+		reserved, err := client.ReserveVolumeDeletion(ctx, q)
+		if err != nil || reserved.GetKnown() != tc.known {
+			t.Fatalf("reserve known(%s): %+v %v", tc.volume, reserved, err)
+		}
+		checked, err := client.CheckVolumeNoLiveLease(ctx, q)
+		if err != nil || checked.GetKnown() != tc.known {
+			t.Fatalf("check known(%s): %+v %v", tc.volume, checked, err)
+		}
+	}
+}
+
+// A failed reservation is never evidence that a durable write did not happen.
+// These handler calls avoid a transport's own cancellation masking its status.
+func TestVolumeDeleteAuthorityRPCFailureIsUnknown(t *testing.T) {
+	svc := &services{host: &Host{}}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, stop := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer stop()
+	req := &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "delete-v"}
+	for _, ctx := range []context.Context{context.Background(), canceled, expired} {
+		if _, err := svc.ReserveVolumeDeletion(ctx, req); status.Code(err) != codes.Unavailable {
+			t.Fatalf("reservation failure: %v; want unknown/Unavailable", err)
+		}
+	}
+	if _, err := svc.CheckVolumeNoLiveLease(context.Background(), &control.MarkVolumeDeletingRequest{VolumeId: "v"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("lease proof without token: %v", err)
 	}
 }
