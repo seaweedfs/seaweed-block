@@ -248,6 +248,11 @@ func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	if h.State == layout.StateDeleting || h.State == layout.StateDeleted {
 		return storage.ChunkHead{}, storage.ErrChunkHeadDeleted
 	}
+	// Another claim at this holder's own epoch is another owner of HEAD: the
+	// head the engine sees carries no claim id, so it must not read as its own.
+	if h.Epoch == l.me.Epoch && h.Holder == l.me.Holder && h.ClaimID != l.me.ClaimID {
+		return storage.ChunkHead{}, fmt.Errorf("%w: HEAD is held by %s at epoch %d (claim %q)", storage.ErrChunkLayerFenced, h.Holder, h.Epoch, h.ClaimID)
+	}
 	out := storage.ChunkHead{Gen: l.visible, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, Chunks: map[uint64]storage.ChunkRef{}, State: "active"}
 	if h.State == layout.StateDetached {
 		out.State = "detached"
@@ -707,6 +712,12 @@ func (l *LayoutRemote) stopCleaningLocked() {
 //   - any other refusal is returned as it is;
 //   - the store does not answer: remote unavailable (the session is
 //     dropped locally; the next cut rolls it back).
+// LayoutErr classifies a layout error from a call made outside the remote
+// (the holder's cleaning) the way the remote classifies its own: an
+// identity-moved refusal is storage.ErrChunkLayerFenced, a volume being
+// deleted storage.ErrChunkHeadDeleted.
+func LayoutErr(err error) error { return layoutRemoteErr(err) }
+
 func layoutRemoteErr(err error) error {
 	switch {
 	case err == nil:

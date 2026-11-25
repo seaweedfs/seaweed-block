@@ -44,7 +44,9 @@ func newChunkMaintenance(cat *chunkstore.BCatalog, ref chunkstore.VolumeRef, hol
 		}
 		res, err := cat.Clean(ctx, ref, me, session)
 		log.Printf("blockvolume: maintenance volume=%s clean=%s shards=%d planned=%d removed=%d", vol, session, res.Shards, res.Planned, res.Removed)
-		return err
+		// A cleaning refused because HEAD moved away from this holder is
+		// the same fence a cut would see: classified so the provider latches.
+		return chunkstore.LayoutErr(err)
 	}
 }
 
