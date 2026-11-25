@@ -13,6 +13,7 @@ import (
 type memVolume struct {
 	head    *memHead
 	objects map[string][]byte
+	metas   map[string]ObjectMeta
 	writes  []string // every write, in order
 	killAt  int
 	after   bool
@@ -54,35 +55,91 @@ func (v *memVolume) UpdateHead(ctx context.Context, gen uint64, next Head) error
 	return nil
 }
 
-func (v *memVolume) look(_ context.Context, dir, name string) (bool, error) {
-	if v.dead {
-		return false, errKilled
+// memVolume is also the volume's ObjectStore: every object write counts
+// toward the same kill point as HEAD's. An object a fixture stored without
+// metadata reads as written by session "s0".
+func (v *memVolume) meta(p string) ObjectMeta {
+	if m, ok := v.metas[p]; ok {
+		return m
 	}
-	_, ok := v.objects[path.Join(dir, name)]
-	return ok, nil
+	return ObjectMeta{Session: "s0"}
 }
 
-// put writes an object if absent (a content name that exists is complete,
-// so a present one is skipped).
-func (v *memVolume) put(rel string, b []byte) error {
-	p := path.Join(volRoot, rel)
+func (v *memVolume) Stat(_ context.Context, rel string) (ObjectMeta, bool, error) {
 	if v.dead {
-		return errKilled
+		return ObjectMeta{}, false, errKilled
 	}
-	if _, ok := v.objects[p]; ok {
-		return nil
+	p := path.Join(volRoot, rel)
+	if _, ok := v.objects[p]; !ok {
+		return ObjectMeta{}, false, nil
 	}
-	apply, die, err := v.write("create " + rel)
+	return v.meta(p), true, nil
+}
+
+// objWrite applies f under the shared kill point.
+func (v *memVolume) objWrite(what string, f func() error) error {
+	apply, die, err := v.write(what)
 	if err != nil {
 		return err
 	}
 	if apply {
-		v.objects[p] = append([]byte(nil), b...)
+		err = f()
 	}
 	if die {
 		return errKilled
 	}
-	return nil
+	return err
+}
+
+func (v *memVolume) Create(_ context.Context, rel string, data []byte, session string) error {
+	p := path.Join(volRoot, rel)
+	return v.objWrite("create "+rel, func() error {
+		if _, ok := v.objects[p]; ok {
+			return ErrExists
+		}
+		v.objects[p] = append([]byte(nil), data...)
+		v.metas[p] = ObjectMeta{Session: session}
+		return nil
+	})
+}
+
+func (v *memVolume) Reuse(_ context.Context, rel string, expect ObjectMeta, session string) error {
+	p := path.Join(volRoot, rel)
+	return v.objWrite("reuse "+rel, func() error {
+		if _, ok := v.objects[p]; !ok || v.meta(p) != expect {
+			return ErrPrecondition
+		}
+		v.metas[p] = ObjectMeta{Session: session}
+		return nil
+	})
+}
+
+func (v *memVolume) Mark(_ context.Context, rel string, expect ObjectMeta, mark string) error {
+	p := path.Join(volRoot, rel)
+	return v.objWrite("mark "+rel, func() error {
+		if _, ok := v.objects[p]; !ok || v.meta(p) != expect {
+			return ErrPrecondition
+		}
+		m := v.meta(p)
+		m.Mark = mark
+		v.metas[p] = m
+		return nil
+	})
+}
+
+func (v *memVolume) DeleteMarked(_ context.Context, rel string, mark string) error {
+	p := path.Join(volRoot, rel)
+	return v.objWrite("delete "+rel, func() error {
+		if _, ok := v.objects[p]; !ok {
+			return nil
+		}
+		if v.meta(p).Mark != mark {
+			return ErrPrecondition
+		}
+		delete(v.objects, p)
+		delete(v.metas, p)
+		return nil
+	})
 }
 
 // snapshotSession is the whole snapshot transaction as the holder runs it
@@ -115,7 +172,7 @@ func snapshotSession(v *memVolume, session string, data map[uint64][]byte, req C
 		return fmt.Errorf("unexpected current root %s", cur)
 	}
 	for i, r := range newOwn("v1", req.Prev, req.Next) {
-		if err := v.put(r.Chunk.Path(), data[i]); err != nil {
+		if err := EnsureObject(ctx, v, r.Chunk.Path(), data[i], session); err != nil {
 			return err
 		}
 	}
@@ -124,7 +181,7 @@ func snapshotSession(v *memVolume, session string, data map[uint64][]byte, req C
 		return err
 	}
 	for n, b := range segs {
-		if err := v.put(n.Path(), b); err != nil {
+		if err := EnsureObject(ctx, v, n.Path(), b, session); err != nil {
 			return err
 		}
 	}
@@ -132,11 +189,11 @@ func snapshotSession(v *memVolume, session string, data map[uint64][]byte, req C
 	if err != nil {
 		return err
 	}
-	if err := v.put(rn.Path(), rb); err != nil {
+	if err := EnsureObject(ctx, v, rn.Path(), rb, session); err != nil {
 		return err
 	}
 	req.Session = session
-	_, err = RunCommit(ctx, v, v.look, volRoot, "v1", me, req)
+	_, err = RunCommit(ctx, v, v, "v1", me, req)
 	return err
 }
 
@@ -162,7 +219,7 @@ func sessionFixture(t *testing.T) (func() *memVolume, map[uint64][]byte, CommitR
 		prevRoot := writeImage(t, objs, prev, prevData)
 		h := Head{Gen: 7, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}, Current: &prevRoot, Position: 40,
 			Snapshots: map[string]Snapshot{"daily": {Root: prevRoot}}}
-		return &memVolume{head: &memHead{h: &h}, objects: objs}
+		return &memVolume{head: &memHead{h: &h}, objects: objs, metas: map[string]ObjectMeta{}}
 	}
 	return fresh, data, CommitRequest{Prev: prev, Next: next, Position: 50, Snapshot: "hourly"}
 }

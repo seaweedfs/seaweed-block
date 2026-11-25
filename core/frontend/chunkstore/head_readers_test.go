@@ -40,7 +40,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/share_guard.go beginShare -> ReadHead":           "refuses outcome_unknown: the HEAD to share is no longer current",
 	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                      "GAP: reports an empty image, no error (probe Usage)",
 	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":               "finding ROOT_INVALID (probe Verify)",
-	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":  "refuses ErrHeadAbsent and deletes nothing (probe LayoutRemoval)",
+	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":  "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":        "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                    "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":       "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
@@ -271,11 +271,11 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatal(err)
 		}
 		pool := &countingPool{}
-		if _, err := layout.RemoveUnreachable(ctx, &absentLayoutHead{}, r, pool, okLease{}, layout.HolderID{Epoch: 1, Holder: "h"}, "c", 0, []layout.ChunkName{layout.NameChunk(1, []byte("x"))}); !errors.Is(err, layout.ErrHeadAbsent) {
+		if _, err := layout.RemoveUnreachable(ctx, &absentLayoutHead{}, r, pool, layout.HolderID{Epoch: 1, Holder: "h"}, "c", 0, []layout.ChunkName{layout.NameChunk(1, []byte("x"))}); !errors.Is(err, layout.ErrHeadAbsent) {
 			t.Fatalf("layout removal over an absent HEAD: %v; want ErrHeadAbsent", err)
 		}
-		if pool.deletes != 0 {
-			t.Fatalf("layout removal over an absent HEAD deleted %d objects", pool.deletes)
+		if pool.writes != 0 {
+			t.Fatalf("layout removal over an absent HEAD wrote %d times to the objects", pool.writes)
 		}
 	})
 	t.Run("ForkReplay", func(t *testing.T) {
@@ -312,10 +312,20 @@ func (a *absentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) erro
 	return nil
 }
 
-type countingPool struct{ deletes int }
+// countingPool is a layout object store that counts writes and holds
+// nothing.
+type countingPool struct{ writes int }
 
-func (p *countingPool) DeleteObject(context.Context, string) error { p.deletes++; return nil }
-
-type okLease struct{}
-
-func (okLease) StillHeld(context.Context) error { return nil }
+func (p *countingPool) Stat(context.Context, string) (layout.ObjectMeta, bool, error) {
+	return layout.ObjectMeta{}, false, nil
+}
+func (p *countingPool) Create(context.Context, string, []byte, string) error { p.writes++; return nil }
+func (p *countingPool) Reuse(context.Context, string, layout.ObjectMeta, string) error {
+	p.writes++
+	return nil
+}
+func (p *countingPool) Mark(context.Context, string, layout.ObjectMeta, string) error {
+	p.writes++
+	return nil
+}
+func (p *countingPool) DeleteMarked(context.Context, string, string) error { p.writes++; return nil }
