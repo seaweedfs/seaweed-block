@@ -36,8 +36,10 @@ func (f *recordCrashFixture) captureLayoutIdentity(t *testing.T) {
 		t.Fatal("fixture did not persist its layout identity")
 	}
 	old.Spec.LayoutID = got.(VolumeRecord).Spec.LayoutID
+	old.Spec.BlockSize, old.Spec.ChunkBytes = 4096, 4<<20
 	next := f.next.(VolumeRecord)
 	next.Spec.LayoutID = old.Spec.LayoutID
+	next.Spec.BlockSize, next.Spec.ChunkBytes = old.Spec.BlockSize, old.Spec.ChunkBytes
 	f.old, f.next = old, next
 }
 
