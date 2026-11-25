@@ -18,6 +18,7 @@ func TestLayoutIdentityWriterAndReaders(t *testing.T) {
 		"core/lifecycle/store.go MarkStoreReady":                          true,
 		"core/lifecycle/workload_plan.go PlanBlockVolumeWorkloads":        true,
 		"core/host/master/services.go lifecycleVolumeResponse":            true,
+		"core/host/master/services.go CreateVolume":                       true,
 		"core/host/master/services.go createLifecycleVolume":              true,
 		"core/host/master/workspace_layout_head.go WorkspaceLayoutVolume": true,
 		"core/launcher/k8s_renderer.go blockVolumeArgs":                   true,
@@ -25,6 +26,10 @@ func TestLayoutIdentityWriterAndReaders(t *testing.T) {
 		"cmd/blockvolume/main.go runVolume":                               true,
 		"cmd/blockvolume/main.go parseFlags":                              true,
 		"cmd/blockmaster/layout_create.go layoutVolumeCreator":            true,
+		"cmd/blockmaster/layout_create.go layoutVolumeReader":             true,
+		"cmd/blockmaster/layout_create.go layoutHeadReader":               true,
+		"cmd/blockmaster/layout_create.go layoutTargetCreator":            true,
+		"cmd/sw-block/chunk_b.go chunkRestore":                            true,
 		"core/rpc/lifecycleclient/identity.go ResolveVolume":              true,
 	}
 	seen := map[string]bool{}
