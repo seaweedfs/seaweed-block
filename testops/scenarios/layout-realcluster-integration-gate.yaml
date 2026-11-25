@@ -23,9 +23,8 @@
 #   cutover-create  TestCutoverCreateFromSnapshot (the master creates the
 #                target identity and its restored image in one request)
 #   fence-heal   TestFencingRoundHealContinuesThePrimary (a failed fencing
-#                round heals by continuing the primary; must run as a non-root
-#                user: as root the test skips, which fails the entry). Not in
-#                the default set until the promotion fence is on the base.
+#                round heals by continuing the primary). Not in the default
+#                set until the promotion fence is on the base.
 #
 # Expected invocation (on the Linux host):
 #   swblock run \
