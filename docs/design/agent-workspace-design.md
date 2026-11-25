@@ -367,6 +367,10 @@ stateDiagram-v2
     Granted --> Expired: horizon or deadline passes
     Expired --> Granted: unchanged holder from its registered host, no move/revocation, MAX expiry + skew passed; durable re-grant
     Expired --> Moved: FORCED move after expiry + skew bound, then HEAD read (an older-epoch HEAD is accepted)
+    Granted --> DeleteReserved: lifecycle deletion committed, then exclusion published under publisher mu -> leaseMu
+    Expired --> DeleteReserved: same permanent reservation
+    DeleteReserved --> DeleteReserved: every grant/renewal/extension refuses; restart rebuilds exclusion before serving
+    DeleteReserved --> NoLiveLease: durable horizon and granted/restart deadline plus skew have both passed
   }
 ```
 

@@ -263,6 +263,10 @@ func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest,
 		return WorkspaceMoveRecord{}, err
 	}
 	p.mu.Lock()
+	if p.deleteReserved[req.VolumeID] {
+		p.mu.Unlock()
+		return WorkspaceMoveRecord{}, ErrWorkspaceDeleteReserved
+	}
 	r, replay, err := p.issuedWorkspaceReplayLocked(req)
 	p.mu.Unlock()
 	if err != nil {
