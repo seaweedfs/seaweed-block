@@ -76,7 +76,13 @@ func TestPrecopyFreezeDoesNotWaitForAdmittedIO(t *testing.T) {
 	}
 }
 
-func precopyProvider(t *testing.T, fixture *testutil.LayoutFixture, view *parkView, delayed *precopyFixedSampleRemote, hooks ...*detachHooks) *durable.DurableProvider {
+func precopyProvider(t *testing.T, remote storage.ChunkRemote, view *parkView, hooks ...*detachHooks) *durable.DurableProvider {
+	t.Helper()
+	_ = remote // Other legacy callers migrate to the layout fixture separately.
+	return precopyLayoutProvider(t, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), view, nil, hooks...)
+}
+
+func precopyLayoutProvider(t *testing.T, fixture *testutil.LayoutFixture, view *parkView, delayed *precopyFixedSampleRemote, hooks ...*detachHooks) *durable.DurableProvider {
 	t.Helper()
 	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
@@ -107,7 +113,7 @@ func precopyProvider(t *testing.T, fixture *testutil.LayoutFixture, view *parkVi
 
 func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
-	p := precopyProvider(t, fixture, &parkView{stubView: v1View()}, nil)
+	p := precopyLayoutProvider(t, fixture, &parkView{stubView: v1View()}, nil)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
@@ -164,7 +170,7 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 	remote := &precopyFixedSampleRemote{}
 	view := &parkView{stubView: v1View()}
 	k := &detachHooks{}
-	p := precopyProvider(t, fixture, view, remote, k)
+	p := precopyLayoutProvider(t, fixture, view, remote, k)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
