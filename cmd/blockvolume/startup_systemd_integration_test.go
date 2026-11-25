@@ -225,19 +225,17 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, "r1", s["NRestarts"], s["InvocationID"])
 	gap1PrestartedTargetServesAfterMove(t, fixture, ws, remote, target, stem, filepath.Join(bin, "blockvolume"), args, root, volume, want)
-	moved, err := gap1ReadHead(t, remote)
-	if err != nil || moved.Holder != "s2/r1" {
-		t.Fatal("target did not claim the moved line", moved, err)
-	}
-	gap1MovedSourceNeverServes(t, fixture, filepath.Join(bin, "blockvolume"), args, stem, statusAddr, volume, moved.Epoch)
+	gap1MovedSourceNeverServes(t, fixture, filepath.Join(bin, "blockvolume"), args, stem, statusAddr, volume)
 }
 
 // gap1MovedSourceNeverServes is the negative case of the in-process wait:
 // after the volume moved to another host (and the new holder stopped), the
 // old source started again never serves and never adopts the line naming the
-// other host. The master proves it was the issued move's source and returns
-// typed MOVED even before any own assignment: exit 78, no restart loop.
-func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, args []string, stem, statusAddr, volume string, epoch uint64) {
+// other host. It has no lineage of its own from the master, so it exits 75
+// (retry: zero observed-own lineage selects retry, never a fence) rather than
+// 78; the exit-78 refusal of a running holder that is moved is covered by
+// the master-wait integration tests.
+func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, args []string, stem, statusAddr, volume string) {
 	t.Helper()
 	// The simulated hosts share this kernel's per-host volume lock directory:
 	// stop the new holder (the prestarted target) so the old source can open
@@ -255,30 +253,35 @@ func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, 
 		switch s["ExecMainStatus"] {
 		case "", "0":
 			return false
-		case "78":
+		case "75":
 			return true
 		}
-		t.Fatalf("the moved-away source exited %s; want 78 moved, never retry 75: %+v", s["ExecMainStatus"], s)
+		t.Fatalf("the moved-away source exited %s; want 75 (retry, no lineage of its own): %+v", s["ExecMainStatus"], s)
 		return false
 	})
 	if gap1Operational(t, statusAddr, volume) {
 		t.Fatal("the moved-away source served after its exit")
 	}
-	// Observe beyond the shipped 5 s RestartSec. The prestarted target above
-	// is the opposite control: a genuine 75 was restarted by the same policy.
-	end := time.Now().Add(6 * time.Second)
-	for time.Now().Before(end) {
-		s := gap1Unit(t, unit)
-		if s["NRestarts"] != "0" || s["MainPID"] != "0" || s["ExecMainStatus"] != "78" {
-			t.Fatalf("moved source restarted or lost its terminal status: %+v", s)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// The exit must come from the move, not from an unassigned or
+	// disconnected timeout: the journal shows the source received the line
+	// naming the other host, refused it as another server's, and never adopted
+	// a lineage of its own.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	journal, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat").CombinedOutput()
-	if err != nil || !strings.Contains(string(journal), "status=78 reason=moved") || !strings.Contains(string(journal), fmt.Sprintf("holder s2 at epoch %d", epoch)) {
-		t.Fatalf("moved exit lacks the master's destination proof: %v %s", err, journal)
+	cancel()
+	if err != nil {
+		t.Fatalf("moved-away source journal: %v %s", err, journal)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("assignment identity refusal volume=%q replica=%q server=%q", volume, "r1", "s2"),
+		fmt.Sprintf("foreign assignment server=%q replica=%q recorded, not adopted", "s2", "r1"),
+	} {
+		if !strings.Contains(string(journal), want) {
+			t.Fatalf("the moved-away source's journal lacks %q: its exit is not proven to come from the move\n%s", want, journal)
+		}
+	}
+	if strings.Contains(string(journal), "adopted as PRIMARY") {
+		t.Fatalf("the moved-away source adopted a lineage:\n%s", journal)
 	}
 	gap1Systemctl(t, "stop", unit)
 }

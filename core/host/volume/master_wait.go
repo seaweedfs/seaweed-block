@@ -27,7 +27,6 @@ const masterWaitLogEvery = 10 * time.Minute
 // has no bound.
 type MasterWait struct {
 	Reason string
-	Detail string // diagnostic text of a typed final refusal; never used as a guard
 	Since  time.Time
 	Until  time.Time
 }
@@ -36,23 +35,22 @@ type MasterWait struct {
 // (heartbeat, assignment stream, lease renewal). It holds observations
 // only: no decision branches on it except the startup wait's end.
 type masterWait struct {
-	mu          sync.Mutex
-	now         func() time.Time
-	contact     time.Time // start of the current contact streak; zero while none
-	last        time.Time // the latest reply
-	down        time.Time // first failure without a reply since the last contact
-	creds       time.Time // first credentials refusal since the last accepted call
-	ident       time.Time // first identity refusal since the last accepted call
-	identAt     time.Time // the latest identity refusal
-	identOf     string    // its kind: unregistered or wrong_host
-	start       time.Time // when the startup wait began (after the local open); zero before
-	window      time.Time // the first reply at or after start in the current run of replies
-	barrier     time.Time // T: request start + retry_after of the latest BARRIER refusal
-	final       string    // "moved" or "deleted": a permanent refusal
-	finalDetail string
-	logged      string // the reason last logged
-	loggedAt    time.Time
-	logf        func(string, ...any)
+	mu       sync.Mutex
+	now      func() time.Time
+	contact  time.Time // start of the current contact streak; zero while none
+	last     time.Time // the latest reply
+	down     time.Time // first failure without a reply since the last contact
+	creds    time.Time // first credentials refusal since the last accepted call
+	ident    time.Time // first identity refusal since the last accepted call
+	identAt  time.Time // the latest identity refusal
+	identOf  string    // its kind: unregistered or wrong_host
+	start    time.Time // when the startup wait began (after the local open); zero before
+	window   time.Time // the first reply at or after start in the current run of replies
+	barrier  time.Time // T: request start + retry_after of the latest BARRIER refusal
+	final    string    // "moved" or "deleted": a permanent refusal
+	logged   string    // the reason last logged
+	loggedAt time.Time
+	logf     func(string, ...any)
 }
 
 func newMasterWait(now func() time.Time, logf func(string, ...any)) *masterWait {
@@ -97,8 +95,7 @@ func masterCallClass(err error) (contact, credentials bool) {
 func (w *masterWait) call(err error) {
 	contact, credentials := masterCallClass(err)
 	identity := ""
-	r := leaseRefusalDetail(err)
-	if r != nil && r.GetKind() == control.WorkspaceLeaseRefusal_IDENTITY {
+	if r := leaseRefusalDetail(err); r != nil && r.GetKind() == control.WorkspaceLeaseRefusal_IDENTITY {
 		contact, identity = false, r.GetIdentity()
 		if identity == "" {
 			identity = "unknown"
@@ -107,14 +104,6 @@ func (w *masterWait) call(err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := w.now()
-	if r != nil && status.Code(err) == codes.FailedPrecondition {
-		switch r.GetKind() {
-		case control.WorkspaceLeaseRefusal_MOVED:
-			w.final, w.finalDetail = "moved", status.Convert(err).Message()
-		case control.WorkspaceLeaseRefusal_DELETED:
-			w.final, w.finalDetail = "deleted", status.Convert(err).Message()
-		}
-	}
 	switch {
 	case identity != "":
 		w.endStreakLocked()
@@ -202,6 +191,10 @@ func (w *masterWait) renewal(start time.Time, err error) {
 		if t := start.Add(time.Duration(r.GetRetryAfterNs())); t.After(w.barrier) {
 			w.barrier = t
 		}
+	case control.WorkspaceLeaseRefusal_MOVED:
+		w.final = "moved"
+	case control.WorkspaceLeaseRefusal_DELETED:
+		w.final = "deleted"
 	}
 }
 
@@ -267,7 +260,7 @@ func (w *masterWait) snapshot(assigned bool) MasterWait {
 	var out MasterWait
 	switch {
 	case w.final != "":
-		out = MasterWait{Reason: w.final, Detail: w.finalDetail, Since: now}
+		out = MasterWait{Reason: w.final, Since: now}
 	case !w.creds.IsZero():
 		out = MasterWait{Reason: "credentials", Since: w.creds}
 	case !w.ident.IsZero():
@@ -309,13 +302,6 @@ func (w *masterWait) snapshot(assigned bool) MasterWait {
 // master gives no reply or refuses the node's credentials: no bound) and a
 // permanent refusal of the lease ("moved" or "deleted"; "" when none).
 func (h *Host) MasterWaitState() (time.Time, string) { return h.mw.state() }
-
-// MasterWaitDetail is diagnostic only; exit classification uses the typed kind.
-func (h *Host) MasterWaitDetail() string {
-	h.mw.mu.Lock()
-	defer h.mw.mu.Unlock()
-	return h.mw.finalDetail
-}
 
 // MasterWaitStatus is why a workspace primary is not serving under a
 // grant, or nil when it holds one (or is not a workspace primary).

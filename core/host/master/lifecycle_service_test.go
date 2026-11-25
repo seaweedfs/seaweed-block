@@ -49,6 +49,9 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if rec.Spec.VolumeID != "pvc-a" || rec.Spec.SizeBytes != 1<<30 || rec.Spec.ReplicationFactor != 2 {
 		t.Fatalf("record=%+v", rec)
 	}
+	if resp.GetLayoutId() == "" || resp.GetLayoutId() != rec.Spec.LayoutID {
+		t.Fatal("create response does not carry the durable layout identity")
+	}
 	if rec.Spec.Protocol != "nvme" {
 		t.Fatalf("record protocol=%q want nvme", rec.Spec.Protocol)
 	}

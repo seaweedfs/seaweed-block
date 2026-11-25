@@ -70,18 +70,6 @@ func TestLeaseRefusalKinds(t *testing.T) {
 		return &control.WorkspaceIdentity{VolumeId: "v", ReplicaId: "r1", Epoch: epoch, ServerId: server}
 	}
 	e1 := id("node-a", line.Epoch)
-	assignment := func(server string) error {
-		probeCtx, end := context.WithTimeout(ctx, 3*time.Second)
-		defer end()
-		stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(probeCtx, &control.SubscribeRequest{VolumeId: "v", ReplicaId: "r1", ServerId: server})
-		if err == nil {
-			_, err = stream.Recv()
-		}
-		return err
-	}
-	if err := assignment("node-b"); err != nil {
-		t.Fatal("a prestarted target was mistaken for a moved source", err)
-	}
 	if _, err := ws.RenewWorkspaceLease(ctx, e1); err != nil {
 		t.Fatal("first grant:", err)
 	}
@@ -145,10 +133,6 @@ func TestLeaseRefusalKinds(t *testing.T) {
 	if r == nil || r.GetKind() != control.WorkspaceLeaseRefusal_MOVED || text != "workspace lease: server identity does not match the current holder" {
 		t.Fatalf("moved to another host: %q detail %v; want MOVED with the unchanged text", text, r)
 	}
-	text, r = refusalOf(t, "restarted source assignment stream", assignment("node-a"))
-	if r == nil || r.GetKind() != control.WorkspaceLeaseRefusal_MOVED || !strings.Contains(text, "holder node-b at epoch ") {
-		t.Fatalf("restarted source did not receive destination-labelled MOVED: %q %v", text, r)
-	}
 
 	// Move back to node-a: the stale node-a process at e2 is the same owner at
 	// a newer epoch, so OTHER (no detail), never a false MOVED.
@@ -156,9 +140,6 @@ func TestLeaseRefusalKinds(t *testing.T) {
 		t.Fatal("grant to the moved host:", err)
 	}
 	e4 := id("node-a", cleanMove("move-back", e3, b))
-	if err := assignment("node-a"); err != nil {
-		t.Fatal("a move back was rejected by historical source evidence", err)
-	}
 	text, r = refusalOf(t, "moved and moved back", func() error { _, err := ws.RenewWorkspaceLease(ctx, e2); return err }())
 	if r != nil || text != "workspace lease: server identity does not match the current holder" {
 		t.Fatalf("moved and moved back: %q detail %v; want the unchanged text, no detail", text, r)

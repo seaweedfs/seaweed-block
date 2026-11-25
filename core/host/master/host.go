@@ -281,6 +281,15 @@ func New(cfg Config) (*Host, error) {
 	h.ln = ln
 	h.lifecycle = lifecycleStores
 	if h.lifecycle != nil {
+		// Rebuild permanent grant exclusions before any request, publisher
+		// loop or lifecycle reconciliation can create positive validity.
+		for _, volume := range h.lifecycle.Deletions.CommittedVolumes() {
+			if err := h.Publisher().ReserveWorkspaceDeletion(context.Background(), volume, nil); err != nil {
+				_ = ln.Close()
+				_ = boot.Close()
+				return nil, fmt.Errorf("master.New: deletion reservation recovery: %w", err)
+			}
+		}
 		if err := h.reconcileWorkspaceBindings(); err != nil {
 			_ = ln.Close()
 			_ = boot.Close()

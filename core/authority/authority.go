@@ -163,6 +163,9 @@ type Publisher struct {
 	workspaceNow          func() time.Time
 	workspaceTTL          time.Duration
 	workspaceMaxClockSkew time.Duration
+	// Rebuilt from committed lifecycle deletion reservations before serving.
+	// Writes hold mu then leaseMu; readers hold either existing grant lock.
+	deleteReserved map[string]bool
 
 	// Lease renewal state (workspace_lease_view.go). leaseMu is a memory-only
 	// leaf: lock order p.mu -> leaseMu, never the reverse, and nothing is
@@ -178,6 +181,8 @@ type Publisher struct {
 	// testAfterIssuePublish, when set by a test, runs under mu right after
 	// an issued move's lease view is published.
 	testAfterIssuePublish func(volume string)
+	// Set before concurrent test requests; nil in production.
+	testBeforeGrantLock func(site string)
 }
 
 // PublicationAdmission surrounds an ordinary mint with local ownership/lifetime
@@ -468,7 +473,12 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 		return err
 	}
 
+	p.beforeWorkspaceGrantLock("publication")
 	p.mu.Lock()
+	if p.deleteReserved[ask.VolumeID] {
+		p.mu.Unlock()
+		return ErrWorkspaceDeleteReserved
+	}
 	if p.workspaceUncertain[ask.VolumeID] {
 		p.mu.Unlock()
 		if grant != nil {
@@ -618,8 +628,9 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			if issuedWorkspace != nil {
 				// The store may have written the issuing record before
-				// failing (e.g. a directory sync after the rename): the
-				// move's outcome is unknown, not refused.
+				// failing (a failure after its rename): the move's outcome
+				// is unknown, not refused. The file store fail-stops on a
+				// directory fsync failure there instead (exit 74).
 				return fmt.Errorf("authority: durable Put of a workspace move issue failed: %w: %w", err, ErrWorkspaceOutcomeUncertain)
 			}
 			return fmt.Errorf("authority: durable Put failed, rolling back mint: %w", err)

@@ -30,6 +30,10 @@ func TestFileStore_CreateVolumePersistsAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	if rec.Spec.LayoutID == "" {
+		t.Fatal("missing minted layout identity")
+	}
+	spec.LayoutID = rec.Spec.LayoutID
 	if rec.Spec != spec {
 		t.Fatalf("record spec=%+v want %+v", rec.Spec, spec)
 	}

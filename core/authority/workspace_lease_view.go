@@ -222,6 +222,7 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 	if err := ctx.Err(); err != nil {
 		return WorkspaceLease{}, err
 	}
+	p.beforeWorkspaceGrantLock("renewal")
 	p.leaseMu.Lock()
 	now := p.workspaceNow() // read under leaseMu: the forced-barrier argument needs it
 	// unlock releases leaseMu on a path that grants nothing and logs a due
@@ -231,6 +232,10 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 		summary := p.leaseStats.summaryDue(now)
 		p.leaseMu.Unlock()
 		p.logLease(summary)
+	}
+	if p.deleteReserved[volume] {
+		unlock()
+		return WorkspaceLease{}, ErrWorkspaceDeleteReserved
 	}
 	lv := p.leaseViews[volume]
 	if lv == nil || !lv.d.bound || lv.d.replica != holder || lv.d.epoch != epoch {
@@ -316,7 +321,12 @@ func (p *Publisher) RenewWorkspaceLease(ctx context.Context, volume, holder stri
 // its holder's lease. A host whose first renewal fails does not fence: it has
 // no deadline yet and retries. The durable horizon starts at now+1.5*TTL.
 func (p *Publisher) firstWorkspaceGrant(ctx context.Context, volume, holder string, epoch uint64) (WorkspaceLease, error) {
+	p.beforeWorkspaceGrantLock("first grant")
 	p.mu.Lock()
+	if p.deleteReserved[volume] {
+		p.mu.Unlock()
+		return WorkspaceLease{}, ErrWorkspaceDeleteReserved
+	}
 	_, line, ok := p.workspaceLineLocked(volume)
 	if !ok || line.info.ReplicaID != holder || line.info.Epoch != epoch {
 		p.mu.Unlock()
@@ -353,12 +363,16 @@ func (p *Publisher) firstWorkspaceGrant(ctx context.Context, volume, holder stri
 // reusing the forced-move barrier so the old process's validity is past.
 // The live renewal path releases leaseMu before entering this writer.
 func (p *Publisher) regrantWorkspaceLease(ctx context.Context, volume, holder string, epoch uint64) (WorkspaceLease, error) {
+	p.beforeWorkspaceGrantLock("regrant")
 	// INV-WS-RENEW-NONBLOCKING-001: a held writer refuses this attempt;
 	// a returning process can retry after that writer has settled.
 	if !p.mu.TryLock() {
 		return WorkspaceLease{}, fmt.Errorf("workspace lease: authority writer busy; retry")
 	}
 	defer p.mu.Unlock()
+	if p.deleteReserved[volume] {
+		return WorkspaceLease{}, ErrWorkspaceDeleteReserved
+	}
 	if err := ctx.Err(); err != nil {
 		return WorkspaceLease{}, err
 	}
@@ -409,6 +423,7 @@ func (p *Publisher) newWorkspaceLease(holder string, epoch uint64, now time.Time
 // (INV-AUTH-UNCERTAIN-001); a failed recheck is a known no-write.
 func (p *Publisher) extendWorkspaceLease(volume, holder string, epoch uint64, trigger time.Time) {
 	defer p.extWG.Done()
+	p.beforeWorkspaceGrantLock("extension")
 	var note string
 	defer func() {
 		if note != "" {
@@ -427,7 +442,7 @@ func (p *Publisher) extendWorkspaceLease(volume, holder string, epoch uint64, tr
 	p.leaseMu.Lock()
 	closing := p.leaseClosing
 	p.leaseMu.Unlock()
-	if closing {
+	if closing || p.deleteReserved[volume] {
 		return
 	}
 	_, line, ok := p.workspaceLineLocked(volume)

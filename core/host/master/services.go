@@ -76,8 +76,16 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	if err != nil {
 		return nil, lifecycleError("create volume", err)
 	}
+	return lifecycleVolumeResponse(rec)
+}
+
+func lifecycleVolumeResponse(rec lifecycle.VolumeRecord) (*control.CreateVolumeResponse, error) {
+	if rec.Spec.LayoutID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "volume has no layout identity; recreate the legacy volume")
+	}
 	return &control.CreateVolumeResponse{
 		VolumeId:          rec.Spec.VolumeID,
+		LayoutId:          rec.Spec.LayoutID,
 		SizeBytes:         rec.Spec.SizeBytes,
 		ReplicationFactor: int32(rec.Spec.ReplicationFactor),
 		Protocol:          rec.Spec.Protocol,
@@ -87,6 +95,26 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		PvcUid:            rec.Spec.PVCUID,
 		PvName:            rec.Spec.PVName,
 	}, nil
+}
+
+// GetVolume resolves a name using durable lifecycle intent only. It never
+// creates a record or infers an identity from the filer or an assignment.
+func (s *services) GetVolume(ctx context.Context, req *control.GetLifecycleVolumeRequest) (*control.CreateVolumeResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+	stores := s.host.Lifecycle()
+	if stores == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
+	}
+	rec, ok := stores.Volumes.GetVolume(req.GetVolumeId())
+	if !ok {
+		return nil, status.Error(codes.NotFound, "volume not found")
+	}
+	return lifecycleVolumeResponse(rec)
 }
 
 func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRequest) (*control.DeleteVolumeResponse, error) {
@@ -419,10 +447,6 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 	if s.isWorkspaceVolume(req.VolumeId) {
 		if err := s.host.refuseWorkspaceHolderHost(ctx, "assignment stream", req.GetServerId()); err != nil {
 			return identityRefusal(err)
-		}
-		if line, moved := pub.WorkspaceSourceMoved(req.VolumeId, req.ReplicaId, req.ServerId); moved {
-			owner, _ := line.Owner()
-			return leaseRefusal(fmt.Sprintf("workspace moved to holder %s at epoch %d", owner, line.Epoch), control.WorkspaceLeaseRefusal_MOVED, 0)
 		}
 	}
 

@@ -4,11 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -29,72 +25,6 @@ func refusalWith(t *testing.T, text string, kind control.WorkspaceLeaseRefusal_K
 		t.Fatal(err)
 	}
 	return st.Err()
-}
-
-func TestMovedAssignmentStreamIsFinalWithoutAnyOwnAssignment(t *testing.T) {
-	w := newMasterWait(nil, func(string, ...any) {})
-	w.call(refusalWith(t, "workspace moved to holder node-b at epoch 8", control.WorkspaceLeaseRefusal_MOVED, 0))
-	if _, final := w.state(); final != "moved" {
-		t.Fatalf("typed stream MOVED became %q; want final even without an own lineage", final)
-	}
-	if got := w.snapshot(false); got.Detail != "workspace moved to holder node-b at epoch 8" {
-		t.Fatal("moved status omitted the current holder and epoch", got)
-	}
-	w.call(status.Error(codes.Unavailable, "master unreachable"))
-	if _, final := w.state(); final != "moved" {
-		t.Fatal("transport failure erased the confirmed move", final)
-	}
-	unknown := newMasterWait(nil, func(string, ...any) {})
-	unknown.call(status.Error(codes.Unavailable, "master unreachable"))
-	if _, final := unknown.state(); final != "" {
-		t.Fatal("unknown answer became permanent", final)
-	}
-	unknown.call(status.Error(codes.FailedPrecondition, "workspace moved to holder node-b at epoch 8"))
-	if _, final := unknown.state(); final != "" {
-		t.Fatal("diagnostic words without a typed proof became permanent", final)
-	}
-	transport, err := status.New(codes.Unavailable, "master unreachable").WithDetails(&control.WorkspaceLeaseRefusal{Kind: control.WorkspaceLeaseRefusal_MOVED})
-	if err != nil {
-		t.Fatal(err)
-	}
-	unknown.call(transport.Err())
-	if _, final := unknown.state(); final != "" {
-		t.Fatal("an unavailable result with a stale detail became permanent", final)
-	}
-}
-
-// The typed final result has one writer and two readers. A new direct reader
-// or writer must supply its own probe instead of silently adding a decision.
-func TestMasterWaitFinalSites(t *testing.T) {
-	pkgs, err := parser.ParseDir(token.NewFileSet(), ".", func(f os.FileInfo) bool {
-		return strings.HasSuffix(f.Name(), ".go") && !strings.HasSuffix(f.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sites := map[string]bool{}
-	for _, f := range pkgs["volume"].Files {
-		for _, d := range f.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			owner := "<package>"
-			var scope ast.Node = d
-			if ok {
-				if fn.Body == nil {
-					continue
-				}
-				owner, scope = fn.Name.Name, fn.Body
-			}
-			ast.Inspect(scope, func(n ast.Node) bool {
-				if s, ok := n.(*ast.SelectorExpr); ok && s.Sel.Name == "final" {
-					sites[owner] = true
-				}
-				return true
-			})
-		}
-	}
-	if len(sites) != 3 || !sites["call"] || !sites["state"] || !sites["snapshot"] {
-		t.Fatal("master-wait final sites changed; enumerate and probe each", sites)
-	}
 }
 
 // The startup wait's bound starts at the first answered contact, never
@@ -266,12 +196,10 @@ func TestStatusShowsTheMasterWait(t *testing.T) {
 	s := NewStatusServer(view)
 	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{VolumeID: "v1", Operational: true}}})
 	since, until := time.Unix(1000, 0), time.Unix(1045, 0)
-	s.SetMasterWait(func() *MasterWait {
-		return &MasterWait{Reason: "barrier", Since: since, Until: until, Detail: "diagnostic"}
-	})
+	s.SetMasterWait(func() *MasterWait { return &MasterWait{Reason: "barrier", Since: since, Until: until} })
 	got := s.statusProjection()
 	if got.NotReadyReason != NotReadyLeaseNotHeld || got.MasterWait == nil ||
-		*got.MasterWait != (MasterWaitStatus{Reason: "barrier", Detail: "diagnostic", SinceMs: since.UnixMilli(), UntilMs: until.UnixMilli()}) {
+		*got.MasterWait != (MasterWaitStatus{Reason: "barrier", SinceMs: since.UnixMilli(), UntilMs: until.UnixMilli()}) {
 		t.Fatalf("status %q MasterWait %+v; want barrier since/until", got.NotReadyReason, got.MasterWait)
 	}
 	view.workspaceRequired = false
@@ -332,12 +260,8 @@ type safeBuffer struct {
 	b  strings.Builder
 }
 
-func (s *safeBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-func (s *safeBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+func (s *safeBuffer) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
+func (s *safeBuffer) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
 // A flapping master (an answer, then no reply, every 10 s for 10 min) never
 // ends the wait early: each answer starts a new streak, so the bound is never

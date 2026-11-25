@@ -24,6 +24,8 @@ var deleteSites = map[string]string{
 	"core/frontend/chunkstore/chunk_remote.go ChunkRemote.DeleteIntent -> DeleteEntry": "an intent entry (old store)",
 	"core/frontend/chunkstore/retention.go Catalog.freeName -> DeleteEntry":            "a snapshot name entry, conditional on its attempt (old store)",
 	"core/frontend/chunkstore/swfs.go SWFS.DeleteEntry -> DeleteEntry":                 "the filer client itself",
+	"cmd/blockvolume/main.go parseFlags -> VolumeDir":                                  "the local root <name>-<id8> from the launch args (name and the master-minted layout id)",
+	"core/launcher/k8s_renderer.go durableRoot -> VolumeDir":                           "the local root path from the master's volume record (name and layout id)",
 	"cmd/sw-block/chunk_b.go chunkSnapshots -> VolumeDir":                              "prints a dependent's directory from HEAD's dependent record (its name and id); nothing is read or written there",
 	"core/frontend/chunkstore/catalog_b.go VolumeRef.Dir -> VolumeDir":                 "a VolumeRef is the master's record (name, layout id) or a reference's owner name and id (foreignOwners)",
 	"core/frontend/chunkstore/layout_store.go LayoutStore.deleteObject -> DeleteEntry": "only canonical pool, segment or root files under the configured volume root; HEAD, VOLUME and directory paths refused (TestLayoutStoreDeleteNeverRemovesControlRecords)",
