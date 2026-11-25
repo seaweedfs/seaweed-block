@@ -23,6 +23,7 @@ import (
 // pins it. "GAP" marks a reader that takes an absent HEAD for an empty
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
+	"core/frontend/chunkstore/layout_store.go ReadHead -> LookupEntry": "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
 	// chunkstore: the two raw reads every other reader goes through
 	"core/frontend/chunkstore/catalog.go ReadHead -> LookupEntry":                    "ok=false, no error (probe ReadHead)",
 	"core/frontend/chunkstore/chunk_remote.go getHeadRoot -> LookupEntry":            "zero HEAD, no error (probe GetHead)",

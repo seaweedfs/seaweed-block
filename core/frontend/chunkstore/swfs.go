@@ -169,13 +169,14 @@ func (c *SWFS) ListEntries(ctx context.Context, dir, prefix, startAfter string, 
 	}
 }
 
-// DeleteEntry implements Filer. It never deletes data or recurses. A failed
+// DeleteEntry implements Filer. The filer reclaims the file's chunks; the
+// request never recurses. A failed
 // expected_extended (including a missing entry) comes back as gRPC
 // FailedPrecondition; other failures are a gRPC error or the response's
 // Error string, and are returned unwrapped from the sentinels.
 func (c *SWFS) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
 	resp, err := c.fc.DeleteEntry(ctx, &filerpb.DeleteEntryRequest{
-		Directory: dir, Name: name, IsDeleteData: false, IsRecursive: false, ExpectedExtended: expected,
+		Directory: dir, Name: name, IsDeleteData: true, IsRecursive: false, ExpectedExtended: expected,
 	})
 	if err != nil {
 		if status.Code(err) == codes.FailedPrecondition {

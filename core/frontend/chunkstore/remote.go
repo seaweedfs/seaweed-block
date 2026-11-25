@@ -28,7 +28,7 @@ type Filer interface {
 	// dir whose names start with prefix and sort after startAfter, in name
 	// order. A directory that does not exist lists as empty.
 	ListEntries(ctx context.Context, dir, prefix, startAfter string, limit uint32) ([]*filerpb.Entry, error)
-	// DeleteEntry removes dir/name without deleting any data, and only if
+	// DeleteEntry removes dir/name and lets the filer reclaim its data, only if
 	// every expected extended key still holds the given value; otherwise
 	// ErrPrecondition (also when the entry is missing and expected is not
 	// empty). An unconditional delete of a missing entry succeeds.
