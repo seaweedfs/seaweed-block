@@ -124,9 +124,11 @@ func owners(m map[string]bool) []string {
 //     RunClaim, when it is declared, uses it.
 //   - Every declared exported Run function goes through runTransition.
 //   - Pool: a name starting with Delete or Remove is used only in
-//     RemoveUnreachable, and there every delete is preceded, in the same
-//     loop body, by the remover's own lease check (StillHeld); see
-//     removerOrderFindings.
+//     RemoveUnreachable, where every delete is preceded, in the same loop
+//     body, by the remover's own lease check (StillHeld), and in
+//     DeleteVolume, whose steps run in the delete's order: no holder, HEAD
+//     deleting, the dependents released, the objects deleted, HEAD
+//     deleted; see removerOrderFindings and deleteOrderFindings.
 //
 // These are syntactic checks of this package's own files: they see any
 // use of these names, but not a store effect reached through a name they
@@ -169,8 +171,8 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 	for name, by := range code {
 		if strings.HasPrefix(name, "Delete") || strings.HasPrefix(name, "Remove") {
 			for _, fn := range owners(by) {
-				if fn != "RemoveUnreachable" {
-					bad = append(bad, fn+" uses "+name+": only RemoveUnreachable removes, after its lease re-check")
+				if fn != "RemoveUnreachable" && fn != "DeleteVolume" {
+					bad = append(bad, fn+" uses "+name+": only RemoveUnreachable (after its lease re-check) and DeleteVolume (after HEAD deleting and the dependents released) remove")
 				}
 			}
 		}
@@ -243,6 +245,57 @@ func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
 	return bad
 }
 
+// deleteOrderFindings checks DeleteVolume's order in the sources: among its
+// top-level statements, the first use of each step comes after the
+// previous step's: NoHolder, RunMarkDeleting, RunReleaseDependent,
+// DeleteObject, RunMarkDeleted.
+func deleteOrderFindings(t *testing.T, srcs map[string]string) []string {
+	t.Helper()
+	steps := []string{"NoHolder", "RunMarkDeleting", "RunReleaseDependent", "DeleteObject", "RunMarkDeleted"}
+	var bad []string
+	for fname, src := range srcs {
+		file, err := parser.ParseFile(token.NewFileSet(), fname, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "DeleteVolume" {
+				continue
+			}
+			first := map[string]int{}
+			for i, st := range fn.Body.List {
+				ast.Inspect(st, func(n ast.Node) bool {
+					var name string
+					switch x := n.(type) {
+					case *ast.SelectorExpr:
+						name = x.Sel.Name
+					case *ast.Ident:
+						name = x.Name
+					}
+					if _, seen := first[name]; !seen && name != "" {
+						first[name] = i
+					}
+					return true
+				})
+			}
+			for k, step := range steps {
+				at, ok := first[step]
+				if !ok {
+					bad = append(bad, "DeleteVolume has no "+step)
+					continue
+				}
+				if k > 0 {
+					if prev, ok := first[steps[k-1]]; ok && prev >= at {
+						bad = append(bad, "DeleteVolume runs "+step+" before "+steps[k-1]+" has run")
+					}
+				}
+			}
+		}
+	}
+	return bad
+}
+
 // declared returns the names of the functions the sources declare.
 func declared(t *testing.T, srcs map[string]string) map[string]bool {
 	t.Helper()
@@ -266,6 +319,9 @@ func TestGuard_WritersTransitionsAndRemovers(t *testing.T) {
 	code := refs(t, src)
 	tests := declared(t, packageSources(t, true))
 	if bad := append(guardFindings(code, declared(t, src), tests), removerOrderFindings(t, src)...); len(bad) != 0 {
+		t.Fatalf("guard: %s", strings.Join(bad, "\n"))
+	}
+	if bad := deleteOrderFindings(t, src); len(bad) != 0 {
 		t.Fatalf("guard: %s", strings.Join(bad, "\n"))
 	}
 	st := reflect.TypeOf((*HeadStore)(nil)).Elem()
@@ -299,7 +355,7 @@ func TestGuard_Controls(t *testing.T) {
 		"untested transition":      {src: `func RunZz(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }`, want: "has no TestZz_Closure"},
 		"lease wait outside claim": {src: `func w(ctx context.Context, l LeaseWait) error { return l.OldLeaseEnded(ctx, 1) }`, want: "only RunClaim claims"},
 		"remover outside RemoveUnreachable": {src: `type p interface{ DeleteObject(context.Context, string) error }
-func w(ctx context.Context, x p) error { return x.DeleteObject(ctx, "o") }`, want: "only RemoveUnreachable removes"},
+func w(ctx context.Context, x p) error { return x.DeleteObject(ctx, "o") }`, want: "only RemoveUnreachable (after its lease re-check) and DeleteVolume"},
 		"removal without lease check": {file: "remove.go", src: `type p interface{ DeleteObject(context.Context, string) error }
 type l interface{ StillHeld(context.Context) error }
 func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
@@ -340,8 +396,40 @@ func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h, false, nil })
 }`, want: "does not wait for the old lease", file: "claim.go"},
 		"transition not through runTransition": {src: `func RunZz(ctx context.Context, st HeadStore) (Head, error) { h, _, err := st.ReadHead(ctx); return h, err }`, want: "does not go through runTransition"},
+		"delete removes the pool before releasing dependents": {file: "delete.go", src: `type p interface{ DeleteObject(context.Context, string) error }
+type g interface{ NoHolder(context.Context) error }
+func RunMarkDeleting(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }
+func RunMarkDeleted(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }
+func RunReleaseDependent(ctx context.Context, st HeadStore, id VolumeID) (Head, error) { return runTransition(ctx, st, nil) }
+func DeleteVolume(ctx context.Context, st HeadStore, x g, id VolumeID, srcs []HeadStore, pool p, objs []string) error {
+	_ = x.NoHolder(ctx)
+	_, _ = RunMarkDeleting(ctx, st)
+	for _, o := range objs {
+		_ = pool.DeleteObject(ctx, o)
+	}
+	for _, s := range srcs {
+		_, _ = RunReleaseDependent(ctx, s, id)
+	}
+	_, _ = RunMarkDeleted(ctx, st)
+	return nil
+}`, want: "runs DeleteObject before RunReleaseDependent"},
+		"delete without the holder check": {file: "delete.go", src: `type p interface{ DeleteObject(context.Context, string) error }
+func RunMarkDeleting(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }
+func RunMarkDeleted(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }
+func RunReleaseDependent(ctx context.Context, st HeadStore, id VolumeID) (Head, error) { return runTransition(ctx, st, nil) }
+func DeleteVolume(ctx context.Context, st HeadStore, id VolumeID, srcs []HeadStore, pool p, objs []string) error {
+	_, _ = RunMarkDeleting(ctx, st)
+	for _, s := range srcs {
+		_, _ = RunReleaseDependent(ctx, s, id)
+	}
+	for _, o := range objs {
+		_ = pool.DeleteObject(ctx, o)
+	}
+	_, _ = RunMarkDeleted(ctx, st)
+	return nil
+}`, want: "DeleteVolume has no NoHolder"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
-func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable removes"},
+func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable (after its lease re-check) and DeleteVolume"},
 	} {
 		srcs := packageSources(t, false)
 		file := c.file
@@ -349,7 +437,7 @@ func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable remove
 			file = "zz_control.go"
 		}
 		srcs[file] = "package layout\n\nimport \"context\"\n\nvar _ context.Context\n\n" + c.src + "\n"
-		bad := append(guardFindings(refs(t, srcs), declared(t, srcs), tests), removerOrderFindings(t, srcs)...)
+		bad := append(append(guardFindings(refs(t, srcs), declared(t, srcs), tests), removerOrderFindings(t, srcs)...), deleteOrderFindings(t, srcs)...)
 		if !strings.Contains(strings.Join(bad, "\n"), c.want) {
 			t.Errorf("control %q: findings %q; want one containing %q", name, bad, c.want)
 		}

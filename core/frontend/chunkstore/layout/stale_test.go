@@ -9,8 +9,8 @@ import (
 // Every pure transition refuses a caller that is not the holder at HEAD's
 // epoch: an older epoch of the same server, and the same epoch held by
 // another server, in idle, snap and clean. The table must name every
-// method of Head that returns (Head, bool, error), so a new transition
-// fails here until it is added.
+// method of Head that takes a HolderID and returns (Head, bool, error), so
+// a new holder transition fails here until it is added.
 func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("r"))}
 	steps := map[string]func(Head, HolderID) error{
@@ -40,7 +40,8 @@ func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 	var missing []string
 	for i := 0; i < headT.NumMethod(); i++ {
 		m := headT.Method(i).Type
-		if m.NumOut() == 3 && m.Out(0) == headT && m.Out(1) == boolT && m.Out(2) == errT {
+		holderT := reflect.TypeOf(HolderID{})
+		if m.NumOut() == 3 && m.Out(0) == headT && m.Out(1) == boolT && m.Out(2) == errT && m.NumIn() > 1 && m.In(1) == holderT {
 			if _, ok := steps[headT.Method(i).Name]; !ok {
 				missing = append(missing, headT.Method(i).Name)
 			}

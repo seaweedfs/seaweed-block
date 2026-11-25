@@ -66,8 +66,8 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 	if session == "" {
 		return Head{}, false, errors.New("layout: Commit needs a session id")
 	}
-	if !h.heldBy(me) {
-		return Head{}, false, fmt.Errorf("%w: HEAD epoch %d holder %q, caller epoch %d holder %q", ErrNotHolder, h.Epoch, h.Holder, me.Epoch, me.Holder)
+	if err := h.holderErr(me); err != nil {
+		return Head{}, false, err
 	}
 	if h.Activity.Kind == ActIdle && h.Current != nil && *h.Current == root && h.Position == position {
 		if s, ok := h.Snapshots[snapshot]; snapshot == "" || ok && s.Root == root {
