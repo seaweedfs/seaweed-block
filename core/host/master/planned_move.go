@@ -80,7 +80,9 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 	}
 	for _, c := range result.Candidates {
 		if c.ReplicaID == target && c.Ready {
-			return promotionEvidenceFor(result, target), nil
+			ev := promotionEvidenceFor(result, target)
+			ev.FencedEpoch, ev.Basis = 0, adapter.BasisPlanned
+			return ev, nil
 		}
 	}
 	return adapter.PrimaryEvidence{}, fmt.Errorf("planned move: replica %s did not answer the probe round ready (caught up, epoch table valid)", target)

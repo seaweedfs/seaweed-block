@@ -62,11 +62,27 @@ type PrimaryEvidence struct {
 	// answering (a fencing round); the line is minted only at this epoch.
 	// 0: no fencing round (a planned move).
 	FencedEpoch uint64
-	// Planned: a guarded planned move (the target in every acknowledgement
-	// set while the current primary is alive), the one promotion minted
-	// without a fencing round.
-	Planned bool
+	// Basis is why a promotion may be minted; a promotion without one is
+	// refused.
+	Basis PromotionBasis
 }
+
+// PromotionBasis is the one reason a promotion is minted.
+type PromotionBasis uint8
+
+const (
+	BasisNone PromotionBasis = iota
+	// BasisFenced: decided on a fencing round's answers; FencedEpoch is the
+	// epoch minted.
+	BasisFenced
+	// BasisPlanned: a planned move after its guard (the target in every
+	// acknowledgement set while the current primary is alive); no fencing
+	// round, FencedEpoch 0.
+	BasisPlanned
+	// BasisHeal: the line's own primary continued at FencedEpoch after a
+	// fencing round that published nothing.
+	BasisHeal
+)
 
 // ProbeResult is the outcome of a transport probe.
 type ProbeResult struct {

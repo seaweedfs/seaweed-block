@@ -14,6 +14,7 @@ package authority
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -86,6 +87,32 @@ var ErrFenceSuperseded = errors.New("authority: the fencing round's epoch is no 
 // ErrPromotionUnfenced: a promotion carried neither a fencing round's epoch
 // nor the planned-move mark; the publisher mints nothing.
 var ErrPromotionUnfenced = errors.New("authority: a promotion needs a fencing round's decision or a guarded planned move")
+
+// promotionBasisHolds checks a promotion's basis against the epoch it is
+// minted at; for a heal, the target must be the replica the line names now.
+func promotionBasisHolds(ask AssignmentAsk, epoch uint64, state map[subKey]assignmentState, lineEpoch uint64) error {
+	ev := ask.Evidence
+	switch ev.Basis {
+	case adapter.BasisFenced:
+		if ev.FencedEpoch != epoch {
+			return fmt.Errorf("fenced at %d, minted at %d", ev.FencedEpoch, epoch)
+		}
+	case adapter.BasisPlanned:
+		if ev.FencedEpoch != 0 {
+			return fmt.Errorf("a planned move carries no fenced epoch (%d)", ev.FencedEpoch)
+		}
+	case adapter.BasisHeal:
+		if ev.FencedEpoch != epoch {
+			return fmt.Errorf("heal fenced at %d, minted at %d", ev.FencedEpoch, epoch)
+		}
+		if cur, ok := state[subKey{volumeID: ask.VolumeID, replicaID: ask.ReplicaID}]; !ok || !cur.present || cur.info.Epoch != lineEpoch {
+			return fmt.Errorf("a heal continues the line's own primary; %s is not it", ask.ReplicaID)
+		}
+	default:
+		return fmt.Errorf("no basis")
+	}
+	return nil
+}
 
 // Directive is the input side of the authority route. A Directive
 // emits one AssignmentAsk at a time. The publisher's Run loop calls

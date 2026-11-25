@@ -595,6 +595,15 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			return fmt.Errorf("%w: volume %s fenced at %d, the next epoch is %d", ErrFenceSuperseded, ask.VolumeID, ask.Evidence.FencedEpoch, next.Epoch)
 		}
+		// A promotion states its basis, exactly one: fenced (at this epoch),
+		// planned (after the planned-move guard, no fence), or heal (the
+		// line's own primary, at this epoch). No path mints one without.
+		if ask.Evidence.Kind == adapter.PrimaryKindPromotion {
+			if err := promotionBasisHolds(ask, next.Epoch, p.state, maxEpoch); err != nil {
+				p.mu.Unlock()
+				return fmt.Errorf("%w: volume %s replica %s: %v", ErrPromotionUnfenced, ask.VolumeID, ask.ReplicaID, err)
+			}
+		}
 
 	default:
 		p.mu.Unlock()

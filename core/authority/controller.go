@@ -508,7 +508,7 @@ func (c *TopologyController) decideVolume(
 				DataAddr:  target.DataAddr,
 				CtrlAddr:  target.CtrlAddr,
 				Intent:    IntentReassign,
-				Evidence:  target.PromotionEvidence,
+				Evidence:  plannedEvidence(target.PromotionEvidence),
 			}, "rebalance", true
 		}
 		return AssignmentAsk{}, "", false
@@ -743,4 +743,11 @@ func sameAsk(a, b AssignmentAsk) bool {
 		a.DataAddr == b.DataAddr &&
 		a.CtrlAddr == b.CtrlAddr &&
 		a.Intent == b.Intent
+}
+
+// plannedEvidence is a rebalance's evidence: the gate's probe of the target,
+// a planned move after the planned-move guard (PlannedMoveAllowed).
+func plannedEvidence(ev adapter.PrimaryEvidence) adapter.PrimaryEvidence {
+	ev.FencedEpoch, ev.Basis = 0, adapter.BasisPlanned
+	return ev
 }

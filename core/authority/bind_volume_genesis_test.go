@@ -165,7 +165,16 @@ func TestPublisher_AnUnfencedPromotionIsRefused(t *testing.T) {
 	if line, _ := pub.VolumeAuthorityLine("v1"); line.ReplicaID != "r1" || line.Epoch != 1 {
 		t.Fatalf("the line moved: %+v", line)
 	}
-	ask.Evidence.Planned = true
+	ask.Evidence.Basis = adapter.BasisFenced // but fenced at another epoch
+	ask.Evidence.FencedEpoch = 3
+	if err := pub.apply(ask); err == nil {
+		t.Fatal("a fenced basis at another epoch was minted")
+	}
+	ask.Evidence.Basis, ask.Evidence.FencedEpoch = adapter.BasisHeal, 2 // r2 is not the line's primary
+	if err := pub.apply(ask); !errors.Is(err, ErrPromotionUnfenced) {
+		t.Fatalf("a heal of another replica: %v; want ErrPromotionUnfenced", err)
+	}
+	ask.Evidence.Basis, ask.Evidence.FencedEpoch = adapter.BasisPlanned, 0
 	if err := pub.apply(ask); err != nil {
 		t.Fatalf("a guarded planned move: %v", err)
 	}

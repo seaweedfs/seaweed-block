@@ -272,7 +272,7 @@ func (p *Publisher) MoveWorkspace(ctx context.Context, req WorkspaceMoveRequest,
 	if replay {
 		return r, nil
 	}
-	kind := adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion} // a clean move: the source detached at its sealed image
+	kind := adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned} // a clean move: the source detached at its sealed image
 	if req.Kind == "forced" {
 		kind = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindForced}
 	}

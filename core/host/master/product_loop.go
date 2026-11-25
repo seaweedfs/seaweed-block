@@ -273,7 +273,10 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		// ready): the decision is read from a fencing round, never from the
 		// plain answers, so no write the old primary gets acknowledged after
 		// a survivor answered can be missing from the target.
-		replacing := !currentAcceptable || (result.CurrentKnown && !result.Current.Ready)
+		// A primary in its boot grace is not replaced, so no fencing round
+		// cuts it off from its replicas while it starts.
+		replacing := (!currentAcceptable || (result.CurrentKnown && !result.Current.Ready)) &&
+			!h.primaryBootGraceHoldsNow(vol.VolumeID, vol.Authority.ReplicaID)
 		// A survivor answering above the line was fenced by a round that
 		// published nothing (e.g. before a master restart): heal.
 		if ok && !replacing && floorAboveLine(result, vol.Authority.Epoch) {
@@ -493,7 +496,7 @@ func (h *Host) healAfterFailedFence(volumeID string, current authority.Authority
 		CtrlAddr:  current.CtrlAddr,
 		Intent:    authority.IntentReassign,
 		Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN,
-			StoreID: c.StoreID, FencedEpoch: current.Epoch + 1},
+			StoreID: c.StoreID, FencedEpoch: current.Epoch + 1, Basis: adapter.BasisHeal},
 	}, true
 }
 
@@ -571,6 +574,18 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 			}
 			if h.primaryBootGraceHoldsNow(vol.VolumeID, current.ReplicaID) {
 				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, current.ReplicaID)
+				continue
+			}
+			// One decision function: the failover is read from a fencing
+			// round here too, never from the plain answers.
+			result, allowed = h.fencedDecision(vol.VolumeID, current, result, len(candidates))
+			if len(allowed) == 0 {
+				h.noteFencePending(vol.VolumeID, current.Epoch+1)
+				if heal, healed := h.healAfterFailedFence(vol.VolumeID, current); healed {
+					directAsks = append(directAsks, heal)
+				} else {
+					h.recordVolumeBlockedEvent(vol.VolumeID, ops.ReasonFenceRoundIncomplete)
+				}
 				continue
 			}
 			if target, ok := chooseAllowedPromotionTarget(vol, result, allowed); ok {
@@ -894,7 +909,11 @@ func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount in
 func promotionEvidenceFor(result PromotionProbeResult, replicaID string) adapter.PrimaryEvidence {
 	for _, c := range result.Candidates {
 		if c.ReplicaID == replicaID {
-			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN, StoreID: c.StoreID, FencedEpoch: result.FencedEpoch}
+			ev := adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN, StoreID: c.StoreID, FencedEpoch: result.FencedEpoch}
+			if result.FencedEpoch != 0 {
+				ev.Basis = adapter.BasisFenced
+			}
+			return ev
 		}
 	}
 	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}
