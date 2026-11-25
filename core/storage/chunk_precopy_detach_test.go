@@ -248,7 +248,6 @@ func TestPrecopyDetachSustainedWrapFlushAndFreshRestore(t *testing.T) {
 	next.Holder = "host-b"
 	next.FreshFromHead = true
 	next.RestoreChunkBytes = ctChunkBytes
-	next.PrepareRestore = func(h ChunkHead) error { return fresh.SeedChunkFrontier(h.RemoteLSN) }
 	// layout.Start owns the epoch transition in the B path. Publish the
 	// successor HEAD here so this engine test still checks sustained writes,
 	// detach and lazy fresh readback without calling the removed flat claim.
@@ -256,7 +255,7 @@ func TestPrecopyDetachSustainedWrapFlushAndFreshRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := next.PrepareRestore(oldHead); err != nil {
+	if err := fresh.SeedChunkFrontier(oldHead.RemoteLSN); err != nil {
 		t.Fatal(err)
 	}
 	h := copyHead(oldHead)
@@ -266,7 +265,6 @@ func TestPrecopyDetachSustainedWrapFlushAndFreshRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.Gen = gen
-	next.RestoreGuard = &ChunkHeadVersion{Gen: h.Gen, Epoch: h.Epoch}
 	mustAttach(t, fresh, f, next)
 	for lba := uint32(0); lba < ctNumBlocks; lba++ {
 		got, err := fresh.Read(lba)

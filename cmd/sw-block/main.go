@@ -2293,7 +2293,6 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops chunk cut|detach --volume <id> --status-addr <addr|url> [--min-lsn <n>] [--timeout <d>]")
 	fmt.Fprintln(w, "  sw-block ops chunk snapshot --volume <id> --status-addr <addr|url> --name <name> [--label k=v]... [--request-id <id>] [--consistency crash|app]")
 	fmt.Fprintln(w, "  sw-block ops chunk snapshots|snapshot-delete --volume <id> [--name <name>] --chunk-filer <host:port> [--chunk-path /swblock/chunks]")
-	fmt.Fprintln(w, "  sw-block ops chunk fork --chunk-filer <host:port> [--chunk-path /swblock/chunks] --source <id> --snapshot <name> --target <id> [--request-id <id>] [--label k=v]...")
 	fmt.Fprintln(w, "  sw-block ops chunk show --volume <id> --chunk-filer <host:port> [--chunk-path /swblock/chunks]")
 	fmt.Fprintln(w, "  sw-block ops chunk verify --volume <id> --chunk-filer <host:port> [--chunk-path /swblock/chunks] [--depth meta|bindings|data] [--orphans] [--timeout <d>]")
 	fmt.Fprintln(w, "      (read-only; every root HEAD names is checked; exit 0 clean, 3 findings, 1 incomplete; --depth data needs --timeout)")

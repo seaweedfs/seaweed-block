@@ -8,6 +8,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/retain"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -20,7 +21,7 @@ func TestScheduledSnapshot_SealsTheCutHeadAsScheduled(t *testing.T) {
 	calls := 0
 	take := ScheduledSnapshot(func(_ context.Context, volume, name string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
 		calls++
-		if volume != "v1" || name != "sched-20261121T030405Z" || meta.Class != chunkstore.SnapshotClassScheduled || meta.CreatedNs != at.UnixNano() || meta.Labels[chunkstore.LabelScheduleKeep] != "7" {
+		if volume != "v1" || name != "sched-20261121T030405Z" || meta.Class != layout.ClassScheduled || meta.CreatedNs != at.UnixNano() || meta.Labels[retain.LabelScheduleKeep] != "7" {
 			t.Fatalf("snapshot %s %s %+v", volume, name, meta)
 		}
 		return chunkstore.SnapshotInfo{}, nil

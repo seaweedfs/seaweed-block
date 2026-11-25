@@ -29,8 +29,6 @@ const (
 	defaultChunkMaintenanceInterval = time.Hour
 	defaultChunkCutTimeout          = 5 * time.Minute
 	defaultChunkMaintenanceTimeout  = time.Minute
-	defaultChunkGCGrace             = time.Hour
-	defaultChunkIntentTTL           = time.Hour
 )
 
 type chunkFlags struct {

@@ -120,26 +120,6 @@ func (img *Image) Shards() []uint64 {
 // AllShards selects every shard in EachRef.
 const AllShards = ^uint64(0)
 
-// HeadRoots is every root h names: its current image and each snapshot's,
-// once each.
-func HeadRoots(h Head) []RootName {
-	seen := map[RootName]bool{}
-	var out []RootName
-	add := func(rn RootName) {
-		if !seen[rn] {
-			seen[rn] = true
-			out = append(out, rn)
-		}
-	}
-	if h.Current != nil {
-		add(*h.Current)
-	}
-	for _, s := range h.Snapshots {
-		add(s.Root)
-	}
-	return out
-}
-
 // EachRef calls fn for every chunk reference root rn names in shard (or in
 // every shard, AllShards), until fn returns false. A root or segment that
 // cannot be read is an error, never a partial walk.

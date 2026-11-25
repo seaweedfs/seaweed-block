@@ -96,7 +96,7 @@ func Verify(ctx context.Context, base, vol string, fetch Fetch, opts VerifyOptio
 		return VerifyResult{}, err
 	}
 	if ok {
-		for _, rn := range headRoots(head) {
+		for _, rn := range HeadRoots(head) {
 			if err := v.root(ctx, vol, rn, true); err != nil {
 				return VerifyResult{}, err
 			}
@@ -177,8 +177,9 @@ func (v *verifier) volumeID(ctx context.Context, vol string, report bool) (Volum
 	return rec.ID, true, nil
 }
 
-// headRoots is the current root and every snapshot's root, each once.
-func headRoots(h Head) []RootName {
+// HeadRoots is every root h names: its current image and each snapshot's
+// (in snapshot name order), once each.
+func HeadRoots(h Head) []RootName {
 	seen := map[RootName]bool{}
 	var out []RootName
 	add := func(rn RootName) {
@@ -340,7 +341,7 @@ func (v *verifier) orphans(ctx context.Context, h Head) error {
 		if !live {
 			continue
 		}
-		for _, rn := range headRoots(dh) {
+		for _, rn := range HeadRoots(dh) {
 			if err := v.root(ctx, d, rn, false); err != nil {
 				return err
 			}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
 // GET /status/chunk?volume= answers the served volume's space accounting
@@ -41,7 +42,7 @@ func TestStatusServer_ChunkSnapshotCarriesClass(t *testing.T) {
 	if w := serve(t, s, http.MethodPost, "/chunk/snapshot", `{"volumeID":"v1","name":"s1","requestID":"r","class":"pinned"}`, ""); w.Code != http.StatusOK {
 		t.Fatalf("snapshot: %d %s", w.Code, w.Body)
 	}
-	if fake.lastSnap.Class != chunkstore.SnapshotClassPinned {
+	if fake.lastSnap.Class != layout.ClassPinned {
 		t.Fatalf("class not passed through: %+v", fake.lastSnap)
 	}
 }

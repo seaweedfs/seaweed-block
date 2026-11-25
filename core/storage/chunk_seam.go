@@ -295,16 +295,6 @@ type chunkLayerConfig struct {
 	// with it and FreshFromHead: a fresh marker left by an earlier start, an
 	// older binary or another opener is never trusted.
 	CreatedThisStart bool
-	// RestoreGuard binds fresh attachment to the HEAD the provider claimed
-	// and durably seeded. A changed read refuses before hooks/readiness; the
-	// next recovery must repeat claim and seed. Nil is for direct layer users.
-	RestoreGuard *chunkHeadVersion
-	// PrepareRestore runs after layout.Start validates its observed HEAD
-	// and before any ownership CAS (also for an idempotent claim). The owner
-	// durably seeds the local frontier and rebases cached ship cursors here,
-	// while its frontend is gated. An error leaves remote ownership unchanged.
-	// No store/layer/remote lock is held across the callback.
-	PrepareRestore func(head chunkHead) error
 	// RestoreChunkBytes is the local, validated geometry for upgrading a flat
 	// legacy image during an ownership claim; it is never inferred from data.
 	RestoreChunkBytes uint64
