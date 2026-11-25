@@ -1106,6 +1106,27 @@ func replicationDurationNanos(d time.Duration) uint64 {
 	return uint64(d.Nanoseconds())
 }
 
+// LocalStoreID is the id of the store this volume replicates from (zero
+// when the store carries none).
+func (v *ReplicationVolume) LocalStoreID() storage.StoreID { return storage.StoreIDOf(v.store) }
+
+// AttestedStores is the primary's attestation of its write-ACK set: each
+// Healthy peer with the store its last barrier reported (replica id ->
+// store id). A peer that is not Healthy, or has not answered a barrier
+// since it became Healthy, is absent: the master never takes it as a
+// survivor on this primary's word.
+func (v *ReplicationVolume) AttestedStores() map[string]storage.StoreID {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := map[string]storage.StoreID{}
+	for id, peer := range v.peers {
+		if sid, ok := peer.AttestedStore(); ok {
+			out[id] = sid
+		}
+	}
+	return out
+}
+
 // PeerStatuses returns a stable, sorted diagnostic snapshot of all
 // currently tracked peers. This is intentionally a status surface, not
 // a control surface: callers cannot mutate the returned peer state.

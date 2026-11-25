@@ -330,6 +330,12 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 	if err := s.host.ingestHeartbeatRecordingHealth(msg); err != nil {
 		return nil, fmt.Errorf("ingest: %w", err)
 	}
+	// A primary's attestation of its write-ACK stores. Only the holder of
+	// the volume's current line is taken; a failed write fails the report,
+	// so the primary sends it again with its next heartbeat.
+	if err := s.host.ingestStoreAttestation(r.GetServerId(), r.GetStoreAttestation()); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
 	return &control.HeartbeatAck{
 		AcceptedAt: timestamppb.Now(),
 		Sequence:   s.seq.Add(1),

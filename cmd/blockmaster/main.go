@@ -459,6 +459,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 		h.SetPromotionEvidenceProvider(master.NewWorkloadPlanPromotionEvidenceProvider(result.Plans, master.WorkloadPlanPromotionProbeConfig{
 			AckProfile:     f.launcherReplicationAck,
 			ExternalStatus: f.launcherExternalStatus,
+			Attested:       h.AttestedStore,
 		}))
 	}
 	if f.launcherManifestDir == "" && !f.launcherKubernetesApply {

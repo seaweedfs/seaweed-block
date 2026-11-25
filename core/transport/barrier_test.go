@@ -5,6 +5,7 @@ package transport
 
 import (
 	"encoding/binary"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"strings"
 	"testing"
 )
@@ -83,11 +84,30 @@ func TestBarrierResp_FullLineageEcho_RoundTrip(t *testing.T) {
 // callers could count toward durability.
 //
 // Required test per mini-plan §2 T4b-1.
+// The barrier reply carries the replica's store id; a 56-byte reply (a
+// replica from before the store id) decodes with the zero id, "unknown".
+func TestBarrierResp_StoreID(t *testing.T) {
+	lin := RecoveryLineage{SessionID: 7, Epoch: 3, EndpointVersion: 2, TargetLSN: 40}
+	id := storage.StoreID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	buf := EncodeBarrierResp(BarrierResponse{Lineage: lin, AchievedLSN: 40, LastDataEpoch: 3, LastDataFirstLSN: 9, StoreID: id})
+	if len(buf) != barrierRespSize {
+		t.Fatalf("encoded %d bytes, want %d", len(buf), barrierRespSize)
+	}
+	got, err := DecodeBarrierResp(buf)
+	if err != nil || got.StoreID != id || got.AchievedLSN != 40 || got.LastDataFirstLSN != 9 {
+		t.Fatalf("round trip: %+v %v", got, err)
+	}
+	old, err := DecodeBarrierResp(buf[:barrierRespV1Size])
+	if err != nil || !old.StoreID.IsZero() || old.LastDataEpoch != 3 {
+		t.Fatalf("56-byte reply: %+v %v; want the rows and a zero store id", old, err)
+	}
+}
+
 func TestBarrierResp_ShortPayload_Rejected(t *testing.T) {
 	// Every length below the full response except the 40-byte response of
 	// a replica from before the epoch table (TestT4b6 decodes that one).
 	for n := 0; n < barrierRespSize; n++ {
-		if n == barrierRespV0Size {
+		if n == barrierRespV0Size || n == barrierRespV1Size {
 			continue
 		}
 		t.Run("", func(t *testing.T) {
