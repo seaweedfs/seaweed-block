@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
@@ -28,6 +29,8 @@ func TestFinalLayoutStartRefusalTable(t *testing.T) {
 		{"corrupt store", layout.ErrCorrupt, true},
 		{"malformed store", layout.ErrMalformed, true},
 		{"missing VOLUME", layout.ErrMissing, true},
+		{"oversized HEAD", layout.ErrHeadTooLarge, true},
+		{"legacy store", chunkstore.ErrLegacyStore, true},
 		{"CAS precondition", layout.ErrPrecondition, false},
 		{"busy", layout.ErrBusy, false},
 		{"unanswered read", context.DeadlineExceeded, false},

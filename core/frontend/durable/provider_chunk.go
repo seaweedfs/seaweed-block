@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -141,7 +142,8 @@ func finalLayoutStartRefusal(err error) bool {
 		errors.Is(err, layout.ErrVolumeDeleting) || errors.Is(err, layout.ErrStaleEpoch) ||
 		errors.Is(err, layout.ErrNotHolder) || errors.Is(err, layout.ErrIdentity) ||
 		errors.Is(err, layout.ErrCorrupt) || errors.Is(err, layout.ErrMalformed) ||
-		errors.Is(err, layout.ErrMissing)
+		errors.Is(err, layout.ErrMissing) || errors.Is(err, layout.ErrHeadTooLarge) ||
+		errors.Is(err, chunkstore.ErrLegacyStore)
 }
 
 // startChunkAuthorityWait starts the authority wait of recovery gen,
