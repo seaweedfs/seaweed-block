@@ -64,6 +64,11 @@ func TestReplicationVolume_UpdateReplicaSet_DegradesPeerAboveLocalFrontier(t *te
 	if state != ReplicaDegraded {
 		t.Fatalf("peer state=%s want degraded for a survivor holding a divergent tail above the frontier", state)
 	}
+	// A flush must not count it either: its length covers the target, but it
+	// is not in sync.
+	if err := v.Sync(context.Background(), frontier); err == nil || !strings.Contains(err.Error(), ErrDurabilityQuorumLost.Error()) {
+		t.Fatalf("Sync err=%v, want quorum loss: a degraded divergent survivor's barrier must not count", err)
+	}
 
 	next := make([]byte, blockSize)
 	next[0], next[1] = 0x12, 0x34
