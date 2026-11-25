@@ -11,15 +11,47 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+func seededHydrationLayout(t *testing.T) *testutil.LayoutFixture {
+	t.Helper()
+	f := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkHolder: "old"}
+	f.Configure(&cfg)
+	source, err := durable.NewDurableProvider(cfg, viewAs("old", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := openRecovered(t, source)
+	writeSync(t, s, 33, 0x33)
+	writeSync(t, s, 100, 0x64)
+	if _, err := source.CaptureVolume(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func hydrationProvider(t *testing.T, f *testutil.LayoutFixture, view *stubView) *durable.DurableProvider {
+	t.Helper()
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks}
+	f.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
 
 func TestDurableHydration_ConfiguredLimitsReachStatus(t *testing.T) {
 	for _, configured := range []bool{false, true} {
 		cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks}
-		r := storage.NewMemChunkRemote()
-		cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return r, nil }
+		testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks).Configure(&cfg)
 		wantWorkers, wantDepth := 2, 64
 		if configured {
 			cfg.ChunkHydrationWorkers, cfg.ChunkHydrationQueueDepth = 3, 17
@@ -43,31 +75,31 @@ func TestDurableHydration_ConfiguredLimitsReachStatus(t *testing.T) {
 }
 
 type faultyHydrationRemote struct {
-	storage.ChunkRemote
 	fault   error
 	corrupt bool
 }
 
-func (r *faultyHydrationRemote) Get(ctx context.Context, key string) ([]byte, error) {
+func (r *faultyHydrationRemote) Get(_ context.Context, _ string, b []byte) ([]byte, error) {
 	if r.fault != nil {
 		return nil, r.fault
 	}
-	b, err := r.ChunkRemote.Get(ctx, key)
-	if err == nil && r.corrupt && len(b) > 0 {
+	if r.corrupt && len(b) > 0 {
 		b = append([]byte(nil), b...)
 		b[0] ^= 0xff
 	}
-	return b, err
+	return b, nil
 }
 
 func TestDurableHydration_NVMePreservesPhysicalAndHashErrors(t *testing.T) {
 	for _, corrupt := range []bool{false, true} {
 		t.Run(map[bool]string{false: "joined physical", true: "hash"}[corrupt], func(t *testing.T) {
-			r := &faultyHydrationRemote{ChunkRemote: seededRemote(t), corrupt: corrupt}
+			f := seededHydrationLayout(t)
+			r := &faultyHydrationRemote{corrupt: corrupt}
 			if !corrupt {
 				r.fault = errors.Join(context.DeadlineExceeded, errors.New("physical remote read failure"))
 			}
-			p := chunkProvider(t, t.TempDir(), r, v1View(), 0)
+			f.Blobs.GetHook = r.Get
+			p := hydrationProvider(t, f, v1View())
 			openRecovered(t, p)
 			b, err := p.Open(context.Background(), "v1")
 			if err != nil {
@@ -83,14 +115,13 @@ func TestDurableHydration_NVMePreservesPhysicalAndHashErrors(t *testing.T) {
 }
 
 type pacedHydrationRemote struct {
-	storage.ChunkRemote
 	gets   atomic.Int64
 	second chan struct{}
 	once   sync.Once
 }
 
 func (r *pacedHydrationRemote) release() { r.once.Do(func() { close(r.second) }) }
-func (r *pacedHydrationRemote) Get(ctx context.Context, key string) ([]byte, error) {
+func (r *pacedHydrationRemote) Get(ctx context.Context, _ string, data []byte) ([]byte, error) {
 	if r.gets.Add(1) == 1 {
 		timer := time.NewTimer(120 * time.Millisecond)
 		defer timer.Stop()
@@ -106,12 +137,14 @@ func (r *pacedHydrationRemote) Get(ctx context.Context, key string) ([]byte, err
 			return nil, ctx.Err()
 		}
 	}
-	return r.ChunkRemote.Get(ctx, key)
+	return data, nil
 }
 
 func TestDurableHydration_MultipleChunksShareOneDeadline(t *testing.T) {
-	r := &pacedHydrationRemote{ChunkRemote: seededRemote(t), second: make(chan struct{})}
-	p := chunkProvider(t, t.TempDir(), r, v1View(), 0)
+	f := seededHydrationLayout(t)
+	r := &pacedHydrationRemote{second: make(chan struct{})}
+	f.Blobs.GetHook = r.Get
+	p := hydrationProvider(t, f, v1View())
 	t.Cleanup(r.release)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
@@ -145,7 +178,6 @@ func TestDurableHydration_MultipleChunksShareOneDeadline(t *testing.T) {
 }
 
 type heldHydrationRemote struct {
-	storage.ChunkRemote
 	gate    chan struct{}
 	once    sync.Once
 	gets    atomic.Int64
@@ -153,7 +185,7 @@ type heldHydrationRemote struct {
 }
 
 func (r *heldHydrationRemote) release() { r.once.Do(func() { close(r.gate) }) }
-func (r *heldHydrationRemote) Get(ctx context.Context, key string) ([]byte, error) {
+func (r *heldHydrationRemote) Get(ctx context.Context, _ string, data []byte) ([]byte, error) {
 	r.gets.Add(1)
 	if r.entered != nil {
 		select {
@@ -163,15 +195,17 @@ func (r *heldHydrationRemote) Get(ctx context.Context, key string) ([]byte, erro
 	}
 	select {
 	case <-r.gate:
-		return r.ChunkRemote.Get(ctx, key)
+		return data, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
 func TestDurableHydration_HostRetriesJoinOwnedFetch(t *testing.T) {
-	r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
-	p := chunkProvider(t, t.TempDir(), r, v1View(), 0)
+	f := seededHydrationLayout(t)
+	r := &heldHydrationRemote{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	f.Blobs.GetHook = r.Get
+	p := hydrationProvider(t, f, v1View())
 	t.Cleanup(r.release)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
@@ -219,9 +253,11 @@ func TestDurableHydration_HostRetriesJoinOwnedFetch(t *testing.T) {
 }
 
 func TestDurableHydration_FenceWinsCallerExpiry(t *testing.T) {
-	r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	f := seededHydrationLayout(t)
+	r := &heldHydrationRemote{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	view := v1View()
-	p := chunkProvider(t, t.TempDir(), r, view, 0)
+	f.Blobs.GetHook = r.Get
+	p := hydrationProvider(t, f, view)
 	t.Cleanup(r.release)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
@@ -270,8 +306,10 @@ func TestDurableHydration_ReadAndRMWPreserveCallerBudget(t *testing.T) {
 			name = "rmw"
 		}
 		t.Run(name, func(t *testing.T) {
-			r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{})}
-			p := chunkProvider(t, t.TempDir(), r, v1View(), 0)
+			f := seededHydrationLayout(t)
+			r := &heldHydrationRemote{gate: make(chan struct{})}
+			f.Blobs.GetHook = r.Get
+			p := hydrationProvider(t, f, v1View())
 			t.Cleanup(r.release)
 			s, err := p.EnsureStorage("v1")
 			if err != nil {
@@ -316,9 +354,11 @@ func TestDurableHydration_ReadAndRMWPreserveCallerBudget(t *testing.T) {
 }
 
 func TestDurableHydration_RMWFenceWinsCallerExpiry(t *testing.T) {
-	r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	f := seededHydrationLayout(t)
+	r := &heldHydrationRemote{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	view := v1View()
-	p := chunkProvider(t, t.TempDir(), r, view, 0)
+	f.Blobs.GetHook = r.Get
+	p := hydrationProvider(t, f, view)
 	t.Cleanup(r.release)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
@@ -371,9 +411,11 @@ func TestDurableHydration_RMWFenceWinsCallerExpiry(t *testing.T) {
 }
 
 func TestDurableHydration_RMWFenceKeepsCommittedPrefix(t *testing.T) {
-	r := &heldHydrationRemote{ChunkRemote: seededRemote(t), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	f := seededHydrationLayout(t)
+	r := &heldHydrationRemote{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	view := v1View()
-	p := chunkProvider(t, t.TempDir(), r, view, 0)
+	f.Blobs.GetHook = r.Get
+	p := hydrationProvider(t, f, view)
 	t.Cleanup(r.release)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")

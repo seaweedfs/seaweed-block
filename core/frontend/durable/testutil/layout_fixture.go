@@ -20,6 +20,8 @@ type MemoryBlobs struct {
 	// PutHook can hold or refuse a payload upload in a test. Set it before
 	// starting concurrent provider work.
 	PutHook func(context.Context) error
+	// GetHook observes or changes a fetched payload; nil uses the stored bytes.
+	GetHook func(context.Context, string, []byte) ([]byte, error)
 }
 
 func (b *MemoryBlobs) Put(ctx context.Context, data []byte) (string, error) {
@@ -36,14 +38,18 @@ func (b *MemoryBlobs) Put(ctx context.Context, data []byte) (string, error) {
 	return id, nil
 }
 
-func (b *MemoryBlobs) Get(_ context.Context, id string) ([]byte, error) {
+func (b *MemoryBlobs) Get(ctx context.Context, id string) ([]byte, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	v, ok := b.data[id]
+	copyV := append([]byte(nil), v...)
+	b.mu.Unlock()
 	if !ok {
 		return nil, chunkstore.ErrBlobNotFound
 	}
-	return append([]byte(nil), v...), nil
+	if b.GetHook != nil {
+		return b.GetHook(ctx, id, copyV)
+	}
+	return copyV, nil
 }
 
 // LayoutFixture creates one B VOLUME and HEAD, retaining them across provider
