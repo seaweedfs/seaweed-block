@@ -122,17 +122,17 @@ func TestHostVolumeLockRefusesNonDirectoryLockPath(t *testing.T) {
 // A lock file this process cannot write (one another user created, as the
 // root ublk unit does) is still taken: the lock opens it read-only.
 func TestHostVolumeLockTakesReadOnlyLockFile(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	lockDir := t.TempDir()
 	path := filepath.Join(lockDir, "v1.lock")
 	if err := os.WriteFile(path, nil, 0o444); err != nil {
 		t.Fatal(err)
 	}
-	a := lockedProvider(t, t.TempDir(), lockDir, remote)
+	a := lockedProvider(t, t.TempDir(), lockDir, fixture)
 	if _, err := a.EnsureStorage("v1"); err != nil {
 		t.Fatalf("a read-only lock file refused the volume: %v", err)
 	}
-	b := lockedProvider(t, t.TempDir(), lockDir, remote)
+	b := lockedProvider(t, t.TempDir(), lockDir, fixture)
 	if _, err := b.EnsureStorage("v1"); !errors.Is(err, storage.ErrWALStoreLocked) {
 		t.Fatalf("a second provider on a read-only lock file: %v; want %v", err, storage.ErrWALStoreLocked)
 	}

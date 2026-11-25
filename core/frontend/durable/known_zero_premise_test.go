@@ -66,8 +66,12 @@ func newKZLayout(t *testing.T) *kzLayout {
 
 // kzProvider is a B-layout chunk provider for v1 (16 chunks).
 func kzProvider(t *testing.T, root string, remote *kzLayout) *DurableProvider {
+	return kzProviderAt(t, root, remote, "r1", 3)
+}
+
+func kzProviderAt(t *testing.T, root string, remote *kzLayout, replica string, epoch uint64) *DurableProvider {
 	t.Helper()
-	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: replica, Epoch: epoch, EndpointVersion: 1}
 	p, err := NewDurableProvider(ProviderConfig{
 		Impl: ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: 256, ChunkBlocks: 16,
 		ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return remote.cat.Store(remote.ref) },
@@ -321,7 +325,7 @@ func TestNoFetchOrFillReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := kzProvider(t, t.TempDir(), remote)
+	p := kzProviderAt(t, t.TempDir(), remote, "r2", 4)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
