@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -342,6 +343,9 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 	// The owner commit is serialized with a later BASE begin. The callback
 	// does marker I/O only: no store/layer reentry while installMu is held.
 	commit := func() error {
+		if p.cfg.ChunkLayoutHeadFor != nil {
+			return nil
+		}
 		if h.fresh {
 			return removeChunkFreshMarker(h.path)
 		}
@@ -360,6 +364,13 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 		}
 	} else if err := commit(); err != nil {
 		return err
+	}
+	if p.cfg.ChunkLayoutHeadFor != nil {
+		ws := h.storage.(*storage.WALStore)
+		id, _, _ := ws.LayoutIdentity()
+		if err := ws.SetLayoutIdentity(id, false); err != nil {
+			return err
+		}
 	}
 	// RULE-FRESH-KNOWN-ZERO order: the marker is retired (above), THEN the
 	// marking is made durable, THEN the volume serves (after this attach).
@@ -444,12 +455,40 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return nil, fmt.Errorf("durable: chunk attach check for %s: %w", volumeID, err)
 		}
 	}
-	inner, err := p.cfg.ChunkRemoteFor(volumeID)
+	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
+	holder := p.chunkHolder(proj)
+	var inner storage.ChunkRemote
+	var layoutHead layout.Head
+	var err error
+	if p.cfg.ChunkLayoutHeadFor != nil {
+		st, e := p.cfg.ChunkLayoutHeadFor(volumeID)
+		if e != nil {
+			return nil, e
+		}
+		layoutHead, err = startLayoutRoot(ctx, ws, st, layout.HolderID{Epoch: proj.Epoch, Holder: holder})
+		if err != nil {
+			return nil, err
+		}
+		me := layout.HolderID{Epoch: layoutHead.Epoch, Holder: layoutHead.Holder, ClaimID: layoutHead.ClaimID}
+		p.mu.Lock()
+		if h.layoutHolder == me {
+			inner = h.layoutRemote
+		}
+		p.mu.Unlock()
+		if inner == nil {
+			inner, err = p.cfg.ChunkLayoutRemoteFor(volumeID, me)
+		}
+		if err == nil {
+			p.mu.Lock()
+			h.layoutHolder, h.layoutHead, h.layoutRemote = me, st, inner
+			p.mu.Unlock()
+		}
+	} else {
+		inner, err = p.cfg.ChunkRemoteFor(volumeID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("durable: chunk remote for %s: %w", volumeID, err)
 	}
-	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
-	holder := p.chunkHolder(proj)
 	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
 	if pace, ok := p.cfg.ChunkBudget.(interface {
 		WaitUpload(context.Context, int) error
@@ -461,6 +500,13 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	var remote storage.ChunkRemote = bound
 	if builder, ok := inner.(storage.ChunkManifestBuilder); ok {
 		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
+	}
+	if p.cfg.ChunkLayoutHeadFor != nil {
+		keyer, ok := inner.(storage.ChunkKeyer)
+		if !ok {
+			return nil, errors.New("durable: layout remote lacks content keys")
+		}
+		remote = &layoutBoundRemote{closeBoundRemote: bound, keyer: keyer}
 	}
 	cfg := storage.ChunkLayerConfig{
 		OnPublishSettled:    p.publishSettledHook(volumeID),
@@ -490,6 +536,25 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			}
 			return nil
 		},
+	}
+	if p.cfg.ChunkLayoutHeadFor != nil {
+		// The kernel already claimed and validated this root. Seed only a fresh
+		// root; an existing root keeps its acknowledged WAL and synced position.
+		if h.fresh {
+			if base, complete := ws.InstalledBaseLSN(); complete {
+				if layoutHead.Position > base {
+					return nil, errors.New("durable: completed BASE behind layout HEAD")
+				}
+				cfg.FreshFromHead = false
+			} else if err := h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(layoutHead.Position) }); err != nil {
+				return nil, err
+			}
+		}
+		layer, err := storage.AttachChunkLayer(ws, remote, cfg)
+		if err == nil {
+			h.chunkLineage = lin
+		}
+		return layer, err
 	}
 	if !h.fresh {
 		// An existing local volume is this holder's image only while HEAD is
@@ -1455,7 +1520,15 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		dl, _ := sctx.Deadline()
 		trace("settle", dl)
 	}
-	how, dr, serr := layer.SettleDetach(sctx)
+	var how storage.DetachSettlement
+	var dr storage.ChunkCutResult
+	var serr error
+	if h.layoutHead != nil {
+		how, dr, serr = settleLayoutStop(sctx, h.layoutHead, h.layoutHolder)
+	} else {
+		how, dr, serr = layer.SettleDetach(sctx)
+	}
+
 	if precopy {
 		attempts := countCAS() - casAtFreeze
 		extra := uint64(0)

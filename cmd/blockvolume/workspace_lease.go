@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -65,4 +66,23 @@ func workspaceDetachedGeneration(ctx context.Context, remoteFor func(string) (st
 		return 0, err
 	}
 	return head.Gen, nil
+}
+
+// workspaceLayoutDetachedGeneration accepts only the attached Start identity's
+// exact detached HEAD. Missing, foreign or unknown evidence never yields ACK.
+func workspaceLayoutDetachedGeneration(ctx context.Context, st layout.HeadStore, id *control.WorkspaceIdentity, me layout.HolderID) (uint64, error) {
+	if id == nil || id.Epoch != me.Epoch || id.ServerId+"/"+id.ReplicaId != me.Holder || me.ClaimID == "" {
+		return 0, layout.ErrNotHolder
+	}
+	h, found, err := st.ReadHead(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, layout.ErrHeadAbsent
+	}
+	if h.State != layout.StateDetached || h.Epoch != me.Epoch || h.Holder != me.Holder || h.ClaimID != me.ClaimID {
+		return 0, fmt.Errorf("workspace: no detached proof for the attached claim")
+	}
+	return h.Gen, nil
 }
