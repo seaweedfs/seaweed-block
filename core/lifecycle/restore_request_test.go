@@ -9,7 +9,8 @@ import (
 // A restore retry keeps the original source, snapshot and request identity.
 // A target name cannot be rebound to a different image after an uncertain RPC.
 func TestRestoreRequestBindsTargetName(t *testing.T) {
-	s, err := OpenFileStore(t.TempDir())
+	dir := t.TempDir()
+	s, err := OpenFileStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,6 +19,13 @@ func TestRestoreRequestBindsTargetName(t *testing.T) {
 	first, err := s.CreateVolume(spec)
 	if err != nil {
 		t.Fatal(err)
+	}
+	s, err = OpenFileStore(dir) // restart between the record and filer writes
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record, ok := s.GetVolume(spec.VolumeID); !ok || record.StoreReady || record.Spec.SourceVolume != spec.SourceVolume || record.Spec.SourceSnapshot != spec.SourceSnapshot || record.Spec.CreateRequestID != spec.CreateRequestID {
+		t.Fatalf("restart lost the pending restore request: %+v found=%t", record, ok)
 	}
 	again, err := s.CreateVolume(spec)
 	if err != nil || again.Spec.LayoutID != first.Spec.LayoutID {
