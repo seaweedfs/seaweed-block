@@ -42,7 +42,6 @@ func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
 	// 4. blockvolume adopts the volume.
 	vol1 := h.start(t, "blockvolume-1", h.volume, volArgs...)
 	e := mustU(adoptedEpoch(vol1.waitLog(t, 60*time.Second, "blockvolume: volume v1 adopted as PRIMARY at r1@")))
-	vol1.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in")
 	h.waitPrimary(t, e)
 
 	// 5. The lease.
@@ -62,9 +61,9 @@ func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
 	g := mustU(sealedGen(out, errOut, e))
 
 	// 9. The seal is in the object store.
-	chunkShow := []string{"ops", "chunk", "show", "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath}
+	chunkShow := []string{"ops", "chunk", "show", "--master", h.masterAddr, "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath}
 	out, _ = h.command(t, chunkShow...)
-	l := mustU(sealedHeadLSN(out, e, g))
+	l := mustU(sealedLayoutHeadPosition(out, e, g))
 
 	// 10. Revoke with the sealed generation.
 	out, _ = h.command(t, "ops", "workspace", "revoke", "--master", h.masterAddr, "--volume", "v1", "--replica", "r1",
@@ -102,8 +101,6 @@ func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
 
 	// 14. Start again with the same root, within the new lease (30 s).
 	vol2 := h.start(t, "blockvolume-2", h.volume, volArgs...)
-	vol2.waitLog(t, 60*time.Second, fmt.Sprintf(`durable: HEAD claim for volume=v1 starting: target epoch=%d holder="s1/r1"`, e2))
-	must(checkClaimDone(vol2.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in"), e2))
 	vol2.waitLog(t, 60*time.Second, fmt.Sprintf("blockvolume: volume v1 adopted as PRIMARY at r1@%d", e2))
 	for _, bad := range []string{"refusing to attach volume=v1", "assignment unavailable, not serving"} {
 		if vol2.has(bad) {
@@ -118,7 +115,7 @@ func TestStandalonePlannedHandoffToTheSameHost(t *testing.T) {
 
 	// 16. The new epoch claimed HEAD.
 	out, _ = h.command(t, chunkShow...)
-	must(checkHeadReopened(out, e2, g, l))
+	must(checkLayoutHeadReopened(out, e2, g, l))
 
 	// 17. The block written before the hand-over reads back unchanged.
 	c = dialNVMe(t, h.nvmeAddr, nqn)
@@ -146,8 +143,8 @@ func TestStandaloneCleanMoveWithoutTheACKIsRefused(t *testing.T) {
 	c.close()
 	out, errOut := h.command(t, "ops", "chunk", "detach", "--plain", "--volume", "v1", "--status-addr", h.statusAddr, "--timeout", "120s")
 	g := mustU(sealedGen(out, errOut, e))
-	out, _ = h.command(t, "ops", "chunk", "show", "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
-	mustU(sealedHeadLSN(out, e, g)) // HEAD is sealed: only the ACK is missing
+	out, _ = h.command(t, "ops", "chunk", "show", "--master", h.masterAddr, "--volume", "v1", "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
+	mustU(sealedLayoutHeadPosition(out, e, g)) // HEAD is sealed: only the ACK is missing
 	vol.kill(t)
 
 	out, _ = h.command(t, "ops", "workspace", "revoke", "--master", h.masterAddr, "--volume", "v1", "--replica", "r1",
