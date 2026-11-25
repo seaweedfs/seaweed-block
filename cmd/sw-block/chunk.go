@@ -73,11 +73,9 @@ func refuseUnlessSingleFiler(name string, f chunkstore.Filer, timeout time.Durat
 
 func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|detach|show|gc|usage|verify|volume-delete|restore|release|retain", false)
+		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|detach|show|usage|verify|volume-delete|restore|release|retain", false)
 	}
 	switch args[0] {
-	case "gc":
-		return chunkGC(args[1:], stdout, stderr)
 	case "cut":
 		return chunkCut(args[1:], stdout, stderr)
 	case "snapshot":
