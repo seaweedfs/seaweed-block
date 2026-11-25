@@ -34,6 +34,29 @@ type AssignmentInfo struct {
 	DataAddr        string
 	CtrlAddr        string
 	PrimaryStartLSN uint64 // see engine.AssignmentObserved.PrimaryStartLSN; 0 = not known
+	// Primary is how this line made its primary the primary, with the
+	// evidence the master probed on the target; the target checks it before
+	// adopting the role. The zero value is a line without a kind.
+	Primary PrimaryEvidence
+}
+
+// PrimaryKind is how a line made its primary the primary.
+type PrimaryKind uint8
+
+const (
+	PrimaryKindUnspecified PrimaryKind = iota // a line without a kind (a pre-release master)
+	PrimaryKindBootstrap                      // the volume's first primary: the target holds no data
+	PrimaryKindPromotion                      // promoted on the master's probed evidence
+	PrimaryKindForced                         // the operator's forced promotion: no evidence
+)
+
+// PrimaryEvidence is a line's kind and, for a promotion, what the master
+// probed on the target: its durable LSN and its epoch-table row at that LSN.
+type PrimaryEvidence struct {
+	Kind       PrimaryKind
+	DurableLSN uint64
+	Epoch      uint64
+	FirstLSN   uint64
 }
 
 // ProbeResult is the outcome of a transport probe.

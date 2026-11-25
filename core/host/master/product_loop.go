@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/ops"
@@ -274,6 +275,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 					DataAddr:  target.DataAddr,
 					CtrlAddr:  target.CtrlAddr,
 					Intent:    authority.IntentReassign,
+					Primary:   promotionEvidenceFor(result, target.ReplicaID),
 				})
 			}
 		}
@@ -369,6 +371,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 					DataAddr:  target.DataAddr,
 					CtrlAddr:  target.CtrlAddr,
 					Intent:    authority.IntentReassign,
+					Primary:   promotionEvidenceFor(result, target.ReplicaID),
 				})
 			}
 			continue
@@ -674,6 +677,17 @@ func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount in
 		}
 	}
 	return allowed
+}
+
+// promotionEvidenceFor is the line's evidence for promoting replicaID: what
+// this tick's probe saw on it (its durable LSN and its epoch-table row there).
+func promotionEvidenceFor(result PromotionProbeResult, replicaID string) adapter.PrimaryEvidence {
+	for _, c := range result.Candidates {
+		if c.ReplicaID == replicaID {
+			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, Epoch: c.LastDataEpoch, FirstLSN: c.LastDataFirstLSN}
+		}
+	}
+	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}
 }
 
 func chooseAllowedPromotionTarget(vol authority.VolumeTopologySnapshot, result PromotionProbeResult, allowed map[string]bool) (authority.ReplicaCandidate, bool) {

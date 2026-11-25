@@ -286,6 +286,9 @@ func (p *Publisher) reloadFromStore() {
 			},
 			present: true,
 		}
+		if rec.Primary != nil {
+			loaded.info.Primary = *rec.Primary
+		}
 		p.captureAssignmentOwner(&loaded.info, rec.Workspace)
 		p.state[key] = loaded
 		if rec.WriteSeq > p.writeSeqByVolume[rec.VolumeID] {
@@ -526,6 +529,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			EndpointVersion: 1,
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
+			Primary:         adapter.PrimaryEvidence{Kind: adapter.PrimaryKindBootstrap},
 		}
 
 	case IntentRefreshEndpoint:
@@ -572,6 +576,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			EndpointVersion: 1,
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
+			Primary:         ask.Primary,
 		}
 		if reservedEpoch != 0 {
 			next.Epoch = reservedEpoch
@@ -604,6 +609,10 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			CtrlAddr:        next.CtrlAddr,
 			WriteSeq:        nextSeq,
 			Workspace:       cloneWorkspace(p.workspace[ask.VolumeID]),
+		}
+		if next.Primary != (adapter.PrimaryEvidence{}) {
+			pe := next.Primary
+			record.Primary = &pe
 		}
 		if issuedWorkspace != nil {
 			record.Workspace = cloneWorkspace(issuedWorkspace)
