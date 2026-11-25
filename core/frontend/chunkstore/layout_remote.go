@@ -102,6 +102,16 @@ func (l *LayoutRemote) SetSnapshot(name string, meta layout.SnapshotMeta) {
 	l.pending = &pendingSnapshot{name: name, meta: meta}
 }
 
+// DropSnapshot withdraws a pending snapshot name whose request gave up (its
+// cut failed): the name never rides onto a later cut, which would name an
+// image the requester was told was not taken. A cut that keeps its session
+// for a retry does not drop it by itself.
+func (l *LayoutRemote) DropSnapshot() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pending = nil
+}
+
 // layoutKeyPrefix marks a key that is a layout reference.
 const layoutKeyPrefix = "layout:"
 

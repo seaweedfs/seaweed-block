@@ -20,6 +20,7 @@ import (
 //	abandoned session s held, the engine's AbortCut notice taken; HEAD snap(s)
 //	pending   no session, a snapshot name set; HEAD idle
 //	dead      no session, nothing read yet; HEAD snap(d) of this holder (a dead process's)
+//	cleaning  this remote's cleaning tick running; HEAD clean(c)
 //
 // The other in-memory pieces (visible/ownGen/seen/forceView, cleaning,
 // snapErr, lastCommit) are covered by their own tests; when the intent
@@ -55,6 +56,13 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 			"CASHead": {act: layout.ActIdle, named: true}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
 			"CommitPendingSnapshot": {act: layout.ActIdle, named: true},
 		},
+		"cleaning": {
+			"Clean":   {err: "busy", act: layout.ActClean},
+			"Abort":   {act: layout.ActClean},
+			"GetHead": {act: layout.ActClean}, "Begin": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
+			"CASHead": {act: layout.ActIdle}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionIdle},
+			"CommitPendingSnapshot": {act: layout.ActClean},
+		},
 		"dead": {
 			"GetHead": {act: layout.ActIdle}, "PutIntent": {act: layout.ActSnap}, "Put": {act: layout.ActSnap},
 			"CASHead": {err: "precondition", act: layout.ActSnap}, "AbortOpenSession": {act: layout.ActIdle, settled: SessionAborted},
@@ -84,6 +92,23 @@ func TestLayoutRemote_StateByCallTable(t *testing.T) {
 			r.AbortCut()
 		case "pending":
 			r.SetSnapshot("p", layout.SnapshotMeta{CreatedNs: 1})
+		case "cleaning":
+			// a cleaning tick that runs until a session's call stops it
+			// (or the test ends)
+			release, started, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = r.Clean(ctx, func(cctx context.Context, _ layout.HolderID, _ string) error {
+					close(started)
+					select {
+					case <-cctx.Done():
+					case <-release:
+					}
+					return nil
+				})
+			}()
+			<-started
+			t.Cleanup(func() { close(release); <-done })
 		case "dead":
 			st, _ := lh.cat.Store(lh.v)
 			if _, err := layout.RunBegin(ctx, st, lh.me, "s-dead"); err != nil {

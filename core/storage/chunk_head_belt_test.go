@@ -63,8 +63,9 @@ func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
 	if layer.RemoteLSN() != frontier {
 		t.Fatal("refused cut advanced remote frontier")
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("fenced cut removed its intent")
+	// fenced: what it staged is dropped, and with it its own session
+	if f.openSession() != "" {
+		t.Fatal("fenced cut kept its session")
 	}
 	calls := f.stats().cas
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || f.stats().cas != calls {
@@ -73,8 +74,8 @@ func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("Close removed fenced publication roots")
+	if f.openSession() != "" {
+		t.Fatal("a session is open after the fenced layer closed")
 	}
 }
 
@@ -91,8 +92,8 @@ func TestHeadBeltEmptyBaseForeignPublicationFences(t *testing.T) {
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || !layer.Fenced() {
 		t.Fatalf("empty-base foreign publication not fenced: %v", err)
 	}
-	if layer.RemoteLSN() != 0 || len(liveIntents(t, f)) == 0 {
-		t.Fatal("fenced first cut settled or deleted intents")
+	if layer.RemoteLSN() != 0 || f.openSession() != "" {
+		t.Fatal("fenced first cut settled, or kept its session")
 	}
 	calls := f.stats().cas
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || f.stats().cas != calls {
@@ -101,7 +102,7 @@ func TestHeadBeltEmptyBaseForeignPublicationFences(t *testing.T) {
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("Close removed first-cut intents")
+	if f.openSession() != "" {
+		t.Fatal("a session is open after the fenced layer closed")
 	}
 }

@@ -717,16 +717,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			res.CandidateTail = l.estimateCandidateTail(tailBytes)
 		}
 		if errors.Is(err, errChunkLayerFenced) {
-			l.stMu.Lock()
-			var ids []string
-			for _, sc := range l.reusable {
-				if sc.intent != "" {
-					ids = append(ids, sc.intent)
-				}
-			}
-			l.reusable = nil
-			l.stMu.Unlock()
-			dropCapturedIntents(ctx, ids)
+			l.discardStaged()
 		}
 		if observe := l.precopyPause; observe != nil {
 			observe(time.Duration(st.BarrierPauseNs))
@@ -903,8 +894,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	if guestFrozen && !detach {
 		unlockCapture()
 		st.BarrierPauseNs = time.Since(pauseStart).Nanoseconds()
-		l.abortCut(all)
-		dropCapturedIntents(ctx, intents)
+		l.requeueCut(all)
 		return chunkCutResult{}, errors.Join(ErrFrozenTailTooLarge, context.Cause(ctx), l.admit())
 	}
 
@@ -914,8 +904,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		// HEAD holds the image of a later LSN than this host's log has
 		// reached: publishing would move remote_lsn backwards. Refused
 		// before any upload. (A HEAD of a newer holder fences below.)
-		l.abortCut(all)
-		dropCapturedIntents(ctx, intents)
+		l.requeueCut(all)
 		return chunkCutResult{}, fmt.Errorf("%w: %w: cut LSN %d, HEAD remote_lsn %d", errChunkCaptureRefused, errChunkLSNBehind, h, baseHead.RemoteLSN)
 	}
 
@@ -960,8 +949,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	st.UploadNs = st.CopyNs
 	if copyErr != nil {
-		l.abortCut(all)
-		dropCapturedIntents(ctx, intents)
+		l.requeueCut(all)
 		return chunkCutResult{}, fmt.Errorf("storage: capture copy: %w", copyErr)
 	}
 	if b := l.cfg.BarrierBound; b > 0 && st.BarrierCopyChunks > b {
@@ -1012,9 +1000,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	// the first upload: GC treats it as a root until the cut is settled.
 	uploadStart := time.Now()
 	if len(uploads) > 0 {
-		keys := make([]string, len(uploads))
-		for i, u := range uploads {
-			keys[i] = u.key
+		if _, err := l.remote.Begin(ctx); err != nil {
+			l.requeueCut(all)
+			return chunkCutResult{}, fmt.Errorf("storage: capture session: %w: %w", errChunkRemoteUnavailable, err)
 		}
 		id, err := l.remote.PutIntent(ctx, chunkIntent{Gen: baseHead.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
 		if err != nil {
@@ -1031,8 +1019,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		u := uploads[i]
 		return l.putCapturedWith(ctx, u.key, u.c.data, func(ctx context.Context) error { return put(ctx, i, u.key, u.c.data) })
 	}); err != nil {
-		l.abortCut(all)
-		dropCapturedIntents(ctx, intents)
+		l.requeueCut(all)
 		return chunkCutResult{}, fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 	}
 	if len(uploads) > 0 {
@@ -1057,8 +1044,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.ManifestNs += time.Since(manifestStart).Nanoseconds()
 		intents = append(intents, ids...)
 		if err != nil {
-			l.abortCut(all)
-			dropCapturedIntents(ctx, intents)
+			l.requeueCut(all)
 			return chunkCutResult{}, err
 		}
 	}
@@ -1068,15 +1054,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		// claimed HEAD without uploading a single chunk since our last cut.
 		cur, err := readCapturedHead()
 		if err != nil {
-			l.abortCut(all)
-			dropCapturedIntents(ctx, intents)
+			l.requeueCut(all)
 			return chunkCutResult{}, fmt.Errorf("storage: no-op cut authority read: %w: %w", errChunkRemoteUnavailable, err)
 		}
 		if cur.Gen != baseHead.Gen || !sameProposal(cur, baseHead) {
-			l.abortCut(all)
-			l.stMu.Lock()
-			l.pendingIntents = append(l.pendingIntents, intents...)
-			l.stMu.Unlock()
+			l.requeueCut(all)
 			l.fencePublication(cur)
 			return chunkCutResult{}, errChunkLayerFenced
 		}
@@ -1086,13 +1068,11 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
 	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
-		l.abortCut(all)
-		dropCapturedIntents(ctx, intents)
+		l.requeueCut(all)
 		return chunkCutResult{}, err
 	}
 	if l.supersededBy(baseHead) {
-		l.abortCut(all)
-		dropCapturedIntents(ctx, intents)
+		l.requeueCut(all)
 		l.stMu.Lock()
 		l.fenced = true
 		l.stMu.Unlock()
@@ -1156,9 +1136,10 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		dropCapturedIntents(ctx, intents)
 		return l.cutDone(chunkCutResult{H: h, Head: copyHead(cur), FullHash: all}, detach), nil
 	}
-	// HEAD moved past the CAS's base without it: it can never land.
-	l.abortCut(all)
-	dropCapturedIntents(ctx, intents)
+	// HEAD moved past the CAS's base without it: it can never land, and
+	// what it staged was compared against a HEAD that is gone.
+	l.requeueCut(all)
+	l.discardStaged()
 	if l.supersededBy(cur) {
 		l.stMu.Lock()
 		l.fenced = true
@@ -1246,11 +1227,7 @@ func (l *chunkLayerImpl) SettleDetach(ctx context.Context) (detachSettlement, ch
 		return detachFenced, chunkCutResult{}, nil
 	}
 	// Settled: the detach landed, or it can never land.
-	l.stMu.Lock()
-	l.reusable = nil
-	l.pendingIntents = nil // settled here; allow deletion of these roots below.
-	l.stMu.Unlock()
-	l.dropIntents(ctx, intents)
+	l.discardStaged() // a landed proposal's commit already ended its session
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
 	cut := l.pendingCut
@@ -1375,14 +1352,10 @@ func (l *chunkLayerImpl) resolvePending(ctx context.Context) (err error) {
 		return errChunkLayerFenced
 	}
 	// Settled: the proposal landed or can never land.
-	l.stMu.Lock()
-	l.reusable = nil
-	l.pendingIntents = nil // settled here; allow deletion of these roots below.
-	l.stMu.Unlock()
-	l.dropIntents(ctx, intents)
+	l.discardStaged() // a landed proposal's commit already ended its session
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
-	l.pending, l.pendingIntents = nil, nil
+	l.pending = nil
 	wasDetach, cut := l.pendingDetach, l.pendingCut
 	l.pendingDetach, l.pendingCut, l.pendingBase = false, chunkCutResult{}, chunkHeadVersion{}
 	switch {
@@ -1661,10 +1634,22 @@ type CutAborter interface {
 	AbortCut()
 }
 
-func (l *chunkLayerImpl) abortCut(all bool) {
-	if a, ok := l.remote.(CutAborter); ok {
-		a.AbortCut()
-	}
+// discardStaged drops the reusable staged uploads and, with them, their
+// session (Abort: non-blocking; the remote rolls it back at its next HEAD
+// read). The session lives exactly as long as the staged set: a cut that
+// is refused but keeps its uploads (admission, frozen tail, an upload or
+// copy error) keeps the session, so its retry commits them without
+// staging again. Caller does not hold stMu.
+func (l *chunkLayerImpl) discardStaged() {
+	l.stMu.Lock()
+	l.reusable = nil
+	l.stMu.Unlock()
+	l.remote.Abort()
+}
+
+// requeueCut returns a cut that ended without a commit to the dirty set.
+// Its staged uploads stay reusable and its session stays open.
+func (l *chunkLayerImpl) requeueCut(all bool) {
 	l.stMu.Lock()
 	defer l.stMu.Unlock()
 	for idx := range l.inflight {

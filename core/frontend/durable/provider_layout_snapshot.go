@@ -12,6 +12,7 @@ import (
 // remote (chunkstore.LayoutRemote).
 type layoutSnapshotter interface {
 	SetSnapshot(name string, meta layout.SnapshotMeta)
+	DropSnapshot()
 	TakeSnapshotErr() error
 	CommitPendingSnapshot(ctx context.Context) error
 	ReadHead(ctx context.Context) (layout.Head, error)
@@ -53,13 +54,18 @@ func (p *DurableProvider) SnapshotVolume(ctx context.Context, volumeID, name str
 		return h, nil
 	}
 	sr.SetSnapshot(name, meta)
+	// A request that fails withdraws its name: the cut may keep its session
+	// for a retry, and the name must not ride onto that later image.
 	if _, err := p.CutVolume(ctx, volumeID, 0); err != nil {
+		sr.DropSnapshot()
 		return layout.Head{}, err
 	}
 	if err := sr.TakeSnapshotErr(); err != nil {
+		sr.DropSnapshot()
 		return layout.Head{}, err
 	}
 	if err := sr.CommitPendingSnapshot(ctx); err != nil {
+		sr.DropSnapshot()
 		return layout.Head{}, err
 	}
 	if h, err = sr.ReadHead(ctx); err != nil {
