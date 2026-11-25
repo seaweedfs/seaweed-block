@@ -93,8 +93,8 @@ type ReplicationVolume struct {
 	updateMu              sync.Mutex // serializes membership replacement with Close
 	mu                    sync.Mutex // protects membership, lineage, and lifecycle snapshots
 	peers                 map[string]*ReplicaPeer
-	// requireAttest: peers count toward write ACKs only with a master-acked
-	// attested store (RequireAttestedStores).
+	// requireAttest: peers count toward write ACKs only while their barrier
+	// store is the one the master recorded (RequireAttestedStores).
 	requireAttest bool
 	executors             map[string]*transport.BlockExecutor
 	peerQueues            map[string]*peerWorkQueue
@@ -410,6 +410,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		// peer ID set; `got` is the incoming set. Equal sets are the
 		// normal replay case; unequal sets indicate a master-side
 		// oddity worth a grep.
+		// The master's store record for a peer may change without a new
+		// generation (it records a rebuilt replica's store): apply it.
+		v.applyExpectedStoresLocked(targets)
 		had := peerIDSet(v.peers)
 		got := targetIDSet(targets)
 		if !stringSetEqual(had, got) {
@@ -529,6 +532,7 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 	}
 
 	v.seedNewPeerLiveCursorsLocked(addedPeers)
+	v.applyExpectedStoresLocked(targets)
 
 	// Advance the monotonic guard only for real (non-zero) generations.
 	if generation > 0 {
@@ -537,6 +541,22 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 	v.membershipUpdating = false
 	v.mu.Unlock()
 	return nil
+}
+
+// learnPeerStoresLocked runs a barrier at LSN 0 to each peer: the answer
+// carries the peer's store. A peer that does not answer stays as it is (its
+// store is learned at its next barrier).
+func (v *ReplicationVolume) learnPeerStoresLocked(peers []*ReplicaPeer) {
+	for _, peer := range peers {
+		if peer == nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), promotionSeedBarrierTimeout)
+		if _, err := peer.Barrier(ctx, 0); err != nil {
+			log.Printf("replication: volume %s store barrier peer=%s: %v", v.volumeID, peer.Target().ReplicaID, err)
+		}
+		cancel()
+	}
 }
 
 func (v *ReplicationVolume) closePeerQueueLocked(replicaID string) {
@@ -602,6 +622,12 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 		return
 	}
 	if frontier == 0 {
+		// Nothing to seed. Where stores are required, a barrier at 0 still
+		// teaches the primary each new peer's store, so it can attest it
+		// before any write (a new volume serves nothing until then).
+		if v.requireAttest {
+			v.learnPeerStoresLocked(peers)
+		}
 		return
 	}
 	for _, peer := range peers {
@@ -1119,27 +1145,30 @@ func replicationDurationNanos(d time.Duration) uint64 {
 // when the store carries none).
 func (v *ReplicationVolume) LocalStoreID() storage.StoreID { return storage.StoreIDOf(v.store) }
 
-// RequireAttestedStores makes every peer count toward write ACKs only once
-// the master has acknowledged the heartbeat attesting its current store
-// (ConfirmAttested). A host that attests its stores to a master sets it.
+// applyExpectedStoresLocked sets each kept peer's expected store from its
+// target, when the target names the peer's current lineage.
+func (v *ReplicationVolume) applyExpectedStoresLocked(targets []ReplicaTarget) {
+	for _, t := range targets {
+		p, ok := v.peers[t.ReplicaID]
+		if !ok {
+			continue
+		}
+		cur := p.Target()
+		if cur.Epoch == t.Epoch && cur.EndpointVersion == t.EndpointVersion && cur.DataAddr == t.DataAddr {
+			p.setExpectedStore(t.StoreID)
+		}
+	}
+}
+
+// RequireAttestedStores makes every peer count toward write ACKs only while
+// its barrier reports the store the master recorded for it (the target's
+// StoreID). A host that attests its stores to a master sets it.
 func (v *ReplicationVolume) RequireAttestedStores() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.requireAttest = true
 	for _, p := range v.peers {
 		p.setRequireAttest()
-	}
-}
-
-// ConfirmAttested records the stores of an attestation the master
-// acknowledged (replica id -> store id).
-func (v *ReplicationVolume) ConfirmAttested(stores map[string]storage.StoreID) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for id, sid := range stores {
-		if p, ok := v.peers[id]; ok {
-			p.confirmStore(sid)
-		}
 	}
 }
 

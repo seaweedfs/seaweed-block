@@ -27,21 +27,24 @@ const (
 	// The highest end of a fencing round is held only by a replica that is
 	// not ready for primary: the volume waits for it (or for a ready one to
 	// catch up from it).
-	ReasonHighestEndNotReady            = "highest_end_not_ready"
-	ReasonDurableFrontierMissing        = "durable_frontier_missing"
-	ReasonCandidateFrontierBehind       = "candidate_frontier_behind"
-	ReasonStatusEndpointUnreachable     = "status_endpoint_unreachable"
-	ReasonCSINodeImagePullFailed        = "csi_node_image_pull_failed"
-	ReasonCSIDriverNotRegistered        = "csi_driver_not_registered"
-	ReasonCSINodePodNotReady            = "csi_node_pod_not_ready"
-	ReasonImageMissingOnNode            = "image_missing_on_node"
-	ReasonISCSIPrereqMissing            = "iscsi_prereq_missing"
-	ReasonMultipathPrereqMissing        = "multipath_prereq_missing"
-	ReasonNodeReady                     = "node_ready"
-	ReasonNodeNotReady                  = "node_not_ready"
-	ReasonNodeSchedulingDisabled        = "node_scheduling_disabled"
-	ReasonGeneratedDeploymentMissing    = "generated_deployment_missing"
-	ReasonObservedReplicasBelowDesired  = "observed_replicas_below_desired"
+	ReasonHighestEndNotReady           = "highest_end_not_ready"
+	ReasonDurableFrontierMissing       = "durable_frontier_missing"
+	ReasonCandidateFrontierBehind      = "candidate_frontier_behind"
+	ReasonStatusEndpointUnreachable    = "status_endpoint_unreachable"
+	ReasonCSINodeImagePullFailed       = "csi_node_image_pull_failed"
+	ReasonCSIDriverNotRegistered       = "csi_driver_not_registered"
+	ReasonCSINodePodNotReady           = "csi_node_pod_not_ready"
+	ReasonImageMissingOnNode           = "image_missing_on_node"
+	ReasonISCSIPrereqMissing           = "iscsi_prereq_missing"
+	ReasonMultipathPrereqMissing       = "multipath_prereq_missing"
+	ReasonNodeReady                    = "node_ready"
+	ReasonNodeNotReady                 = "node_not_ready"
+	ReasonNodeSchedulingDisabled       = "node_scheduling_disabled"
+	ReasonGeneratedDeploymentMissing   = "generated_deployment_missing"
+	ReasonObservedReplicasBelowDesired = "observed_replicas_below_desired"
+	// A new volume serves nothing until the primary attested every initial
+	// replica's store (creating: waiting for replica attestations).
+	ReasonAwaitingReplicaAttestations   = "awaiting_replica_attestations"
 	ReasonLoopbackFrontendRejected      = "loopback_frontend_rejected"
 	ReasonStalePrimaryFenced            = "stale_primary_fenced"
 	ReasonWALIntegrityFault             = "wal_integrity_fault"
@@ -154,33 +157,37 @@ type VolumeEvidence struct {
 }
 
 type ReplicaEvidence struct {
-	ReplicaID            string                 `json:"replica_id"`
-	ServerID             string                 `json:"server_id,omitempty"`
-	KubernetesNode       string                 `json:"kubernetes_node,omitempty"`
-	PhysicalHost         string                 `json:"physical_host,omitempty"`
-	Observed             bool                   `json:"observed"`
-	Role                 string                 `json:"role,omitempty"`
-	ReplicationRole      string                 `json:"replication_role,omitempty"`
-	DurableLatched       bool                   `json:"durable_latched"`
-	DurableFrontierKnown bool                   `json:"durable_frontier_known"`
-	DurableFrontierLSN   uint64                 `json:"durable_frontier_lsn,omitempty"`
-	CandidateReady       bool                   `json:"candidate_ready"`
-	CandidateReadyReason string                 `json:"candidate_ready_reason,omitempty"`
-	Healthy              bool                   `json:"healthy,omitempty"`
-	FrontendPrimaryReady bool                   `json:"frontend_primary_ready,omitempty"`
-	AckEligibilityKnown  bool                   `json:"ack_eligibility_known,omitempty"`
-	AckEligible          bool                   `json:"ack_eligible,omitempty"`
-	FrontendProtocol     string                 `json:"frontend_protocol,omitempty"`
-	FrontendTransport    string                 `json:"frontend_transport,omitempty"`
-	FrontendAddr         string                 `json:"frontend_addr,omitempty"`
-	FrontendNQN          string                 `json:"frontend_nqn,omitempty"`
-	FrontendNSID         uint32                 `json:"frontend_nsid,omitempty"`
-	StatusAddr           string                 `json:"status_addr,omitempty"`
-	DataAddr             string                 `json:"data_addr,omitempty"`
-	CtrlAddr             string                 `json:"ctrl_addr,omitempty"`
-	StalePrimaryFenced   bool                   `json:"stale_primary_fenced"`
-	Conditions           []ObservationCondition `json:"conditions,omitempty"`
-	SupportBundlePath    string                 `json:"support_bundle_path,omitempty"`
+	ReplicaID            string `json:"replica_id"`
+	ServerID             string `json:"server_id,omitempty"`
+	KubernetesNode       string `json:"kubernetes_node,omitempty"`
+	PhysicalHost         string `json:"physical_host,omitempty"`
+	Observed             bool   `json:"observed"`
+	Role                 string `json:"role,omitempty"`
+	ReplicationRole      string `json:"replication_role,omitempty"`
+	DurableLatched       bool   `json:"durable_latched"`
+	DurableFrontierKnown bool   `json:"durable_frontier_known"`
+	DurableFrontierLSN   uint64 `json:"durable_frontier_lsn,omitempty"`
+	CandidateReady       bool   `json:"candidate_ready"`
+	CandidateReadyReason string `json:"candidate_ready_reason,omitempty"`
+	Healthy              bool   `json:"healthy,omitempty"`
+	FrontendPrimaryReady bool   `json:"frontend_primary_ready,omitempty"`
+	AckEligibilityKnown  bool   `json:"ack_eligibility_known,omitempty"`
+	AckEligible          bool   `json:"ack_eligible,omitempty"`
+	FrontendProtocol     string `json:"frontend_protocol,omitempty"`
+	FrontendTransport    string `json:"frontend_transport,omitempty"`
+	FrontendAddr         string `json:"frontend_addr,omitempty"`
+	FrontendNQN          string `json:"frontend_nqn,omitempty"`
+	FrontendNSID         uint32 `json:"frontend_nsid,omitempty"`
+	StatusAddr           string `json:"status_addr,omitempty"`
+	DataAddr             string `json:"data_addr,omitempty"`
+	CtrlAddr             string `json:"ctrl_addr,omitempty"`
+	StalePrimaryFenced   bool   `json:"stale_primary_fenced"`
+	// StoreAttested: a primary attested this replica's store (store_id, hex).
+	// A replica without one is never promoted automatically.
+	StoreAttested     bool                   `json:"store_attested"`
+	StoreID           string                 `json:"store_id,omitempty"`
+	Conditions        []ObservationCondition `json:"conditions,omitempty"`
+	SupportBundlePath string                 `json:"support_bundle_path,omitempty"`
 }
 
 type ClusterEvent struct {

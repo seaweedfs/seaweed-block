@@ -84,10 +84,10 @@ func newPeerWorkQueue(peer *ReplicaPeer, depth int) *peerWorkQueue {
 				peer.Invalidate(err.Error())
 				return ack.AchievedLSN, err
 			}
-			// The barrier taught the peer's store; it counts only once the
-			// master acknowledged that store's attestation.
+			// The barrier taught the peer's store; it counts only while that
+			// is the store the master recorded for it.
 			if !peer.countsTowardAcks() {
-				return ack.AchievedLSN, fmt.Errorf("%w: peer %s store not yet attested to the master", ErrPeerNotInSync, peer.Target().ReplicaID)
+				return ack.AchievedLSN, fmt.Errorf("%w: peer %s store is not the one the master recorded", ErrPeerNotInSync, peer.Target().ReplicaID)
 			}
 			return ack.AchievedLSN, nil
 		},

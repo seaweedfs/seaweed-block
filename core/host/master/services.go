@@ -477,11 +477,26 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 		lastEpoch uint64
 		lastEV    uint64
 		sentAny   bool
+		lastInfo  adapter.AssignmentInfo
 	)
+	// A change of the volume's store record re-sends the current fact: its
+	// descriptors carry the recorded stores (the same generation; the
+	// primary updates its peers' expected stores in place).
+	var storesChanged <-chan struct{}
+	if s.host.attest != nil {
+		storesChanged = s.host.attest.watch(req.VolumeId)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-storesChanged:
+			storesChanged = s.host.attest.watch(req.VolumeId)
+			if sentAny {
+				if err := stream.Send(s.assignmentFact(lastInfo)); err != nil {
+					return err
+				}
+			}
 		case info, ok := <-merged:
 			if !ok {
 				return nil
@@ -515,6 +530,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 
 			lastEpoch = info.Epoch
 			lastEV = info.EndpointVersion
+			lastInfo = info
 			sentAny = true
 			fact := s.assignmentFact(info)
 			if err := stream.Send(fact); err != nil {
@@ -797,7 +813,13 @@ func (s *services) collectPeers(volumeID string, selfInfo adapter.AssignmentInfo
 	if s.host.obs != nil {
 		obsStore = s.host.obs.Store()
 	}
-	return resolvePeers(slots, selfInfo, volumeID, s.host.boot.Publisher, obsStore)
+	peers := resolvePeers(slots, selfInfo, volumeID, s.host.boot.Publisher, obsStore)
+	for _, p := range peers {
+		if id, ok := s.host.AttestedStore(volumeID, p.ReplicaId); ok {
+			p.StoreId = append([]byte(nil), id[:]...)
+		}
+	}
+	return peers
 }
 
 // peerLookup is the narrow read interface resolvePeers needs from
@@ -1027,6 +1049,10 @@ func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.Assignme
 	// durable authority facts preserved across master restart.
 	fact.Peers = s.collectPeers(info.VolumeID, info)
 	fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
+	if s.host.attest != nil {
+		waiting, initial := s.host.attest.awaited(info.VolumeID)
+		fact.ReplicaStoresAwaited, fact.ReplicaStoresInitial = uint32(waiting), uint32(initial)
+	}
 	return fact
 }
 

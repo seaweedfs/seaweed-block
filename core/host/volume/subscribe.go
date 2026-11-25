@@ -26,6 +26,7 @@ package volume
 import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/replication"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
@@ -108,6 +109,7 @@ func decodeReplicaTargets(f *control.AssignmentFact) ([]replication.ReplicaTarge
 			ControlAddr:     p.CtrlAddr,
 			Epoch:           p.Epoch,
 			EndpointVersion: p.EndpointVersion,
+			StoreID:         storage.StoreIDFromBytes(p.StoreId),
 		})
 	}
 	return out, f.PeerSetGeneration

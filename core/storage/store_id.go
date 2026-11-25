@@ -9,6 +9,15 @@ type StoreID [16]byte
 // IsZero reports whether the id is unknown.
 func (id StoreID) IsZero() bool { return id == StoreID{} }
 
+// StoreIDFromBytes decodes a wire store id; anything but 16 bytes is zero.
+func StoreIDFromBytes(b []byte) StoreID {
+	var id StoreID
+	if len(b) == len(id) {
+		copy(id[:], b)
+	}
+	return id
+}
+
 // storeIdentified is implemented by stores that carry a superblock UUID.
 type storeIdentified interface {
 	StoreID() StoreID

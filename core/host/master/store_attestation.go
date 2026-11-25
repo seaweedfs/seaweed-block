@@ -25,6 +25,9 @@ type attestedStores struct {
 	Primary string            `json:"primary"`
 	Epoch   uint64            `json:"epoch"`
 	Stores  map[string]string `json:"stores"` // replica id -> store id (hex)
+	// Initial is a new volume's replica set at its first bind, while any of
+	// them has no recorded store; cleared once all have one.
+	Initial []string `json:"initial,omitempty"`
 }
 
 // storeAttestations is the master's record of which store each replica
@@ -36,10 +39,12 @@ type storeAttestations struct {
 	mu   sync.Mutex
 	path string // "" = memory only
 	vols map[string]attestedStores
+	// changed[vol] is closed (and dropped) when vol's record changes.
+	changed map[string]chan struct{}
 }
 
 func loadStoreAttestations(dir string) (*storeAttestations, error) {
-	s := &storeAttestations{vols: map[string]attestedStores{}}
+	s := &storeAttestations{vols: map[string]attestedStores{}, changed: map[string]chan struct{}{}}
 	if dir == "" {
 		return s, nil
 	}
@@ -79,6 +84,65 @@ func (s *storeAttestations) lookup(volumeID, replicaID string) (storage.StoreID,
 	return id, !id.IsZero()
 }
 
+// watch returns a channel closed at the next change of volumeID's record.
+func (s *storeAttestations) watch(volumeID string) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch, ok := s.changed[volumeID]
+	if !ok {
+		ch = make(chan struct{})
+		s.changed[volumeID] = ch
+	}
+	return ch
+}
+
+func (s *storeAttestations) notifyLocked(volumeID string) {
+	if ch, ok := s.changed[volumeID]; ok {
+		close(ch)
+		delete(s.changed, volumeID)
+	}
+}
+
+// open records a new volume's initial replicas at its first bind, so its
+// primary serves nothing until each has an attested store. A volume that
+// already has a record (or an attestation) is left as it is: only a volume
+// the master binds for the first time waits.
+func (s *storeAttestations) open(volumeID string, replicas []string) error {
+	if len(replicas) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, had := s.vols[volumeID]; had {
+		return nil
+	}
+	vols := make(map[string]attestedStores, len(s.vols)+1)
+	for k, v := range s.vols {
+		vols[k] = v
+	}
+	vols[volumeID] = attestedStores{Stores: map[string]string{}, Initial: append([]string(nil), replicas...)}
+	if err := s.persist(vols); err != nil {
+		return err
+	}
+	s.vols = vols
+	s.notifyLocked(volumeID)
+	return nil
+}
+
+// awaited reports how many of a new volume's initial replicas have no
+// recorded store yet, and how many initial replicas it has.
+func (s *storeAttestations) awaited(volumeID string) (waiting, initial int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.vols[volumeID]
+	for _, id := range v.Initial {
+		if _, ok := v.Stores[id]; !ok {
+			waiting++
+		}
+	}
+	return waiting, len(v.Initial)
+}
+
 // record merges att into the volume's record, in one write: each replica it
 // names gets that store as its reference; a replica it does not name keeps
 // its last one. An attestation from a lower epoch than the recorded one is
@@ -111,6 +175,12 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 			next.Stores[id] = sid
 		}
 	}
+	for _, id := range cur.Initial {
+		if _, ok := next.Stores[id]; !ok {
+			next.Initial = cur.Initial // still waiting
+			break
+		}
+	}
 	if had && sameAttestation(cur, next) {
 		return nil
 	}
@@ -123,11 +193,12 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 		return err
 	}
 	s.vols = vols
+	s.notifyLocked(att.GetVolumeId())
 	return nil
 }
 
 func sameAttestation(a, b attestedStores) bool {
-	if a.Primary != b.Primary || a.Epoch != b.Epoch || len(a.Stores) != len(b.Stores) {
+	if a.Primary != b.Primary || a.Epoch != b.Epoch || len(a.Stores) != len(b.Stores) || len(a.Initial) != len(b.Initial) {
 		return false
 	}
 	for k, v := range a.Stores {
@@ -194,6 +265,19 @@ func (h *Host) ingestStoreAttestation(server string, att *control.StoreAttestati
 		return nil
 	}
 	return h.attest.record(att)
+}
+
+// openStoreRecord records the initial replicas of a volume the master binds
+// for the first time (no authority line yet): its primary serves nothing
+// until each has an attested store.
+func (h *Host) openStoreRecord(volumeID string) error {
+	if h == nil || h.attest == nil {
+		return nil
+	}
+	if _, bound := h.Publisher().VolumeAuthorityLine(volumeID); bound {
+		return nil
+	}
+	return h.attest.open(volumeID, h.replicaSlotsFor(volumeID))
 }
 
 // AttestedStore is the store the primary of volumeID last attested for
