@@ -50,20 +50,23 @@ func TestPlanRetention_NewestNWithNameTieBreak(t *testing.T) {
 	}
 }
 
-// Pinned: never expired by count or age; past its ExpiresNs it is
-// unpinned again. Semantic and labeled snapshots are not exempt.
+// Pinned exactly as the kernel judges it (layout.SnapshotMeta.PinnedAt, the
+// rule its automatic delete refuses by): class pinned always, any other
+// class only before its ExpiresNs. Never expired by count or age while
+// pinned. Semantic and labeled snapshots are not exempt.
 func TestPlanRetention_PinnedSemanticAndLabels(t *testing.T) {
 	now := retBase.Add(48 * time.Hour)
 	snaps := []Snapshot{
 		snapAt("pinned-old", retBase, ClassPinned, time.Time{}, nil),
 		snapAt("pinned-by-expiry", retBase, "", now.Add(time.Hour), nil),
-		snapAt("pinned-expired", retBase, ClassPinned, now.Add(-time.Second), nil),
+		snapAt("pinned-class-expiry-passed", retBase, ClassPinned, now.Add(-time.Second), nil),
+		snapAt("expiry-passed", retBase, "", now.Add(-time.Second), nil),
 		snapAt("semantic-old", retBase, ClassSemantic, time.Time{}, nil),
 		snapAt("labeled-old", retBase, "", time.Time{}, map[string]string{"agent.step": "npm-ci"}),
 	}
 	k := kept(Plan(Policy{}, snaps, now))
-	if len(k) != 2 || k["pinned-old"] == nil || k["pinned-by-expiry"] == nil {
-		t.Fatalf("kept %v; want exactly pinned-old and pinned-by-expiry", k)
+	if len(k) != 3 || k["pinned-old"] == nil || k["pinned-by-expiry"] == nil || k["pinned-class-expiry-passed"] == nil {
+		t.Fatalf("kept %v; want exactly pinned-old, pinned-by-expiry and pinned-class-expiry-passed", k)
 	}
 }
 
