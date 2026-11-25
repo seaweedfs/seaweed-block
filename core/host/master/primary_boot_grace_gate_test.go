@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // #128 boot grace through the full lifecycle product tick, on the
@@ -71,6 +72,9 @@ type switchProbe struct {
 	// currentUnknown: the current primary did not answer (status GET
 	// refused or timed out), so CurrentKnown is false.
 	currentUnknown bool
+	// empty: a new volume, never written: every end is zero and no frontier
+	// is required.
+	empty bool
 	// When hold is set, a probe signals entered and then blocks until
 	// release is closed.
 	hold    bool
@@ -101,6 +105,14 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 		p.mu.Lock()
 	}
 	defer p.mu.Unlock()
+	if p.empty {
+		return PromotionProbeResult{
+			AckProfile:   "sync-quorum",
+			CurrentKnown: !p.currentUnknown,
+			Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady},
+			Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true}, {ReplicaID: "r3"}},
+		}, nil
+	}
 	return PromotionProbeResult{
 		AckProfile: "sync-quorum",
 		// Only r2 is ready, so its promotion needs a known frontier it
@@ -146,7 +158,18 @@ const testFreshness = time.Second
 // promotion probe says the current primary r1 is not ready and r2 is a
 // ready survivor, and publishes r1 from an all-ready first observation.
 // It then lets node-c's facts age out, so the volume is unsupported.
+// The volume has left its creation wait (its stores are attested): an
+// established volume, whose not-ready primary is a failover candidate.
 func newBootGraceMaster(t *testing.T, cfg Config) *Host {
+	t.Helper()
+	h := newBootGraceMasterCreating(t, cfg)
+	attestAllStores(t, h)
+	return h
+}
+
+// newBootGraceMasterCreating is newBootGraceMaster for a volume still in its
+// creation wait (no store attested).
+func newBootGraceMasterCreating(t *testing.T, cfg Config) *Host {
 	t.Helper()
 	cfg.AuthorityStoreDir = t.TempDir()
 	cfg.LifecycleStoreDir = t.TempDir()
@@ -172,6 +195,19 @@ func newBootGraceMaster(t *testing.T, cfg Config) *Host {
 	}
 	time.Sleep(cfg.Freshness.FreshnessWindow + 100*time.Millisecond) // node-c goes stale
 	return h
+}
+
+// attestAllStores records r1's attestation of every replica's store, so the
+// volume has left its creation wait (an established volume).
+func attestAllStores(t *testing.T, h *Host) {
+	t.Helper()
+	line := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", line.Epoch, map[string]storage.StoreID{"r1": testStoreID, "r2": testStoreID, "r3": testStoreID})); err != nil {
+		t.Fatal(err)
+	}
+	if h.inCreationWait("vol-rf3") {
+		t.Fatal("fixture: still in the creation wait after the attestation")
+	}
 }
 
 // unsupportedTick ingests fresh r1/r2 facts (node-c stays silent) and
