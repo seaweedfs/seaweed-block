@@ -48,6 +48,14 @@ type LayoutRemote struct {
 	// remote's own Begin, Abort or cleaning; ownGen is HEAD's generation
 	// after this remote's last own write.
 	visible, ownGen uint64
+	// seen is the image HEAD named when visible was last set: a write of
+	// anyone else that leaves it equal (a snapshot delete, retention, a
+	// dependent added) does not move visible.
+	seen imageTuple
+	// forceView moves visible at the next HEAD read even when the image is
+	// unchanged: this remote's session ended without its commit, so what
+	// the engine staged in it is void and must be dropped.
+	forceView bool
 	// abandoned is set by the engine when a cut ends without a commit
 	// (AbortCut): the next call drops the session and the pending name.
 	abandoned atomic.Bool
@@ -325,7 +333,7 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 			// An upload of an ended session (a staged pre-copy): forget the
 			// engine's view so its re-read finds a newer generation and
 			// drops what it staged; the retry uploads again.
-			l.ownGen = 0
+			l.forceView = true
 			return 0, fmt.Errorf("%w: %w", storage.ErrChunkHeadPrecondition, err)
 		}
 		// An unknown outcome is decided by the engine's next HEAD read,
@@ -333,7 +341,7 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 		return 0, layoutRemoteErr(err)
 	}
 	l.session, l.pending, l.lastCommit = "", nil, got
-	l.ownGen, l.visible = got.Gen, got.Gen
+	l.ownGen, l.visible, l.seen = got.Gen, got.Gen, imageOf(got)
 	return got.Gen, nil
 }
 
@@ -409,6 +417,12 @@ func (l *LayoutRemote) ListIntents(context.Context) ([]storage.ChunkIntent, erro
 // Delete is not a removal path on the layout (cleaning removes names).
 func (l *LayoutRemote) Delete(context.Context, string) error { return nil }
 
+// ErrRemoteDamaged: the remote image is damaged (an object HEAD names is
+// missing or does not hash to its name, or a VOLUME id does not match):
+// never retried as unavailable. The block keeps serving locally; its
+// backup is degraded and the operator sees the error.
+var ErrRemoteDamaged = errors.New("chunkstore: the remote image is damaged")
+
 // ErrUnsupportedEncoding: a chunk encoding other than full (the content
 // name hashes the stored bytes, which must be the logical bytes).
 var ErrUnsupportedEncoding = errors.New("chunkstore: unsupported chunk encoding on the layout")
@@ -473,6 +487,7 @@ func (l *LayoutRemote) LastCommit() layout.Head {
 // cleaning takes over (the removal plans every found name).
 func (l *LayoutRemote) Clean(ctx context.Context, run func(ctx context.Context, me layout.HolderID, session string) error) error {
 	l.mu.Lock()
+	l.takeAbandonLocked()
 	if l.session != "" || l.cleaning != "" {
 		l.mu.Unlock()
 		return layout.ErrBusy
@@ -520,7 +535,7 @@ func (l *LayoutRemote) Clean(ctx context.Context, run func(ctx context.Context, 
 // actor ended, never leaves a stale session behind.
 func (l *LayoutRemote) syncSessionLocked(h layout.Head) {
 	if l.session != "" && h.Activity != (layout.Activity{Kind: layout.ActSnap, Session: l.session}) {
-		l.session = ""
+		l.session, l.forceView = "", true
 	}
 }
 
@@ -528,10 +543,33 @@ func (l *LayoutRemote) syncSessionLocked(h layout.Head) {
 // itself (someone else's write, or the first read) becomes the engine's
 // view; the session is re-derived from h.
 func (l *LayoutRemote) viewLocked(h layout.Head) {
-	if h.Gen != l.ownGen {
-		l.visible, l.ownGen = h.Gen, h.Gen
-	}
 	l.syncSessionLocked(h)
+	if h.Gen != l.ownGen || l.forceView {
+		if t := imageOf(h); l.forceView || l.visible == 0 || t != l.seen {
+			l.visible, l.seen = h.Gen, t
+		}
+		l.ownGen, l.forceView = h.Gen, false
+	}
+}
+
+// imageTuple is what the engine's view of HEAD depends on: the image and
+// who holds it, not the snapshot table.
+type imageTuple struct {
+	current  layout.RootName
+	hasRoot  bool
+	position uint64
+	state    string
+	epoch    uint64
+	holder   string
+	claimID  string
+}
+
+func imageOf(h layout.Head) imageTuple {
+	t := imageTuple{position: h.Position, state: h.State, epoch: h.Epoch, holder: h.Holder, claimID: h.ClaimID}
+	if h.Current != nil {
+		t.current, t.hasRoot = *h.Current, true
+	}
+	return t
 }
 
 // AbortCut is the engine's notice that a cut ended without a commit. It
@@ -542,7 +580,7 @@ func (l *LayoutRemote) AbortCut() { l.abandoned.Store(true) }
 
 func (l *LayoutRemote) takeAbandonLocked() {
 	if l.abandoned.Swap(false) {
-		l.session, l.pending = "", nil
+		l.session, l.pending, l.forceView = "", nil, true
 	}
 }
 
@@ -566,6 +604,8 @@ func (l *LayoutRemote) stopCleaningLocked() {
 //   - the volume is being deleted: HEAD deleted (the engine stops);
 //   - my own cleaning open (busy): remote unavailable (retry later; never a
 //     fence);
+//   - damage (corrupt, missing, another volume's id): ErrRemoteDamaged, a
+//     hard reported error, never a retry;
 //   - any other refusal is returned as it is;
 //   - the store does not answer: remote unavailable (the session is
 //     dropped locally; the next cut rolls it back).
@@ -581,6 +621,8 @@ func layoutRemoteErr(err error) error {
 		return fmt.Errorf("%w: %w", storage.ErrChunkHeadDeleted, err)
 	case errors.Is(err, layout.ErrBusy):
 		return fmt.Errorf("%w: %w", storage.ErrChunkRemoteUnavailable, err)
+	case errors.Is(err, layout.ErrCorrupt), errors.Is(err, layout.ErrIdentity), errors.Is(err, layout.ErrMissing):
+		return fmt.Errorf("%w: %w", ErrRemoteDamaged, err)
 	case isKernelRefusal(err):
 		return err
 	}

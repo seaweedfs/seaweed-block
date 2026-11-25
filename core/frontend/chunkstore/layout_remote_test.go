@@ -238,6 +238,9 @@ func TestLayoutRemote_ErrorMap(t *testing.T) {
 		{layout.ErrVolumeDeleting, storage.ErrChunkHeadDeleted},
 		{layout.ErrBusy, storage.ErrChunkRemoteUnavailable},
 		{other, storage.ErrChunkRemoteUnavailable},
+		{layout.ErrCorrupt, ErrRemoteDamaged},
+		{layout.ErrIdentity, ErrRemoteDamaged},
+		{layout.ErrMissing, ErrRemoteDamaged},
 		{layout.ErrNotPrepared, nil},
 		{layout.ErrTooManySnapshots, nil},
 		{layout.ErrSnapshotExists, nil},
@@ -249,7 +252,7 @@ func TestLayoutRemote_ErrorMap(t *testing.T) {
 		if c.want != nil && !errors.Is(got, c.want) {
 			t.Errorf("%v: mapped to %v; want %v", c.err, got, c.want)
 		}
-		for _, cls := range []error{storage.ErrChunkLayerFenced, storage.ErrChunkHeadPrecondition, storage.ErrChunkHeadDeleted, storage.ErrChunkRemoteUnavailable} {
+		for _, cls := range []error{storage.ErrChunkLayerFenced, storage.ErrChunkHeadPrecondition, storage.ErrChunkHeadDeleted, storage.ErrChunkRemoteUnavailable, ErrRemoteDamaged} {
 			if cls != c.want && errors.Is(got, cls) {
 				t.Errorf("%v: also maps to %v", c.err, cls)
 			}
@@ -528,5 +531,59 @@ func TestLayoutRemote_ABadSnapshotNameIsRefusedBeforeTheCommit(t *testing.T) {
 	}
 	if hd := lh.head(); hd.Position != h || len(hd.Snapshots) != 0 {
 		t.Fatalf("HEAD after the refused name: %+v", hd)
+	}
+}
+
+// Writes of others that leave the image alone (a snapshot delete, a
+// retention pass) do not move the engine's view: the next cut commits
+// without a precondition and uploads nothing.
+func TestLayoutRemote_AForeignSnapshotDeleteDoesNotMoveTheView(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{2: block(2)})
+	r.SetSnapshot("old", layout.SnapshotMeta{CreatedNs: 1})
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lh.cat.DeleteSnapshot(ctx, lh.v, "old"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Gen != before.Gen {
+		t.Fatalf("a snapshot delete moved the engine's view: gen %d -> %d", before.Gen, after.Gen)
+	}
+	writeSync(t, s, map[uint32][]byte{3: block(3)})
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatalf("cut after a foreign snapshot delete: %v", err)
+	}
+}
+
+// After an abandoned cut, a cleaning is not refused busy: it takes the
+// abandon notice first.
+func TestLayoutRemote_CleaningAfterAnAbandonedCut(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	r, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+		t.Fatal(err)
+	}
+	r.AbortCut()
+	if err := r.Clean(ctx, func(context.Context, layout.HolderID, string) error { return nil }); err != nil {
+		t.Fatalf("cleaning after an abandoned cut: %v", err)
+	}
+	if h := lh.head(); h.Activity.Kind != layout.ActIdle {
+		t.Fatalf("HEAD after the cleaning: %+v", h.Activity)
 	}
 }
