@@ -67,7 +67,7 @@ func startCutoverLayoutEnv(t *testing.T, precreateTarget bool) *handoffEnv {
 	if procedureTLSOn() {
 		tlsCfg = map[string]time.Time{}
 	}
-	return startHandoffEnvConfigured(t, 1, []string{"v2"}, tlsCfg, precreateTarget, true)
+	return startHandoffEnvConfigured(t, 1, []string{"v2"}, tlsCfg, precreateTarget)
 }
 
 // Resolve the identity from the real master before launching the public CLI.

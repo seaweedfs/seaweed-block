@@ -223,13 +223,13 @@ func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...st
 // startHandoffEnvTLS is startHandoffEnvWith with mutual TLS when tlsNotAfter
 // is non-nil (it overrides chosen node certificates' expiry).
 func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, masterArgs ...string) *handoffEnv {
-	return startHandoffEnvConfigured(t, n, targets, tlsNotAfter, true, false, masterArgs...)
+	return startHandoffEnvConfigured(t, n, targets, tlsNotAfter, true, masterArgs...)
 }
 
 // startHandoffEnvConfigured can reserve target placement without importing a
 // VolumeRecord. The restore-create test uses that form so the master creates
 // the target's identity and restored image in one request.
-func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, precreateTargets, layoutMaster bool, masterArgs ...string) *handoffEnv {
+func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, precreateTargets bool, masterArgs ...string) *handoffEnv {
 	t.Helper()
 	h := newPlannedHandoffHarness(t)
 	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
@@ -283,9 +283,7 @@ func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfte
 		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
 		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)
-	if layoutMaster {
-		env.masterArgs = append(env.masterArgs, "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
-	}
+	env.masterArgs = append(env.masterArgs, "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
 	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
 	env.masterProcess = master
 	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
