@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/ops"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 const (
@@ -73,7 +73,7 @@ func refuseUnlessSingleFiler(name string, f chunkstore.Filer, timeout time.Durat
 
 func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|fork|detach|show|gc|usage|retain|verify|volume-delete|restore", false)
+		return chunkFail("", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "expected cut|snapshot|snapshots|snapshot-delete|detach|show|gc|usage|verify|volume-delete|restore|release", false)
 	}
 	switch args[0] {
 	case "gc":
@@ -88,14 +88,12 @@ func runOpsChunk(args []string, stdout, stderr io.Writer) int {
 		return chunkSnapshots(args[1:], stdout, stderr)
 	case "snapshot-delete":
 		return chunkSnapshotDelete(args[1:], stdout, stderr)
-	case "fork":
-		return chunkFork(args[1:], stdout, stderr)
 	case "show":
 		return chunkShow(args[1:], stdout, stderr)
 	case "usage":
 		return chunkUsage(args[1:], stdout, stderr)
-	case "retain":
-		return chunkRetain(args[1:], stdout, stderr)
+	case "release":
+		return chunkRelease(args[1:], stdout, stderr)
 	case "verify":
 		return chunkVerify(args[1:], stdout, stderr)
 	case "volume-delete":
@@ -335,6 +333,8 @@ func chunkResult(name string, v any, err error, stdout, stderr io.Writer) int {
 			return chunkFail(name, stdout, stderr, chunkExitFailed, ce.Code, ce.Detail(), ce.Retryable)
 		case errors.Is(err, context.DeadlineExceeded):
 			return chunkFail(name, stdout, stderr, chunkExitFailed, chunkstore.CodeDeadlineExceeded, err.Error(), true)
+		case layoutCode(err) != "":
+			return chunkFail(name, stdout, stderr, chunkExitFailed, layoutCode(err), err.Error(), errors.Is(err, layout.ErrPrecondition))
 		default:
 			return chunkFail(name, stdout, stderr, chunkExitFailed, codeInternalCLI, err.Error(), false)
 		}
@@ -391,144 +391,4 @@ func writeAll(w io.Writer, p []byte) error {
 		err = io.ErrShortWrite
 	}
 	return err
-}
-
-func chunkSnapshots(args []string, stdout, stderr io.Writer) int {
-	fs := chunkFlagSet("snapshots", stderr)
-	var (
-		volumeID, filer, base, prefix, startAfter string
-		limit                                     int
-		includeDeleting                           bool
-		timeout                                   time.Duration
-	)
-	fs.StringVar(&volumeID, "volume", "", "volume id")
-	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
-	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
-	fs.StringVar(&prefix, "prefix", "", "only names with this prefix")
-	fs.StringVar(&startAfter, "start-after", "", "list after this name (the previous page's next)")
-	fs.IntVar(&limit, "limit", 0, "page size (0: the default)")
-	fs.BoolVar(&includeDeleting, "include-deleting", false, "also list snapshots marked deleting")
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "filer timeout")
-	if err := fs.Parse(args); err != nil {
-		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
-	}
-	if volumeID == "" {
-		return chunkFail("snapshots", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
-	}
-	cat, closeFn, exit := chunkCatalog("snapshots", filer, base, false, timeout, stdout, stderr)
-	if exit >= 0 {
-		return exit
-	}
-	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	list, next, err := cat.ListSnapshots(ctx, volumeID, chunkstore.ListOptions{Prefix: prefix, StartAfter: startAfter, Limit: limit, IncludeDeleting: includeDeleting})
-	return chunkResult("snapshots", chunkstore.NewSnapshotListBody(volumeID, list, next), err, stdout, stderr)
-}
-
-func chunkSnapshotDelete(args []string, stdout, stderr io.Writer) int {
-	fs := chunkFlagSet("snapshot-delete", stderr)
-	var (
-		volumeID, filer, base, name string
-		timeout                     time.Duration
-	)
-	fs.StringVar(&volumeID, "volume", "", "volume id")
-	fs.StringVar(&name, "name", "", "snapshot name")
-	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
-	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "filer timeout")
-	if err := fs.Parse(args); err != nil {
-		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
-	}
-	if volumeID == "" || name == "" {
-		return chunkFail("snapshot-delete", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume and --name are required", false)
-	}
-	cat, closeFn, exit := chunkCatalog("snapshot-delete", filer, base, true, timeout, stdout, stderr)
-	if exit >= 0 {
-		return exit
-	}
-	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	state, err := cat.DeleteSnapshot(ctx, volumeID, name)
-	return chunkResult("snapshot-delete", chunkstore.SnapshotDeleteBody{VolumeID: volumeID, Name: name, State: state}, err, stdout, stderr)
-}
-
-func chunkFork(args []string, stdout, stderr io.Writer) int {
-	fs := chunkFlagSet("fork", stderr)
-	var (
-		filer, base, source, snapshot, target, requestID string
-		timeout                                          time.Duration
-	)
-	labels := labelFlags{}
-	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
-	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
-	fs.StringVar(&source, "source", "", "source volume id")
-	fs.StringVar(&snapshot, "snapshot", "", "source snapshot name")
-	fs.StringVar(&target, "target", "", "new volume id")
-	fs.StringVar(&requestID, "request-id", "", "idempotency id; generated and printed when empty (reuse it to retry)")
-	fs.Var(labels, "label", "key=value label (repeatable)")
-	fs.DurationVar(&timeout, "timeout", 6*time.Minute, "filer timeout (the fork's own HEAD deadline is OpDeadline)")
-	if err := fs.Parse(args); err != nil {
-		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
-	}
-	if source == "" || snapshot == "" || target == "" {
-		return chunkFail("fork", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--source, --snapshot and --target are required", false)
-	}
-	if requestID == "" {
-		requestID = newRequestID()
-		fmt.Fprintf(stderr, "sw-block ops chunk fork: request id %s (reuse it to retry)\n", requestID)
-	}
-	cat, closeFn, exit := chunkCatalog("fork", filer, base, true, timeout, stdout, stderr)
-	if exit >= 0 {
-		return exit
-	}
-	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	res, err := cat.Fork(ctx, chunkstore.ForkRequest{Source: source, Snapshot: snapshot, Target: target, RequestID: requestID, Labels: map[string]string(labels)})
-	return chunkResult("fork", res, err, stdout, stderr)
-}
-
-// chunkShow prints one volume's VOLUME entry and HEAD from the filer (§0.1).
-func chunkShow(args []string, stdout, stderr io.Writer) int {
-	fs := chunkFlagSet("show", stderr)
-	var (
-		volumeID, filer, base string
-		timeout               time.Duration
-	)
-	fs.StringVar(&volumeID, "volume", "", "volume id")
-	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
-	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "filer timeout")
-	if err := fs.Parse(args); err != nil {
-		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
-	}
-	if volumeID == "" {
-		return chunkFail("show", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume is required", false)
-	}
-	cat, closeFn, exit := chunkCatalog("show", filer, base, false, timeout, stdout, stderr)
-	if exit >= 0 {
-		return exit
-	}
-	defer closeFn()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	v, hasVolume, err := cat.ReadVolume(ctx, volumeID)
-	if err != nil {
-		return chunkResult("show", nil, err, stdout, stderr)
-	}
-	h, hasHead, err := cat.ReadHead(ctx, volumeID)
-	if err != nil {
-		return chunkResult("show", nil, err, stdout, stderr)
-	}
-	var vp *chunkstore.VolumeInfo
-	if hasVolume {
-		vp = &v
-	}
-	var hp *storage.ChunkHead
-	if hasHead {
-		hp = &h
-	}
-	return chunkResult("show", chunkstore.NewVolumeShowBody(volumeID, vp, hp), nil, stdout, stderr)
 }

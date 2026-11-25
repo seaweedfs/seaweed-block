@@ -6,7 +6,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 )
 
 type failWriter struct{}
@@ -60,20 +58,12 @@ func TestOpsChunk_OversizedResponseIsRefused(t *testing.T) {
 
 func TestOpsChunk_LostResultFailsTheCommand(t *testing.T) {
 	srv, _ := chunkServer(t, 200, `{"volumeID":"v1","cutLSN":9}`)
-	mem := chunkstore.NewMemFiler()
-	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
-	t.Cleanup(func() { dialChunkFiler = prev })
-	cat, err := chunkstore.NewCatalog(mem, defaultChunkPathCLI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cat.EnsureVolume(context.Background(), "v1", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
-		t.Fatal(err)
-	}
+	store := newMemChunkStore()
+	useMemChunkStore(t, store)
+	v := cliVolume(t, store, "v1", "s1")
 	commands := map[string][]string{
 		"cut (HTTP)":        {"ops", "chunk", "cut", "--volume", "v1", "--status-addr", srv.URL},
-		"snapshots (filer)": {"ops", "chunk", "snapshots", "--volume", "v1", "--chunk-filer", "filer:18888"},
+		"snapshots (filer)": append([]string{"ops"}, append([]string{"chunk"}, cliArgs("snapshots", volArgs("volume", v))...)...),
 	}
 	for name, args := range commands {
 		for wname, w := range map[string]io.Writer{"failing": failWriter{}, "short": shortWriter{}} {
