@@ -32,6 +32,10 @@ func (f *fakeObservationClient) ReportHeartbeat(context.Context, *control.Heartb
 	return &control.HeartbeatAck{}, nil
 }
 
+func (f *fakeObservationClient) AnswerProbe(context.Context, *control.ProbeAnswer, ...grpc.CallOption) (*control.ProbeAck, error) {
+	return &control.ProbeAck{}, nil
+}
+
 func (f *fakeObservationClient) ReportClusterEvent(_ context.Context, event *control.ClusterEvent, _ ...grpc.CallOption) (*control.ClusterEventAck, error) {
 	f.event = event
 	if f.err != nil {
