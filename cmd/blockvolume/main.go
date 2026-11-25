@@ -1000,7 +1000,7 @@ func runVolume(f flags, exits *processExit) int {
 				CooldownBase:  f.degradedProbeCooldownBase,
 				CooldownCap:   f.degradedProbeCooldownCap,
 			}
-			probeFn := volume.ProductionProbeFnWithPrime(peerRegistry.AdapterFor, peerRegistry.PrimePending)
+			probeFn := volume.ProductionProbeFnWithPrime(peerRegistry.AdapterForPeer, peerRegistry.PrimePendingFor)
 			if err := replVolume.ConfigureProbeLoop(loopCfg, probeFn, time.Now); err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: probe loop configure:", err)
 				_ = replVolume.Close()

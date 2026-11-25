@@ -153,7 +153,7 @@ func TestReplicaApplyFailure_PrimaryDegradesRecoversAndReplaysFailedLSN(t *testi
 		t.Fatalf("WAL replay fixture retired failed LSN %d (retained=%d)", failedLSN, retained)
 	}
 	cfg := replication.ProbeLoopConfig{Interval: 30 * time.Millisecond, MaxConcurrent: 1, CooldownBase: 20 * time.Millisecond, CooldownCap: 200 * time.Millisecond}
-	if err := c.primary.RepVol.ConfigureProbeLoop(cfg, volume.ProductionProbeFnWithPrime(registry.AdapterFor, registry.PrimePending), time.Now); err != nil {
+	if err := c.primary.RepVol.ConfigureProbeLoop(cfg, volume.ProductionProbeFnWithPrime(registry.AdapterForPeer, registry.PrimePendingFor), time.Now); err != nil {
 		t.Fatalf("ConfigureProbeLoop: %v", err)
 	}
 	if err := c.primary.RepVol.StartProbeLoop(); err != nil {

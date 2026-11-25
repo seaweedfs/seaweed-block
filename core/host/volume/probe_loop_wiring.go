@@ -76,15 +76,31 @@ type AdapterRouter func(replicaID string) *adapter.VolumeReplicaAdapter
 // Borrows: AdapterRouter — caller retains; lifetime must outlive
 // the probe loop's lifetime.
 func ProductionProbeFn(router AdapterRouter) replication.ProbeFn {
-	return ProductionProbeFnWithPrime(router, nil)
+	if router == nil {
+		return productionProbeFn(nil, nil)
+	}
+	return productionProbeFn(func(p *replication.ReplicaPeer) *adapter.VolumeReplicaAdapter { return router(p.Target().ReplicaID) }, nil)
 }
+
+// PeerAdapterRouter is the per-peer adapter lookup for the exact peer a
+// dispatch was admitted for: nil when that peer was replaced since.
+type PeerAdapterRouter func(peer *replication.ReplicaPeer) *adapter.VolumeReplicaAdapter
 
 // ProductionProbeFnWithPrime is ProductionProbeFn with the registry's
 // deferred priming: on the first dispatch for a peer, prime(replicaID)
 // primes its adapter, whose own assignment-driven probe is this attempt
 // (no second wire probe with another session); later dispatches probe as
 // ProductionProbeFn does.
-func ProductionProbeFnWithPrime(router AdapterRouter, prime func(replicaID string) bool) replication.ProbeFn {
+//
+// Both lookups are by the exact peer the dispatch was admitted for
+// (PeerAdapterRegistry.AdapterForPeer, PrimePendingFor): a dispatch held
+// while its peer was replaced under the same ReplicaID finds no adapter,
+// primes nothing and sends no wire probe.
+func ProductionProbeFnWithPrime(router PeerAdapterRouter, prime func(peer *replication.ReplicaPeer) bool) replication.ProbeFn {
+	return productionProbeFn(router, prime)
+}
+
+func productionProbeFn(router PeerAdapterRouter, prime func(peer *replication.ReplicaPeer) bool) replication.ProbeFn {
 	if router == nil {
 		// Fail-closed shim: if no router is wired, return a probeFn
 		// that ALWAYS reports failure (so cooldown progresses + log
@@ -134,11 +150,11 @@ func ProductionProbeFnWithPrime(router AdapterRouter, prime func(replicaID strin
 		// peer (registry misconfigured / peer added before registry
 		// caught up), fail the probe so backoff advances and the
 		// log is loud.
-		adpt := router(t.ReplicaID)
+		adpt := router(peer)
 		if adpt == nil {
 			return fmt.Errorf("ProductionProbeFn: no adapter registered for peer=%s (PeerAdapterRegistry not synced?)", t.ReplicaID)
 		}
-		if prime != nil && prime(t.ReplicaID) {
+		if prime != nil && prime(peer) {
 			return nil
 		}
 

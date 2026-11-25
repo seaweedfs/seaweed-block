@@ -61,7 +61,7 @@ func TestPeerAdapterNeverTakesAHealthyPeersSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := replication.ProbeLoopConfig{Interval: time.Millisecond, MaxConcurrent: 1, CooldownBase: time.Millisecond, CooldownCap: 10 * time.Millisecond}
-	if err := v.ConfigureProbeLoop(cfg, ProductionProbeFnWithPrime(reg.AdapterFor, reg.PrimePending), time.Now); err != nil {
+	if err := v.ConfigureProbeLoop(cfg, ProductionProbeFnWithPrime(reg.AdapterForPeer, reg.PrimePendingFor), time.Now); err != nil {
 		t.Fatal(err)
 	}
 	if err := v.StartProbeLoop(); err != nil {
