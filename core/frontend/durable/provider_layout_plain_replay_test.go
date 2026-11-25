@@ -32,6 +32,8 @@ func TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory(t *testing.T) {
 	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}))
 	var proofErr error
 	var absent, foreign bool
+	var proofReads int
+	var onProofRead func()
 	open := func() (*durable.DurableProvider, *storage.WALStore) {
 		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: dir, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r1",
 			ChunkLayoutHeadFor: func(string) (layout.StartStore, error) {
@@ -39,7 +41,7 @@ func TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return &layoutReplayFault{StartStore: st, err: &proofErr, absent: &absent, foreign: &foreign}, nil
+				return &layoutReplayFault{StartStore: st, err: &proofErr, absent: &absent, foreign: &foreign, reads: &proofReads, onRead: &onProofRead}, nil
 			},
 			ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
 				return chunkstore.NewLayoutRemote(cat, ref, me)
@@ -79,12 +81,16 @@ func TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory(t *testing.T) {
 	if _, err := restarted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrDetached) {
 		t.Fatalf("same epoch restart: %v", err)
 	}
+	beforeReplayReads := proofReads
 	replay, again, err := restarted.DetachVolumePlain(ctx, "v1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if replay.Head.Gen != first.Head.Gen || replay.H != first.H || again != last {
 		t.Fatalf("replay changed detached proof: %+v %d", replay, again)
+	}
+	if proofReads <= beforeReplayReads {
+		t.Fatal("replay did not read the B HEAD")
 	}
 	for _, mode := range []string{"unreadable", "absent", "foreign"} {
 		proofErr = nil
@@ -101,6 +107,29 @@ func TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory(t *testing.T) {
 		if _, _, err := restarted.DetachVolumePlain(ctx, "v1"); err == nil {
 			t.Fatalf("%s detached proof returned cached success", mode)
 		}
+	}
+	proofErr, absent, foreign = nil, false, false
+	initial := view.Projection()
+	onProofRead = func() {
+		moved := initial
+		moved.EndpointVersion++
+		view.set(moved)
+	}
+	if _, _, err := restarted.DetachVolumePlain(ctx, "v1"); !errors.Is(err, durable.ErrChunkEpochStale) {
+		t.Fatalf("replay ignored authority movement during B HEAD read: %v", err)
+	}
+	onProofRead = nil
+	view.set(initial)
+	ended, end := context.WithCancel(ctx)
+	end()
+	if _, _, err := restarted.DetachVolumePlain(ended, "v1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("replay hid caller cancellation: %v", err)
+	}
+	if err := restarted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := restarted.DetachVolumePlain(ctx, "v1"); err == nil {
+		t.Fatal("closed provider replayed a seal")
 	}
 
 }
@@ -120,9 +149,15 @@ type layoutReplayFault struct {
 	layout.StartStore
 	err             *error
 	absent, foreign *bool
+	reads           *int
+	onRead          *func()
 }
 
 func (s *layoutReplayFault) ReadHead(ctx context.Context) (layout.Head, bool, error) {
+	*s.reads++
+	if *s.onRead != nil {
+		(*s.onRead)()
+	}
 	if *s.err != nil {
 		return layout.Head{}, false, *s.err
 	}
