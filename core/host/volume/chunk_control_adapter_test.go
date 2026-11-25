@@ -85,14 +85,14 @@ func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	return fp, NewChunkControl(fp, cat, v)
 }
 
-func (f *fakeChunkProvider) SnapshotVolume(ctx context.Context, volumeID string, name string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
+func (f *fakeChunkProvider) SnapshotVolume(ctx context.Context, volumeID string, name string, meta layout.SnapshotMeta) (layout.Head, error) {
 	f.snapshotName = name
 	f.snapshotMeta = meta
 	r, err := f.CutVolume(ctx, volumeID, 0)
 	if err != nil {
-		return chunkstore.SnapshotInfo{}, err
+		return layout.Head{}, err
 	}
-	return chunkstore.SnapshotInfo{VolumeID: volumeID, Name: name, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, CutLSN: r.H, Class: meta.Class, CreatedNs: meta.CreatedNs, ExpiresAtNs: meta.ExpiresNs, Labels: meta.Labels}, nil
+	return layout.Head{Gen: r.Head.Gen, Epoch: r.Head.Epoch, Position: r.H, Snapshots: map[string]layout.Snapshot{name: {Meta: meta}}}, nil
 }
 
 // The cut body carries the statistics the chunk layer measured for that

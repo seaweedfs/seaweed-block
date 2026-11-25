@@ -24,6 +24,8 @@ import (
 // pins it. "GAP" marks a reader that takes an absent HEAD for an empty
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
+	"core/frontend/chunkstore/layout_remote.go CommitPendingSnapshot -> ReadHead":                     "absent refuses before snapshot commit (layout remote absent-HEAD probe)",
+	"core/frontend/durable/provider_layout_snapshot.go SnapshotVolume -> ReadHead":                    "absent refuses before cut and after commit (TestLayoutProviderSnapshotVolume, remote absent-HEAD probe)",
 	"core/frontend/durable/provider_seal_replay.go readLayoutSeal -> ReadHead":                        "absent, unreadable and foreign layout proof refuse without cached success (TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory)",
 	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                           "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopAbortMustConfirmItsOutcome)",
 	"cmd/blockvolume/workspace_lease.go workspaceLayoutDetachedGeneration -> ReadHead":                "absent refuses ACK (probe TestWorkspaceLayoutDetachedProof)",
@@ -195,6 +197,10 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		r, err := NewLayoutRemote(c, VolumeRef{Name: "v", ID: layout.VolumeID{1}}, layout.HolderID{Epoch: 1, Holder: "a", ClaimID: "k"})
 		if err != nil {
 			t.Fatal(err)
+		}
+		r.SetSnapshot("x", layout.SnapshotMeta{})
+		if err := r.CommitPendingSnapshot(ctx); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
+			t.Fatalf("naming over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
 		}
 		if _, err := r.AbortOpenSession(ctx); !errors.Is(err, layout.ErrHeadAbsent) {
 			t.Fatalf("settling a stop over an absent HEAD: %v; want ErrHeadAbsent", err)
