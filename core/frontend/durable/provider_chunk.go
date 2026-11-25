@@ -483,15 +483,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	}
 	bound.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer bound.setAttach(nil)
-	var remote storage.ChunkRemote = bound
-	if builder, ok := inner.(storage.ChunkManifestBuilder); ok {
-		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
-	}
 	keyer, ok := inner.(storage.ChunkKeyer)
 	if !ok {
 		return nil, errors.New("durable: layout remote lacks content keys")
 	}
-	remote = &layoutBoundRemote{closeBoundRemote: bound, keyer: keyer}
+	var remote storage.ChunkRemote = &layoutBoundRemote{closeBoundRemote: bound, keyer: keyer}
 	cfg := storage.ChunkLayerConfig{
 		OnPublishSettled:    p.publishSettledHook(volumeID),
 		ChunkBlocks:         p.cfg.ChunkBlocks,
@@ -1470,19 +1466,6 @@ func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer
 	}
 	log.Printf("durable: detach of volume=%s aborted, nothing published; serving resumed: %v", volumeID, cause)
 	return fmt.Errorf("%w: %w", ErrDetachAborted, cause)
-}
-
-// Preserve the optional manifest capability only when the inner remote has it;
-// legacy in-memory/flat remotes keep their existing no-op cut behavior.
-type manifestBoundRemote struct {
-	*closeBoundRemote
-	builder storage.ChunkManifestBuilder
-}
-
-func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, []string, error) {
-	c, end := r.bind(ctx)
-	defer end()
-	return r.builder.PrepareManifest(c, base, next, chunkBytes)
 }
 
 // publishSettledHook adapts ChunkOnPublishSettled to one volume's layer.
