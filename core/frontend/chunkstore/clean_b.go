@@ -31,7 +31,7 @@ type CleanResult struct {
 // it is closed by the next pass with the same session id, or replaced by
 // the holder's next claim.
 func (c *BCatalog) Clean(ctx context.Context, v VolumeRef, me layout.HolderID, session string) (res CleanResult, err error) {
-	s, r, err := c.open(v)
+	s, _, err := c.open(v)
 	if err != nil {
 		return res, err
 	}
@@ -43,6 +43,19 @@ func (c *BCatalog) Clean(ctx context.Context, v VolumeRef, me layout.HolderID, s
 			err = errors.Join(err, endErr)
 		}
 	}()
+	return c.RemoveUnreachableAll(ctx, v, me, session)
+}
+
+// RemoveUnreachableAll is the cleaning's removal step over every pool shard
+// of v, page by page, for a holder whose clean(session) is open on HEAD
+// (opened by Clean, or by the engine's remote between its sessions):
+// layout.RemoveUnreachable validates HEAD after reading each page's tags,
+// so it removes nothing unless clean(session) is this holder's.
+func (c *BCatalog) RemoveUnreachableAll(ctx context.Context, v VolumeRef, me layout.HolderID, session string) (res CleanResult, err error) {
+	s, r, err := c.open(v)
+	if err != nil {
+		return res, err
+	}
 	shards, err := s.List(ctx, path.Join(c.base, v.Dir(), layout.PoolDir))
 	if err != nil {
 		return res, err
