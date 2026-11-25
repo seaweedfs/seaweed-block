@@ -241,6 +241,15 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 			continue
 		}
 		currentAcceptable := candidateAcceptableForPromotionGate(vol.Slots[currentIdx], serverIndex)
+		// A fencing round fenced survivors above this line and nothing was
+		// published: they refuse the primary at its epoch (and may no longer
+		// look ready), so heal before anything else while it is acceptable.
+		if pend := h.pendingFence(vol.VolumeID, vol.Authority.Epoch); pend && currentAcceptable {
+			if heal, ok := h.healAfterFailedFence(vol.VolumeID, vol.Authority); ok {
+				directAsks = append(directAsks, heal)
+				continue
+			}
+		}
 		candidates := make([]authority.ReplicaCandidate, 0, len(vol.Slots)-1)
 		readyCandidate := false
 		for _, slot := range vol.Slots {
@@ -261,9 +270,18 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		// ready): the decision is read from a fencing round, never from the
 		// plain answers, so no write the old primary gets acknowledged after
 		// a survivor answered can be missing from the target.
-		if (len(allowed) > 0 || emptyVolumeSurvivors(result, ok)) && (!currentAcceptable || (result.CurrentKnown && !result.Current.Ready)) {
+		replacing := !currentAcceptable || (result.CurrentKnown && !result.Current.Ready)
+		// A survivor answering above the line was fenced by a round that
+		// published nothing (e.g. before a master restart): heal.
+		if ok && !replacing && floorAboveLine(result, vol.Authority.Epoch) {
+			if heal, healed := h.healAfterFailedFence(vol.VolumeID, vol.Authority); healed {
+				directAsks = append(directAsks, heal)
+			}
+		}
+		if (len(allowed) > 0 || emptyVolumeSurvivors(result, ok)) && replacing {
 			result, allowed = h.fencedDecision(vol.VolumeID, vol.Authority, result, len(candidates))
 			if len(allowed) == 0 {
+				h.noteFencePending(vol.VolumeID, vol.Authority.Epoch+1)
 				// The fencing round ended without a publication: survivors may
 				// now refuse the primary at e. Continue that primary at e+1 if
 				// it answers ready, else the volume waits (visibly).
@@ -408,6 +426,39 @@ func emptyVolumeSurvivors(result PromotionProbeResult, ok bool) bool {
 		ready = ready || c.Ready
 	}
 	return ready
+}
+
+func floorAboveLine(result PromotionProbeResult, lineEpoch uint64) bool {
+	for _, c := range result.Candidates {
+		if c.Floor > lineEpoch {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) noteFencePending(volumeID string, epoch uint64) {
+	h.promotionMu.Lock()
+	defer h.promotionMu.Unlock()
+	if h.fencePending == nil {
+		h.fencePending = map[string]uint64{}
+	}
+	if epoch > h.fencePending[volumeID] {
+		h.fencePending[volumeID] = epoch
+	}
+}
+
+// pendingFence reports a fencing round above the line at lineEpoch that has
+// not been followed by a line; one the line has reached is forgotten.
+func (h *Host) pendingFence(volumeID string, lineEpoch uint64) bool {
+	h.promotionMu.Lock()
+	defer h.promotionMu.Unlock()
+	e, ok := h.fencePending[volumeID]
+	if ok && lineEpoch >= e {
+		delete(h.fencePending, volumeID)
+		return false
+	}
+	return ok
 }
 
 func (h *Host) recordVolumeWaitingEvent(volumeID, reason, message string) {

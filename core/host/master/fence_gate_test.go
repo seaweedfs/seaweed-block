@@ -208,6 +208,52 @@ func TestPromotionGate_HealsAFailedFencingRoundOnTheCurrentPrimary(t *testing.T)
 	}
 }
 
+// The heal outlives the tick of the failed fencing round: the primary did not
+// answer then, and on a later tick (now acceptable, its survivors no longer
+// looking ready) it is continued at e+1. Without a remembered round, a
+// survivor answering above the line triggers the same heal.
+func TestPromotionGate_HealsOnALaterTick(t *testing.T) {
+	store := storage.StoreID{7}
+	healed := PromotionProbeResult{CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true, DurableLSN: 11, StoreID: store}}
+	t.Run("remembered failed round", func(t *testing.T) {
+		h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
+		defer closeTestMaster(t, h)
+		p := &fenceProbe{
+			plain:  PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10}, {ReplicaID: "r3", Ready: true, DurableLSN: 10}}},
+			fenced: fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}),
+		}
+		h.SetPromotionEvidenceProvider(p)
+		snap := rf3DeadPrimary()
+		if _, _, asks := h.applyPromotionEvidenceGate(&snap); len(asks) != 0 {
+			t.Fatalf("tick 1 asks %+v; want none (primary silent)", asks)
+		}
+		p.heal = healed
+		snap = rf3DeadPrimary()
+		s := snap.Volumes[0].Slots
+		s[0].Reachable, s[0].ReadyForPrimary = true, true
+		s[1].ReadyForPrimary, s[2].ReadyForPrimary = false, false // fenced: they refuse the primary
+		_, _, asks := h.applyPromotionEvidenceGate(&snap)
+		if len(asks) != 1 || asks[0].ReplicaID != "r1" || asks[0].Evidence.FencedEpoch != 2 {
+			t.Fatalf("tick 2 asks %+v; want r1 continued at 2", asks)
+		}
+	})
+	t.Run("a survivor answers above the line", func(t *testing.T) {
+		h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
+		defer closeTestMaster(t, h)
+		h.SetPromotionEvidenceProvider(&fenceProbe{
+			plain: PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true},
+				Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, {ReplicaID: "r3", Ready: true, DurableLSN: 10, Floor: 1}}},
+			heal: healed,
+		})
+		snap := rf3DeadPrimary()
+		snap.Volumes[0].Slots[0].Reachable, snap.Volumes[0].Slots[0].ReadyForPrimary = true, true
+		_, _, asks := h.applyPromotionEvidenceGate(&snap)
+		if len(asks) != 1 || asks[0].ReplicaID != "r1" || asks[0].Evidence.FencedEpoch != 2 {
+			t.Fatalf("asks %+v; want r1 continued at 2", asks)
+		}
+	})
+}
+
 // The round sends a fencing ask with the fenced epoch and the reference store
 // (the last attested), and reads each answer's floor; an answer from another
 // store carries no floor.

@@ -146,6 +146,10 @@ type Host struct {
 	events          *eventRing
 	promotionMu     sync.RWMutex
 	promotionProber PromotionEvidenceProvider
+	// fencePending: volume -> the epoch a fencing round fenced survivors at
+	// without a line being published there. Until the line reaches it, those
+	// survivors refuse the primary, so the gate keeps trying to heal it.
+	fencePending map[string]uint64
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 
