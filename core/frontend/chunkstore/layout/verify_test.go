@@ -47,7 +47,7 @@ func putImage(t *testing.T, m *memStore, vol string, data map[uint64]string, bor
 	for i, d := range data {
 		c := NameChunk(i, []byte(d))
 		m.obj[path.Join(vbase, vol, c.Path())] = []byte(d)
-		manifest[i] = Ref{Owner: vol, Chunk: c}
+		manifest[i] = Ref{Owner: vol, OwnerID: vid(vol, 0), Chunk: c}
 	}
 	for i, r := range borrowed {
 		manifest[i] = r
@@ -67,9 +67,28 @@ func putImage(t *testing.T, m *memStore, vol string, data map[uint64]string, bor
 	return rn
 }
 
+// vid is a fixed id per volume name (n: a generation, to model a volume created again).
+func vid(vol string, n byte) VolumeID {
+	var id VolumeID
+	copy(id[:], vol)
+	id[15] = n + 1
+	return id
+}
+
+func vputVolume(t *testing.T, m *memStore, vol string, id VolumeID) {
+	t.Helper()
+	b, err := Volume{ID: id, Name: vol, Format: VolumeFormat}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.obj[path.Join(vbase, vol, VolumeName)] = b
+}
+
 func putHead(t *testing.T, m *memStore, vol string, cur *RootName, snaps map[string]Snapshot) {
 	t.Helper()
-	b, err := Head{Epoch: 1, Holder: "h1", Activity: Activity{Kind: ActIdle}, Current: cur, Snapshots: snaps}.Encode()
+	vputVolume(t, m, vol, vid(vol, 0))
+	b, err := Head{VolumeID: vid(vol, 0), Epoch: 1, Holder: "h1", ClaimID: "c1", Activity: Activity{Kind: ActIdle},
+		Current: cur, Snapshots: snaps}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,18 +207,59 @@ func TestVerifyDependentReachIsNotOrphanAndUnreadableDependentSuppresses(t *test
 	m, cur := newVol(t)
 	// v1 snapshot s1 names chunk 4; restore target v2's current root borrows it
 	snap := putImage(t, m, "v1", map[uint64]string{4: "dddd"}, nil)
-	putHead(t, m, "v1", &cur, map[string]Snapshot{"s1": {Root: snap, Dependents: []string{"v2"}}})
+	putHead(t, m, "v1", &cur, map[string]Snapshot{"s1": {Root: snap, Dependents: []Dependent{{Target: "v2", TargetID: vid("v2", 0), Root: snap}}}})
 	borrowed := NameChunk(5, []byte("eeee"))
 	m.obj[path.Join(vbase, "v1", borrowed.Path())] = []byte("eeee") // only v2 names it
-	v2 := putImage(t, m, "v2", nil, map[uint64]Ref{5: {Owner: "v1", Chunk: borrowed}})
+	v2 := putImage(t, m, "v2", nil, map[uint64]Ref{5: {Owner: "v1", OwnerID: vid("v1", 0), Chunk: borrowed}})
 	putHead(t, m, "v2", &v2, nil)
 	if r := run(t, m, VerifyOptions{Orphans: true}); !r.Complete || len(r.Findings) != 0 || !r.OrphansChecked {
 		t.Fatalf("a chunk only the dependent names is not an orphan: %+v", r)
 	}
+	head2 := m.obj[path.Join(vbase, "v2", HeadName)]
 	delete(m.obj, path.Join(vbase, "v2", HeadName))
 	if r := run(t, m, VerifyOptions{Orphans: true}); r.Complete || r.OrphansChecked || len(r.Findings) != 0 {
 		t.Fatalf("an unreadable dependent must suppress orphans: %+v", r)
 	}
+	// v2 created again under the same name (new id): no longer a dependent, so the borrowed chunk is an orphan
+	m.obj[path.Join(vbase, "v2", HeadName)] = head2
+	vputVolume(t, m, "v2", vid("v2", 1))
+	if r := run(t, m, VerifyOptions{Orphans: true}); !r.Complete || classes(r) != "ORPHAN v1/"+borrowed.Path() {
+		t.Fatalf("a re-created target matches no dependent: %+v", r)
+	}
+}
+
+func TestVerifyVolumeRecordAndHeadID(t *testing.T) {
+	m, _ := newVol(t)
+	delete(m.obj, path.Join(vbase, "v1", VolumeName))
+	if r := run(t, m, VerifyOptions{}); r.Complete || classes(r) != "MISSING v1/VOLUME" {
+		t.Fatalf("no VOLUME: %+v", r)
+	}
+	vputVolume(t, m, "v1", vid("v1", 9)) // a VOLUME of another id: HEAD names v1's first id
+	if r := run(t, m, VerifyOptions{}); r.Complete || !strings.HasPrefix(classes(r), "MALFORMED v1/HEAD") {
+		t.Fatalf("HEAD of another volume id: %+v", r)
+	}
+}
+
+func TestVerifyChunkOwnerIdentity(t *testing.T) {
+	m, _ := newVol(t)
+	vputVolume(t, m, "v1", vid("v1", 9)) // VOLUME re-created: chunk refs name the old id (HEAD too)
+	m2, _ := newVol(t)
+	snap := putImage(t, m2, "v1", nil, map[uint64]Ref{4: {Owner: "v3", OwnerID: vid("v3", 0), Chunk: NameChunk(4, []byte("gggg"))}})
+	cur := putImage(t, m2, "v1", map[uint64]string{0: "aaaa"}, nil)
+	putHead(t, m2, "v1", &cur, map[string]Snapshot{"s1": {Root: snap}})
+	m2.obj[path.Join(vbase, "v3", NameChunk(4, []byte("gggg")).Path())] = []byte("gggg") // v3 has no VOLUME
+	if c := classes(run(t, m2, VerifyOptions{Depth: DepthFull})); !strings.HasPrefix(c, "IDENTITY v3/pool/0/4-") {
+		t.Fatalf("a chunk of an owner without VOLUME: %s", c)
+	}
+	vputVolume(t, m2, "v3", vid("v3", 1)) // an owner VOLUME of another id
+	if c := classes(run(t, m2, VerifyOptions{Depth: DepthFull})); !strings.HasPrefix(c, "IDENTITY v3/pool/0/4-") {
+		t.Fatalf("a chunk of an owner with another id: %s", c)
+	}
+	vputVolume(t, m2, "v3", vid("v3", 0))
+	if r := run(t, m2, VerifyOptions{Depth: DepthFull}); len(r.Findings) != 0 {
+		t.Fatalf("matching owner id: %s", classes(r))
+	}
+	_ = m
 }
 
 func TestVerifyReadErrorIsReturned(t *testing.T) {

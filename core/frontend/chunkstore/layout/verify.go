@@ -30,6 +30,7 @@ const (
 	FindCorrupt   = "CORRUPT" // bytes do not hash to the name, or do not decode
 	FindMalformed = "MALFORMED"
 	FindOrphan    = "ORPHAN"
+	FindIdentity  = "IDENTITY" // a chunk reference names an owner id its VOLUME does not hold
 )
 
 // List returns the entry names of the directory p. A missing directory is
@@ -66,6 +67,12 @@ type verifier struct {
 	res       VerifyResult
 	ownPool   map[string]bool // reachable own names, by path relative to the volume
 	ownMeta   map[string]bool
+	owners    map[string]ownerID // VOLUME id per chunk owner, read once
+}
+
+type ownerID struct {
+	id VolumeID
+	ok bool
 }
 
 // Verify checks vol under base; see the top of this file.
@@ -85,7 +92,7 @@ func Verify(ctx context.Context, base, vol string, fetch Fetch, opts VerifyOptio
 	if opts.Orphans && opts.List == nil {
 		return VerifyResult{}, errors.New("layout: verify orphans needs a list")
 	}
-	v := &verifier{base: base, vol: vol, fetch: fetch, opts: opts, ownPool: map[string]bool{}, ownMeta: map[string]bool{}}
+	v := &verifier{base: base, vol: vol, fetch: fetch, opts: opts, ownPool: map[string]bool{}, ownMeta: map[string]bool{}, owners: map[string]ownerID{}}
 	v.res.Complete = true
 	head, ok, err := v.head(ctx, vol)
 	if err != nil {
@@ -120,9 +127,14 @@ func (v *verifier) incomplete(why string) {
 	}
 }
 
-// head reads and decodes vol's HEAD. A missing or malformed HEAD is a
-// finding and leaves nothing to walk; a read error is returned.
+// head reads vol's VOLUME and then its HEAD, decoded against the VOLUME's
+// id (a HEAD of another volume id does not decode). A missing or malformed
+// record is a finding and leaves nothing to walk; a read error is returned.
 func (v *verifier) head(ctx context.Context, vol string) (Head, bool, error) {
+	id, ok, err := v.volumeID(ctx, vol, true)
+	if err != nil || !ok {
+		return Head{}, false, err
+	}
 	p := path.Join(vol, HeadName)
 	b, ok, err := v.fetch(ctx, path.Join(v.base, p))
 	if err != nil {
@@ -133,13 +145,39 @@ func (v *verifier) head(ctx context.Context, vol string) (Head, bool, error) {
 		v.incomplete("no HEAD")
 		return Head{}, false, nil
 	}
-	h, err := DecodeHead(b, 0)
+	h, err := DecodeHead(b, 0, id)
 	if err != nil {
 		v.find(FindMalformed, p, err.Error())
-		v.incomplete("HEAD does not decode")
+		v.incomplete("HEAD does not decode against the VOLUME id")
 		return Head{}, false, nil
 	}
 	return h, true, nil
+}
+
+// volumeID reads vol's VOLUME record. report: findings for this volume
+// (false for a dependent, where absence only means "no longer a dependent").
+func (v *verifier) volumeID(ctx context.Context, vol string, report bool) (VolumeID, bool, error) {
+	p := path.Join(vol, VolumeName)
+	b, ok, err := v.fetch(ctx, path.Join(v.base, p))
+	if err != nil {
+		return VolumeID{}, false, fmt.Errorf("layout: read %s: %w", p, err)
+	}
+	if !ok {
+		if report {
+			v.find(FindMissing, p, "no VOLUME")
+			v.incomplete("no VOLUME")
+		}
+		return VolumeID{}, false, nil
+	}
+	rec, err := DecodeVolume(b)
+	if err != nil {
+		if report {
+			v.find(FindMalformed, p, err.Error())
+			v.incomplete("VOLUME does not decode")
+		}
+		return VolumeID{}, false, nil
+	}
+	return rec.ID, true, nil
 }
 
 // headRoots is the current root and every snapshot's root, each once.
@@ -249,6 +287,19 @@ func (v *verifier) chunks(ctx context.Context, r *Reader, seg Segment, count boo
 		}
 		v.res.Chunks++
 		p := path.Join(ref.Owner, ref.Chunk.Path())
+		o, seen := v.owners[ref.Owner]
+		if !seen {
+			id, ok, err := v.volumeID(ctx, ref.Owner, false)
+			if err != nil {
+				return err
+			}
+			o = ownerID{id, ok}
+			v.owners[ref.Owner] = o
+		}
+		if !o.ok || o.id != ref.OwnerID {
+			v.find(FindIdentity, p, fmt.Sprintf("names owner %s id %s; its VOLUME has %s", ref.Owner, ref.OwnerID, map[bool]string{true: o.id.String(), false: "none"}[o.ok]))
+			continue
+		}
 		if v.opts.Depth == DepthFull {
 			if _, err := r.get(ctx, ref.Owner, ref.Chunk.Path(), ref.Chunk.Hash); err != nil {
 				if err := v.classify(p, err); err != nil {
@@ -273,19 +324,23 @@ func (v *verifier) chunks(ctx context.Context, r *Reader, seg Segment, count boo
 // too; if any dependent cannot be walked, no orphan is reported (a false
 // orphan is worse than none).
 func (v *verifier) orphans(ctx context.Context, h Head) error {
-	deps := map[string]bool{}
+	deps := map[string]VolumeID{}
 	for _, s := range h.Snapshots {
 		for _, d := range s.Dependents {
-			deps[d] = true
+			deps[d.Target] = d.TargetID
 		}
 	}
+	names := make([]string, 0, len(deps))
 	for d := range deps {
-		dh, ok, err := v.depHead(ctx, d)
+		names = append(names, d)
+	}
+	sort.Strings(names)
+	for _, d := range names {
+		dh, live, err := v.depHead(ctx, d, deps[d])
 		if err != nil {
 			return err
 		}
-		if !ok {
-			v.incomplete("dependent " + d + " has no readable HEAD: orphans not reported")
+		if !live {
 			continue
 		}
 		for _, rn := range headRoots(dh) {
@@ -339,19 +394,25 @@ func (v *verifier) orphans(ctx context.Context, h Head) error {
 	return nil
 }
 
-func (v *verifier) depHead(ctx context.Context, d string) (Head, bool, error) {
+// depHead reads a dependent's HEAD. A target whose VOLUME is gone or has
+// another id is no longer a dependent (a volume created again under the
+// name matches no dependent): live false, no doubt. A live target whose
+// HEAD cannot be read leaves the orphan report undecidable.
+func (v *verifier) depHead(ctx context.Context, d string, want VolumeID) (Head, bool, error) {
 	if checkOwner(d) != nil {
 		return Head{}, false, nil
+	}
+	id, ok, err := v.volumeID(ctx, d, false)
+	if err != nil || !ok || id != want {
+		return Head{}, false, err
 	}
 	b, ok, err := v.fetch(ctx, path.Join(v.base, d, HeadName))
 	if err != nil {
 		return Head{}, false, fmt.Errorf("layout: read %s: %w", path.Join(d, HeadName), err)
 	}
-	if !ok {
-		return Head{}, false, nil
-	}
-	h, err := DecodeHead(b, 0)
-	if err != nil {
+	h, derr := DecodeHead(b, 0, id)
+	if !ok || derr != nil {
+		v.incomplete("dependent " + d + " has no readable HEAD: orphans not reported")
 		return Head{}, false, nil
 	}
 	return h, true, nil
