@@ -1,5 +1,4 @@
 # Exact repository-relative path<TAB>Module.Action; repeat a path for alternatives.
-# DRAFT: four source actions still need canonical public action replacements.
 core/authority/workspace.go	HolderInterface.ForcedMove
 core/authority/workspace.go	HolderInterface.PlannedMove
 core/authority/workspace.go	MoveAdmission.Ack
@@ -27,15 +26,23 @@ core/frontend/chunkstore/layout/clean.go	SnapshotRemoval.BeginClean
 core/frontend/chunkstore/layout/clean.go	SnapshotRemoval.EndClean
 core/frontend/chunkstore/layout/commit.go	EngineAdapter.Apply
 core/frontend/chunkstore/layout/commit.go	SnapshotRemoval.Commit
+core/frontend/chunkstore/layout/create.go	RestoreTarget.CreateHead
+core/frontend/chunkstore/layout/create.go	RestoreTarget.CreateVol
 core/frontend/chunkstore/layout/delete.go	MoveAdmission.DelMark
 core/frontend/chunkstore/layout/delete.go	MoveAdmission.DelRead
+core/frontend/chunkstore/layout/delete.go	RestoreTarget.OpRelease
+core/frontend/chunkstore/layout/delete.go	RestoreTarget.OpTomb
 core/frontend/chunkstore/layout/head.go	SnapshotRemoval.Abort
 core/frontend/chunkstore/layout/head.go	SnapshotRemoval.Begin
 core/frontend/chunkstore/layout/head.go	StopAndRestart.Apply
 core/frontend/chunkstore/layout/head.go	StopAndRestart.Begin
 core/frontend/chunkstore/layout/objects.go	SnapshotRemoval.Upload
+core/frontend/chunkstore/layout/remove.go	SnapshotRemoval.Issue
+core/frontend/chunkstore/layout/remove.go	SnapshotRemoval.Stat
+core/frontend/chunkstore/layout/remove.go	SnapshotRemoval.Validate
 core/frontend/chunkstore/layout/snapshots.go	EngineAdapter.OpWrite
 core/frontend/chunkstore/layout/snapshots.go	MoveAdmission.OpWrite
+core/frontend/chunkstore/layout/snapshots.go	RestoreTarget.AddDep
 core/frontend/chunkstore/layout/snapshots.go	SnapshotRemoval.DeleteSnap
 core/frontend/chunkstore/layout/start.go	HolderInterface.Start
 core/frontend/chunkstore/layout/start.go	StopAndRestart.CrashRestart
@@ -46,6 +53,8 @@ core/frontend/chunkstore/layout_remote.go	EngineAdapter.SettleAbort
 core/frontend/chunkstore/layout_remote.go	EngineAdapter.TakeAbandon
 core/frontend/chunkstore/layout_remote.go	StopAndRestart.SendCommit
 core/frontend/chunkstore/layout_remote.go	StopAndRestart.SettleAbort
+core/frontend/chunkstore/layout_store.go	SnapshotRemoval.ApplyDelete
+core/frontend/chunkstore/layout_store.go	SnapshotRemoval.ApplyMark
 core/frontend/durable/provider_chunk.go	EngineAdapter.SettleResume
 core/frontend/durable/provider_chunk.go	EngineAdapter.StartStop
 core/frontend/durable/provider_chunk.go	HolderInterface.StopBegin
