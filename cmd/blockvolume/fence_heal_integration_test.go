@@ -86,6 +86,14 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 		t.Fatal("block A did not read back at epoch 1")
 	}
 	c.close()
+	for _, b := range []*host{r1, r2} {
+		resp, err := http.Get("http://" + b.status + "/status?volume=v1")
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Logf("DEBUG %s status: %s", b.id, body)
+		}
+	}
 
 	// 2. r3 can no longer persist a floor; r1 stops: a fencing round at 2
 	// gets only r2, publishes nothing, and r1 cannot answer the heal.
