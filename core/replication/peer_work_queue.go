@@ -65,7 +65,7 @@ type peerWorkQueue struct {
 func newPeerWorkQueue(peer *ReplicaPeer, depth int) *peerWorkQueue {
 	return newPeerWorkQueueWithOps(peer.Target().ReplicaID, depth, peerWorkQueueOps{
 		ship: func(ctx context.Context, write LocalWrite) (bool, error) {
-			eligible := peer.State() == ReplicaHealthy
+			eligible := peer.countsTowardAcks()
 			err := peer.ShipEntry(ctx, transport.RecoveryLineage{}, write.LBA, write.LSN, write.Data)
 			return eligible, err
 		},
@@ -83,6 +83,11 @@ func newPeerWorkQueue(peer *ReplicaPeer, depth int) *peerWorkQueue {
 					ErrBarrierBelowTargetLSN, peer.Target().ReplicaID, ack.AchievedLSN, targetLSN)
 				peer.Invalidate(err.Error())
 				return ack.AchievedLSN, err
+			}
+			// The barrier taught the peer's store; it counts only once the
+			// master acknowledged that store's attestation.
+			if !peer.countsTowardAcks() {
+				return ack.AchievedLSN, fmt.Errorf("%w: peer %s store not yet attested to the master", ErrPeerNotInSync, peer.Target().ReplicaID)
 			}
 			return ack.AchievedLSN, nil
 		},

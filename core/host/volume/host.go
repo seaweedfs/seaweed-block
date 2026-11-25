@@ -384,6 +384,11 @@ func (h *Host) SetReplicationVolume(rv *replication.ReplicationVolume) {
 // goroutine has visibility yet).
 func (h *Host) setReplicationLocked(rv replicaSetUpdater) {
 	h.replication = rv
+	// This host attests its write-ACK stores to the master in every
+	// heartbeat: a peer counts only once its store's attestation is acked.
+	if c, ok := rv.(storeConfirmer); ok && c != nil {
+		c.RequireAttestedStores()
+	}
 }
 
 func (h *Host) storeLocalReadinessReplayFact(fact *control.AssignmentFact) {
@@ -631,7 +636,11 @@ func (h *Host) runHeartbeat(ctx context.Context) {
 	send := func() {
 		rpcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_, err := h.obsCli.ReportHeartbeat(rpcCtx, h.buildReport())
+		report := h.buildReport()
+		_, err := h.obsCli.ReportHeartbeat(rpcCtx, report)
+		if err == nil {
+			h.confirmAttestation(report.GetStoreAttestation())
+		}
 		if ctx.Err() == nil {
 			h.mw.call(err)
 			// The wait's reason reaches the journal on a change and every
@@ -690,6 +699,35 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 type storeAttester interface {
 	LocalStoreID() storage.StoreID
 	AttestedStores() map[string]storage.StoreID
+}
+
+// storeConfirmer is the replication slot's side of an acknowledged
+// attestation (replication.ReplicationVolume).
+type storeConfirmer interface {
+	RequireAttestedStores()
+	ConfirmAttested(map[string]storage.StoreID)
+}
+
+// confirmAttestation passes the stores of an attestation the master
+// acknowledged to the replication slot: only then do they count toward
+// write ACKs.
+func (h *Host) confirmAttestation(att *control.StoreAttestation) {
+	if att == nil {
+		return
+	}
+	rv, ok := h.getReplication().(storeConfirmer)
+	if !ok || rv == nil {
+		return
+	}
+	stores := make(map[string]storage.StoreID, len(att.GetStores()))
+	for _, st := range att.GetStores() {
+		var id storage.StoreID
+		if len(st.GetStoreId()) == len(id) {
+			copy(id[:], st.GetStoreId())
+			stores[st.GetReplicaId()] = id
+		}
+	}
+	rv.ConfirmAttested(stores)
 }
 
 // storeAttestation is this node's attestation of its write-ACK set while it

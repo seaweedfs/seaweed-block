@@ -93,6 +93,9 @@ type ReplicationVolume struct {
 	updateMu              sync.Mutex // serializes membership replacement with Close
 	mu                    sync.Mutex // protects membership, lineage, and lifecycle snapshots
 	peers                 map[string]*ReplicaPeer
+	// requireAttest: peers count toward write ACKs only with a master-acked
+	// attested store (RequireAttestedStores).
+	requireAttest bool
 	executors             map[string]*transport.BlockExecutor
 	peerQueues            map[string]*peerWorkQueue
 	peerQueueDepth        int
@@ -494,6 +497,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		peer.setOnHealthy(func() {
 			v.resetTerminalPeerQueue(peer)
 		})
+		if v.requireAttest {
+			peer.setRequireAttest()
+		}
 		if v.epochs != nil {
 			peer.setReconcile(func(ctx context.Context) (bool, bool, string) { return v.reconcilePeer(ctx, peer) })
 			executor.SetEpochTable(v.epochs)
@@ -1112,6 +1118,30 @@ func replicationDurationNanos(d time.Duration) uint64 {
 // LocalStoreID is the id of the store this volume replicates from (zero
 // when the store carries none).
 func (v *ReplicationVolume) LocalStoreID() storage.StoreID { return storage.StoreIDOf(v.store) }
+
+// RequireAttestedStores makes every peer count toward write ACKs only once
+// the master has acknowledged the heartbeat attesting its current store
+// (ConfirmAttested). A host that attests its stores to a master sets it.
+func (v *ReplicationVolume) RequireAttestedStores() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.requireAttest = true
+	for _, p := range v.peers {
+		p.setRequireAttest()
+	}
+}
+
+// ConfirmAttested records the stores of an attestation the master
+// acknowledged (replica id -> store id).
+func (v *ReplicationVolume) ConfirmAttested(stores map[string]storage.StoreID) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for id, sid := range stores {
+		if p, ok := v.peers[id]; ok {
+			p.confirmStore(sid)
+		}
+	}
+}
 
 // AttestedStores is the primary's attestation of its write-ACK set: each
 // Healthy peer with the store its last barrier reported (replica id ->
