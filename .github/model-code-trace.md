@@ -9,7 +9,8 @@ cover it. Paths are case-sensitive; directories and glob patterns are not
 expanded. Missing, empty or malformed mappings refuse the check.
 
 The reviewed map uses the neutral public module names: `SnapshotRemoval`,
-`RestoreTarget`, `EngineAdapter`, `StopAndRestart` and `MoveAdmission`.
+`RestoreTarget`, `HolderInterface`, `EngineAdapter`, `StopAndRestart`,
+`MoveAdmission`, `Promotion`, `ProbeRound` and `FencingRound`.
 Actions name top-level definitions used by the corresponding model's `Next`.
 The mapping is the source of accepted citations; private model names and
 storage locations do not belong in the public map or PR description.
