@@ -41,13 +41,13 @@ func TestPrecopyDetachConvergesBeforeStoppingIO(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatal("detached HEAD differs from local image")
 	}
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
 
 func TestPrecopyDetachUnsettledRoundsKeepDirtyBytes(t *testing.T) {
 	s, f, l, w := precopyLayer(t, 1024, 1)
 	// Fail before publication, after a candidate image has been collected.
-	f.failPutIntent = errFakeRemoteDown
+	f.failBegin = errFakeRemoteDown
 	stopped := 0
 	_, err := l.PrecopyDetach(ctTimeout(t), func() bool { stopped++; return true })
 	if !errors.Is(err, ErrPrecopyUnknown) || stopped != 0 {
@@ -56,7 +56,7 @@ func TestPrecopyDetachUnsettledRoundsKeepDirtyBytes(t *testing.T) {
 	if f.stats().head.State == ChunkHeadDetached {
 		t.Fatal("failed rounds detached")
 	}
-	f.failPutIntent = nil
+	f.failBegin = nil
 	r, err := l.Cut(ctTimeout(t))
 	if err != nil {
 		t.Fatal(err)

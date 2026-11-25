@@ -85,7 +85,7 @@ func TestChunkStage_StagedChunksCountsAnInterruptedRound(t *testing.T) {
 		w.write(t, s, uint32(c*ctChunkBlocks+2), 0)
 	}
 	f.mu.Lock()
-	f.failPutIntent = errors.New("intent refused")
+	f.failBegin = errors.New("intent refused")
 	f.mu.Unlock()
 	before := l.Stats().StagedChunks
 	l.stMu.Lock()

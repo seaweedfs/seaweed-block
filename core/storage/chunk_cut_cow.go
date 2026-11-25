@@ -593,7 +593,7 @@ func (l *chunkLayerImpl) copyCOWEntry(w *cutCOWWindow, idx uint64) (capturedChun
 // Each worker owns one immutable image from local read through remote Put.
 // Once copied, its entry is done: guest writes need not wait for remote I/O.
 // The window remains installed for candidates not yet read by a worker.
-func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent, versions map[uint64]uint64, head chunkHead) ([]capturedChunk, []string, error) {
+func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, recent, versions map[uint64]uint64, head chunkHead) ([]capturedChunk, error) {
 	parent := ctx
 	abortStop := context.AfterFunc(parent, func() { w.abort(parent.Err()) })
 	defer abortStop()
@@ -621,7 +621,7 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, rec
 		}
 	}
 	order := hotChunkKeys(indices, recent)
-	out, intents, err := l.streamCutPayloads(ctx, order, head, false, func(ctx context.Context, idx uint64) (capturedChunk, error) {
+	out, err := l.streamCutPayloads(ctx, order, head, false, func(ctx context.Context, idx uint64) (capturedChunk, error) {
 		c, ok, err := l.copyCOWEntry(w, idx)
 		if err != nil {
 			return capturedChunk{}, err
@@ -649,9 +649,9 @@ func (l *chunkLayerImpl) copyCOWWindow(ctx context.Context, w *cutCOWWindow, rec
 	w.mu.Unlock()
 	err = errors.Join(err, w.join())
 	if err != nil {
-		return nil, intents, err
+		return nil, err
 	}
-	return out, intents, nil
+	return out, nil
 }
 
 // Creation is single-owner, but no allocation/lifetime lock spans filesystem I/O.

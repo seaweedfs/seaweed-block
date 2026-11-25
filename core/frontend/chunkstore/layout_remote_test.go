@@ -167,7 +167,7 @@ func TestLayoutRemote_CrashInsideASessionRollsBack(t *testing.T) {
 	// Written after the last commit, then a cut that dies after its Begin.
 	want[20], want[40] = block(7), block(8)
 	writeSync(t, s, map[uint32][]byte{20: want[20], 40: want[40]})
-	if _, err := r.PutIntent(ctx, storage.ChunkIntent{Gen: committed.Gen}); err != nil {
+	if _, err := r.Begin(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if h := lh.head(); h.Activity.Kind != layout.ActSnap {
@@ -449,7 +449,7 @@ func TestLayoutRemote_ASessionLostWhileAliveIsReplaced(t *testing.T) {
 	defer s.Close()
 	want := map[uint32][]byte{6: block(6)}
 	writeSync(t, s, want)
-	if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+	if _, err := r.Begin(ctx); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := lh.cat.Store(lh.v)
@@ -492,7 +492,7 @@ func TestLayoutRemote_StagedUploadsOfAnEndedSessionAreRedone(t *testing.T) {
 		t.Fatal(err)
 	}
 	// s1 ends (the cut was abandoned); a new session opens on the next call.
-	r.AbortCut()
+	r.Abort()
 	next := storage.ChunkHead{Epoch: 1, RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{0: {Key: key, SHA256: layout.Sum(data), Encoding: "full"}}}
 	_, err = r.CASHead(ctx, storage.ChunkHeadVersion{Gen: h0.Gen, Epoch: 1}, next)
 	if !errors.Is(err, storage.ErrChunkHeadPrecondition) {
@@ -577,10 +577,10 @@ func TestLayoutRemote_CleaningAfterAnAbandonedCut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+	if _, err := r.Begin(ctx); err != nil {
 		t.Fatal(err)
 	}
-	r.AbortCut()
+	r.Abort()
 	if err := r.Clean(ctx, func(context.Context, layout.HolderID, string) error { return nil }); err != nil {
 		t.Fatalf("cleaning after an abandoned cut: %v", err)
 	}
@@ -603,7 +603,7 @@ func TestLayoutRemote_AbortOpenSession(t *testing.T) {
 		t.Fatalf("nothing open: %q %v", got, err)
 	}
 	r.SetSnapshot("x", layout.SnapshotMeta{})
-	if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+	if _, err := r.Begin(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionAborted || lh.head().Activity.Kind != layout.ActIdle {

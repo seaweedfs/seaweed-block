@@ -8,7 +8,21 @@ import (
 
 // The fake's direct root replacement models a delayed request accepted at a
 // second serialization point; it deliberately bypasses the first filer's CAS.
-func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
+func TestHeadBeltTakeoverRefusesLateOldCAS(t *testing.T) {
+	f := newFakeChunkRemote()
+	f.head = chunkHead{Gen: 1, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
+	f.afterCAS = func(f *fakeChunkRemote) {
+		f.head = chunkHead{Gen: 2, Epoch: 1, Holder: "old", Chunks: map[uint64]chunkRef{}}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	_, err := ClaimChunkHead(ctx, f, ChunkLayerConfig{Epoch: 2, Holder: "new"})
+	if !errors.Is(err, ErrChunkLayerFenced) {
+		t.Fatalf("late old CAS allowed takeover to serve: %v", err)
+	}
+}
+
+func TestHeadBeltOldCASUnconfirmedKeepsSessionAndFrontier(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
@@ -20,6 +34,7 @@ func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.afterCAS = func(f *fakeChunkRemote) { f.failGet = errors.New("confirmation unavailable near lease horizon") }
+	mark := len(f.stats().ops)
 	_, err := layer.Cut(ctTimeout(t))
 	if err == nil {
 		t.Fatal("unconfirmed CAS returned success")
@@ -27,8 +42,10 @@ func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
 	if layer.RemoteLSN() != 0 {
 		t.Fatal("unconfirmed CAS advanced remoteLSN", layer.RemoteLSN())
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("unconfirmed CAS removed its intent")
+	// The CAS landed (its commit ended the session at the remote) but the
+	// layer could not confirm it: the layer must not Abort.
+	if n := countOps(opsSince(f, mark), "abort:"); n != 0 {
+		t.Fatal("unconfirmed CAS aborted its session")
 	}
 	if got, err := s.Read(0); err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("local acknowledged bytes changed: %v", err)
@@ -36,8 +53,8 @@ func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("Close removed unconfirmed publication roots")
+	if n := countOps(opsSince(f, mark), "abort:"); n != 0 {
+		t.Fatal("Close aborted an unconfirmed commit's session")
 	}
 }
 
@@ -63,8 +80,8 @@ func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
 	if layer.RemoteLSN() != frontier {
 		t.Fatal("refused cut advanced remote frontier")
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("fenced cut removed its intent")
+	if f.openSession() == "" {
+		t.Fatal("fenced cut aborted its unresolved commit's session")
 	}
 	calls := f.stats().cas
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || f.stats().cas != calls {
@@ -73,8 +90,8 @@ func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("Close removed fenced publication roots")
+	if f.openSession() == "" {
+		t.Fatal("Close aborted a fenced, unresolved commit's session")
 	}
 }
 
@@ -91,7 +108,7 @@ func TestHeadBeltEmptyBaseForeignPublicationFences(t *testing.T) {
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || !layer.Fenced() {
 		t.Fatalf("empty-base foreign publication not fenced: %v", err)
 	}
-	if layer.RemoteLSN() != 0 || len(liveIntents(t, f)) == 0 {
+	if layer.RemoteLSN() != 0 || f.openSession() == "" {
 		t.Fatal("fenced first cut settled or deleted intents")
 	}
 	calls := f.stats().cas
@@ -101,7 +118,7 @@ func TestHeadBeltEmptyBaseForeignPublicationFences(t *testing.T) {
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(liveIntents(t, f)) == 0 {
+	if f.openSession() == "" {
 		t.Fatal("Close removed first-cut intents")
 	}
 }

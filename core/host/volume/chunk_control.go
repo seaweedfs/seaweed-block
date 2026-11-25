@@ -67,7 +67,6 @@ type ChunkCutStatsBody struct {
 	PublishPrepareNs int64                  `json:"publishPrepareNs"`
 	ManifestNs       int64                  `json:"manifestNs"`
 	CommitStateNs    int64                  `json:"commitStateNs"`
-	IntentCleanupNs  int64                  `json:"intentCleanupNs"`
 	NonPayloadCopyNs int64                  `json:"nonPayloadCopyNs"`
 
 	PayloadNs          int64  `json:"payloadNs"`
@@ -108,7 +107,6 @@ func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 		PublishPrepareNs: s.PublishPrepareNs,
 		ManifestNs:       s.ManifestNs,
 		CommitStateNs:    s.CommitStateNs,
-		IntentCleanupNs:  s.IntentCleanupNs,
 		NonPayloadCopyNs: s.NonPayloadCopyNs,
 
 		PayloadNs:          s.PayloadNs,
