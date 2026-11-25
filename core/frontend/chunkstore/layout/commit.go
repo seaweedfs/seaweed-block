@@ -33,8 +33,9 @@ type CommitRequest struct {
 	Prev     map[uint64]Ref
 	Next     map[uint64]Ref
 	Position uint64
-	Snapshot string // "" = no named snapshot
-	State    string // StateLive, or StateDetached for the final synced image
+	Snapshot string       // "" = no named snapshot
+	Meta     SnapshotMeta // the new snapshot's retention facts
+	State    string       // StateLive, or StateDetached for the final synced image
 }
 
 // rootOf names the root of a manifest.
@@ -67,7 +68,7 @@ func newOwn(vol string, prev, next map[uint64]Ref) map[uint64]Ref {
 // A live HEAD that already shows this commit
 // applied (idle, current = root, position, the snapshot) is a replay:
 // unchanged, changed=false.
-func (h Head) Commit(me HolderID, session string, root RootName, position uint64, snapshot, state string) (next Head, changed bool, err error) {
+func (h Head) Commit(me HolderID, session string, root RootName, position uint64, snapshot string, meta SnapshotMeta, state string) (next Head, changed bool, err error) {
 	if session == "" {
 		return Head{}, false, errors.New("layout: Commit needs a session id")
 	}
@@ -98,7 +99,10 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 			if next.Snapshots == nil {
 				next.Snapshots = map[string]Snapshot{}
 			}
-			next.Snapshots[snapshot] = Snapshot{Root: root}
+			if err := meta.check(snapshot); err != nil {
+				return Head{}, false, err
+			}
+			next.Snapshots[snapshot] = Snapshot{Root: root, Meta: meta.clone()}
 		}
 	}
 	rn := root
@@ -124,7 +128,7 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 		return Head{}, err
 	}
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) {
-		if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.State); err != nil || !changed {
+		if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State); err != nil || !changed {
 			return next, changed, err // refused, or already applied: no lookups
 		}
 		// The base is HEAD's current root. Before any commit there is none
@@ -172,6 +176,17 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 				return Head{}, false, fmt.Errorf("%w: %s (absent, written by another session, or marked)", ErrNotPrepared, rel)
 			}
 		}
-		return h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.State)
+		return h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State)
 	})
+}
+
+func (m SnapshotMeta) clone() SnapshotMeta {
+	if m.Labels != nil {
+		l := make(map[string]string, len(m.Labels))
+		for k, v := range m.Labels {
+			l[k] = v
+		}
+		m.Labels = l
+	}
+	return m
 }

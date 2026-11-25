@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/retain"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
@@ -302,6 +303,7 @@ func layoutCode(err error) string {
 		{layout.ErrTargetLive, "target_live"},
 		{layout.ErrIdentity, "identity_mismatch"},
 		{layout.ErrPrecondition, "conflict"},
+		{retain.ErrInvalidPolicy, "invalid_policy"},
 	} {
 		if errors.Is(err, c.err) {
 			return c.code
@@ -310,31 +312,27 @@ func layoutCode(err error) string {
 	return ""
 }
 
-// RetainResult is what a retention pass deleted and kept.
-type RetainResult struct {
-	Deleted []string `json:"deleted"`
-	Kept    []string `json:"kept"`
-	// Pinned are names the policy would delete that a restore target
-	// depends on; they stay until it is released.
-	Pinned []string `json:"pinned,omitempty"`
-	DryRun bool     `json:"dry_run,omitempty"`
-}
-
-// chunkRetain applies a retention policy: of the snapshots whose names
-// start with --prefix, it keeps the newest --keep-newest (names sort in
-// time order: a schedule names its snapshots <prefix><UTC timestamp>) and
-// deletes the others (transition 9). Names without the prefix are never
-// touched; a snapshot with dependents is kept and reported.
+// chunkRetain: sw-block ops chunk retain --volume v --master m
+// --chunk-filer host:port [--dry-run] applies the volume's retention policy:
+// it deletes the expired snapshots by the automatic snapshot delete, which
+// refuses a pinned snapshot or one a restore target depends on. With
+// --set-policy it stores the policy given by the --keep-* flags in the
+// volume's RETENTION entry instead; a policy change applies from the next
+// pass.
 func chunkRetain(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("retain", 5*time.Minute, stdout, stderr)
 	var vol volumeFlags
-	var prefix string
-	var keep int
-	var dryRun bool
+	var keepYounger time.Duration
+	var dryRun, setPolicy bool
+	var keepNewest, keepHourly, keepDaily, keepWeekly int
 	c.bindVolume(&vol, "volume", "volume")
-	c.fs.StringVar(&prefix, "prefix", "", "the schedule's name prefix; only these names are considered")
-	c.fs.IntVar(&keep, "keep-newest", 0, "keep the newest N names with the prefix")
 	c.fs.BoolVar(&dryRun, "dry-run", false, "list what would be deleted; write nothing")
+	c.fs.BoolVar(&setPolicy, "set-policy", false, "store the --keep-* policy on the volume instead of applying it")
+	c.fs.IntVar(&keepNewest, "keep-newest", retain.DefaultKeepNewest, "with --set-policy: keep the newest N unpinned snapshots")
+	c.fs.DurationVar(&keepYounger, "keep-younger", retain.DefaultKeepYounger, "with --set-policy: keep every snapshot younger than this")
+	c.fs.IntVar(&keepHourly, "keep-hourly", 0, "with --set-policy: keep the newest snapshot of each of the last N hours")
+	c.fs.IntVar(&keepDaily, "keep-daily", 0, "with --set-policy: keep the newest snapshot of each of the last N days")
+	c.fs.IntVar(&keepWeekly, "keep-weekly", 0, "with --set-policy: keep the newest snapshot of each of the last N weeks")
 	var ref chunkstore.VolumeRef
 	// The start check runs only for a pass that writes.
 	writes := true
@@ -344,46 +342,22 @@ func chunkRetain(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return c.run(args, writes, func() (err error) {
-		if prefix == "" || keep < 1 {
-			return errors.New("--prefix and a positive --keep-newest are required")
+		if setPolicy && dryRun {
+			return errors.New("--set-policy and --dry-run do not combine")
 		}
 		ref, err = vol.ref("volume")
 		return err
 	}, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
-		h, found, err := cat.ReadHead(ctx, ref)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			return nil, layout.ErrHeadAbsent
-		}
-		var names []string
-		for n := range h.Snapshots {
-			if strings.HasPrefix(n, prefix) {
-				names = append(names, n)
+		if setPolicy {
+			p := retain.Policy{KeepNewest: keepNewest, KeepYoungerNs: int64(keepYounger), KeepHourly: keepHourly, KeepDaily: keepDaily, KeepWeekly: keepWeekly}
+			if err := cat.SetRetention(ctx, ref, p); err != nil {
+				return nil, err
 			}
+			return map[string]any{"volume": ref.Dir(), "policy": p, "policySet": true}, nil
 		}
-		sort.Sort(sort.Reverse(sort.StringSlice(names)))
-		res := RetainResult{Deleted: []string{}, Kept: []string{}, DryRun: dryRun}
-		for i, n := range names {
-			switch {
-			case i < keep:
-				res.Kept = append(res.Kept, n)
-			case len(h.Snapshots[n].Dependents) > 0:
-				res.Pinned = append(res.Pinned, n)
-			case dryRun:
-				res.Deleted = append(res.Deleted, n)
-			default:
-				if _, err := cat.DeleteSnapshot(ctx, ref, n); err != nil {
-					if errors.Is(err, layout.ErrHasDependents) {
-						res.Pinned = append(res.Pinned, n)
-						continue
-					}
-					return res, err
-				}
-				res.Deleted = append(res.Deleted, n)
-			}
-		}
-		return res, nil
+		return cat.Retain(ctx, ref, chunkRetainNow(), dryRun)
 	})
 }
+
+// chunkRetainNow is the wall clock retention decides by. Tests replace it.
+var chunkRetainNow = time.Now

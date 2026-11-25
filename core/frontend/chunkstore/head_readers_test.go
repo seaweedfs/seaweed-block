@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/retain"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -47,6 +48,8 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":       "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
 	"core/frontend/chunkstore/catalog_b.go DeleteVolume -> ReadHead":                 "refuses ErrHeadAbsent before any write (probe BCatalog)",
 	"core/frontend/chunkstore/catalog_b.go ReadHead -> ReadHead":                     "found=false to the caller, which reports no HEAD (probe BCatalog)",
+	"core/frontend/chunkstore/retain_b.go Retain -> ReadHead":                        "refuses ErrHeadAbsent, deletes nothing (probe BCatalog)",
+	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                  "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
 	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
 	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":             "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
@@ -60,7 +63,6 @@ var headReaders = map[string]string{
 	// above the chunk store: they read through storage.ChunkRemote GetHead /
 	// GetHeadRoot, so an absent HEAD reaches them as the zero HEAD (probe GetHead)
 	"cmd/sw-block/chunk_b.go chunkShow -> ReadHead":                      "found=false: prints a null head (probe TestOpsChunk_AbsentVolume)",
-	"cmd/sw-block/chunk_b.go chunkRetain -> ReadHead":                    "refuses volume_not_found, deletes nothing (probe TestOpsChunk_AbsentVolume)",
 	"cmd/sw-block/chunk_b.go chunkSnapshots -> ReadHead":                 "refuses volume_not_found (probe TestOpsChunk_AbsentVolume)",
 	"cmd/sw-block/chunk_volume_delete.go chunkVolumeDelete -> ReadHead":  "read after a refused delete: absent gives nothing back (the delete refused before the admission; probe TestOpsChunk_AbsentVolume)",
 	"core/frontend/durable/provider_chunk.go GetHead -> GetHead":         "zero HEAD (probe GetHead)",
@@ -298,6 +300,12 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		}
 		if _, err := c.Usage(ctx, v); !errors.Is(err, layout.ErrHeadAbsent) {
 			t.Fatalf("usage of an absent HEAD: %v; want ErrHeadAbsent", err)
+		}
+		if _, err := c.Retain(ctx, v, time.Now(), false); !errors.Is(err, layout.ErrHeadAbsent) {
+			t.Fatalf("retain of an absent HEAD: %v; want ErrHeadAbsent", err)
+		}
+		if err := c.SetRetention(ctx, v, retain.DefaultPolicy()); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
+			t.Fatalf("policy of an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
 		}
 		if err := c.DeleteVolume(ctx, v, okDeleteAuthority{}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
 			t.Fatalf("delete of an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))

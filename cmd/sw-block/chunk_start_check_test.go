@@ -36,7 +36,7 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 		"snapshot-delete": append(append([]string{"ops", "chunk", "snapshot-delete", "--volume", "v1", "--name", "s1"}, id...), filer...),
 		"restore":         append(append(append([]string{"ops", "chunk", "restore", "--snapshot", "s1"}, src...), tgt...), filer...),
 		"release":         append(append(append([]string{"ops", "chunk", "release"}, src...), tgt...), filer...),
-		"retain":          append(append([]string{"ops", "chunk", "retain", "--volume", "v1", "--prefix", "auto-", "--keep-newest", "2"}, id...), filer...),
+		"retain":          append(append([]string{"ops", "chunk", "retain", "--volume", "v1"}, id...), filer...),
 		"volume-delete":   append(append([]string{"ops", "chunk", "volume-delete", "--volume", "v1", "--master", "m:1", "--request-id", "r"}, id...), filer...),
 		"gc --apply":      append([]string{"ops", "chunk", "gc", "--master", "m:1", "--apply"}, filer...),
 	}
@@ -56,7 +56,7 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 		"show":             append(append([]string{"ops", "chunk", "show", "--volume", "v1"}, id...), filer...),
 		"usage":            append(append([]string{"ops", "chunk", "usage", "--volume", "v1"}, id...), filer...),
 		"gc (read-only)":   append([]string{"ops", "chunk", "gc", "--master", "m:1"}, filer...),
-		"retain --dry-run": append(append([]string{"ops", "chunk", "retain", "--volume", "v1", "--prefix", "auto-", "--keep-newest", "2", "--dry-run"}, id...), filer...),
+		"retain --dry-run": append(append([]string{"ops", "chunk", "retain", "--volume", "v1", "--dry-run"}, id...), filer...),
 	}
 	for name, args := range readOnly {
 		before := checks

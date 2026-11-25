@@ -22,7 +22,7 @@ func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 	steps := map[string]func(Head, HolderID) error{
 		"Begin":      func(h Head, c HolderID) error { _, _, err := h.Begin(c, "s"); return err },
 		"Abort":      func(h Head, c HolderID) error { _, _, err := h.Abort(c, "s"); return err },
-		"Commit":     func(h Head, c HolderID) error { _, _, err := h.Commit(c, "s", rn, 1, "", StateLive); return err },
+		"Commit":     func(h Head, c HolderID) error { _, _, err := h.Commit(c, "s", rn, 1, "", SnapshotMeta{}, StateLive); return err },
 		"BeginClean": func(h Head, c HolderID) error { _, _, err := h.BeginClean(c, "c"); return err },
 		"EndClean":   func(h Head, c HolderID) error { _, _, err := h.EndClean(c, "c"); return err },
 		"Claim":      func(h Head, c HolderID) error { _, _, err := h.Claim(c); return err },

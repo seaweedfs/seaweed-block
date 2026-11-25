@@ -45,7 +45,63 @@ type Dependent struct {
 // still name its chunks, ordered by target id.
 type Snapshot struct {
 	Root       RootName
+	Meta       SnapshotMeta
 	Dependents []Dependent
+}
+
+// The retention classes of a snapshot.
+const (
+	ClassSemantic  = "semantic"
+	ClassPinned    = "pinned"
+	ClassScheduled = "scheduled"
+)
+
+// MaxSnapshotLabels and MaxLabelBytes bound a snapshot's labels.
+const (
+	MaxSnapshotLabels = 4
+	MaxLabelBytes     = 64
+)
+
+// SnapshotMeta is what retention decides from: written once by the commit
+// that creates the name. The times are wall clock and decide policy only;
+// reachability, dependents and removal never read them.
+type SnapshotMeta struct {
+	CreatedNs int64
+	Class     string // "", ClassSemantic, ClassPinned or ClassScheduled
+	ExpiresNs int64  // pinned until then, when set
+	Labels    map[string]string
+}
+
+// PinnedAt reports whether the snapshot is an explicit keep at nowNs: class
+// pinned, or an expiry not yet passed. An automatic delete refuses it.
+func (m SnapshotMeta) PinnedAt(nowNs int64) bool {
+	return m.Class == ClassPinned || m.ExpiresNs > 0 && nowNs < m.ExpiresNs
+}
+
+func (m SnapshotMeta) check(name string) error {
+	switch m.Class {
+	case "", ClassSemantic, ClassPinned, ClassScheduled:
+	default:
+		return fmt.Errorf("%w: snapshot %q class %q", ErrMalformed, name, m.Class)
+	}
+	if m.CreatedNs < 0 || m.ExpiresNs < 0 {
+		return fmt.Errorf("%w: snapshot %q has a negative time", ErrMalformed, name)
+	}
+	if len(m.Labels) > MaxSnapshotLabels {
+		return fmt.Errorf("%w: snapshot %q has %d labels, at most %d", ErrMalformed, name, len(m.Labels), MaxSnapshotLabels)
+	}
+	for k, v := range m.Labels {
+		if k == "" || len(k) > MaxLabelBytes || len(v) > MaxLabelBytes {
+			return fmt.Errorf("%w: snapshot %q label %q: keys 1-%d bytes, values at most %d", ErrMalformed, name, k, MaxLabelBytes, MaxLabelBytes)
+		}
+		if err := validName("label", k); err != nil {
+			return err
+		}
+		if err := validName("label", v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Head is the decoded HEAD. Gen is the generation the store holds it at;
@@ -79,8 +135,12 @@ type headDoc struct {
 }
 
 type snapDoc struct {
-	Root       string   `json:"root"`
-	Dependents []depDoc `json:"dependents,omitempty"`
+	Root       string            `json:"root"`
+	CreatedNs  int64             `json:"created_ns,omitempty"`
+	Class      string            `json:"class,omitempty"`
+	ExpiresNs  int64             `json:"expires_ns,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	Dependents []depDoc          `json:"dependents,omitempty"`
 }
 
 type depDoc struct {
@@ -153,6 +213,9 @@ func (h Head) check() error {
 		if err := validName("snapshot", n); err != nil {
 			return err
 		}
+		if err := s.Meta.check(n); err != nil {
+			return err
+		}
 		for i, d := range s.Dependents {
 			if err := validName("dependent", d.Target); err != nil {
 				return err
@@ -186,7 +249,10 @@ func (h Head) Encode() ([]byte, error) {
 	if len(h.Snapshots) > 0 {
 		d.Snapshots = map[string]snapDoc{}
 		for n, s := range h.Snapshots {
-			sd := snapDoc{Root: s.Root.String()}
+			sd := snapDoc{Root: s.Root.String(), CreatedNs: s.Meta.CreatedNs, Class: s.Meta.Class, ExpiresNs: s.Meta.ExpiresNs}
+			if len(s.Meta.Labels) > 0 {
+				sd.Labels = s.Meta.Labels
+			}
 			for _, dep := range s.Dependents {
 				sd.Dependents = append(sd.Dependents, depDoc{Target: dep.Target, TargetID: dep.TargetID.String(), Root: dep.Root.String()})
 			}
@@ -230,7 +296,7 @@ func DecodeHead(b []byte, gen uint64, volume VolumeID) (Head, error) {
 			if err != nil {
 				return Head{}, err
 			}
-			snap := Snapshot{Root: rn}
+			snap := Snapshot{Root: rn, Meta: SnapshotMeta{CreatedNs: s.CreatedNs, Class: s.Class, ExpiresNs: s.ExpiresNs, Labels: s.Labels}}
 			for _, dep := range s.Dependents {
 				tid, err := ParseVolumeID(dep.TargetID)
 				if err != nil {
@@ -327,7 +393,7 @@ func (h Head) clone() Head {
 	if h.Snapshots != nil {
 		c.Snapshots = make(map[string]Snapshot, len(h.Snapshots))
 		for n, s := range h.Snapshots {
-			c.Snapshots[n] = Snapshot{Root: s.Root, Dependents: append([]Dependent(nil), s.Dependents...)}
+			c.Snapshots[n] = Snapshot{Root: s.Root, Meta: s.Meta.clone(), Dependents: append([]Dependent(nil), s.Dependents...)}
 		}
 	}
 	return c

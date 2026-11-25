@@ -118,3 +118,22 @@ func namesOtherThan(ctx context.Context, r *Reader, rn RootName, own VolumeID) (
 	}
 	return false, nil
 }
+
+// ErrPinned: an automatic delete of a snapshot pinned at its time.
+var ErrPinned = errors.New("layout: snapshot is pinned")
+
+// RetireSnapshot is transition 9 for the automatic caller (retention): as
+// DeleteSnapshot, and also refused for a snapshot pinned at nowNs (class
+// pinned, or an expiry not yet passed), checked on the HEAD the update
+// replaces.
+func (h Head) RetireSnapshot(name string, nowNs int64) (next Head, changed bool, err error) {
+	if s, ok := h.Snapshots[name]; ok && s.Meta.PinnedAt(nowNs) {
+		return Head{}, false, fmt.Errorf("%w: %q", ErrPinned, name)
+	}
+	return h.DeleteSnapshot(name)
+}
+
+// RunRetireSnapshot applies RetireSnapshot by one conditional update.
+func RunRetireSnapshot(ctx context.Context, st HeadStore, name string, nowNs int64) (Head, error) {
+	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.RetireSnapshot(name, nowNs) })
+}
