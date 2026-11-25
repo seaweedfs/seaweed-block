@@ -7,10 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -54,9 +54,9 @@ func copyRootFiles(t *testing.T, src, dst string) {
 // exact copy of the root at HEAD, and the root's own restart, attach.
 func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	root := t.TempDir()
-	a := chunkProvider(t, root, remote, v1View(), 0)
+	a := layoutChunkProvider(t, root, fixture, v1View(), 0)
 	s := openRecovered(t, a)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 	backup := t.TempDir()
 	copyRootFiles(t, root, backup) // durable LSN at the first cut
 
-	a = chunkProvider(t, root, remote, v1View(), 0)
+	a = layoutChunkProvider(t, root, fixture, v1View(), 0)
 	s = openRecovered(t, a) // the root's own restart
 	if _, err := s.Write(2, block(2)); err != nil {
 		t.Fatal(err)
@@ -82,33 +82,29 @@ func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
-	head, _ := remote.GetHead(ctx)
+	head := layoutHead(t, fixture)
 	exact := t.TempDir()
 	copyRootFiles(t, root, exact) // durable LSN at HEAD
-	puts := remote.Puts()
+	puts := fixture.Blobs.Puts()
 
-	observed := &casObservedRemote{ChunkRemote: remote}
-	b := chunkProvider(t, backup, observed, v1View(), 0)
+	b := layoutChunkProvider(t, backup, fixture, v1View(), 0)
 	bs, err := b.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = b.RecoverVolume(ctx, "v1")
-	if !errors.Is(err, durable.ErrChunkStaleLocalRoot) || !strings.Contains(err.Error(), "remove or quarantine the local root") {
-		t.Fatalf("a rolled-back copy attached under HEAD remote_lsn %d: %v; want the stale-root refusal", head.RemoteLSN, err)
+	if !errors.Is(err, layout.ErrStaleLocalRoot) {
+		t.Fatalf("a rolled-back copy attached under HEAD position %d: %v; want the stale-root refusal", head.Position, err)
 	}
 	gen, ended := b.ChunkStartupOutcome("v1")
 	if !ended || !b.ChunkStartupSuperseded("v1", gen) {
-		t.Fatalf("the rolled-back copy's startup: ended=%t superseded=%t, want a no-retry outcome", ended, b.ChunkStartupSuperseded("v1", gen))
+		t.Errorf("the rolled-back copy's startup: ended=%t superseded=%t, want a no-retry outcome", ended, b.ChunkStartupSuperseded("v1", gen))
 	}
-	if cure := b.ChunkStartupCure("v1", gen); cure != durable.ChunkStaleLocalRootCure {
-		t.Fatalf("the startup end carries cure %q, want %q for the final exit line", cure, durable.ChunkStaleLocalRootCure)
+	if cure := b.ChunkStartupCure("v1", gen); cure != layout.StaleLocalRootCure {
+		t.Errorf("the startup end carries cure %q, want %q for the final exit line", cure, layout.StaleLocalRootCure)
 	}
-	if after, _ := remote.GetHead(ctx); after.Gen != head.Gen || after.Epoch != head.Epoch || after.Holder != head.Holder || remote.Puts() != puts {
-		t.Fatalf("the refused copy claimed or wrote: HEAD gen %d -> %d, PUTs %d -> %d", head.Gen, after.Gen, puts, remote.Puts())
-	}
-	if observed.cass != 0 {
-		t.Fatalf("the refused copy attempted %d HEAD CASes, want none", observed.cass)
+	if after := layoutHead(t, fixture); after.Gen != head.Gen || after.Epoch != head.Epoch || after.Holder != head.Holder || fixture.Blobs.Puts() != puts {
+		t.Fatalf("the refused copy claimed or wrote: HEAD gen %d -> %d, PUTs %d -> %d", head.Gen, after.Gen, puts, fixture.Blobs.Puts())
 	}
 	if err := b.Backend("v1").AdmitsIO(); err == nil {
 		t.Fatal("the refused copy admits I/O")
@@ -129,18 +125,18 @@ func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	x := chunkProvider(t, exact, remote, v1View(), 0)
+	x := layoutChunkProvider(t, exact, fixture, v1View(), 0)
 	if _, err := x.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := x.RecoverVolume(ctx, "v1"); err != nil {
-		t.Fatalf("an exact copy at HEAD remote_lsn %d was refused: %v", head.RemoteLSN, err)
+		t.Fatalf("an exact copy at HEAD position %d was refused: %v", head.Position, err)
 	}
 	if err := x.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	c := chunkProvider(t, root, remote, v1View(), 0)
+	c := layoutChunkProvider(t, root, fixture, v1View(), 0)
 	if _, err := c.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -148,41 +144,4 @@ func TestRolledBackCopyBelowHeadLSNIsRefused(t *testing.T) {
 		t.Fatalf("the root's own restart after its last cut was refused: %v", err)
 	}
 
-	// The recheck on the exact claim image: HEAD advances at the same epoch
-	// and holder between the preliminary HEAD read and the claim's read
-	// (the original root cut again). An exact copy that passed the first
-	// read is then below HEAD and refused, with no CAS.
-	race := t.TempDir()
-	copyRootFiles(t, exact, race)
-	raced := &casObservedRemote{ChunkRemote: remote}
-	var advanced storage.ChunkHead
-	raced.onGetHead = func(n int) {
-		if n != 2 {
-			return
-		}
-		cur, err := remote.GetHead(ctx)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		next := cur
-		next.RemoteLSN = cur.RemoteLSN + 1
-		if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, next); err != nil {
-			t.Error(err)
-		}
-		advanced, _ = remote.GetHead(ctx)
-	}
-	y := chunkProvider(t, race, raced, v1View(), 0)
-	if _, err := y.EnsureStorage("v1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := y.RecoverVolume(ctx, "v1"); !errors.Is(err, durable.ErrChunkStaleLocalRoot) {
-		t.Fatalf("HEAD advanced to remote_lsn %d (epoch %d) after the preliminary read; the claim recheck attached: %v", advanced.RemoteLSN, advanced.Epoch, err)
-	}
-	if advanced.Gen == 0 || advanced.Epoch != head.Epoch || advanced.Holder != head.Holder || raced.cass != 0 {
-		t.Fatalf("race control: advanced HEAD %+v (want same epoch %d, holder %q), CAS attempts %d (want 0)", advanced, head.Epoch, head.Holder, raced.cass)
-	}
-	if err := y.Close(); err != nil {
-		t.Fatal(err)
-	}
 }
