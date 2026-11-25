@@ -13,6 +13,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // maintenanceBlobs is an in-memory needle store.
@@ -148,6 +149,11 @@ func TestMaintenanceCleansOnlyAsTheHolder(t *testing.T) {
 			}
 			if tc.err != nil && !errors.Is(err, tc.err) {
 				t.Fatalf("pass: %v; want %v", err, tc.err)
+			}
+			// HEAD is another claim's or epoch's: the refusal is the fence a
+			// cut would see, so the provider latches the layer on it.
+			if (name == "other claim" || name == "next epoch") && !errors.Is(err, storage.ErrChunkLayerFenced) {
+				t.Fatalf("pass refused as %v; want it classified as the fence", err)
 			}
 		})
 	}

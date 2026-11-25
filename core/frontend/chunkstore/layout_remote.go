@@ -47,6 +47,11 @@ type LayoutRemote struct {
 	// remote's own Begin, Abort or cleaning; ownGen is HEAD's generation
 	// after this remote's last own write.
 	visible, ownGen uint64
+	// BirthLSN belongs to the engine's chunk reference, not to a layout
+	// object name. Keep the references we handed to the engine so a later
+	// HEAD position does not invent a new birth for an unchanged object.
+	refs, pendingRefs map[uint64]storage.ChunkRef
+	pendingPosition   uint64
 	// seen is the image HEAD named when visible was last set: a write of
 	// anyone else that leaves it equal (a snapshot delete, retention, a
 	// dependent added) does not move visible.
@@ -248,12 +253,18 @@ func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 	if h.State == layout.StateDeleting || h.State == layout.StateDeleted {
 		return storage.ChunkHead{}, storage.ErrChunkHeadDeleted
 	}
+	// Another claim at this holder's own epoch is another owner of HEAD: the
+	// head the engine sees carries no claim id, so it must not read as its own.
+	if h.Epoch == l.me.Epoch && h.Holder == l.me.Holder && h.ClaimID != l.me.ClaimID {
+		return storage.ChunkHead{}, fmt.Errorf("%w: HEAD is held by %s at epoch %d (claim %q)", storage.ErrChunkLayerFenced, h.Holder, h.Epoch, h.ClaimID)
+	}
 	out := storage.ChunkHead{Gen: l.visible, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, Chunks: map[uint64]storage.ChunkRef{}, State: "active"}
 	if h.State == layout.StateDetached {
 		out.State = "detached"
 		out.DetachedBy = &storage.ChunkDetachedBy{Holder: h.Holder, Epoch: h.Epoch, Gen: h.Gen}
 	}
 	if h.Current == nil {
+		l.refs, l.pendingRefs = nil, nil
 		return out, nil
 	}
 	m, err := l.manifest(ctx, *h.Current)
@@ -261,9 +272,29 @@ func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 		return storage.ChunkHead{}, err
 	}
 	for idx, ref := range m {
-		out.Chunks[idx] = storage.ChunkRef{Key: LayoutKey(ref), SHA256: ref.Chunk.Hash, Encoding: "full", BirthLSN: h.Position}
+		c := storage.ChunkRef{Key: LayoutKey(ref), SHA256: ref.Chunk.Hash, Encoding: "full", BirthLSN: h.Position}
+		if old, ok := l.refs[idx]; ok && sameLayoutObject(old, c) {
+			c.BirthLSN = old.BirthLSN
+		}
+		if old, ok := l.pendingRefs[idx]; ok && h.Position == l.pendingPosition && sameLayoutObject(old, c) {
+			c.BirthLSN = old.BirthLSN
+		}
+		out.Chunks[idx] = c
 	}
+	l.refs, l.pendingRefs = copyLayoutRefs(out.Chunks), nil
 	return out, nil
+}
+
+func sameLayoutObject(a, b storage.ChunkRef) bool {
+	return a.Key == b.Key && a.SHA256 == b.SHA256 && a.Encoding == b.Encoding
+}
+
+func copyLayoutRefs(refs map[uint64]storage.ChunkRef) map[uint64]storage.ChunkRef {
+	out := make(map[uint64]storage.ChunkRef, len(refs))
+	for idx, ref := range refs {
+		out[idx] = ref
+	}
+	return out
 }
 
 // manifest is the chunk map root names.
@@ -281,9 +312,9 @@ func (l *LayoutRemote) manifest(ctx context.Context, rn layout.RootName) (map[ui
 
 // CASHead commits next as this cut's session: the root of next's chunk
 // map, position next.RemoteLSN, detached when next is, and the pending
-// snapshot name. It applies only while HEAD is still at expected (before
-// this session's Begin; Begin and Commit back to back when no upload
-// opened a session); any other HEAD is storage.ErrChunkHeadPrecondition.
+// snapshot name. It uses the engine view from before this session's Begin.
+// A concurrent operator-only HEAD update is rebased with a bounded retry;
+// a foreign claim or detached/deleted state remains a final refusal.
 func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -325,13 +356,47 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 			req.Snapshot, req.Meta = l.pending.name, l.pending.meta
 		}
 	}
-	got, err := layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
-	if err != nil && req.Snapshot != "" && snapshotRefusal(err) {
-		// This snapshot cannot be named; the cut still commits unnamed and
-		// the request gets the typed refusal.
-		l.snapErr, l.pending = err, nil
-		req.Snapshot, req.Meta = "", layout.SnapshotMeta{}
+	// A lost reply can mean the commit applied. Keep its birth values until
+	// the next HEAD read decides whether the old or proposed image won.
+	l.pendingRefs, l.pendingPosition = copyLayoutRefs(next.Chunks), next.RemoteLSN
+	var got layout.Head
+	// An operator may change only HEAD's snapshot/dependent table between
+	// Commit's read and conditional write. Re-read and retry that same image
+	// with the same session; a different claim is a final fence. The bound
+	// keeps a busy operator from starving the holder's cut indefinitely.
+	const maxMetadataCommitAttempts = 4
+	for attempt := 0; attempt < maxMetadataCommitAttempts; attempt++ {
 		got, err = layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
+		if err != nil && req.Snapshot != "" && snapshotRefusal(err) {
+			// This snapshot cannot be named; the cut still commits unnamed and
+			// the request gets the typed refusal.
+			l.snapErr, l.pending = err, nil
+			req.Snapshot, req.Meta = "", layout.SnapshotMeta{}
+			got, err = layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
+		}
+		if !errors.Is(err, layout.ErrPrecondition) {
+			break
+		}
+		cur, found, readErr := l.st.ReadHead(ctx)
+		if readErr != nil {
+			return 0, layoutRemoteErr(readErr)
+		}
+		if !found {
+			return 0, storage.ErrChunkHeadDeleted
+		}
+		if cur.Epoch != l.me.Epoch || cur.Holder != l.me.Holder || cur.ClaimID != l.me.ClaimID {
+			return 0, fmt.Errorf("%w: layout HEAD claim changed during commit", storage.ErrChunkLayerFenced)
+		}
+		if cur.State == layout.StateDetached {
+			return 0, storage.ErrChunkLayerFenced
+		}
+		if cur.State == layout.StateDeleting || cur.State == layout.StateDeleted {
+			return 0, storage.ErrChunkHeadDeleted
+		}
+		if imageOf(cur) != imageOf(h) || cur.Activity != (layout.Activity{Kind: layout.ActSnap, Session: l.session}) {
+			return 0, storage.ErrChunkHeadPrecondition
+		}
+		l.viewLocked(cur)
 	}
 	if err != nil {
 		if errors.Is(err, layout.ErrStaleBase) {
@@ -350,6 +415,7 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 	}
 	l.session, l.pending, l.lastCommit = "", nil, got
 	l.ownGen, l.visible, l.seen = got.Gen, got.Gen, imageOf(got)
+	l.refs, l.pendingRefs = copyLayoutRefs(next.Chunks), nil
 	return got.Gen, nil
 }
 
@@ -707,6 +773,12 @@ func (l *LayoutRemote) stopCleaningLocked() {
 //   - any other refusal is returned as it is;
 //   - the store does not answer: remote unavailable (the session is
 //     dropped locally; the next cut rolls it back).
+// LayoutErr classifies a layout error from a call made outside the remote
+// (the holder's cleaning) the way the remote classifies its own: an
+// identity-moved refusal is storage.ErrChunkLayerFenced, a volume being
+// deleted storage.ErrChunkHeadDeleted.
+func LayoutErr(err error) error { return layoutRemoteErr(err) }
+
 func layoutRemoteErr(err error) error {
 	switch {
 	case err == nil:
