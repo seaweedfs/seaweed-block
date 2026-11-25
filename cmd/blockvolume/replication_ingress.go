@@ -25,9 +25,13 @@ type replicationIngress struct {
 	// (walstore-chunk). The host latches the error: no role is adopted, not Healthy.
 	rf1Only  string
 	listener *transport.ReplicaListener
-	dual     net.Listener
-	cancel   context.CancelFunc
-	closed   bool
+	// epochs is the volume's epoch table, kept across roles; epochsErr a load
+	// failure, which refuses every role.
+	epochs    *transport.EpochTable
+	epochsErr error
+	dual      net.Listener
+	cancel    context.CancelFunc
+	closed    bool
 }
 
 // newReplicationIngress is the volume's ingress from its flags; an RF1-only
@@ -36,7 +40,24 @@ func newReplicationIngress(f flags, store storage.LogicalStorage) *replicationIn
 	r := &replicationIngress{addr: f.dataAddr, store: store, volumeID: f.volumeID,
 		floorPath: replicaFloorPath(f), dualLane: f.recoveryMode == "dual-lane"}
 	r.rf1Only = rf1Only(f)
+	r.epochs, r.epochsErr = transport.LoadEpochTable(epochTablePath(f), f.volumeID)
 	return r
+}
+
+// EpochTable is the volume's epoch table (nil when it failed to load).
+func (r *replicationIngress) EpochTable() *transport.EpochTable { return r.epochs }
+
+// notePrimaryEpoch makes the primary's row (epoch, durable end + 1) durable
+// before the role is adopted, so no entry of the epoch can be durable first.
+func (r *replicationIngress) notePrimaryEpoch(epoch uint64) error {
+	if r.epochsErr != nil {
+		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
+	}
+	head, err := r.store.Sync()
+	if err != nil {
+		return fmt.Errorf("volume %s epoch table: local sync: %w", r.volumeID, err)
+	}
+	return r.epochs.Note(epoch, head+1)
 }
 
 // rf1Only is the single-replica rule of this volume, "" when replication is
@@ -58,6 +79,9 @@ func (r *replicationIngress) FenceAsPrimaryWithPeers(epoch uint64, hasPeers bool
 	defer r.mu.Unlock()
 	if r.closed {
 		return fmt.Errorf("replication ingress closed")
+	}
+	if err := r.notePrimaryEpoch(epoch); err != nil {
+		return err
 	}
 	if !hasPeers {
 		if r.listener != nil {
@@ -82,6 +106,9 @@ func (r *replicationIngress) AdmitAsReplica(epoch uint64) error {
 	if r.rf1Only != "" {
 		return fmt.Errorf("volume %s refuses a replica role at epoch %d: %s", r.volumeID, epoch, r.rf1Only)
 	}
+	if r.epochsErr != nil {
+		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
+	}
 	return r.roleLocked(epoch, false)
 }
 func (r *replicationIngress) roleLocked(epoch uint64, primary bool) error {
@@ -97,6 +124,7 @@ func (r *replicationIngress) roleLocked(epoch uint64, primary bool) error {
 		if err != nil {
 			return err
 		}
+		listener.SetEpochTable(r.epochs)
 	}
 	var err error
 	if primary {

@@ -12,7 +12,7 @@ import (
 // A survivor that holds an entry above the promoted primary's frontier holds
 // a tail written at the old epoch that the new primary never had: it was never
 // acknowledged (an acknowledged write is on the promotion target). The seed
-// barrier must not accept it as caught up on length: the peer is degraded,
+// barrier must not accept it as caught up on length: the peer needs a rebuild,
 // its live cursor is not seeded, and it does not satisfy sync-quorum.
 func TestReplicationVolume_UpdateReplicaSet_DegradesPeerAboveLocalFrontier(t *testing.T) {
 	const blockSize = 4096
@@ -61,8 +61,8 @@ func TestReplicationVolume_UpdateReplicaSet_DegradesPeerAboveLocalFrontier(t *te
 	v.mu.Lock()
 	state := v.peers["r3"].State()
 	v.mu.Unlock()
-	if state != ReplicaDegraded {
-		t.Fatalf("peer state=%s want degraded for a survivor holding a divergent tail above the frontier", state)
+	if state != ReplicaNeedsRebuild {
+		t.Fatalf("peer state=%s want needs_rebuild for a survivor holding a divergent tail above the frontier", state)
 	}
 	// A flush must not count it either: its length covers the target, but it
 	// is not in sync.

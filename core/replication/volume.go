@@ -85,6 +85,10 @@ type ReplicationVolume struct {
 	store       storage.LogicalStorage  // borrowed, NEVER closed by us
 	newExec     executorFactory         // test seam; default dials real TCP
 	newDualExec dualLaneExecutorFactory // optional dual-lane override; nil = use newExec
+	// epochs is this volume's epoch table (nil = none: length checks only).
+	// A new peer is counted only when its barrier's (last data epoch, end)
+	// is in sync with this table; an entry's identity is (epoch, LSN).
+	epochs *transport.EpochTable
 
 	updateMu              sync.Mutex // serializes membership replacement with Close
 	mu                    sync.Mutex // protects membership, lineage, and lifecycle snapshots
@@ -223,6 +227,21 @@ func (v *ReplicationVolume) SetDualLaneExecutorFactory(f func(store storage.Logi
 // start, or on operator reconfiguration.
 // Owns: durabilityMode field under v.mu.
 // Borrows: nothing.
+// SetEpochTable installs the volume's epoch table (the replica listener's).
+// Call before the first UpdateReplicaSet.
+func (v *ReplicationVolume) SetEpochTable(t *transport.EpochTable) {
+	v.mu.Lock()
+	v.epochs = t
+	v.mu.Unlock()
+}
+
+// markDiverged takes a peer whose entries are not this primary's out of
+// every count: degraded, then NeedsRebuild, which nothing heals but a rebuild.
+func markDiverged(peer *ReplicaPeer, reason string) {
+	peer.Invalidate(reason)
+	peer.SetState(ReplicaNeedsRebuild)
+}
+
 func (v *ReplicationVolume) SetDurabilityMode(mode DurabilityMode) {
 	v.mu.Lock()
 	v.durabilityMode = mode
@@ -539,6 +558,15 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 				v.volumeID, peer.Target().ReplicaID, frontier, err)
 			continue
 		}
+		if v.epochs != nil {
+			if shared, ok := v.epochs.SharedEnd(ack.LastDataEpoch, ack.AchievedLSN); !ok {
+				markDiverged(peer, fmt.Sprintf("promotion seed barrier: divergent entries (last data epoch %d, end %d; shared up to %d)",
+					ack.LastDataEpoch, ack.AchievedLSN, shared))
+				log.Printf("replication: volume %s live cursor seed rejected peer=%s: divergent (epoch %d, end %d) shared to %d",
+					v.volumeID, peer.Target().ReplicaID, ack.LastDataEpoch, ack.AchievedLSN, shared)
+				continue
+			}
+		}
 		if ack.AchievedLSN < frontier {
 			peer.Invalidate(fmt.Sprintf("promotion seed barrier below frontier: achieved=%d required=%d",
 				ack.AchievedLSN, frontier))
@@ -550,7 +578,7 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 			// Above this node's frontier the survivor holds entries this
 			// node never had: a tail of the old epoch that was never
 			// acknowledged. Length is not agreement; it needs a rebuild.
-			peer.Invalidate(fmt.Sprintf("promotion seed barrier above frontier: divergent tail achieved=%d frontier=%d",
+			markDiverged(peer, fmt.Sprintf("promotion seed barrier above frontier: divergent tail achieved=%d frontier=%d",
 				ack.AchievedLSN, frontier))
 			log.Printf("replication: volume %s live cursor seed rejected peer=%s: divergent tail achieved=%d above frontier=%d",
 				v.volumeID, peer.Target().ReplicaID, ack.AchievedLSN, frontier)
