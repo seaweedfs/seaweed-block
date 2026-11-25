@@ -6,9 +6,23 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
+
+type failFirstHead struct {
+	chunkstore.Filer
+	fail bool
+}
+
+func (f *failFirstHead) CreateEntry(ctx context.Context, dir string, e *filerpb.Entry, excl bool) error {
+	if e.Name == "HEAD" && f.fail {
+		f.fail = false
+		return errors.New("fixture: lost filer HEAD create")
+	}
+	return f.Filer.CreateEntry(ctx, dir, e, excl)
+}
 
 type noCreateBlobs struct{}
 
@@ -57,5 +71,40 @@ func TestMasterLayoutCreatorWritesUnclaimedHeadAndReplays(t *testing.T) {
 	h, found, err := st.ReadHead(ctx)
 	if err != nil || !found || h.Epoch != 0 || h.Holder != "" || h.ClaimID != "" || h.Gen == 0 {
 		t.Fatalf("unclaimed HEAD=%+v found=%t err=%v", h, found, err)
+	}
+}
+
+func TestMasterLayoutCreatorHealsCrashBetweenVolumeAndHead(t *testing.T) {
+	ctx := context.Background()
+	filer := &failFirstHead{Filer: chunkstore.NewMemFiler(), fail: true}
+	cat, err := chunkstore.NewBCatalog(filer, noCreateBlobs{}, "/blocks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := chunkstore.VolumeRef{Name: "v", ID: id}
+	spec := lifecycle.VolumeSpec{VolumeID: ref.Name, LayoutID: id.String(), SizeBytes: 1 << 20, BlockSize: 4096, ChunkBytes: 4 << 20, ReplicationFactor: 1}
+	create := layoutVolumeCreator(cat)
+	if err := create(ctx, spec); err == nil {
+		t.Fatal("first HEAD create did not fail")
+	}
+	st, err := cat.Store(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := st.ReadVolumeRecord(ctx); err != nil || !found {
+		t.Fatalf("VOLUME after interrupted create: found=%t err=%v", found, err)
+	}
+	if _, found, err := st.ReadHead(ctx); err != nil || found {
+		t.Fatalf("HEAD after interrupted create: found=%t err=%v", found, err)
+	}
+	if err := create(ctx, spec); err != nil {
+		t.Fatalf("retry did not complete HEAD: %v", err)
+	}
+	if h, found, err := st.ReadHead(ctx); err != nil || !found || h.Epoch != 0 {
+		t.Fatalf("healed HEAD=%+v found=%t err=%v", h, found, err)
 	}
 }
