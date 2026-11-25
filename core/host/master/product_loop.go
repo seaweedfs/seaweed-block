@@ -214,7 +214,8 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 	for vi := range snap.Volumes {
 		vol := &snap.Volumes[vi]
 		h.noteSlotServers(vol.VolumeID, vol.Slots)
-		if len(vol.Slots) < 3 || !vol.Authority.Assigned {
+		// Every replicated volume (RF2 and RF3) decides a promotion here.
+		if len(vol.Slots) < 2 || !vol.Authority.Assigned {
 			continue
 		}
 		currentIdx := replicaIndex(vol.Slots, vol.Authority.ReplicaID)
@@ -310,7 +311,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		// and every start counts toward flap history (#128). The
 		// promotion rules below are unchanged.
 		h.recordCurrentBootFact(placement.VolumeID)
-		if len(placement.Slots) < 3 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
+		if len(placement.Slots) < 2 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
 			continue
 		}
 		current, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID)
