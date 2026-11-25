@@ -580,7 +580,9 @@ func (l *LayoutRemote) AbortCut() { l.abandoned.Store(true) }
 
 func (l *LayoutRemote) takeAbandonLocked() {
 	if l.abandoned.Swap(false) {
-		l.session, l.pending, l.forceView = "", nil, true
+		// Uploads the engine staged in the dropped session are caught by the
+		// commit (not prepared), which forces the view then.
+		l.session, l.pending = "", nil
 	}
 }
 
