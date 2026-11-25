@@ -63,7 +63,7 @@ phases:
         env.GATE_WEED: "{{ weed_binary }}"
         env.GATE_WEED_SHA: "{{ weed_sha256 }}"
         env.GATE_GO: "{{ go_bin }}"
-        save_as: pinned
+        save_as: gate_token
         cmd: |
           set -euf
           fail() { echo "$1" >&2; exit 2; }
@@ -75,23 +75,42 @@ phases:
           case "$GATE_ROOT" in /*) ;; *) fail 'scratch_root must be absolute' ;; esac
           case "$GATE_ROOT" in *[!0-9A-Za-z_./-]*|*..*) fail 'scratch_root has unexpected characters' ;; esac
           case "$GATE_TESTS" in *[!0-9a-z\ -]*|'') fail 'tests must be entry names separated by spaces' ;; esac
+          n=0
           for t in $GATE_TESTS; do
             case "$t" in move|lease|systemd|catalog|cutover-e2e|cutover-create) ;; *) fail "unknown entry: $t" ;; esac
+            n=$((n + 1))
           done
+          [ "$n" -gt 0 ] || fail 'tests names no entry'
           [ -x "$GATE_GO/go" ] || fail 'go_bin/go is not executable'
           [ -f "$GATE_WEED" ] || fail 'weed_binary is not a file'
           [ "$(sha256sum < "$GATE_WEED" | cut -d' ' -f1)" = "$GATE_WEED_SHA" ] || fail 'weed_binary does not match weed_sha256'
           [ "$(git -C "$GATE_REPO" rev-parse --verify "$GATE_HEAD^{commit}")" = "$GATE_HEAD" ] || fail 'head is not that commit in product_repo'
           d="$GATE_ROOT/$GATE_RUN"
-          [ ! -e "$d" ] || fail 'run directory already exists'
-          mkdir -p "$d/source" "$d/bin" "$d/tmp" "$d/evidence"
-          : > "$d/.layout-gate-owned"
+          mkdir -p "$GATE_ROOT"
+          # Created here, atomically, or refused: cleanup removes only a
+          # directory whose marker holds this run's token.
+          mkdir "$d" 2>/dev/null || fail 'run directory already exists'
+          token=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+          printf '%s\n' "$token" > "$d/.layout-gate-owned"
+          printf '%s\n' "$token"
+      - action: exec
+        node: host
+        timeout: 2m
+        env.GATE_DIR: "{{ scratch_root }}/{{ run_id }}"
+        env.GATE_HEAD: "{{ head }}"
+        env.GATE_TESTS: "{{ tests }}"
+        env.GATE_REPO: "{{ product_repo }}"
+        env.GATE_WEED_SHA: "{{ weed_sha256 }}"
+        env.GATE_GO: "{{ go_bin }}"
+        cmd: |
+          set -euf
+          d="$GATE_DIR"
+          mkdir "$d/source" "$d/bin" "$d/tmp" "$d/evidence"
           git -C "$GATE_REPO" archive "$GATE_HEAD" | tar -xf - -C "$d/source"
           printf '%s\n' "$GATE_HEAD" > "$d/evidence/product.sha"
           printf '%s  weed\n' "$GATE_WEED_SHA" > "$d/evidence/weed.sha256"
           "$GATE_GO/go" version > "$d/evidence/go.version"
           printf '%s\n' $GATE_TESTS > "$d/evidence/selected.txt"
-          printf '%s %s\n' "$GATE_HEAD" "$GATE_WEED_SHA"
       # Pins, recorded before any entry runs; gate_pass stays 0 unless run_tests passes.
       - action: emit_provenance
         product: seaweed-block
@@ -135,7 +154,9 @@ phases:
           export PATH="$GATE_GO:$PATH" TMPDIR="$d/tmp" CHUNKSTORE_WEED="$GATE_WEED" SWBLOCK_TEST_BINS="$d/bin"
           : > "$d/evidence/verdicts.txt"
           failed=0
+          n=0
           for t in $GATE_TESTS; do
+            n=$((n + 1))
             extra=
             case "$t" in
               move)        pkg=cmd/blockvolume bin=blockvolume.test name=TestIntegrationWorkspaceLayoutMove to=14m ;;
@@ -157,15 +178,13 @@ phases:
               failed=1
             fi
           done
+          passes=$(grep -c '^PASS ' "$d/evidence/verdicts.txt" 2>/dev/null) || passes=0
+          if [ "$n" -eq 0 ] || [ "$passes" -ne "$n" ]; then
+            echo "verdicts: $passes PASS of $n selected entries" >&2
+            failed=1
+          fi
           cat "$d/evidence/verdicts.txt" >&2
           exit "$failed"
-      - action: emit_provenance
-        product: seaweed-block
-        tested_sha: "{{ head }}"
-        gate_pass: "1"
-        gate_status: "ok"
-        __weed_sha256: "{{ weed_sha256 }}"
-        __entries: "{{ tests }}"
 
   - name: collect
     always: true
@@ -174,7 +193,39 @@ phases:
         node: host
         path: "{{ scratch_root }}/{{ run_id }}/evidence"
         name: "layout-gate"
-        ignore_error: true
+
+  # Runs only when every earlier ordinary phase passed (the runner runs the
+  # always phases after them). The pass is read back from a collected copy of
+  # the evidence: a failed collection fails the gate, and the archive must
+  # hold one PASS verdict per selected entry and no other line.
+  - name: mark_pass
+    actions:
+      - action: collect_path
+        node: host
+        path: "{{ scratch_root }}/{{ run_id }}/evidence"
+        name: "layout-gate-pass"
+      - action: exec
+        node: host
+        timeout: 1m
+        env.GATE_ARCHIVE: "{{ artifacts_dir }}/layout-gate-pass.tgz"
+        env.GATE_TESTS: "{{ tests }}"
+        cmd: |
+          set -euf
+          v=$(tar -xzOf "$GATE_ARCHIVE" evidence/verdicts.txt)
+          n=0
+          for t in $GATE_TESTS; do
+            n=$((n + 1))
+            printf '%s\n' "$v" | grep -qE "^PASS $t Test[A-Za-z0-9_]+\$" || { echo "collected verdicts lack PASS for $t" >&2; exit 1; }
+          done
+          lines=$(printf '%s\n' "$v" | grep -c .)
+          [ "$n" -gt 0 ] && [ "$lines" -eq "$n" ] || { echo "collected verdicts: $lines lines for $n entries" >&2; exit 1; }
+      - action: emit_provenance
+        product: seaweed-block
+        tested_sha: "{{ head }}"
+        gate_pass: "1"
+        gate_status: "ok"
+        __weed_sha256: "{{ weed_sha256 }}"
+        __entries: "{{ tests }}"
 
   # Always runs and ends with the zero-residue assertion: no process whose cwd,
   # executable or command line is inside this run's directory (the tests build
@@ -188,13 +239,18 @@ phases:
         timeout: 3m
         env.GATE_RUN: "{{ run_id }}"
         env.GATE_ROOT: "{{ scratch_root }}"
+        env.GATE_TOKEN: "{{ gate_token }}"
         receipt_path: "{{ bundle_dir }}/cleanup.receipt.json"
         cmd: |
           set -u
           case "$GATE_RUN" in *[!0-9A-Za-z_-]*|'') echo 'run_id has unexpected characters' >&2; exit 2 ;; esac
           case "$GATE_ROOT" in /*) ;; *) echo 'scratch_root must be absolute' >&2; exit 2 ;; esac
           d="$GATE_ROOT/$GATE_RUN"
-          [ -f "$d/.layout-gate-owned" ] || { [ ! -e "$d" ] && exit 0; echo "not owned: $d" >&2; exit 2; }
+          [ -e "$d" ] || exit 0
+          # No token: prepare created nothing; whatever is there is not ours.
+          case "$GATE_TOKEN" in *[!0-9a-f]*|'') echo "this run created no directory; left untouched: $d" >&2; exit 0 ;; esac
+          [ ${#GATE_TOKEN} -eq 32 ] || { echo "this run created no directory; left untouched: $d" >&2; exit 0; }
+          [ "$(cat "$d/.layout-gate-owned" 2>/dev/null)" = "$GATE_TOKEN" ] || { echo "not created by this run; left untouched: $d" >&2; exit 2; }
           residue() {
             n=0
             for p in /proc/[0-9]*; do
