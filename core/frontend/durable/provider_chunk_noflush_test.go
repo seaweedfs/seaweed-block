@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"reflect"
 	"runtime"
 	"sort"
 	"testing"
@@ -43,12 +45,13 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 	const total = 400 * 1024 * 1024
 	const transfer = 128 * 1024
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", (1<<30)/4096, 1024)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: (1 << 30) / 4096, ChunkBlocks: 1024, ChunkCaptureInterval: 0,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, v1View())
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,9 +71,9 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
+	before, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found {
+		t.Fatalf("initial layout HEAD: found=%v err=%v", found, err)
 	}
 	ws := s.(*storage.WALStore)
 	if err := ws.SetWMode(mode); err != nil {
@@ -79,7 +82,7 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 	syncsBefore := ws.WALSyncCount()
 	var durations []time.Duration
 	busyCount := 0
-	t.Logf("before HEAD gen=%d remoteLSN=%d cp=%d next=%d retention=%d", before.Gen, before.RemoteLSN, ws.CheckpointLSN(), ws.NextLSN(), ws.RecoveryRetentionLSNs())
+	t.Logf("before HEAD gen=%d cp=%d next=%d retention=%d", before.Gen, ws.CheckpointLSN(), ws.NextLSN(), ws.RecoveryRetentionLSNs())
 	recorded := &noFlushBackend{Backend: be}
 	h := nvme.NewIOHandler(nvme.HandlerConfig{Backend: recorded, BlockSize: 4096, VolumeSize: 1 << 30})
 	data := make([]byte, transfer)
@@ -163,12 +166,12 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 		fsyncs *= 2
 	}
 	t.Logf("COST mode=%d bytes=%d busy=%d pressureBatches=%d internalFsyncsPerGiB=%.2f attemptP99=%v maxAttempt=%v", mode, total, busyCount, batches, float64(fsyncs)/(float64(total)/(1<<30)), durations[(len(durations)-1)*99/100], durations[len(durations)-1])
-	after, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
+	after, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found {
+		t.Fatalf("final layout HEAD: found=%v err=%v", found, err)
 	}
 	st := p.DurableStatuses()
-	if after.Gen != before.Gen || after.RemoteLSN != before.RemoteLSN {
+	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("remote moved without explicit cut: before=%+v after=%+v", before, after)
 	}
 	if len(st) != 1 || st[0].Chunk == nil || st[0].Chunk.Stats.CutsOK != 0 {
@@ -177,7 +180,7 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 	if ws.CheckpointLSN() == 0 || st[0].WriteProfile.WALAppendWrapCount == 0 {
 		t.Fatal("no checkpoint or physical wrap observed")
 	}
-	t.Logf("after HEAD gen=%d remoteLSN=%d cp=%d next=%d wraps=%d cuts=%d", after.Gen, after.RemoteLSN, ws.CheckpointLSN(), ws.NextLSN(), st[0].WriteProfile.WALAppendWrapCount, st[0].Chunk.Stats.CutsOK)
+	t.Logf("after HEAD gen=%d cp=%d next=%d wraps=%d cuts=%d", after.Gen, ws.CheckpointLSN(), ws.NextLSN(), st[0].WriteProfile.WALAppendWrapCount, st[0].Chunk.Stats.CutsOK)
 
 }
 
@@ -185,8 +188,10 @@ func runNoClientFlushBurst(t *testing.T, mode storage.WMode) {
 // Expiry is retryable; ending the session restores local no-Flush progress.
 func TestWALStoreChunkV3NoFlushWithActiveRF2CatchupPin(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
+	fixture := testutil.NewLayoutFixture(t, "v1", 1<<18, 1024)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: 1 << 18, ChunkBlocks: 1024}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
