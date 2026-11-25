@@ -252,7 +252,7 @@ func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 		return storage.ChunkHead{}, err
 	}
 	for idx, ref := range m {
-		out.Chunks[idx] = storage.ChunkRef{Key: LayoutKey(ref), SHA256: ref.Chunk.Hash, Encoding: "full", BirthLSN: h.Position}
+		out.Chunks[idx] = storage.ChunkRef{Key: LayoutKey(ref), SHA256: ref.Chunk.Hash, Encoding: "full"}
 	}
 	return out, nil
 }

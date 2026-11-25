@@ -8,36 +8,7 @@ import (
 	"time"
 )
 
-func TestChunkBirthBASEUsesInheritedFrontierIncludingZero(t *testing.T) {
-	for _, frontier := range []uint64{0, 7} {
-		t.Run(string(rune('0'+frontier)), func(t *testing.T) {
-			s, _, l := mappedBASELayerV3(t)
-			h, err := s.BeginBaseInstall(frontier, idA)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := h.WriteBase(5, blk(0x55)); err != nil {
-				t.Fatal(err)
-			}
-			if err := h.MarkBaseComplete(); err != nil {
-				t.Fatal(err)
-			}
-			newest, err := s.Write(0, blk(0x41))
-			if err != nil {
-				t.Fatal(err)
-			}
-			cut, err := l.Cut(ctTimeout(t))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if cut.Head.Chunks[1].BirthLSN != frontier || cut.Head.Chunks[0].BirthLSN != newest {
-				t.Fatalf("BASE birth drifted with unrelated WAL writes: %+v, inherited %d", cut.Head, frontier)
-			}
-		})
-	}
-}
-
-func TestChunkBirthCOWDoesNotObservePostBarrierWrite(t *testing.T) {
+func TestChunkCutCOWDoesNotObservePostBarrierWrite(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	cfg := ctConfig(1)
@@ -48,7 +19,7 @@ func TestChunkBirthCOWDoesNotObservePostBarrierWrite(t *testing.T) {
 	if _, err := s.Write(0, makeBlock(ctBlockSize, 0x41)); err != nil {
 		t.Fatal(err)
 	}
-	before, err := s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0x42))
+	_, err := s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0x42))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +46,7 @@ func TestChunkBirthCOWDoesNotObservePostBarrierWrite(t *testing.T) {
 	})
 	go func() { defer close(joined); _, err := l.Cut(ctx); done <- err }()
 	cowWaitSignal(t, entered, "copy after the birth barrier")
-	after, err := s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0x43))
+	_, err = s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0x43))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,17 +56,17 @@ func TestChunkBirthCOWDoesNotObservePostBarrierWrite(t *testing.T) {
 	}
 	cowWaitSignal(t, joined, "birth COW join")
 	first := f.installedHeads()[0]
-	if first.Chunks[1].BirthLSN != before || !bytes.Equal(f.imageOf(t, first)[ctChunkBlocks*ctBlockSize:(ctChunkBlocks+1)*ctBlockSize], makeBlock(ctBlockSize, 0x42)) {
-		t.Fatal("post-barrier write changed the saved image or its birth")
+	if !bytes.Equal(f.imageOf(t, first)[ctChunkBlocks*ctBlockSize:(ctChunkBlocks+1)*ctBlockSize], makeBlock(ctBlockSize, 0x42)) {
+		t.Fatal("post-barrier write changed the saved image")
 	}
 	l.testCOWRead = nil
 	second, err := l.Cut(ctTimeout(t))
-	if err != nil || second.Head.Chunks[1].BirthLSN != after {
-		t.Fatalf("next version lost post-barrier birth: %+v %v", second, err)
+	if err != nil || !bytes.Equal(f.imageOf(t, second.Head)[ctChunkBlocks*ctBlockSize:(ctChunkBlocks+1)*ctBlockSize], makeBlock(ctBlockSize, 0x43)) {
+		t.Fatalf("the next version lost the post-barrier write: %+v %v", second, err)
 	}
 }
 
-func TestChunkBirthTracksNewestLocalWriteAtCut(t *testing.T) {
+func TestChunkCutKeepsColdChunksAndDeletesZeroChunks(t *testing.T) {
 	for _, bound := range []int{0, 1} {
 		t.Run(string(rune('0'+bound)), func(t *testing.T) {
 			s, _ := newChunkTestStore(t)
@@ -104,8 +75,7 @@ func TestChunkBirthTracksNewestLocalWriteAtCut(t *testing.T) {
 			cfg.FreshFromHead = true
 			cfg.BarrierBound = bound
 			l := mustAttach(t, s, f, cfg)
-			x, err := s.Write(0, makeBlock(ctBlockSize, 0x41))
-			if err != nil {
+			if _, err := s.Write(0, makeBlock(ctBlockSize, 0x41)); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0x42)); err != nil {
@@ -119,10 +89,10 @@ func TestChunkBirthTracksNewestLocalWriteAtCut(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if first.Head.Chunks[0].BirthLSN != x || first.Head.Chunks[1].BirthLSN != y || first.Head.Chunks[0].Encoding != "full" || first.Head.RemoteLSN != y {
-				t.Fatalf("births did not preserve distinct local write frontiers: %+v, want %d/%d", first.Head, x, y)
+			if first.Head.Chunks[0].Encoding != "full" || first.Head.RemoteLSN != y {
+				t.Fatalf("first cut: %+v, want position %d", first.Head, y)
 			}
-			z, err := s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0x44))
+			_, err = s.Write(ctChunkBlocks, makeBlock(ctBlockSize, 0x44))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -130,8 +100,8 @@ func TestChunkBirthTracksNewestLocalWriteAtCut(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if second.Head.Chunks[0] != first.Head.Chunks[0] || second.Head.Chunks[1].BirthLSN != z {
-				t.Fatal("rewrite changed a cold chunk birth or failed to advance the changed version")
+			if second.Head.Chunks[0] != first.Head.Chunks[0] || second.Head.Chunks[1] == first.Head.Chunks[1] {
+				t.Fatal("rewrite changed a cold chunk or did not publish the changed one")
 			}
 			for _, lba := range []uint32{ctChunkBlocks, ctChunkBlocks + 1} {
 				if _, err := s.Write(lba, makeBlock(ctBlockSize, 0)); err != nil {
@@ -143,7 +113,7 @@ func TestChunkBirthTracksNewestLocalWriteAtCut(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, exists := third.Head.Chunks[1]; exists || third.Head.Chunks[0] != first.Head.Chunks[0] {
-				t.Fatal("zero-chunk deletion retained a reference or changed the cold birth")
+				t.Fatal("zero-chunk deletion retained a reference or changed the cold chunk")
 			}
 		})
 	}

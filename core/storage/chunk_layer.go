@@ -656,7 +656,6 @@ type capturedChunk struct {
 	sum     [32]byte
 	zero    bool
 	key     string // staged: already uploaded under this key (data is nil)
-	birth   uint64
 	size    int
 	missing []uint64 // local copy awaits the pinned HEAD, after the local entry is released
 }
@@ -889,9 +888,9 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	l.cutLSN = h
 	baseHead := copyHead(l.head)
 	l.stMu.Unlock()
-	// Candidates, mutation versions and births belong to the same barrier.
+	// Candidates, mutation versions and the copy-order hint belong to the same barrier.
 	// Do not sample the owned map after COW writers are admitted again.
-	births := l.captureBirths(candidates, h)
+	recent := l.chunkRecency(candidates, h)
 	st.CandidateNs += time.Since(candidateStart).Nanoseconds()
 	// The authoritative candidate set is fixed with mutation admission closed.
 	// The owner callback is nonblocking and may stop only an already drained
@@ -937,7 +936,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		if copyErr == nil {
 			var copied []capturedChunk
 			var ids []string
-			copied, ids, copyErr = l.copyCOWWindow(ctx, w, births, capturedVersions, baseHead)
+			copied, ids, copyErr = l.copyCOWWindow(ctx, w, recent, capturedVersions, baseHead)
 			intents = append(intents, ids...)
 			for _, c := range copied {
 				if c.key != "" {
@@ -985,7 +984,6 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	var uploads []upload
 	for _, c := range captured {
-		c.birth = births[c.idx]
 		ref, had := baseHead.Chunks[c.idx]
 		switch {
 		case c.zero && !had, unchangedFromHead(c, ref, had):
@@ -998,7 +996,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			continue
 		}
 		if c.key != "" { // staged: uploaded before the barrier
-			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full", BirthLSN: c.birth}
+			next.Chunks[c.idx] = chunkRef{Key: c.key, SHA256: c.sum, Encoding: "full"}
 			newKeys[c.idx] = c.key
 			changed = append(changed, c.idx)
 			if useStaged[c.idx] {
@@ -1040,7 +1038,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 	}
 	prepareStart = time.Now()
 	for _, u := range uploads {
-		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full", BirthLSN: u.c.birth}
+		next.Chunks[u.c.idx] = chunkRef{Key: u.key, SHA256: u.c.sum, Encoding: "full"}
 		newKeys[u.c.idx] = u.key
 		changed = append(changed, u.c.idx)
 		st.UploadedChunks++
