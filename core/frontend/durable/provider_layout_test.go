@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
@@ -137,6 +138,9 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 	if _, err = empty.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrMissingLocalRoot) {
 		t.Fatalf("empty own epoch: %v", err)
 	}
+	if gen, ended := empty.ChunkStartupOutcome("v1"); !ended || empty.ChunkStartupCure("v1", gen) != layout.MissingLocalRootCure {
+		t.Fatalf("missing local root did not end with its cure: ended=%t cure=%q", ended, empty.ChunkStartupCure("v1", gen))
+	}
 	if _, err = empty.LayoutHolder(ctx, "v1"); err == nil {
 		t.Fatal("failed Start exposed cleaning identity")
 	}
@@ -170,11 +174,32 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 	if _, err = remounted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrStaleLocalRoot) || !strings.Contains(err.Error(), layout.StaleLocalRootCure) {
 		t.Fatalf("old directory served new lineage: %v", err)
 	}
-	if _, ended := remounted.ChunkStartupOutcome("v1"); ended {
-		t.Fatal("same-holder stale local root was misclassified as superseded")
+	gen, ended := remounted.ChunkStartupOutcome("v1")
+	if !ended || remounted.ChunkStartupSuperseded("v1", gen) || remounted.ChunkStartupCure("v1", gen) != layout.StaleLocalRootCure {
+		t.Fatalf("stale root did not end with its cure: ended=%t superseded=%t cure=%q", ended, remounted.ChunkStartupSuperseded("v1", gen), remounted.ChunkStartupCure("v1", gen))
 	}
 	if remoteCalls != 2 {
 		t.Fatalf("remote constructed before Start/duplicated: %d", remoteCalls)
+	}
+	if err := remounted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	view = newStubView(frontend.Projection{})
+	deferred, _ := makeProvider(oldRoot)
+	if _, err := deferred.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatalf("local recovery before authority: %v", err)
+	}
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 3}))
+	waitFor(t, 4*time.Second, "deferred stale root to finish once", func() bool {
+		_, ended := deferred.ChunkStartupOutcome("v1")
+		return ended
+	})
+	gen, ended = deferred.ChunkStartupOutcome("v1")
+	if !ended || deferred.ChunkStartupSuperseded("v1", gen) || deferred.ChunkStartupCure("v1", gen) != layout.StaleLocalRootCure {
+		t.Fatalf("deferred stale root did not end with its cure: ended=%t superseded=%t cure=%q", ended, deferred.ChunkStartupSuperseded("v1", gen), deferred.ChunkStartupCure("v1", gen))
+	}
+	if err := deferred.Backend("v1").AdmitsIO(); err == nil {
+		t.Fatal("deferred stale root admitted guest I/O")
 	}
 }
 
