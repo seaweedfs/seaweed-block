@@ -517,7 +517,7 @@ Tests: `TestSnapshotSchedule_SlotsAreOffsetPerVolume`, `_FailureIsTypedAndBacksO
 
 ### M9 Snapshot kernel: HEAD transactions over the content-named layout
 
-A library, `core/frontend/chunkstore/layout`, with no production caller yet. A volume's HEAD holds its epoch and holder, one activity (`idle`, `snap(s)` or `clean(c)`), the current root and position, and the named snapshots with their dependents. Every transition is one conditional update of HEAD through `runTransition`; no transition creates a HEAD, and an absent HEAD is refused. Objects (chunks, segments, roots) are written first under content names; the commit is the only step that makes them reachable.
+A library, `core/frontend/chunkstore/layout`, with no production caller yet. A volume's HEAD holds its epoch and holder, one activity (`idle`, `snap(s)` or `clean(c)`), the current root and position, and the named snapshots with their dependents. Every transition is one conditional update of HEAD through `runTransition`; no transition creates a HEAD, and an absent HEAD is refused. One exception: the remove-dependent command of the operator writes a deleted HEAD exclusively for a restore target without HEAD (a tombstone), before releasing it from the source. Objects (chunks, segments, roots) are written first under content names; the commit is the only step that makes them reachable.
 
 ```mermaid
 stateDiagram-v2
@@ -533,6 +533,8 @@ stateDiagram-v2
   clean --> clean: RemoveUnreachable(shard)
   idle --> deleting: MarkDeleting (reserved, no live lease, no dependents)
   deleting --> deleted: MarkDeleted (after release and pool)
+  [*] --> deleted: tombstone (operator, target without HEAD; exclusive create)
+  idle --> idle: ReleaseDependent(target) on a source
 ```
 
 | From | To | Guard | Enforced in | Protects |
@@ -545,6 +547,8 @@ stateDiagram-v2
 | clean(c) | idle | holder at HEAD's epoch (epoch, server and claim id); activity clean(c); over idle it succeeds without a write | clean.go `Head.EndClean` | `INV-SNAPK-CLEAN-EXCL-001` |
 | clean(c) | clean(c), names removed | holder at HEAD's epoch (epoch, server and claim id) with clean(c) open (HEAD read once, after BeginClean); a name is deleted only if no root in HEAD (current or snapshot) names it in this volume's pool; each removal is a mark conditional on the plan's metadata, then a delete conditional on that mark | remove.go `RemoveUnreachable` | `INV-SNAPK-REMOVE-MARK-001` |
 | idle (live) | deleting | the master reserved the volume for delete (no line granted after), then no line holds a live lease, checked between the HEAD read and the update; no open activity, no snapshot with dependents; deleting again is a replay | delete.go `Head.MarkDeleting`, `RunMarkDeleting` (`DeleteAuthority`) | `INV-SNAPK-DELETE-ORDER-001` |
+| absent | deleted (tombstone) | the operator's remove-dependent, for a restore target without HEAD (never created, or a restore died between its two creates); one exclusive create, so a later HEAD create of the restore fails; a HEAD appearing first refuses | delete.go `OperatorReleaseDependent` (`TargetStore.CreateDeletedHead`) | `INV-SNAPK-TOMBSTONE-001`, `INV-SNAPK-HEAD-WRITE-001` |
+| source: any live | source: target released | by the target's volume id, from every snapshot: from DeleteVolume once the target's HEAD is deleting, or from the operator's command once the target is deleted, of another id, no longer naming the source, or tombstoned; an absent target writes nothing | delete.go `Head.ReleaseDependent`, `RunReleaseDependent`, `OperatorReleaseDependent` | `INV-SNAPK-RELEASE-001`, `INV-SNAPK-RELEASE-CALLERS-001`, `INV-SNAPK-RELEASE-OPERATOR-001` |
 | deleting | deleted | after this volume is released from every source it names and its objects are deleted; deleted again is a replay; a live HEAD is refused | delete.go `Head.MarkDeleted`, `DeleteVolume` | `INV-SNAPK-DELETE-ORDER-001` |
 
 ## Part B. Invariant ledger
