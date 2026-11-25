@@ -175,3 +175,28 @@ func TestBCatalog_RestoreOfARestoreTargetIsRefused(t *testing.T) {
 		t.Fatalf("restore from a snapshot naming another volume's chunks: %v; want ErrForeignSource", err)
 	}
 }
+
+// A restore target that was never started still names the source's
+// chunks: the operator's release of it is refused, and the source keeps its
+// dependent.
+func TestBCatalog_ReleaseOfAnUnstartedRestoreTargetIsRefused(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewBCatalog(newFakeFiler(), newFakeBlobs(), "/blocks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, tgt := newRef(t, "src"), newRef(t, "t")
+	if _, err := c.CreateVolume(ctx, src, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	commitSnapshot(t, c, src, []byte("data"), "daily")
+	if _, err := c.Restore(ctx, src, "daily", tgt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReleaseTarget(ctx, src, tgt); !errors.Is(err, layout.ErrTargetLive) {
+		t.Fatalf("release of an unstarted restore target: %v; want ErrTargetLive", err)
+	}
+	if h, _, _ := c.ReadHead(ctx, src); len(h.Snapshots["daily"].Dependents) != 1 {
+		t.Fatalf("source dependents after the refused release: %+v", h.Snapshots["daily"].Dependents)
+	}
+}
