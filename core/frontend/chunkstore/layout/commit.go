@@ -79,7 +79,7 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 		return Head{}, false, fmt.Errorf("%w: invalid commit state %q", ErrMalformed, state)
 	}
 	if h.State == state && h.Activity.Kind == ActIdle && h.Current != nil && *h.Current == root && h.Position == position {
-		if s, ok := h.Snapshots[snapshot]; snapshot == "" || ok && s.Root == root {
+		if s, ok := h.Snapshots[snapshot]; snapshot == "" || ok && s.Root == root && s.Position == position {
 			return h, false, nil
 		}
 	}
@@ -89,7 +89,9 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 	next = h.clone()
 	if snapshot != "" {
 		if s, ok := next.Snapshots[snapshot]; ok {
-			if s.Root != root {
+			// the same name at another root or another position is another
+			// commit's snapshot, never this one's replay
+			if s.Root != root || s.Position != position {
 				return Head{}, false, fmt.Errorf("%w: %q", ErrSnapshotExists, snapshot)
 			}
 		} else {

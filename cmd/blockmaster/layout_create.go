@@ -38,6 +38,23 @@ func layoutVolumeReader(cat *chunkstore.BCatalog) func(context.Context, lifecycl
 	}
 }
 
+func layoutHeadReader(cat *chunkstore.BCatalog) func(context.Context, lifecycle.VolumeSpec) (layout.Head, error) {
+	return func(ctx context.Context, spec lifecycle.VolumeSpec) (layout.Head, error) {
+		id, err := layout.ParseVolumeID(spec.LayoutID)
+		if err != nil {
+			return layout.Head{}, err
+		}
+		h, found, err := cat.ReadHead(ctx, chunkstore.VolumeRef{Name: spec.VolumeID, ID: id})
+		if err != nil {
+			return layout.Head{}, err
+		}
+		if !found {
+			return layout.Head{}, layout.ErrHeadAbsent
+		}
+		return h, nil
+	}
+}
+
 func layoutTargetCreator(cat *chunkstore.BCatalog) func(context.Context, lifecycle.VolumeSpec, lifecycle.VolumeSpec, string) error {
 	return func(ctx context.Context, source, target lifecycle.VolumeSpec, snapshot string) error {
 		sid, err := layout.ParseVolumeID(source.LayoutID)

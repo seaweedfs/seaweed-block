@@ -245,6 +245,7 @@ func run(f flags) int {
 		defer client.Close()
 		cfg.LayoutCreateVolume = layoutVolumeCreator(cat)
 		cfg.LayoutReadVolume = layoutVolumeReader(cat)
+		cfg.LayoutReadHead = layoutHeadReader(cat)
 		cfg.LayoutCreateTarget = layoutTargetCreator(cat)
 	}
 	if authn != nil {

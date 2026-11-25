@@ -26,6 +26,10 @@ func TestRestoreCreateVolumePersistsRequestBeforeTargetAndHealsRetry(t *testing.
 		id, err := layout.ParseVolumeID(source.LayoutID)
 		return layout.Volume{ID: id, Name: source.VolumeID, Geometry: g, Format: layout.VolumeFormat}, err
 	}
+	h.cfg.LayoutReadHead = func(_ context.Context, source lifecycle.VolumeSpec) (layout.Head, error) {
+		id, _ := layout.ParseVolumeID(source.LayoutID)
+		return layout.Head{VolumeID: id, State: layout.StateLive, Snapshots: map[string]layout.Snapshot{"daily": {}}}, nil
+	}
 	var targetID string
 	var calls int
 	h.cfg.LayoutCreateTarget = func(_ context.Context, source, target lifecycle.VolumeSpec, snapshot string) error {
@@ -33,6 +37,9 @@ func TestRestoreCreateVolumePersistsRequestBeforeTargetAndHealsRetry(t *testing.
 		rec, ok := h.Lifecycle().Volumes.GetVolume(target.VolumeID)
 		if !ok || rec.StoreReady || rec.Spec != target || snapshot != "daily" || source.VolumeID != "source" {
 			t.Fatalf("target called before durable request: %+v, source=%+v snapshot=%s", rec, source, snapshot)
+		}
+		if target.SourceLayoutID != source.LayoutID {
+			t.Fatalf("target did not bind source layout id: %+v source=%+v", target, source)
 		}
 		if targetID == "" {
 			targetID = target.LayoutID
@@ -59,6 +66,41 @@ func TestRestoreCreateVolumePersistsRequestBeforeTargetAndHealsRetry(t *testing.
 	req.SourceSnapshot = "weekly"
 	if _, err := svc.CreateVolume(context.Background(), req); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("rebound request: %v; want conflict", err)
+	}
+	wrong := &control.CreateVolumeRequest{VolumeId: "wrong", SourceVolume: "source", SourceSnapshot: "missing", CreateRequestId: "restore-wrong"}
+	if _, err := svc.CreateVolume(context.Background(), wrong); status.Code(err) != codes.NotFound {
+		t.Fatalf("missing snapshot: %v; want not found", err)
+	}
+	if _, ok := h.Lifecycle().Volumes.GetVolume("wrong"); ok {
+		t.Fatal("missing snapshot created a target record")
+	}
+	h.cfg.LayoutReadHead = func(_ context.Context, source lifecycle.VolumeSpec) (layout.Head, error) {
+		id, _ := layout.ParseVolumeID(source.LayoutID)
+		return layout.Head{VolumeID: id, State: layout.StateDeleting, Snapshots: map[string]layout.Snapshot{"daily": {}}}, nil
+	}
+	deleting := &control.CreateVolumeRequest{VolumeId: "from-deleting", SourceVolume: "source", SourceSnapshot: "daily", CreateRequestId: "restore-deleting"}
+	if _, err := svc.CreateVolume(context.Background(), deleting); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("deleting source: %v; want refusal", err)
+	}
+	if _, ok := h.Lifecycle().Volumes.GetVolume("from-deleting"); ok {
+		t.Fatal("deleting source created a target record")
+	}
+	unsafe := &control.CreateVolumeRequest{VolumeId: "net-target", SourceVolume: "source", SourceSnapshot: "daily", CreateRequestId: "restore-net", ReplicationFactor: 2}
+	if _, err := svc.CreateVolume(context.Background(), unsafe); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("RF2 restore: %v; want refusal", err)
+	}
+	if _, ok := h.Lifecycle().Volumes.GetVolume("net-target"); ok {
+		t.Fatal("RF2 restore created a target record")
+	}
+	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "net-source", SizeBytes: 1 << 20, ReplicationFactor: 2}); err != nil {
+		t.Fatal(err)
+	}
+	unsafe = &control.CreateVolumeRequest{VolumeId: "from-net", SourceVolume: "net-source", SourceSnapshot: "daily", CreateRequestId: "restore-from-net"}
+	if _, err := svc.CreateVolume(context.Background(), unsafe); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("RF2 source restore: %v; want refusal", err)
+	}
+	if _, ok := h.Lifecycle().Volumes.GetVolume("from-net"); ok {
+		t.Fatal("RF2 source restore created a target record")
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Every ops chunk command that writes chunk metadata runs the
@@ -99,6 +101,13 @@ func TestOpsChunkRestoreUsesOnlyMasterCreate(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("restore made %d RPCs; want one per invocation", calls)
+	}
+	restoreCreateRPC = func(context.Context, string, *control.CreateVolumeRequest) (*control.CreateVolumeResponse, error) {
+		return nil, status.Error(codes.Unavailable, "filer unreachable")
+	}
+	var out, errs bytes.Buffer
+	if code := run(args, &out, &errs); code != chunkExitFailed || !strings.Contains(out.String(), `"retryable":true`) || !strings.Contains(out.String(), codeUnavailableCLI) {
+		t.Fatalf("uncertain restore must be retryable: code=%d out=%q err=%q", code, out.String(), errs.String())
 	}
 }
 
