@@ -117,6 +117,9 @@ func TestLayoutStartCrashAtEachDurableArrow(t *testing.T) {
 				if _, err = p.RecoverVolume(ctx, "v"); !errors.Is(err, crash) {
 					t.Fatalf("interruption: %v", err)
 				}
+				if err := p.volumes["v"].backend.readyCheck(); !errors.Is(err, frontend.ErrNotReady) {
+					t.Fatalf("interrupted Start admitted guest I/O: %v", err)
+				}
 				_, fresh, _ = ws.LayoutIdentity()
 				if fresh != (point != "fresh clear") {
 					t.Fatalf("fresh=%v at %s", fresh, point)
@@ -139,12 +142,13 @@ func TestLayoutStartCrashAtEachDurableArrow(t *testing.T) {
 				if _, fresh, _ = ws.LayoutIdentity(); fresh {
 					t.Fatal("Start served before fresh clear")
 				}
-				got, err := ws.Read(0)
-				if err != nil || !bytes.Equal(got, want) {
-					t.Fatalf("base read: %v bytes match=%v", err, bytes.Equal(got, want))
+				got := make([]byte, 4096)
+				n, err := reopened.volumes["v"].backend.Read(ctx, 0, got)
+				if err != nil || n != len(got) || !bytes.Equal(got, want) {
+					t.Fatalf("guest base read: n=%d err=%v bytes match=%v", n, err, bytes.Equal(got, want))
 				}
-				if _, err = ws.Write(1, bytes.Repeat([]byte{'B'}, 4096)); err != nil {
-					t.Fatalf("write after Start: %v", err)
+				if n, err := reopened.volumes["v"].backend.Write(ctx, 4096, bytes.Repeat([]byte{'B'}, 4096)); err != nil || n != 4096 {
+					t.Fatalf("guest write after Start: n=%d err=%v", n, err)
 				}
 				if _, err = ws.Sync(); err != nil {
 					t.Fatal(err)
