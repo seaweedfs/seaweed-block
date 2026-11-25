@@ -30,8 +30,12 @@ type Pool interface {
 // volume's pool is deleted, each delete preceded by a check of the
 // remover's own lease. HEAD is read once, after BeginClean: while clean is
 // open no commit can add a root, and a claim that voids the cleaning waits
-// for this lease to end, which the check before every delete sees. It
-// returns the names it deleted, in index order.
+// for this lease to end, which the check before every delete sees. Chunks
+// a restore target names stay live here: the source's snapshot root names
+// them, and that snapshot stays in HEAD while it has dependents (a
+// dependent is added before its target exists, and a target never becomes
+// a restore source while it names foreign chunks). It returns the names it
+// deleted, in index order.
 func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, pool Pool, lease LeaseHeld, me HolderID, session string, shard uint64, candidates []ChunkName) ([]ChunkName, error) {
 	if lease == nil || pool == nil || r == nil {
 		return nil, errors.New("layout: removal needs a reader, a pool and a lease check")
@@ -82,6 +86,10 @@ func reachable(ctx context.Context, r *Reader, h Head, shard uint64) (map[ChunkN
 	for _, s := range h.Snapshots {
 		roots[s.Root] = true
 	}
+	own, err := r.VolumeID(ctx, r.vol)
+	if err != nil {
+		return nil, err
+	}
 	live := map[ChunkName]bool{}
 	for rn := range roots {
 		img, err := r.Open(ctx, rn)
@@ -96,7 +104,7 @@ func reachable(ctx context.Context, r *Reader, h Head, shard uint64) (map[ChunkN
 			continue
 		}
 		for _, ref := range seg.Chunks {
-			if ref.Owner == r.vol {
+			if ref.OwnerID == own {
 				live[ref.Chunk] = true
 			}
 		}

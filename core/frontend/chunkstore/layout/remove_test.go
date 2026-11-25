@@ -66,6 +66,11 @@ func (l *fakeHeld) StillHeld(context.Context) error {
 func removeFixture(t *testing.T) (*objPool, *Head, []ChunkName, []ChunkName) {
 	t.Helper()
 	objs := map[string][]byte{}
+	vb, err := Volume{ID: idFor("v1"), Name: "v1", Format: VolumeFormat}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs[path.Join(volRoot, VolumeName)] = vb
 	cur := manifest(ref("v1", 0, "a"), ref("v1", 3, "b"))
 	old := manifest(ref("v1", 0, "a"), ref("v1", 2, "c"))
 	curRoot := writeImage(t, objs, cur, map[uint64][]byte{0: []byte("a"), 3: []byte("b")})
@@ -76,7 +81,7 @@ func removeFixture(t *testing.T) (*objPool, *Head, []ChunkName, []ChunkName) {
 		objs[path.Join(volRoot, c.Path())] = []byte(d)
 		orphans = append(orphans, c)
 	}
-	h := &Head{Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActClean, Session: "c1"}, Current: &curRoot,
+	h := &Head{Gen: 7, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActClean, Session: "c1"}, Current: &curRoot,
 		Snapshots: map[string]Snapshot{"daily": {Root: oldRoot}}}
 	live := []ChunkName{cur[0].Chunk, cur[3].Chunk, old[2].Chunk}
 	return &objPool{objs: objs}, h, live, orphans
@@ -265,5 +270,15 @@ func TestCleaningPass_InterruptAtEveryStep(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The remover tells its own chunks by its VOLUME id: without a readable
+// VOLUME it removes nothing.
+func TestRemoveUnreachable_NeedsItsOwnVolumeID(t *testing.T) {
+	o, h, _, orphans := removeFixture(t)
+	delete(o.objs, path.Join(volRoot, VolumeName))
+	if _, err := removeShard0(t, &memHead{h: h}, o, &fakeHeld{}, "c1", orphans); !errors.Is(err, ErrMissing) || len(o.deletes) != 0 {
+		t.Fatalf("removal without VOLUME: %v, %d deletes; want ErrMissing and none", err, len(o.deletes))
 	}
 }

@@ -22,8 +22,9 @@ func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 		"Claim":      func(h Head, c HolderID) error { _, _, err := h.Claim(c); return err },
 	}
 	callers := map[string]HolderID{
-		"older epoch, same server":   {Epoch: 2, Holder: "srv-a"},
-		"same epoch, another server": {Epoch: 3, Holder: "srv-b"},
+		"older epoch, same server":                {Epoch: 2, Holder: "srv-a"},
+		"same epoch, another server":              {Epoch: 3, Holder: "srv-b"},
+		"same epoch and server, another claim id": {Epoch: 3, Holder: "srv-a", ClaimID: "k-other"},
 	}
 	for name, step := range steps {
 		for who, c := range callers {

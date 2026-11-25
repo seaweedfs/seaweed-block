@@ -160,7 +160,7 @@ func sessionFixture(t *testing.T) (func() *memVolume, map[uint64][]byte, CommitR
 	fresh := func() *memVolume {
 		objs := map[string][]byte{}
 		prevRoot := writeImage(t, objs, prev, prevData)
-		h := Head{Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActIdle}, Current: &prevRoot, Position: 40,
+		h := Head{Gen: 7, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}, Current: &prevRoot, Position: 40,
 			Snapshots: map[string]Snapshot{"daily": {Root: prevRoot}}}
 		return &memVolume{head: &memHead{h: &h}, objects: objs}
 	}

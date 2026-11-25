@@ -50,7 +50,7 @@ func TestCommit_Closure(t *testing.T) {
 	if err != nil || !changed || next.Activity.Kind != ActIdle || *next.Current != rn || next.Position != 50 || next.Snapshots["hourly"].Root != rn {
 		t.Fatalf("Commit: %+v %t %v", next, changed, err)
 	}
-	if next.Snapshots["daily"].Dependents[0] != "t1" || len(next.Snapshots) != 2 {
+	if next.Snapshots["daily"].Dependents[0].Target != "t1" || len(next.Snapshots) != 2 {
 		t.Fatalf("Commit changed other snapshots: %+v", next.Snapshots)
 	}
 	if h.Activity.Kind != ActSnap || h.Snapshots["hourly"].Root == rn {
@@ -74,7 +74,7 @@ func TestCommit_Closure(t *testing.T) {
 	}{
 		"idle":           {idleHead(), me, "", ErrNoSession},
 		"other session":  {snapHead("s2"), me, "", ErrNoSession},
-		"cleaning":       {Head{Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActClean, Session: "s1"}}, me, "", ErrNoSession},
+		"cleaning":       {Head{Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActClean, Session: "s1"}}, me, "", ErrNoSession},
 		"other epoch":    {h, HolderID{Epoch: 2, Holder: "srv-a"}, "", ErrNotHolder},
 		"other holder":   {h, HolderID{Epoch: 3, Holder: "srv-b"}, "", ErrNotHolder},
 		"name taken":     {h, me, "daily", ErrSnapshotExists},
@@ -96,7 +96,7 @@ func commitFixture(t *testing.T) (*fakeStore, Head, CommitRequest) {
 	prevRoot := prepared(t, f, prev)
 	next := manifest(ref("v1", 0, "a"), ref("v1", 3, "b2"), ref("v1", 10004, "c"), ref("src", 7, "d"))
 	prepared(t, f, next)
-	h := Head{Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActSnap, Session: "s1"}, Current: &prevRoot, Position: 40}
+	h := Head{Gen: 7, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActSnap, Session: "s1"}, Current: &prevRoot, Position: 40}
 	return f, h, CommitRequest{Session: "s1", Prev: prev, Next: next, Position: 50, Snapshot: "hourly"}
 }
 
@@ -182,7 +182,7 @@ func TestRunCommit_StaleBaseAndLookupFailure(t *testing.T) {
 	f2 := &fakeStore{have: map[string]bool{}}
 	next := manifest(ref("v1", 1, "x"))
 	prepared(t, f2, next)
-	h2 := Head{Gen: 1, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActSnap, Session: "s1"}}
+	h2 := Head{Gen: 1, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActSnap, Session: "s1"}}
 	if got, err := runCommit(&memHead{h: &h2}, f2, CommitRequest{Session: "s1", Next: next, Position: 5}); err != nil || got.Current == nil {
 		t.Fatalf("first commit: %+v %v", got, err)
 	}
@@ -243,7 +243,7 @@ func TestRunCommit_AfterAnEmptyPublishedRoot(t *testing.T) {
 	}
 	// Before any commit there is no current root: a non-empty previous
 	// manifest is stale there too.
-	h0 := Head{Gen: 1, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActSnap, Session: "s9"}}
+	h0 := Head{Gen: 1, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActSnap, Session: "s9"}}
 	if _, err := runCommit(&memHead{h: &h0}, f, CommitRequest{Session: "s9", Prev: next, Next: next, Position: 3}); !errors.Is(err, ErrStaleBase) {
 		t.Fatalf("a previous manifest before any commit: %v; want ErrStaleBase", err)
 	}

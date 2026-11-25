@@ -31,19 +31,34 @@ type Activity struct {
 	Session string `json:"session,omitempty"`
 }
 
+// Dependent is a restore target that still names a snapshot's chunks: the
+// target volume's name and id, and the root it was made from. A volume
+// created again under the target's name, or a snapshot name reused for
+// another root, matches no dependent.
+type Dependent struct {
+	Target   string
+	TargetID VolumeID
+	Root     RootName
+}
+
 // Snapshot is one named snapshot: its root and the restore targets that
-// still name its chunks.
+// still name its chunks, ordered by target id.
 type Snapshot struct {
 	Root       RootName
-	Dependents []string
+	Dependents []Dependent
 }
 
 // Head is the decoded HEAD. Gen is the generation the store holds it at;
-// it is not part of the encoding.
+// it is not part of the encoding. VolumeID is the volume's id (its VOLUME
+// record's); ClaimID is the id the current holder's claim wrote, which
+// with the epoch identifies the holder's local data (the holder's name
+// repeats across restarts and same-host moves).
 type Head struct {
 	Gen       uint64
+	VolumeID  VolumeID
 	Epoch     uint64
 	Holder    string
+	ClaimID   string
 	Activity  Activity
 	Current   *RootName // nil: no image committed yet
 	Position  uint64
@@ -51,8 +66,10 @@ type Head struct {
 }
 
 type headDoc struct {
+	VolumeID  string             `json:"volume_id"`
 	Epoch     uint64             `json:"epoch"`
 	Holder    string             `json:"holder"`
+	ClaimID   string             `json:"claim_id,omitempty"`
 	Activity  Activity           `json:"activity"`
 	Current   string             `json:"current,omitempty"`
 	Position  uint64             `json:"position"`
@@ -61,7 +78,13 @@ type headDoc struct {
 
 type snapDoc struct {
 	Root       string   `json:"root"`
-	Dependents []string `json:"dependents,omitempty"`
+	Dependents []depDoc `json:"dependents,omitempty"`
+}
+
+type depDoc struct {
+	Target   string `json:"target"`
+	TargetID string `json:"target_id"`
+	Root     string `json:"root"`
 }
 
 // validName refuses a string the JSON encoding would not keep byte for
@@ -75,7 +98,10 @@ func validName(field, v string) error {
 }
 
 func (h Head) check() error {
-	for field, v := range map[string]string{"holder": h.Holder, "session": h.Activity.Session} {
+	if h.VolumeID.IsZero() {
+		return fmt.Errorf("%w: HEAD without a volume id", ErrMalformed)
+	}
+	for field, v := range map[string]string{"holder": h.Holder, "session": h.Activity.Session, "claim id": h.ClaimID} {
 		if err := validName(field, v); err != nil {
 			return err
 		}
@@ -106,14 +132,20 @@ func (h Head) check() error {
 			return err
 		}
 		for i, d := range s.Dependents {
-			if err := validName("dependent", d); err != nil {
+			if err := validName("dependent", d.Target); err != nil {
 				return err
 			}
-			if err := checkOwner(d); err != nil {
+			if err := checkOwner(d.Target); err != nil {
 				return err
 			}
-			if i > 0 && s.Dependents[i-1] >= d {
-				return fmt.Errorf("%w: snapshot %q dependents not sorted and unique", ErrMalformed, n)
+			if d.TargetID.IsZero() {
+				return fmt.Errorf("%w: snapshot %q dependent %q without its volume id", ErrMalformed, n, d.Target)
+			}
+			if d.Root != s.Root {
+				return fmt.Errorf("%w: snapshot %q dependent %q records root %s, not the snapshot's %s", ErrMalformed, n, d.Target, d.Root, s.Root)
+			}
+			if i > 0 && bytes.Compare(s.Dependents[i-1].TargetID[:], d.TargetID[:]) >= 0 {
+				return fmt.Errorf("%w: snapshot %q dependents not ordered and unique by target id", ErrMalformed, n)
 			}
 		}
 	}
@@ -125,14 +157,18 @@ func (h Head) Encode() ([]byte, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
-	d := headDoc{Epoch: h.Epoch, Holder: h.Holder, Activity: h.Activity, Position: h.Position}
+	d := headDoc{VolumeID: h.VolumeID.String(), Epoch: h.Epoch, Holder: h.Holder, ClaimID: h.ClaimID, Activity: h.Activity, Position: h.Position}
 	if h.Current != nil {
 		d.Current = h.Current.String()
 	}
 	if len(h.Snapshots) > 0 {
 		d.Snapshots = map[string]snapDoc{}
 		for n, s := range h.Snapshots {
-			d.Snapshots[n] = snapDoc{Root: s.Root.String(), Dependents: s.Dependents}
+			sd := snapDoc{Root: s.Root.String()}
+			for _, dep := range s.Dependents {
+				sd.Dependents = append(sd.Dependents, depDoc{Target: dep.Target, TargetID: dep.TargetID.String(), Root: dep.Root.String()})
+			}
+			d.Snapshots[n] = sd
 		}
 	}
 	return json.Marshal(d)
@@ -147,7 +183,11 @@ func DecodeHead(b []byte, gen uint64) (Head, error) {
 	if err := dec.Decode(&d); err != nil {
 		return Head{}, fmt.Errorf("%w: HEAD: %v", ErrMalformed, err)
 	}
-	h := Head{Gen: gen, Epoch: d.Epoch, Holder: d.Holder, Activity: d.Activity, Position: d.Position}
+	vid, err := ParseVolumeID(d.VolumeID)
+	if err != nil {
+		return Head{}, err
+	}
+	h := Head{Gen: gen, VolumeID: vid, Epoch: d.Epoch, Holder: d.Holder, ClaimID: d.ClaimID, Activity: d.Activity, Position: d.Position}
 	if d.Current != "" {
 		rn, err := ParseRootName(d.Current)
 		if err != nil {
@@ -162,7 +202,19 @@ func DecodeHead(b []byte, gen uint64) (Head, error) {
 			if err != nil {
 				return Head{}, err
 			}
-			h.Snapshots[n] = Snapshot{Root: rn, Dependents: s.Dependents}
+			snap := Snapshot{Root: rn}
+			for _, dep := range s.Dependents {
+				tid, err := ParseVolumeID(dep.TargetID)
+				if err != nil {
+					return Head{}, err
+				}
+				drn, err := ParseRootName(dep.Root)
+				if err != nil {
+					return Head{}, err
+				}
+				snap.Dependents = append(snap.Dependents, Dependent{Target: dep.Target, TargetID: tid, Root: drn})
+			}
+			h.Snapshots[n] = snap
 		}
 	}
 	again, err := h.Encode()
@@ -183,14 +235,19 @@ var (
 	ErrNoSession  = errors.New("layout: the session is not open")
 )
 
-// HolderID is the identity a transition acts as: the epoch of the line it was
-// granted and its server.
+// HolderID is the identity a transition acts as: the epoch of the line it
+// was granted, its server, and the claim id its claim wrote into HEAD. The
+// server's name repeats (a restart, a same-host move); a decision never
+// rests on it alone.
 type HolderID struct {
-	Epoch  uint64
-	Holder string
+	Epoch   uint64
+	Holder  string
+	ClaimID string
 }
 
-func (h Head) heldBy(me HolderID) bool { return h.Epoch == me.Epoch && h.Holder == me.Holder }
+func (h Head) heldBy(me HolderID) bool {
+	return h.Epoch == me.Epoch && h.Holder == me.Holder && h.ClaimID == me.ClaimID
+}
 
 // Begin is transition 2: activity idle -> snap(session), by the holder at
 // HEAD's epoch. Begin of the session already open is a replay: it returns
@@ -222,7 +279,7 @@ func (h Head) clone() Head {
 	if h.Snapshots != nil {
 		c.Snapshots = make(map[string]Snapshot, len(h.Snapshots))
 		for n, s := range h.Snapshots {
-			c.Snapshots[n] = Snapshot{Root: s.Root, Dependents: append([]string(nil), s.Dependents...)}
+			c.Snapshots[n] = Snapshot{Root: s.Root, Dependents: append([]Dependent(nil), s.Dependents...)}
 		}
 	}
 	return c

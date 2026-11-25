@@ -84,8 +84,16 @@ func TestParseChunkName_RoundTripAndRefusals(t *testing.T) {
 	}
 }
 
+// idFor is a fixed test volume id per volume name.
+func idFor(name string) VolumeID {
+	var id VolumeID
+	h := Sum([]byte("volume " + name))
+	copy(id[:], h[:])
+	return id
+}
+
 func ref(owner string, idx uint64, data string) Ref {
-	return Ref{Owner: owner, Chunk: NameChunk(idx, []byte(data))}
+	return Ref{Owner: owner, OwnerID: idFor(owner), Chunk: NameChunk(idx, []byte(data))}
 }
 
 // goldenSegment is the encoding of shard 1 holding chunk 10000 ("abc", own)
@@ -95,16 +103,20 @@ func goldenSegment(t *testing.T) []byte {
 	h := mustHash(t, abcHash)
 	h2 := Sum([]byte("x"))
 	var b []byte
-	b = append(b, "SWBSEG\x01"...)
+	b = append(b, "SWBSEG\x02"...)
 	b = binary.AppendUvarint(b, 1) // shard
 	b = binary.AppendUvarint(b, 2) // entries
 	b = binary.AppendUvarint(b, 10000)
 	b = binary.AppendUvarint(b, 2)
 	b = append(b, "v1"...)
+	v1 := idFor("v1")
+	b = append(b, v1[:]...)
 	b = append(b, h[:]...)
 	b = binary.AppendUvarint(b, 10001)
 	b = binary.AppendUvarint(b, 3)
 	b = append(b, "src"...)
+	src := idFor("src")
+	b = append(b, src[:]...)
 	b = append(b, h2[:]...)
 	return b
 }
@@ -143,6 +155,7 @@ func TestSegment_EncodeRefusals(t *testing.T) {
 		"owner empty":          {Shard: 0, Chunks: map[uint64]Ref{1: ref("", 1, "a")}},
 		"owner with slash":     {Shard: 0, Chunks: map[uint64]Ref{1: ref("a/b", 1, "a")}},
 		"owner dot-dot":        {Shard: 0, Chunks: map[uint64]Ref{1: ref("..", 1, "a")}},
+		"owner without id":     {Shard: 0, Chunks: map[uint64]Ref{1: {Owner: "v1", Chunk: NameChunk(1, []byte("a"))}}},
 	} {
 		if _, err := s.Encode(); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v; want ErrMalformed", name, err)
@@ -154,13 +167,14 @@ func TestSegment_EncodeRefusals(t *testing.T) {
 // makes: the hostile inputs DecodeSegment must refuse.
 func segBytes(shard uint64, entries ...Ref) []byte {
 	var b []byte
-	b = append(b, "SWBSEG\x01"...)
+	b = append(b, "SWBSEG\x02"...)
 	b = binary.AppendUvarint(b, shard)
 	b = binary.AppendUvarint(b, uint64(len(entries)))
 	for _, r := range entries {
 		b = binary.AppendUvarint(b, r.Chunk.Index)
 		b = binary.AppendUvarint(b, uint64(len(r.Owner)))
 		b = append(b, r.Owner...)
+		b = append(b, r.OwnerID[:]...)
 		b = append(b, r.Chunk.Hash[:]...)
 	}
 	return b
@@ -172,12 +186,12 @@ func TestDecodeSegment_RefusesNonCanonical(t *testing.T) {
 	if _, err := DecodeSegment(good); err != nil {
 		t.Fatalf("control: %v", err)
 	}
-	nonMinimal := append([]byte("SWBSEG\x01"), 0x80, 0x00) // shard 0 in two bytes
-	nonMinimal = append(nonMinimal, segBytes(0, a, c)[len("SWBSEG\x01")+1:]...)
-	huge := append([]byte("SWBSEG\x01"), 0)
+	nonMinimal := append([]byte("SWBSEG\x02"), 0x80, 0x00) // shard 0 in two bytes
+	nonMinimal = append(nonMinimal, segBytes(0, a, c)[len("SWBSEG\x02")+1:]...)
+	huge := append([]byte("SWBSEG\x02"), 0)
 	huge = binary.AppendUvarint(huge, ShardSize+1)
 	for name, b := range map[string][]byte{
-		"wrong magic":         append([]byte("SWBSEG\x02"), good[7:]...),
+		"wrong magic":         append([]byte("SWBSEG\x01"), good[7:]...),
 		"unsorted":            segBytes(0, c, a),
 		"duplicate":           segBytes(0, a, a),
 		"empty":               segBytes(0),
@@ -334,7 +348,8 @@ func TestEncodings_RandomRoundTrip(t *testing.T) {
 			i := uint64(rng.Int63n(100000))
 			var d [8]byte
 			rng.Read(d[:])
-			m[i] = Ref{Owner: owners[rng.Intn(len(owners))], Chunk: NameChunk(i, d[:])}
+			o := owners[rng.Intn(len(owners))]
+			m[i] = Ref{Owner: o, OwnerID: idFor(o), Chunk: NameChunk(i, d[:])}
 		}
 		root, segs, err := Build(m)
 		if err != nil {

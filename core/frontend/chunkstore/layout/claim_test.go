@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-var newer = HolderID{Epoch: 4, Holder: "srv-b"}
+var newer = HolderID{Epoch: 4, Holder: "srv-b", ClaimID: "k-b"}
 
 // fakeLease records its calls; ended says whether old leases are over.
 type fakeLease struct {
@@ -30,7 +30,7 @@ func TestClaim_Closure(t *testing.T) {
 	for name, h := range map[string]Head{
 		"idle":     idleHead(),
 		"snap(s)":  snapHead("s1"),
-		"clean(c)": {Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActClean, Session: "c1"}},
+		"clean(c)": {Gen: 7, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActClean, Session: "c1"}},
 	} {
 		next, changed, err := h.Claim(newer)
 		if err != nil || !changed || next.Epoch != 4 || next.Holder != "srv-b" || next.Activity != (Activity{Kind: ActIdle}) {
@@ -51,8 +51,9 @@ func TestClaim_Closure(t *testing.T) {
 		me   HolderID
 		want error
 	}{
-		"older epoch":                {HolderID{Epoch: 2, Holder: "srv-b"}, ErrStaleEpoch},
-		"same epoch, another server": {HolderID{Epoch: 3, Holder: "srv-b"}, ErrNotHolder},
+		"older epoch":                             {HolderID{Epoch: 2, Holder: "srv-b", ClaimID: "k-b"}, ErrStaleEpoch},
+		"same epoch, another server":              {HolderID{Epoch: 3, Holder: "srv-b", ClaimID: "k-b"}, ErrNotHolder},
+		"same epoch and server, another claim id": {HolderID{Epoch: 3, Holder: "srv-a", ClaimID: "k-other"}, ErrNotHolder},
 	} {
 		if _, _, err := h.Claim(tc.me); !errors.Is(err, tc.want) {
 			t.Errorf("%s: %v; want %v", name, err, tc.want)
@@ -127,4 +128,24 @@ func TestRunClaim_InterruptAtEveryStep(t *testing.T) {
 			t.Fatalf("HEAD after Claim: %+v", h)
 		}
 	})
+}
+
+// A claim writes its claim id into HEAD; a later claim at that epoch by
+// the same server with another claim id (another process, fresh local
+// data) is refused, and the same claim id again is a replay.
+func TestClaim_WritesItsClaimID(t *testing.T) {
+	next, changed, err := idleHead().Claim(newer)
+	if err != nil || !changed || next.ClaimID != "k-b" {
+		t.Fatalf("Claim: %+v %t %v; want claim id k-b written", next, changed, err)
+	}
+	if _, changed, err := next.Claim(newer); err != nil || changed {
+		t.Fatalf("Claim again with the same claim id: %t %v; want a replay", changed, err)
+	}
+	other := HolderID{Epoch: newer.Epoch, Holder: newer.Holder, ClaimID: "k-b2"}
+	if _, _, err := next.Claim(other); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("Claim at the same epoch by the same server with another claim id: %v; want ErrNotHolder", err)
+	}
+	if _, _, err := next.Begin(other, "s"); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("Begin by the same server with another claim id: %v; want ErrNotHolder", err)
+	}
 }

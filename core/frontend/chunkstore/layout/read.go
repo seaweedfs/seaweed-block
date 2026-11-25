@@ -14,6 +14,10 @@ var ErrMissing = errors.New("layout: object missing")
 // ErrCorrupt reports an object whose bytes do not match its name.
 var ErrCorrupt = errors.New("layout: object corrupt")
 
+// ErrIdentity reports a reference to a volume whose VOLUME record carries
+// another id: the volume was deleted and created again under the name.
+var ErrIdentity = errors.New("layout: volume id does not match the reference")
+
 // Fetch reads the whole object at p. A missing object is (nil, false, nil);
 // any other failure is an error.
 type Fetch func(ctx context.Context, p string) (data []byte, found bool, err error)
@@ -24,6 +28,7 @@ type Fetch func(ctx context.Context, p string) (data []byte, found bool, err err
 type Reader struct {
 	base, vol string
 	fetch     Fetch
+	ids       map[string]VolumeID // VOLUME ids read so far, by volume name
 }
 
 // NewReader returns a Reader of vol under base.
@@ -34,7 +39,29 @@ func NewReader(base, vol string, fetch Fetch) (*Reader, error) {
 	if fetch == nil {
 		return nil, errors.New("layout: reader needs a fetch")
 	}
-	return &Reader{base: base, vol: vol, fetch: fetch}, nil
+	return &Reader{base: base, vol: vol, fetch: fetch, ids: map[string]VolumeID{}}, nil
+}
+
+// VolumeID returns the id in the VOLUME record of the named volume, read
+// once per Reader. A missing VOLUME is ErrMissing.
+func (r *Reader) VolumeID(ctx context.Context, vol string) (VolumeID, error) {
+	if id, ok := r.ids[vol]; ok {
+		return id, nil
+	}
+	p := path.Join(r.base, vol, VolumeName)
+	b, ok, err := r.fetch(ctx, p)
+	if err != nil {
+		return VolumeID{}, fmt.Errorf("layout: read %s: %w", p, err)
+	}
+	if !ok {
+		return VolumeID{}, fmt.Errorf("%w: %s", ErrMissing, p)
+	}
+	v, err := DecodeVolume(b)
+	if err != nil {
+		return VolumeID{}, fmt.Errorf("%w: %s: %v", ErrCorrupt, p, err)
+	}
+	r.ids[vol] = v.ID
+	return v.ID, nil
 }
 
 // get fetches the object at rel under volume vol and checks its bytes hash
@@ -120,8 +147,9 @@ func (img *Image) Resolve(ctx context.Context, index uint64) (ref Ref, zero bool
 }
 
 // Chunk resolves index and reads its bytes from the pool of the volume
-// that owns it. A chunk the root names but the owner's pool lacks is
-// ErrMissing.
+// that owns it, after checking that volume's VOLUME id is the one the
+// reference carries (ErrIdentity otherwise). A chunk the root names but the
+// owner's pool lacks is ErrMissing.
 func (img *Image) Chunk(ctx context.Context, index uint64) (Chunk, error) {
 	ref, zero, err := img.Resolve(ctx, index)
 	if err != nil {
@@ -129,6 +157,13 @@ func (img *Image) Chunk(ctx context.Context, index uint64) (Chunk, error) {
 	}
 	if zero {
 		return Chunk{Zero: true}, nil
+	}
+	id, err := img.r.VolumeID(ctx, ref.Owner)
+	if err != nil {
+		return Chunk{}, err
+	}
+	if id != ref.OwnerID {
+		return Chunk{}, fmt.Errorf("%w: chunk %d names %s id %s, VOLUME has %s", ErrIdentity, index, ref.Owner, ref.OwnerID, id)
 	}
 	b, err := img.r.get(ctx, ref.Owner, ref.Chunk.Path(), ref.Chunk.Hash)
 	if err != nil {
