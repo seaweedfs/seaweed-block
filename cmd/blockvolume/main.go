@@ -979,6 +979,7 @@ func runVolume(f flags, exits *processExit) int {
 			// ProductionProbeFn routes per-peer via this registry so
 			// engine.checkReplicaID accepts the events.
 			peerRegistry := volume.NewPeerAdapterRegistry(f.volumeID, f.replicaID)
+			peerRegistry.SetFrontier(store.Sync)
 			if err := replVolume.ConfigurePeerLifecycleHook(peerRegistry.OnPeerAdded, peerRegistry.OnPeerRemoved); err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: peer lifecycle hook:", err)
 				_ = replVolume.Close()
