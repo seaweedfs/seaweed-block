@@ -246,6 +246,31 @@ message AssignmentFact {
 
     // Required holder identity. Empty (pre-release master) is never adopted.
     string server_id = 9;
+
+    // primary_kind says how this line made its primary the primary. The
+    // target checks it before adopting the role: a PROMOTION carries the
+    // evidence the master probed on the target (its durable LSN and its
+    // epoch-table row at that LSN), and the target adopts only if its own
+    // store still shows it. UNSPECIFIED (a pre-release master) is never
+    // adopted by a replicated volume's target that holds data at an epoch it
+    // has no row for.
+    PrimaryKind primary_kind = 10;
+    uint64 evidence_durable_lsn = 11;
+    uint64 evidence_epoch = 12;
+    uint64 evidence_first_lsn = 13;
+}
+
+// PrimaryKind is how a line made its primary the primary.
+enum PrimaryKind {
+    PRIMARY_KIND_UNSPECIFIED = 0;
+    // The volume's first primary: the target holds no data.
+    PRIMARY_KIND_BOOTSTRAP = 1;
+    // A replica promoted on the master's probed evidence (automatic
+    // promotion, failover, failback, a planned move).
+    PRIMARY_KIND_PROMOTION = 2;
+    // The operator's forced promotion: no evidence; the lost range is
+    // reported and the target's epoch table restarts at this epoch.
+    PRIMARY_KIND_FORCED = 3;
 }
 
 message StatusRequest {
