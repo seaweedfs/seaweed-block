@@ -319,16 +319,17 @@ type volHandle struct {
 	// wait, 0 if none: a recovered volume whose layer waits for master
 	// authority. A wait only acts while its generation is still the
 	// latest recovery's.
-	recoverGen        uint64
-	waitGen           uint64
-	startupSuperseded bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
-	startupEnded      uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
-	runtimeFenced     bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
-	chunk             storage.ChunkLayer // after RecoverVolume
-	layoutHolder      layout.HolderID    // successful Start identity; guarded by p.mu
-	layoutHead        layout.HeadStore
-	layoutRemote      storage.ChunkRemote // one runtime per attachment, including attach retries
-	chunkLineage      chunkLineage        // immutable authority captured by this attachment
+	recoverGen             uint64
+	waitGen                uint64
+	startupIdentityRefused bool               // definite VOLUME/HEAD identity mismatch for startupEnded
+	startupSuperseded      bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
+	startupEnded           uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
+	runtimeFenced          bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
+	chunk                  storage.ChunkLayer // after RecoverVolume
+	layoutHolder           layout.HolderID    // successful Start identity; guarded by p.mu
+	layoutHead             layout.HeadStore
+	layoutRemote           storage.ChunkRemote // one runtime per attachment, including attach retries
+	chunkLineage           chunkLineage        // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
@@ -1111,6 +1112,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		gen = h.recoverGen
 		h.startupEnded = 0
 		h.startupSuperseded = false
+		h.startupIdentityRefused = false
 		p.mu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)

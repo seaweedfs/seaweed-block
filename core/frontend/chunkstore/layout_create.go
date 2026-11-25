@@ -60,6 +60,9 @@ func (s *LayoutStore) ReadVolumeRecord(ctx context.Context) (layout.Volume, bool
 	if err != nil {
 		return layout.Volume{}, false, fmt.Errorf("%w: VOLUME: %v", layout.ErrCorrupt, err)
 	}
+	if v.ID != s.id {
+		return layout.Volume{}, false, layout.ErrIdentity
+	}
 	return v, true, nil
 }
 
