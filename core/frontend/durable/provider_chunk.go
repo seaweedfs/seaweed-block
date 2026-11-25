@@ -483,6 +483,28 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			h.layoutHolder, h.layoutHead, h.layoutRemote = me, st, inner
 			p.mu.Unlock()
 		}
+		if err == nil {
+			settler, ok := inner.(interface {
+				AbortOpenSession(context.Context) (string, error)
+			})
+			if !ok {
+				return nil, errors.New("durable: layout attach needs explicit activity settlement")
+			}
+			outcome, settleErr := settler.AbortOpenSession(ctx)
+			if settleErr != nil {
+				return nil, fmt.Errorf("durable: settle activity before attach: %w", settleErr)
+			}
+			switch outcome {
+			case "idle", "aborted":
+				// A prior process's conditional commit can no longer publish;
+				// no guest write is admitted before this step completes.
+			case "detached":
+				return nil, layout.ErrDetached
+			default:
+				return nil, fmt.Errorf("%w: attach activity result %q", ErrDetachOutcomeUnknown, outcome)
+			}
+		}
+
 	} else {
 		inner, err = p.cfg.ChunkRemoteFor(volumeID)
 	}
