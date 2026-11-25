@@ -5,7 +5,6 @@ package durable_test
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,23 +14,10 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
-
-type seedSyncFaultRemote struct {
-	storage.ChunkRemote
-	once       sync.Once
-	beforeSeed func()
-}
-
-func (r *seedSyncFaultRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
-	head, err := r.ChunkRemote.GetHead(ctx)
-	if err == nil {
-		r.once.Do(r.beforeSeed)
-	}
-	return head, err
-}
 
 // Replace only this fixture's WAL descriptor after Recover has read it and
 // before the seed's real os.File.Sync. /dev/full fsync returns EINVAL. Restore
@@ -85,80 +71,60 @@ func failSeedFD(t *testing.T, root string) func() {
 	return restore
 }
 
+// A real failed WAL fsync during a B restore must keep the guest closed.
+// The store's fsync failure is sticky; reopening the same local root retries
+// from the unchanged published B image.
 func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
 	ctx := hangGuard(t)
+	c, position, data := seededLayoutForSyncFault(t)
 	root := filepath.Join(t.TempDir(), "provider")
-	remote := storage.NewMemChunkRemote()
-	data := bytes.Repeat([]byte{0xA7}, 4*4096)
-	if err := remote.Put(ctx, "seed", data); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 3, Holder: "r1", RemoteLSN: 7,
-		Chunks: map[uint64]storage.ChunkRef{0: {Key: "seed", SHA256: sha256.Sum256(data)}}}); err != nil {
-		t.Fatal(err)
-	}
 	var restore func()
-	fault := &seedSyncFaultRemote{ChunkRemote: remote, beforeSeed: func() { restore = failSeedFD(t, root) }}
-	makeProvider := func(r storage.ChunkRemote) *durable.DurableProvider {
-		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root,
-			NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
-			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}, v1View())
-		if err != nil {
-			t.Fatal(err)
+	p := c.provider(t, root, v1View(), "r1", func(cfg *durable.ProviderConfig) {
+		cfg.WALRecoveryTestDisableFlusher = true
+		next := cfg.ChunkLayoutRemoteFor
+		cfg.ChunkLayoutRemoteFor = func(name string, me layout.HolderID) (storage.ChunkRemote, error) {
+			restore = failSeedFD(t, root)
+			return next(name, me)
 		}
-		t.Cleanup(func() { _ = p.Close() })
-		return p
-	}
-	p := makeProvider(fault)
+	})
 	s, err := p.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ws := s.(*storage.WALStore)
-	if _, err := p.RecoverVolume(ctx, "v1"); err == nil {
-		t.Fatal("real seed fsync failure was accepted")
-	} else if !errors.Is(err, syscall.EINVAL) {
-		t.Fatalf("expected real fsync EINVAL, got %v", err)
-	} else {
-		t.Logf("injected real WAL fsync failure: %v", err)
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("real seed fsync should fail with EINVAL: %v", err)
 	}
 	if restore == nil {
-		t.Fatal("fault not exercised")
+		t.Fatal("real fsync fault not exercised")
 	}
 	restore()
-	blocked, err := p.Open(ctx, "v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blocked.Read(ctx, 0, make([]byte, 4096)); !errors.Is(err, frontend.ErrNotReady) {
-		t.Fatalf("failed recovery exposed backend: %v", err)
+	if _, err := p.Backend("v1").Read(ctx, 0, make([]byte, 4096)); !errors.Is(err, frontend.ErrNotReady) {
+		t.Fatalf("failed recovery exposed guest I/O: %v", err)
 	}
 	if got := ws.NextLSN(); got != 1 {
-		t.Errorf("failed seed published allocator watermark %d, want 1", got)
+		t.Fatalf("failed seed advanced allocator to %d", got)
 	}
-	// The failed fsync is sticky for the open store (storage.ErrFsyncFailed,
-	// io_error): no same-handle retry; a reopen restores from HEAD.
 	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrFsyncFailed) {
-		t.Fatalf("same-handle retry after a failed fsync: %v; want ErrFsyncFailed", err)
+		t.Fatalf("same-handle retry after failed fsync: %v", err)
 	}
-	if r, _, h := ws.Boundaries(); r != 0 || h != 0 {
-		t.Errorf("refused retry published R=%d H=%d", r, h)
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
 	}
-	_ = p.Close()
-	p1 := makeProvider(remote)
+	p1 := c.provider(t, root, v1View(), "r1", nil)
 	if _, err := p1.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p1.RecoverVolume(ctx, "v1"); err != nil {
-		t.Fatal("restore after a reopen:", err)
+		t.Fatal("restore after reopen:", err)
 	}
-	if cut, err := p1.CaptureVolume(ctx, "v1"); err != nil || cut != 7 {
-		t.Errorf("cut after a reopen=%d err=%v, want 7", cut, err)
+	if _, err := p1.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
 	}
 	if err := p1.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2 := makeProvider(remote)
+	p2 := c.provider(t, root, v1View(), "r1", nil)
 	s2, err := p2.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -166,87 +132,98 @@ func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
 	if _, err := p2.RecoverVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
-	if next := s2.(*storage.WALStore).NextLSN(); next != 8 {
-		t.Errorf("reopen nextLSN=%d, want 8", next)
-	}
-	b, err := p2.Open(ctx, "v1")
-	if err != nil {
-		t.Fatal(err)
+	if next := s2.(*storage.WALStore).NextLSN(); next <= position {
+		t.Fatalf("reopen nextLSN=%d, published position=%d", next, position)
 	}
 	got := make([]byte, 4096)
-	if _, err := b.Read(ctx, 0, got); err != nil || !bytes.Equal(got, data[:4096]) {
-		t.Fatal("restored bytes changed:", err)
+	if _, err := p2.Backend("v1").Read(ctx, 0, got); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("restored bytes changed: %v", err)
 	}
-	if _, err := b.Write(ctx, 4096, bytes.Repeat([]byte{0xB8}, 4096)); err != nil {
+	if _, err := p2.Backend("v1").Write(ctx, 4096, bytes.Repeat([]byte{0xB8}, 4096)); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Sync(ctx); err != nil {
+	if err := p2.Backend("v1").Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if cut, err := p2.CaptureVolume(ctx, "v1"); err != nil || cut != 8 {
-		t.Fatalf("new cut=%d err=%v, want 8", cut, err)
+	if cut, err := p2.CaptureVolume(ctx, "v1"); err != nil || cut <= position {
+		t.Fatalf("new cut=%d err=%v, prior position=%d", cut, err, position)
 	}
 }
 
-func TestRestoreFailedSeedNeverTakesOwnership(t *testing.T) {
+func seededLayoutForSyncFault(t *testing.T) (*layoutCase, uint64, []byte) {
+	t.Helper()
 	ctx := hangGuard(t)
+	c := newLayoutCase(t, 64, 4)
+	source := c.provider(t, t.TempDir(), viewAs("old", 1), "old", nil)
+	s := openRecovered(t, source)
+	data := bytes.Repeat([]byte{0xA7}, 4096)
+	if _, err := s.Write(0, data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	position := c.head(t).Position
+	if position == 0 {
+		t.Fatal("source did not publish B image")
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return c, position, data
+}
+
+// B may claim before local seed. A failed seed may leave that claim in HEAD,
+// but it cannot change the published image or admit a guest write.
+func TestRestoreFailedSeedNeverServesOrChangesImage(t *testing.T) {
+	ctx := hangGuard(t)
+	c, position, data := seededLayoutForSyncFault(t)
+	before := c.head(t)
 	root := filepath.Join(t.TempDir(), "provider")
-	remote := storage.NewMemChunkRemote()
-	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "old", RemoteLSN: 7}); err != nil {
-		t.Fatal(err)
-	}
-	calls := 0
-	watched := &takeoverOrderRemote{ChunkRemote: remote, beforeCAS: func() { calls++ }}
 	var restore func()
-	fault := &seedSyncFaultRemote{ChunkRemote: watched, beforeSeed: func() { restore = failSeedFD(t, root) }}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return fault, nil }}, v1View())
-	if err != nil {
+	p := c.provider(t, root, v1View(), "r1", func(cfg *durable.ProviderConfig) {
+		cfg.WALRecoveryTestDisableFlusher = true
+		next := cfg.ChunkLayoutRemoteFor
+		cfg.ChunkLayoutRemoteFor = func(name string, me layout.HolderID) (storage.ChunkRemote, error) {
+			restore = failSeedFD(t, root)
+			return next(name, me)
+		}
+	})
+	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	defer p.Close()
-	if _, err = p.EnsureStorage("v1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = p.RecoverVolume(ctx, "v1"); !errors.Is(err, syscall.EINVAL) {
+	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, syscall.EINVAL) {
 		t.Fatalf("seed sync should fail with EINVAL: %v", err)
 	}
 	if restore == nil {
 		t.Fatal("real fsync fault not exercised")
 	}
 	restore()
-	h, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if calls != 0 || h.Gen != 1 || h.Epoch != 1 || h.Holder != "old" || h.RemoteLSN != 7 {
-		t.Fatalf("failed seed changed authority: CAS=%d HEAD=%+v; want untouched old HEAD", calls, h)
+	after := c.head(t)
+	if after.Position != position || after.Current == nil || before.Current == nil || *after.Current != *before.Current {
+		t.Fatalf("failed seed changed published image: before=%+v after=%+v", before, after)
 	}
 	if _, err := p.Backend("v1").Read(ctx, 0, make([]byte, 4096)); !errors.Is(err, frontend.ErrNotReady) {
-		t.Fatal("failed seed admitted I/O", err)
+		t.Fatalf("failed seed admitted I/O: %v", err)
 	}
-	// The failed fsync is sticky (storage.ErrFsyncFailed): the same-store
-	// retry refuses and still takes no ownership; a reopen takes it once.
 	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrFsyncFailed) {
-		t.Fatalf("same-store retry after a failed fsync: %v; want ErrFsyncFailed", err)
+		t.Fatalf("same-store retry after failed fsync: %v", err)
 	}
-	if calls != 0 {
-		t.Fatal("a refused retry took ownership", calls)
-	}
-	_ = p.Close()
-	p2, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return watched, nil }}, v1View())
-	if err != nil {
+	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	defer p2.Close()
-	if _, err = p2.EnsureStorage("v1"); err != nil {
+	again := c.provider(t, root, v1View(), "r1", nil)
+	if _, err := again.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p2.RecoverVolume(ctx, "v1"); err != nil {
-		t.Fatal("restore after a reopen", err)
+	if _, err := again.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal("reopen:", err)
 	}
-	if calls != 1 {
-		t.Fatal("restore after a reopen must take ownership exactly once", calls)
+	got := make([]byte, 4096)
+	if _, err := again.Backend("v1").Read(ctx, 0, got); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("reopen changed B image: %v", err)
 	}
 }
