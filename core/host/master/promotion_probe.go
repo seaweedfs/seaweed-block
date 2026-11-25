@@ -15,6 +15,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
 type WorkloadPlanPromotionProbeConfig struct {
@@ -127,15 +128,31 @@ func (p *workloadPlanPromotionEvidenceProvider) probeCandidate(volumeID, replica
 			best = st
 		}
 	}
-	return PromotionCandidateEvidence{
-		ReplicaID: replicaID,
-		ProbeAddr: statusAddr,
-		Ready: local.VolumeID == volumeID &&
-			local.ReplicaID == replicaID &&
-			strings.EqualFold(local.ReplicationRole, "replica_ready") &&
-			best.FrontierKnown,
+	ev := PromotionCandidateEvidence{
+		ReplicaID:  replicaID,
+		ProbeAddr:  statusAddr,
 		DurableLSN: best.DurableLSN,
-	}, nil
+	}
+	// The candidate's epoch-table row at its durable LSN; an invalid table is
+	// never a survivor.
+	if et := local.EpochTable; et != nil && et.Present {
+		ev.TableInvalid = et.Invalid
+		if !et.Invalid {
+			row := transport.EpochRow{}
+			for _, r := range et.Rows {
+				if r.FirstLSN <= best.DurableLSN {
+					row = r
+				}
+			}
+			ev.LastDataEpoch, ev.LastDataFirstLSN = row.Epoch, row.FirstLSN
+		}
+	}
+	ev.Ready = local.VolumeID == volumeID &&
+		local.ReplicaID == replicaID &&
+		strings.EqualFold(local.ReplicationRole, "replica_ready") &&
+		best.FrontierKnown &&
+		!ev.TableInvalid
+	return ev, nil
 }
 
 func (p *workloadPlanPromotionEvidenceProvider) probeCurrent(volumeID, replicaID, statusAddr string) (PromotionCandidateEvidence, error) {

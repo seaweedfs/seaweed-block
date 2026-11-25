@@ -26,6 +26,14 @@ type PromotionCandidateEvidence struct {
 	Ready      bool
 	DurableLSN uint64
 	ProbeAddr  string
+	// LastDataEpoch and LastDataFirstLSN are the candidate's epoch-table row
+	// at DurableLSN (zero: no table, or no row): the promotion line carries
+	// them, and the target adopts only if its own row at that LSN is the same.
+	LastDataEpoch    uint64
+	LastDataFirstLSN uint64
+	// TableInvalid: a recovery left the candidate's table without a known
+	// history; such a candidate is never Ready (never a promotion survivor).
+	TableInvalid bool
 }
 
 type PromotionProbeResult struct {

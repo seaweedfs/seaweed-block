@@ -63,6 +63,7 @@ type StatusServer struct {
 	runtimeEnabled  bool
 	allowExternal   bool
 	peerSource      peerStatusSource
+	epochSource     epochTableStatusSource
 	durableSource   durableStatusSource
 	masterWait      func() *MasterWait // why a workspace primary holds no grant; nil: not wired
 	nvmeSource      nvmeStatusSource
@@ -86,6 +87,12 @@ func (s *StatusServer) SetNVMeListenerReady(ready bool) {
 
 type peerStatusSource interface {
 	PeerStatuses() []replication.ReplicaPeerStatus
+}
+
+// epochTableStatusSource is the volume's epoch table as the master's
+// promotion probe reads it (replication.ReplicationVolume).
+type epochTableStatusSource interface {
+	EpochTableStatus() replication.EpochTableStatus
 }
 
 type durableStatusSource interface {
@@ -188,6 +195,10 @@ const (
 // replica readiness from authority movement.
 type StatusProjection struct {
 	frontend.Projection
+	// EpochTable is the volume's epoch table (rows and whether a recovery
+	// left it invalid); nil when not wired. The promotion probe reads the row
+	// at the candidate's durable LSN from it.
+	EpochTable *replication.EpochTableStatus `json:",omitempty"`
 	// Memory is the process's memory use at the time of the request.
 	Memory ProcessMemoryStatus
 	// FrontendPrimaryReady: this replica is the healthy, non-superseded
@@ -303,6 +314,14 @@ func (s *StatusServer) AllowExternalAccess() {
 // the route is registered at Start, and returns 404 until a source is
 // installed. This fits blockvolume startup, where the status listener
 // binds before durable storage and ReplicationVolume are constructed.
+// SetEpochTableStatusSource puts the volume's epoch table on /status
+// (EpochTable), where the master's promotion probe reads it.
+func (s *StatusServer) SetEpochTableStatusSource(src epochTableStatusSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.epochSource = src
+}
+
 func (s *StatusServer) SetPeerStatusSource(src peerStatusSource) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -531,7 +550,12 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	p.FrontendPrimaryReady = p.FrontendPrimaryReady && !nvmePending
 	src := s.durableSource
 	masterWait := s.masterWait
+	epochs := s.epochSource
 	s.mu.Unlock()
+	if epochs != nil {
+		st := epochs.EpochTableStatus()
+		p.EpochTable = &st
+	}
 	// INV-FE-PRIMARY-READY-OPERATIONAL-001: not FrontendPrimaryReady while the
 	// local backend admits no I/O (before the storage claim of a chunk volume,
 	// after a refused claim: fenced, after a detach), and not when there is no
