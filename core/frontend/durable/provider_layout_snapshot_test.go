@@ -110,4 +110,13 @@ func TestLayoutProviderSnapshotVolume(t *testing.T) {
 	if _, named := after.Snapshots["over"]; named || after.Position <= before.Position || *after.Current == *before.Current {
 		t.Fatalf("past the cap: named %t, position %d -> %d; want the cut committed unnamed", named, before.Position, after.Position)
 	}
+	// A replay after later cuts answers with the facts recorded when the
+	// name was taken, not HEAD's current position or root.
+	again, err := p.SnapshotVolume(ctx, "v1", "daily", layout.SnapshotMeta{CreatedNs: 99})
+	if err != nil {
+		t.Fatalf("replay after later cuts: %v", err)
+	}
+	if ri := chunkstore.SnapshotInfoFromHead("v1", "daily", again); ri.CutLSN != info.CutLSN || ri.Root != info.Root || ri.CreatedNs != 11 || ri.CutLSN == again.Position {
+		t.Fatalf("replay after later cuts: cut %d root %s created %d; want the recorded cut %d root %s (HEAD now at %d)", ri.CutLSN, ri.Root, ri.CreatedNs, info.CutLSN, info.Root, again.Position)
+	}
 }
