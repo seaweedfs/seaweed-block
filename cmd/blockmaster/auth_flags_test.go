@@ -17,13 +17,13 @@ func TestAuthFlags(t *testing.T) {
 		want string // "" = accepted
 	}{
 		{"development mode, loopback", []string{"--listen", "127.0.0.1:9180"}, ""},
-		{"development mode, off loopback", []string{"--listen", "10.0.0.5:9180"}, "not a loopback address"},
-		{"authenticated, off loopback", append([]string{"--listen", "10.0.0.5:9180"}, all...), ""},
-		{"partial: no role file", []string{"--listen", "10.0.0.5:9180", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem"}, "together"},
+		{"development mode, off loopback", []string{"--listen", "192.0.2.5:9180"}, "not a loopback address"},
+		{"authenticated, off loopback", append([]string{"--listen", "192.0.2.5:9180"}, all...), ""},
+		{"partial: no role file", []string{"--listen", "192.0.2.5:9180", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem"}, "together"},
 		{"partial: role file only", []string{"--role-file", "roles"}, "together"},
 		{"audit log without authentication", []string{"--audit-log", "audit.log"}, "needs authentication"},
-		{"authentication without an audit log", []string{"--listen", "10.0.0.5:9180", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem", "--role-file", "roles"}, "needs --audit-log"},
-		{"authenticated with --insecure-external-bind", append([]string{"--listen", "10.0.0.5:9180", "--insecure-external-bind"}, all...), "cannot be combined"},
+		{"authentication without an audit log", []string{"--listen", "192.0.2.5:9180", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem", "--role-file", "roles"}, "needs --audit-log"},
+		{"authenticated with --insecure-external-bind", append([]string{"--listen", "192.0.2.5:9180", "--insecure-external-bind"}, all...), "cannot be combined"},
 	} {
 		_, err := parseFlags(append(append([]string{}, base...), c.args...))
 		switch {
