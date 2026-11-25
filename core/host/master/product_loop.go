@@ -213,6 +213,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 	}
 	for vi := range snap.Volumes {
 		vol := &snap.Volumes[vi]
+		h.noteSlotServers(vol.VolumeID, vol.Slots)
 		if len(vol.Slots) < 3 || !vol.Authority.Assigned {
 			continue
 		}
