@@ -107,8 +107,8 @@ func TestRestoreFailedSeedSyncRetryCaptureAndReopen(t *testing.T) {
 	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrFsyncFailed) {
 		t.Fatalf("same-handle retry after failed fsync: %v", err)
 	}
-	if err := p.Close(); err != nil {
-		t.Fatal(err)
+	if err := p.Close(); !errors.Is(err, storage.ErrFsyncFailed) {
+		t.Fatalf("close must report the sticky fsync failure: %v", err)
 	}
 	p1 := c.provider(t, root, v1View(), "r1", nil)
 	if _, err := p1.EnsureStorage("v1"); err != nil {
@@ -211,8 +211,8 @@ func TestRestoreFailedSeedNeverServesOrChangesImage(t *testing.T) {
 	if _, err := p.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrFsyncFailed) {
 		t.Fatalf("same-store retry after failed fsync: %v", err)
 	}
-	if err := p.Close(); err != nil {
-		t.Fatal(err)
+	if err := p.Close(); !errors.Is(err, storage.ErrFsyncFailed) {
+		t.Fatalf("close must report the sticky fsync failure: %v", err)
 	}
 	again := c.provider(t, root, v1View(), "r1", nil)
 	if _, err := again.EnsureStorage("v1"); err != nil {
