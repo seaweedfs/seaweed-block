@@ -59,6 +59,9 @@ func Start(ctx context.Context, st HeadStore, lease LeaseWait, line HolderID, lo
 		return Head{}, ErrHeadAbsent
 	}
 	me := HolderID{Epoch: line.Epoch, Holder: line.Holder, ClaimID: local.ClaimID}
+	if h.State == StateDetached && line.Epoch == h.Epoch {
+		return Head{}, ErrDetached
+	}
 	if !local.Fresh && local.ClaimID == h.ClaimID && local.Position < h.Position && line.Epoch >= h.Epoch {
 		return Head{}, fmt.Errorf("%w (%w): the local root holds position %d, HEAD published %d: an old copy of this lineage", ErrStaleLocalRoot, ErrNotHolder, local.Position, h.Position)
 	}
