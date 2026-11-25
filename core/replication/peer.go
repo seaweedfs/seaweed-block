@@ -164,6 +164,10 @@ type ReplicaPeer struct {
 	// onHealthy lets the owning ReplicationVolume reopen a terminal work
 	// queue only after recovery has returned this peer to Healthy.
 	onHealthy func()
+	// reconcile, installed by the owning ReplicationVolume, compares the
+	// peer's (last data epoch, end) with the primary's epoch table in a
+	// barrier of this session. nil = no table (length only).
+	reconcile func(ctx context.Context) (inSync, diverged bool, reason string)
 
 	// Probe cooldown / in-flight state. All fields read+written
 	// under p.mu only.
@@ -770,6 +774,37 @@ func (p *ReplicaPeer) setOnHealthy(fn func()) {
 	p.mu.Lock()
 	p.onHealthy = fn
 	p.mu.Unlock()
+}
+
+func (p *ReplicaPeer) setReconcile(fn func(ctx context.Context) (inSync, diverged bool, reason string)) {
+	p.mu.Lock()
+	p.reconcile = fn
+	p.mu.Unlock()
+}
+
+// HealIfInSync is the only way a recovery verdict returns a peer to
+// Healthy: a reconciliation in this session must say its entries are the
+// primary's (an entry's identity is (epoch, LSN); a length or a probe never
+// decides it). Diverged -> NeedsRebuild; behind or unanswered -> Degraded.
+// Without a reconcile (no epoch table) the verdict is applied as before.
+func (p *ReplicaPeer) HealIfInSync(ctx context.Context, why string) bool {
+	p.mu.Lock()
+	fn := p.reconcile
+	p.mu.Unlock()
+	if fn == nil {
+		p.SetState(ReplicaHealthy)
+		return p.State() == ReplicaHealthy
+	}
+	inSync, diverged, reason := fn(ctx)
+	switch {
+	case inSync:
+		p.SetState(ReplicaHealthy)
+	case diverged:
+		markDiverged(p, why+": "+reason)
+	default:
+		p.Invalidate(why + ": not in sync: " + reason)
+	}
+	return p.State() == ReplicaHealthy
 }
 
 // replicaStateTransitionAllowed is the table-driven transition gate.

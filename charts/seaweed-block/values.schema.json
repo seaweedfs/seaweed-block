@@ -59,6 +59,24 @@
         "stateHostPath": { "type": "string" }
       }
     },
+    "tls": {
+      "type": "object",
+      "properties": {
+        "masterSecret": { "type": "string", "minLength": 1 },
+        "roleSecret": { "type": "string", "minLength": 1 },
+        "clientSecrets": {
+          "type": "object",
+          "required": ["csiController", "csiNode", "operatorStatus", "failbackExecutor"],
+          "properties": {
+            "csiController": { "type": "string", "minLength": 1 },
+            "csiNode": { "type": "string", "minLength": 1 },
+            "operatorStatus": { "type": "string", "minLength": 1 },
+            "failbackExecutor": { "type": "string", "minLength": 1 }
+          }
+        },
+        "nodeSecretPrefix": { "type": "string", "minLength": 1 }
+      }
+    },
     "network": {
       "type": "object",
       "properties": {

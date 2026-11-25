@@ -1,8 +1,11 @@
 {{- if and .Values.network.externalISCSI (not .Values.chap.enabled) -}}
 {{- fail "network.externalISCSI=true requires chap.enabled=true so cross-node iSCSI is not published without CHAP credentials" -}}
 {{- end -}}
-{{- if and .Values.network.externalStatus (not (or .Values.network.externalISCSI .Values.network.externalNVMe)) -}}
-{{- fail "network.externalStatus=true requires network.externalISCSI=true or network.externalNVMe=true because external status is only supported with external block frontend publishing" -}}
+{{- if .Values.network.externalStatus -}}
+{{- fail "network.externalStatus=true is not supported: blockmaster runs with mutual TLS and an authenticated volume's status listener stays on loopback" -}}
+{{- end -}}
+{{- if .Values.blockmaster.frontendPublicationRuntimeHTTP -}}
+{{- fail "blockmaster.frontendPublicationRuntimeHTTP=true is not supported: the runtime HTTP API is unauthenticated and stays on loopback, out of reach of the executor pod" -}}
 {{- end -}}
 {{- if and (ne .Values.blockmaster.durableImpl "walstore") (not .Values.compat.launcherDurableImplFlag) -}}
 {{- fail "blockmaster.durableImpl requires compat.launcherDurableImplFlag=true because older published images do not accept --launcher-durable-impl" -}}
@@ -98,15 +101,17 @@ spec:
             {{- if .Values.network.externalNVMe }}
             - "--launcher-external-nvme"
             {{- end }}
-            {{- if .Values.network.externalStatus }}
-            - "--launcher-external-status"
-            {{- end }}
             {{- if and .Values.network.rejectLoopbackPublishTargets .Values.compat.launcherRejectLoopbackFlag }}
             - "--launcher-reject-loopback-publish-targets"
             {{- end }}
             - "--launcher-kubernetes-apply"
             - "--listen=0.0.0.0:{{ .Values.blockmaster.listenPort }}"
-            - "--insecure-external-bind"
+            - "--tls-cert=/etc/sw-block/tls/tls.crt"
+            - "--tls-key=/etc/sw-block/tls/tls.key"
+            - "--tls-client-ca=/etc/sw-block/tls/ca.crt"
+            - "--role-file=/etc/sw-block/roles/roles"
+            - "--audit-log=/var/lib/sw-block/audit.log"
+            - "--launcher-master-tls-secret-prefix={{ .Values.tls.nodeSecretPrefix }}"
             {{- if .Values.blockmaster.failbackRuntimeRPC }}
             - "--failback-runtime-rpc"
             {{- end }}
@@ -130,6 +135,12 @@ spec:
               mountPath: /var/lib/sw-block
             - name: manifests
               mountPath: /manifests
+            - name: tls
+              mountPath: /etc/sw-block/tls
+              readOnly: true
+            - name: roles
+              mountPath: /etc/sw-block/roles
+              readOnly: true
       volumes:
         - name: cluster-spec
           configMap:
@@ -144,6 +155,12 @@ spec:
           {{- end }}
         - name: manifests
           emptyDir: {}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.masterSecret }}
+        - name: roles
+          secret:
+            secretName: {{ .Values.tls.roleSecret }}
 ---
 apiVersion: v1
 kind: Service

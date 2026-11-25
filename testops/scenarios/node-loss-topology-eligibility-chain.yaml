@@ -225,7 +225,7 @@ phases:
         threshold: "0"
       - action: exec
         node: m02
-        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo; test \"$(grep -c -- '--replica-id=r' \"$B/generated-blockvolume.yaml\")\" -ge 3; test \"$(grep -c -- '--allow-external-iscsi-bind' \"$B/generated-blockvolume.yaml\")\" -ge 3; test \"$(grep -c -- '--allow-external-status-bind' \"$B/generated-blockvolume.yaml\")\" -ge 3"
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo; test \"$(grep -c -- '--replica-id=r' \"$B/generated-blockvolume.yaml\")\" -ge 3; test \"$(grep -c -- '--allow-external-iscsi-bind' \"$B/generated-blockvolume.yaml\")\" -ge 3; test \"$(grep -c -- '--master-tls-cert=' \"$B/generated-blockvolume.yaml\")\" -ge 3"
       - action: exec
         node: m02
         cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo; ! grep -Eq -- '--(iscsi-listen|status-addr)=127\\.0\\.0\\.1|--(iscsi-listen|status-addr)=localhost' \"$B/generated-blockvolume.yaml\""

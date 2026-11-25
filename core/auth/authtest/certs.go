@@ -67,9 +67,9 @@ func NewCA(t testing.TB, name string) *CA {
 var serial = big.NewInt(100)
 
 // Issue signs a leaf certificate with the given CN that expires at notAfter;
-// it is valid as a TLS client and server certificate for 127.0.0.1 and
-// localhost.
-func (ca *CA) Issue(t testing.TB, cn string, notAfter time.Time) *Leaf {
+// it is valid as a TLS client and server certificate for 127.0.0.1,
+// localhost and any extra IP addresses.
+func (ca *CA) Issue(t testing.TB, cn string, notAfter time.Time, extraIPs ...net.IP) *Leaf {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -84,7 +84,7 @@ func (ca *CA) Issue(t testing.TB, cn string, notAfter time.Time) *Leaf {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		IPAddresses:  append([]net.IP{net.ParseIP("127.0.0.1")}, extraIPs...),
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &key.PublicKey, ca.key)
 	if err != nil {

@@ -89,6 +89,11 @@ YAML files manually, replace `sw-block:local` and `sw-block-csi:local` yourself.
 
 ## Deploy
 
+blockmaster runs with mutual TLS: `scripts/install-k8s-alpha.sh` applies the
+Secrets with `scripts/k8s-alpha-certs.sh` (development CA, keys under
+`$SW_BLOCK_TLS_DIR`, default `~/.local/state/sw-block-alpha-tls`). By hand, run
+`bash scripts/k8s-alpha-certs.sh kube-system <dir> <node name>` first.
+
 The blockmaster manifest contains a `__NODE_NAME__` placeholder for the lab
 node. Render it first:
 

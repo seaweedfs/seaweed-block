@@ -177,6 +177,7 @@ func applyAssignment(st *ReplicaState, e AssignmentObserved, r *ApplyResult, tra
 	st.Identity.EndpointVersion = e.EndpointVersion
 	st.Identity.DataAddr = e.DataAddr
 	st.Identity.CtrlAddr = e.CtrlAddr
+	st.Identity.PrimaryStartLSN = e.PrimaryStartLSN
 	st.Identity.MemberPresent = true
 	trace("identity_updated", "member_present=true")
 
@@ -488,6 +489,29 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 			})
 			trace("command", "StartRebuild (pinned)")
 		}
+		return
+	}
+
+	// Divergent tail: until the replica has
+	// accepted this epoch (a fence or a completed session raises
+	// FencedEpoch), everything it holds was written at an older epoch, and
+	// whatever lies above this primary's start position was never
+	// acknowledged. R above the start is such a tail: rebuild, pinned. It is
+	// never fenced into healthy because R >= H, and its R is not coverage.
+	if st.Identity.PrimaryStartLSN > 0 && fact.ReplicaRKnown && fact.ReplicaR > st.Identity.PrimaryStartLSN &&
+		st.Reachability.FencedEpoch < st.Identity.Epoch && !hasActiveSession(st) {
+		st.Recovery.Decision = DecisionRebuild
+		st.Recovery.DecisionReason = "divergent_tail"
+		st.Recovery.Attempts = 0
+		st.Recovery.RebuildPinned = true
+		trace("decision", "rebuild (divergent tail above the primary's start)")
+		r.Commands = append(r.Commands, StartRebuild{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			FrontierHint:    H,
+			TargetLSN:       H,
+		})
 		return
 	}
 

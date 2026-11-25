@@ -26,6 +26,7 @@ spec:
             - "--endpoint=unix:///csi/csi.sock"
             - "--master=$(BLOCKMASTER_ADDR)"
             - "--node-id=$(NODE_NAME)"
+            {{- include "seaweed-block.masterTLSClientFlags" . | nindent 12 }}
             {{- if .Values.blockmaster.launcherPVCOwnerRef }}
             - "--kubernetes-pvc-uid-lookup"
             {{- end }}
@@ -48,6 +49,7 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+            {{- include "seaweed-block.masterTLSClientMount" . | nindent 12 }}
         - name: csi-provisioner
           image: {{ .Values.sidecars.provisionerImage | quote }}
           args:
@@ -70,3 +72,4 @@ spec:
       volumes:
         - name: socket-dir
           emptyDir: {}
+        {{- include "seaweed-block.masterTLSClientVolume" .Values.tls.clientSecrets.csiController | nindent 8 }}

@@ -37,6 +37,9 @@ spec:
             - "--endpoint=unix:///csi/csi.sock"
             - "--master=$(BLOCKMASTER_ADDR)"
             - "--node-id=$(NODE_NAME)"
+            - "--master-tls-cert=/etc/sw-block/master-tls/tls.crt"
+            - "--master-tls-key=/etc/sw-block/master-tls/tls.key"
+            - "--master-ca=/etc/sw-block/master-tls/ca.crt"
           env:
             - name: BLOCKMASTER_ADDR
               value: "blockmaster.kube-system.svc.cluster.local:9333"
@@ -47,6 +50,9 @@ spec:
           securityContext:
             privileged: true
           volumeMounts:
+            - name: master-tls
+              mountPath: /etc/sw-block/master-tls
+              readOnly: true
             - name: socket-dir
               mountPath: /csi
             - name: kubelet-dir
@@ -70,6 +76,9 @@ spec:
             - name: registration-dir
               mountPath: /registration
       volumes:
+        - name: master-tls
+          secret:
+            secretName: sw-block-csi-node-tls
         - name: socket-dir
           hostPath:
             path: /var/lib/kubelet/plugins/block.csi.seaweedfs.com

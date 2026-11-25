@@ -1,3 +1,4 @@
+{{- include "seaweed-block.readOnlyClientSecrets" . }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -43,6 +44,7 @@ spec:
             - "--endpoint=unix:///csi/csi.sock"
             - "--master=$(BLOCKMASTER_ADDR)"
             - "--node-id=$(NODE_NAME)"
+            {{- include "seaweed-block.masterTLSClientFlags" . | nindent 12 }}
             {{- if .Values.stage2Multipath.enabled }}
             - "--stage2-multipath"
             {{- end }}
@@ -75,6 +77,7 @@ spec:
             - name: udev-run
               mountPath: /run/udev
               readOnly: true
+            {{- include "seaweed-block.masterTLSClientMount" . | nindent 12 }}
         - name: csi-node-driver-registrar
           image: {{ .Values.sidecars.nodeDriverRegistrarImage | quote }}
           args:
@@ -86,6 +89,7 @@ spec:
             - name: registration-dir
               mountPath: /registration
       volumes:
+        {{- include "seaweed-block.masterTLSClientVolume" .Values.tls.clientSecrets.csiNode | nindent 8 }}
         - name: socket-dir
           hostPath:
             path: {{ .Values.csiNode.pluginPath | quote }}

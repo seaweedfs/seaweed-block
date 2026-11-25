@@ -34,9 +34,8 @@ func (a authFlags) files() link.TLSFiles {
 	return link.TLSFiles{Cert: a.tlsCert, Key: a.tlsKey, CA: a.tlsClientCA}
 }
 
-// validate refuses a partial set, and the plaintext escape hatch together
-// with authentication.
-func (a authFlags) validate(insecureExternalBind bool) error {
+// validate refuses a partial set.
+func (a authFlags) validate() error {
 	if a.auditLog != "" && !a.enabled() {
 		return fmt.Errorf("--audit-log needs authentication (--tls-cert, --tls-key, --tls-client-ca, --role-file)")
 	}
@@ -48,9 +47,6 @@ func (a authFlags) validate(insecureExternalBind bool) error {
 	}
 	if a.auditLog == "" {
 		return fmt.Errorf("authentication needs --audit-log: every changing call is recorded before it runs, and is refused when it cannot be")
-	}
-	if insecureExternalBind {
-		return fmt.Errorf("--insecure-external-bind cannot be combined with mutual TLS: the authenticated listener may bind any address; drop the flag")
 	}
 	return nil
 }

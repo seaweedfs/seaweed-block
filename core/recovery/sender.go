@@ -77,6 +77,10 @@ type DurableAckCallback func(replicaID ReplicaID, sessionID, acknowledgedLSN, pr
 // Sender does NOT own: receiver-side state, retry policy, lineage
 // minting, session lifecycle decisions, or any live-write buffer.
 type Sender struct {
+	// epochRows is the primary's epoch table (wire form), sent on the final
+	// barrier so the replica's table names the history it now holds.
+	epochRows func() []byte
+
 	primaryStore storage.LogicalStorage
 	coordinator  *PeerShipCoordinator
 	conn         io.ReadWriter
@@ -620,7 +624,11 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, frontierHint uint6
 			probeCursor, probeHead)
 	}
 
-	if err := s.writeFrame(frameBarrierReq, nil); err != nil {
+	var barrierPayload []byte
+	if s.epochRows != nil {
+		barrierPayload = s.epochRows()
+	}
+	if err := s.writeFrame(frameBarrierReq, barrierPayload); err != nil {
 		return 0, newFailure(FailureWire, PhaseBarrierReq, err)
 	}
 	var achieved uint64
