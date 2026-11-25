@@ -271,7 +271,8 @@ func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[s
 	env.masterArgs = append([]string{
 		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)
+		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath,
+		"--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath}, masterArgs...)
 	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
 	env.masterProcess = master
 	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
