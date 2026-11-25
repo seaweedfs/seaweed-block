@@ -252,10 +252,6 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, fmt.Errorf("storage: chunk layer attach: read HEAD: %w", err)
 	}
-	if cfg.RestoreGuard != nil && (head.Gen != cfg.RestoreGuard.Gen || head.Epoch != cfg.RestoreGuard.Epoch) {
-		l.cancel()
-		return nil, fmt.Errorf("%w: HEAD changed after restore claim/seed", errChunkHeadPrecondition)
-	}
 	l.head = copyHead(head)
 	l.remoteLSN = head.RemoteLSN
 	// A HEAD that already belongs to a newer epoch or a competing holder is
@@ -1028,20 +1024,8 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.UploadedBytes += int64(max(len(u.c.data), u.c.size))
 	}
 	st.PublishPrepareNs += time.Since(prepareStart).Nanoseconds()
-	upgrade := false
-	if builder, ok := l.remote.(ChunkManifestBuilder); ok {
-		upgrade = baseHead.Segments == nil
-		var err error
-		manifestStart := time.Now()
-		next, err = builder.PrepareManifest(ctx, baseHead, next, uint64(l.blockSize)*l.chunkBlocks)
-		st.ManifestNs += time.Since(manifestStart).Nanoseconds()
-		if err != nil {
-			l.requeueCut(all)
-			return chunkCutResult{}, err
-		}
-	}
 	st.UploadNs += time.Since(uploadStart).Nanoseconds()
-	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
+	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
 		cur, err := readCapturedHead()
