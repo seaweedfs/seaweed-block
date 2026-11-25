@@ -175,7 +175,7 @@ func (h *Host) observationVolume(volumeID string, rec lifecycle.VolumeRecord, pl
 	if h.attest != nil {
 		// A condition only: the wait is a normal step of creating a volume,
 		// not a degradation (the primary's own status says it serves nothing).
-		if waiting, initial := h.attest.awaited(volumeID); waiting > 0 {
+		if waiting, initial := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID)); waiting > 0 {
 			volume.Conditions = append(volume.Conditions, ops.ObservationCondition{
 				Type:     "ReplicaStoresAttested",
 				Status:   "false",

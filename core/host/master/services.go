@@ -1050,7 +1050,7 @@ func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.Assignme
 	fact.Peers = s.collectPeers(info.VolumeID, info)
 	fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
 	if s.host.attest != nil {
-		waiting, initial := s.host.attest.awaited(info.VolumeID)
+		waiting, initial := s.host.attest.awaited(info.VolumeID, s.host.replicaSlotsFor(info.VolumeID))
 		fact.ReplicaStoresAwaited, fact.ReplicaStoresInitial = uint32(waiting), uint32(initial)
 	}
 	return fact

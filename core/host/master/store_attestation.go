@@ -25,8 +25,11 @@ type attestedStores struct {
 	Primary string            `json:"primary"`
 	Epoch   uint64            `json:"epoch"`
 	Stores  map[string]string `json:"stores"` // replica id -> store id (hex)
-	// Initial is a new volume's replica set at its first bind, while any of
-	// them has no recorded store; cleared once all have one.
+	// Initial is a new volume's replica set at its first bind; non-empty
+	// while the volume is creating (waiting for its replicas' stores). The
+	// wait itself follows the volume's current replicas (a replica replaced
+	// meanwhile is not waited for); it is cleared, for good, the first time
+	// every current replica has a recorded store.
 	Initial []string `json:"initial,omitempty"`
 }
 
@@ -129,18 +132,40 @@ func (s *storeAttestations) open(volumeID string, replicas []string) error {
 	return nil
 }
 
-// awaited reports how many of a new volume's initial replicas have no
-// recorded store yet, and how many initial replicas it has.
-func (s *storeAttestations) awaited(volumeID string) (waiting, initial int) {
+// awaited reports, for a volume still creating, how many of its current
+// replicas have no recorded store yet and how many it has; 0, 0 once the
+// volume left creating (or never waited). When nothing is awaited any more
+// the creation wait is cleared durably, so a later replacement of a
+// replica never closes the volume again.
+func (s *storeAttestations) awaited(volumeID string, current []string) (waiting, replicas int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v := s.vols[volumeID]
-	for _, id := range v.Initial {
+	v, had := s.vols[volumeID]
+	if !had || len(v.Initial) == 0 {
+		return 0, 0
+	}
+	for _, id := range current {
 		if _, ok := v.Stores[id]; !ok {
 			waiting++
 		}
 	}
-	return waiting, len(v.Initial)
+	if waiting > 0 || len(current) == 0 {
+		return waiting, len(current)
+	}
+	vols := make(map[string]attestedStores, len(s.vols))
+	for k, x := range s.vols {
+		vols[k] = x
+	}
+	v.Initial = nil
+	vols[volumeID] = v
+	if err := s.persist(vols); err != nil {
+		// Not cleared: the volume keeps answering from its stores (nothing
+		// awaited); the next call retries the write.
+		return 0, len(current)
+	}
+	s.vols = vols
+	s.notifyLocked(volumeID)
+	return 0, len(current)
 }
 
 // record merges att into the volume's record, in one write: each replica it
@@ -175,12 +200,7 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 			next.Stores[id] = sid
 		}
 	}
-	for _, id := range cur.Initial {
-		if _, ok := next.Stores[id]; !ok {
-			next.Initial = cur.Initial // still waiting
-			break
-		}
-	}
+	next.Initial = cur.Initial // cleared only by awaited
 	if had && sameAttestation(cur, next) {
 		return nil
 	}

@@ -73,7 +73,7 @@ func TestNewVolumeAssignmentWaitsForReplicaAttestations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if waiting, initial := reloaded.awaited("vol-rf3"); waiting != 0 || initial != 0 {
+	if waiting, initial := reloaded.awaited("vol-rf3", []string{"r1", "r2", "r3"}); waiting != 0 || initial != 0 {
 		t.Fatalf("reloaded: %d of %d awaited; want the wait cleared", waiting, initial)
 	}
 }
@@ -85,7 +85,7 @@ func TestUpgradedVolumeAwaitsNoAttestation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if waiting, initial := s.awaited("v-old"); waiting != 0 || initial != 0 {
+	if waiting, initial := s.awaited("v-old", []string{"r1", "r2"}); waiting != 0 || initial != 0 {
 		t.Fatalf("no record: %d of %d", waiting, initial)
 	}
 	if err := s.open("v-new", []string{"r1", "r2"}); err != nil {
@@ -94,7 +94,7 @@ func TestUpgradedVolumeAwaitsNoAttestation(t *testing.T) {
 	if err := s.open("v-new", []string{"r1", "r2", "r3"}); err != nil { // a second open changes nothing
 		t.Fatal(err)
 	}
-	if waiting, initial := s.awaited("v-new"); waiting != 2 || initial != 2 {
+	if waiting, initial := s.awaited("v-new", []string{"r1", "r2"}); waiting != 2 || initial != 2 {
 		t.Fatalf("new: %d of %d awaited; want 2 of 2", waiting, initial)
 	}
 	if err := s.record(attestation("v-old", "r1", 3, map[string]storage.StoreID{"r2": storeID(2)})); err != nil {
@@ -103,7 +103,39 @@ func TestUpgradedVolumeAwaitsNoAttestation(t *testing.T) {
 	if err := s.open("v-old", []string{"r1", "r2"}); err != nil {
 		t.Fatal(err)
 	}
-	if waiting, _ := s.awaited("v-old"); waiting != 0 {
+	if waiting, _ := s.awaited("v-old", []string{"r1", "r2"}); waiting != 0 {
 		t.Fatalf("an attested volume opened again waits for %d", waiting)
+	}
+}
+
+// An initial replica replaced during the creation wait (a new replica id in
+// the placement) must not keep the volume waiting for the old id, which
+// never attests: the wait follows the volume's current replicas.
+func TestCreationWaitFollowsAReplacedInitialReplica(t *testing.T) {
+	s, err := loadStoreAttestations(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.open("v", []string{"r1", "r2", "r3"}); err != nil {
+		t.Fatal(err)
+	}
+	// r3 is replaced by r4 before it attests; the primary attests r1, r2, r4.
+	if err := s.record(attestation("v", "r1", 1, map[string]storage.StoreID{"r1": storeID(1), "r2": storeID(2), "r4": storeID(4)})); err != nil {
+		t.Fatal(err)
+	}
+	if waiting, initial := s.awaited("v", []string{"r1", "r2", "r4"}); waiting != 0 {
+		t.Fatalf("after r3 was replaced by r4 and r1, r2, r4 attested: %d of %d awaited; want 0", waiting, initial)
+	}
+	// The wait is over for good: a later replacement (r5, no store yet) does
+	// not close the volume again; its replica just does not count.
+	if waiting, _ := s.awaited("v", []string{"r1", "r2", "r5"}); waiting != 0 {
+		t.Fatalf("a replacement after the wait ended re-opened it: %d awaited", waiting)
+	}
+	// Before r4 attests, the wait names r4, not r3.
+	s2, _ := loadStoreAttestations(t.TempDir())
+	_ = s2.open("v", []string{"r1", "r2", "r3"})
+	_ = s2.record(attestation("v", "r1", 1, map[string]storage.StoreID{"r1": storeID(1), "r2": storeID(2)}))
+	if waiting, initial := s2.awaited("v", []string{"r1", "r2", "r4"}); waiting != 1 || initial != 3 {
+		t.Fatalf("r4 not yet attested: %d of %d; want 1 of 3", waiting, initial)
 	}
 }
