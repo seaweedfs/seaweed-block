@@ -317,6 +317,16 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 		}
 	}
 	got, err := layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
+	if errors.Is(err, layout.ErrNotPrepared) {
+		// A canceled cut may have uploaded content-named chunks in an
+		// abandoned session. The engine reuses those completed uploads on
+		// retry; conditionally bind each new reference to this session before
+		// retrying the same commit. A missing or corrupt object still refuses.
+		if prepareErr := l.reprepareChunksLocked(ctx, prev, nextM); prepareErr != nil {
+			return 0, layoutRemoteErr(prepareErr)
+		}
+		got, err = layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
+	}
 	if err != nil && req.Snapshot != "" && snapshotRefusal(err) {
 		// This snapshot cannot be named; the cut still commits unnamed and
 		// the request gets the typed refusal.
@@ -342,6 +352,22 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 	l.session, l.pending, l.lastCommit = "", nil, got
 	l.ownGen, l.visible, l.seen = got.Gen, got.Gen, imageOf(got)
 	return got.Gen, nil
+}
+
+func (l *LayoutRemote) reprepareChunksLocked(ctx context.Context, prev, next map[uint64]layout.Ref) error {
+	for idx, ref := range next {
+		if ref == prev[idx] || ref.OwnerID != l.vol.ID || ref.Owner != l.vol.Name {
+			continue
+		}
+		data, err := l.r.ReadRef(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if err := layout.EnsureObject(ctx, l.st, ref.Chunk.Path(), data, l.session); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // manifests are HEAD's current chunk map and next's, as layout references:

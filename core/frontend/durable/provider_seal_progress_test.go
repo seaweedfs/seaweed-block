@@ -9,19 +9,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type sealProgressRemote struct {
-	*storage.MemChunkRemote
-	mu     sync.Mutex
-	expire context.CancelCauseFunc
-	keys   []string
-	images map[[32]byte]int
-	bytes  int
-	calls  int
+	storage.ChunkRemote
+	keyer   storage.ChunkKeyer
+	aborter storage.CutAborter
+	mu      sync.Mutex
+	expire  context.CancelCauseFunc
+	keys    []string
+	images  map[[32]byte]int
+	bytes   int
+	calls   int
 }
+
+func (r *sealProgressRemote) ChunkKey(idx uint64, sum [32]byte) string {
+	return r.keyer.ChunkKey(idx, sum)
+}
+func (r *sealProgressRemote) AbortCut() { r.aborter.AbortCut() }
 
 func (r *sealProgressRemote) Put(ctx context.Context, key string, b []byte) error {
 	if err := ctx.Err(); err != nil {
@@ -35,7 +44,7 @@ func (r *sealProgressRemote) Put(ctx context.Context, key string, b []byte) erro
 		r.expire = nil
 		return context.DeadlineExceeded
 	}
-	if err := r.MemChunkRemote.Put(ctx, key, b); err != nil {
+	if err := r.ChunkRemote.Put(ctx, key, b); err != nil {
 		return err
 	}
 	r.keys = append(r.keys, key)
@@ -53,16 +62,19 @@ func TestPlainSealDeadlineRetryUploadsOnlyRemainingChunks(t *testing.T) {
 	defer stop()
 	first, expire := context.WithCancelCause(parent)
 	defer expire(context.Canceled)
-	remote := &sealProgressRemote{MemChunkRemote: storage.NewMemChunkRemote(), expire: expire, images: map[[32]byte]int{}}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
-		NumBlocks: chunks * pcChunkBlocks, ChunkBlocks: pcChunkBlocks, ChunkUploadConcurrency: 1,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, v1View())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = p.Close() })
+	c := newLayoutCase(t, chunks*pcChunkBlocks, pcChunkBlocks)
+	remote := &sealProgressRemote{expire: expire, images: map[[32]byte]int{}}
+	p := c.provider(t, t.TempDir(), v1View(), "s/r1", func(cfg *durable.ProviderConfig) {
+		cfg.ChunkUploadConcurrency = 1
+		cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			r, err := chunkstore.NewLayoutRemote(c.cat, c.ref, me)
+			if err != nil {
+				return nil, err
+			}
+			remote.ChunkRemote, remote.keyer, remote.aborter = r, r, r
+			return remote, nil
+		}
+	})
 	openRecovered(t, p)
 	b, err := p.Open(parent, "v1")
 	if err != nil {
@@ -106,9 +118,13 @@ func TestPlainSealDeadlineRetryUploadsOnlyRemainingChunks(t *testing.T) {
 			t.Errorf("reuploaded unchanged payload %x count=%d", sum, n)
 		}
 	}
+	committed, err := remote.GetHead(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, key := range firstKeys {
 		found := false
-		for _, ref := range r.Head.Chunks {
+		for _, ref := range committed.Chunks {
 			if ref.Key == key {
 				found = true
 			}
@@ -122,7 +138,7 @@ func TestPlainSealDeadlineRetryUploadsOnlyRemainingChunks(t *testing.T) {
 		if lba%pcChunkBlocks == 0 {
 			want = block(byte(0x40 + lba/pcChunkBlocks))
 		}
-		if !bytes.Equal(headBlock(t, remote.MemChunkRemote, uint32(lba)), want) {
+		if !bytes.Equal(c.block(t, uint32(lba)), want) {
 			t.Fatalf("sealed image differs at lba=%d", lba)
 		}
 	}
