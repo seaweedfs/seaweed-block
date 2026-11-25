@@ -175,19 +175,17 @@ func TestInvariantRowsNameExistingTests(t *testing.T) {
 	}
 }
 
-func TestInvariantRowCountMatchesTables(t *testing.T) {
+func TestInvariantRowCount(t *testing.T) {
 	rows, doc := partB(t, repoRoot(t))
 	by := map[string]int{}
 	for _, r := range rows {
 		by[r.status]++
 	}
-	want := fmt.Sprintf("%d rows: %d ACTIVE, %d STUB, %d ARCHIVED", len(rows), by["ACTIVE"], by["STUB"], by["ARCHIVED"])
-	m := strings.Replace(countLine.FindString(doc), "`INV-` ", "", 1)
-	if m == "" {
-		t.Fatalf("invariants.md states no row count; the tables hold: %s", want)
-	}
-	if m != want {
-		t.Fatalf("invariants.md says %q; its tables hold %q", m, want)
+	// The count is printed here, never kept by hand in the file: a hand-kept
+	// line made every pull request conflict with every merge.
+	t.Logf("%d rows: %d ACTIVE, %d STUB, %d ARCHIVED", len(rows), by["ACTIVE"], by["STUB"], by["ARCHIVED"])
+	if m := countLine.FindString(doc); m != "" {
+		t.Fatalf("invariants.md states a row count (%q); remove it, this test prints the count", m)
 	}
 }
 
