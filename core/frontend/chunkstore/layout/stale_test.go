@@ -85,7 +85,19 @@ func TestHolderFunctions_RefuseAStaleHolder(t *testing.T) {
 	// id are its cases in start_test.go (TestStart_Refusals and the same-host
 	// forced successor); startCheck is Start's check, run again inside the
 	// claim (TestStart_ValidatesAgainstTheHeadItUpdates).
-	covered := map[string]bool{"RemoveUnreachable": true, "Start": true, "startCheck": true}
+	// DetachedBy: my own committed, idle detach proves nothing to a stale
+	// caller in any one dimension.
+	mine := Head{Gen: 1, State: StateDetached, Epoch: me.Epoch, Holder: me.Holder, ClaimID: me.ClaimID}
+	mine.Activity.Kind = ActIdle
+	if !DetachedBy(mine, me) {
+		t.Fatal("DetachedBy refused the holder's own detach")
+	}
+	for who, c := range callers {
+		if DetachedBy(mine, c) {
+			t.Errorf("DetachedBy accepted %s", who)
+		}
+	}
+	covered := map[string]bool{"RemoveUnreachable": true, "Start": true, "startCheck": true, "DetachedBy": true}
 	var missing []string
 	for fname, src := range packageSources(t, false) {
 		file, err := parser.ParseFile(token.NewFileSet(), fname, src, 0)

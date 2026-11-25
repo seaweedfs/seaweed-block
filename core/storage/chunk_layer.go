@@ -252,10 +252,6 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, fmt.Errorf("storage: chunk layer attach: read HEAD: %w", err)
 	}
-	if cfg.RestoreGuard != nil && (head.Gen != cfg.RestoreGuard.Gen || head.Epoch != cfg.RestoreGuard.Epoch) {
-		l.cancel()
-		return nil, fmt.Errorf("%w: HEAD changed after restore claim/seed", errChunkHeadPrecondition)
-	}
 	l.head = copyHead(head)
 	l.remoteLSN = head.RemoteLSN
 	// A HEAD that already belongs to a newer epoch or a competing holder is
@@ -1028,20 +1024,8 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		st.UploadedBytes += int64(max(len(u.c.data), u.c.size))
 	}
 	st.PublishPrepareNs += time.Since(prepareStart).Nanoseconds()
-	upgrade := false
-	if builder, ok := l.remote.(ChunkManifestBuilder); ok {
-		upgrade = baseHead.Segments == nil
-		var err error
-		manifestStart := time.Now()
-		next, err = builder.PrepareManifest(ctx, baseHead, next, uint64(l.blockSize)*l.chunkBlocks)
-		st.ManifestNs += time.Since(manifestStart).Nanoseconds()
-		if err != nil {
-			l.requeueCut(all)
-			return chunkCutResult{}, err
-		}
-	}
 	st.UploadNs += time.Since(uploadStart).Nanoseconds()
-	if !upgrade && !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
+	if !detach && len(changed) == 0 && h == baseHead.RemoteLSN && baseHead.Gen != 0 && !chunkHeadIsDetached(baseHead) {
 		// A no-op cut still observes authority: a fresh host may have
 		// claimed HEAD without uploading a single chunk since our last cut.
 		cur, err := readCapturedHead()
@@ -1049,14 +1033,18 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			l.requeueCut(all)
 			return chunkCutResult{}, fmt.Errorf("storage: no-op cut authority read: %w: %w", errChunkRemoteUnavailable, err)
 		}
-		if cur.Gen != baseHead.Gen || !sameProposal(cur, baseHead) {
+		// Fence only when HEAD's identity or image differs from ours, as
+		// the CAS path does. Its generation alone may move without either
+		// (a settlement that aborts this holder's session rewrites HEAD as
+		// it was): the cut then completes on the newer generation.
+		if !sameProposal(cur, baseHead) {
 			l.requeueCut(all)
 			l.fencePublication(cur)
 			return chunkCutResult{}, errChunkLayerFenced
 		}
-		finishCapturedCut(baseHead, h, nil, nil) // nothing new: no CAS
+		finishCapturedCut(cur, h, nil, nil) // nothing new: no CAS
 		persistCapturedMap(capturedVersions)
-		return chunkCutResult{H: h, Head: copyHead(baseHead), Noop: true, FullHash: all}, nil
+		return chunkCutResult{H: h, Head: copyHead(cur), Noop: true, FullHash: all}, nil
 	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
 		l.requeueCut(all)

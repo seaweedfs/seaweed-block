@@ -25,16 +25,11 @@ const (
 	SnapActive   = "active"
 	SnapDeleting = "deleting"
 	// SnapAbsent is DeleteSnapshot's answer for a snapshot that is not there.
-	SnapAbsent             = "absent"
-	SnapshotClassSemantic  = "semantic"
-	SnapshotClassPinned    = "pinned"
-	SnapshotClassScheduled = "scheduled"
+	SnapAbsent = "absent"
 
-	// LabelScheduleKeep, on a scheduled snapshot, is how many scheduled
-	// snapshots its schedule keeps (a decimal count).
-	LabelScheduleKeep = "swb.schedule.keep"
 	// DefaultScheduleKeep is the count kept when the newest scheduled
-	// snapshot carries no valid LabelScheduleKeep.
+	// snapshot carries no valid retain.LabelScheduleKeep (the label, on a
+	// scheduled snapshot, is how many its schedule keeps).
 	DefaultScheduleKeep = 7
 
 	CodeInvalidClass  = "invalid_class"
@@ -51,7 +46,6 @@ const (
 	CodeSnapshotDeleting  = "snapshot_deleting"
 	CodeTargetExists      = "target_exists"
 	CodeGeometryMismatch  = "geometry_mismatch"
-	CodeForkIncomplete    = "fork_incomplete"
 	CodeDeadlineExceeded  = "deadline_exceeded"
 	CodeRemoteUnavailable = "remote_unavailable"
 	CodeOutcomeUnknown    = "outcome_unknown"
@@ -102,13 +96,6 @@ func remoteErr(err error, format string, a ...any) error {
 	return catErr(CodeRemoteUnavailable, true, err, format, a...)
 }
 
-// Geometry is a volume's shape; a chunk index means nothing without it.
-type Geometry struct {
-	NumBlocks   uint64 `json:"num_blocks"`
-	BlockSize   uint32 `json:"block_size"`
-	ChunkBlocks uint32 `json:"chunk_blocks"`
-}
-
 // Parent is a forked volume's source.
 type Parent struct {
 	VolumeID string `json:"volume_id"`
@@ -139,9 +126,7 @@ type SnapshotInfo struct {
 
 	attempt string // the attempt the name resolved to, when read by name
 
-	head   storage.ChunkHead
-	geo    Geometry
-	digest string // identity uses the embedded writer version, not today's serializer
+	head storage.ChunkHead
 }
 
 // Head returns the HEAD the snapshot copied.
@@ -158,8 +143,8 @@ type ListOptions struct {
 // "pinned" and "scheduled" (invalid_class).
 func ValidateSnapshotClass(class string) error {
 	switch class {
-	case "", SnapshotClassSemantic, SnapshotClassPinned, SnapshotClassScheduled:
+	case "", layout.ClassSemantic, layout.ClassPinned, layout.ClassScheduled:
 		return nil
 	}
-	return catErr(CodeInvalidClass, false, nil, "snapshot class %q: want %q, %q or %q", class, SnapshotClassSemantic, SnapshotClassPinned, SnapshotClassScheduled)
+	return catErr(CodeInvalidClass, false, nil, "snapshot class %q: want %q, %q or %q", class, layout.ClassSemantic, layout.ClassPinned, layout.ClassScheduled)
 }

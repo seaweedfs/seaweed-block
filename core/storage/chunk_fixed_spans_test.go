@@ -12,10 +12,6 @@ type fixedSpanRemote struct {
 	delay time.Duration
 }
 
-func (r *fixedSpanRemote) PrepareManifest(_ context.Context, _ ChunkHead, next ChunkHead, _ uint64) (ChunkHead, error) {
-	time.Sleep(r.delay)
-	return next, nil
-}
 func (r *fixedSpanRemote) CASHead(ctx context.Context, v ChunkHeadVersion, h ChunkHead) (uint64, error) {
 	time.Sleep(r.delay)
 	return r.fakeChunkRemote.CASHead(ctx, v, h)
@@ -30,7 +26,7 @@ func TestChunkCutFixedSpansAttributeManifestAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"ManifestNs"} {
+	for _, name := range []string{"CASWriteNs"} {
 		v := reflect.ValueOf(r.Stats).FieldByName(name)
 		if !v.IsValid() || time.Duration(v.Int()) < delay {
 			t.Fatalf("missing fixed span %s: %+v", name, r.Stats)
@@ -40,7 +36,7 @@ func TestChunkCutFixedSpansAttributeManifestAndCleanup(t *testing.T) {
 		t.Fatal("no fixed sample")
 	}
 	parts := reflect.ValueOf(l.precopySamples[len(l.precopySamples)-1].parts)
-	for _, name := range []string{"Manifest"} {
+	for _, name := range []string{"HeadCAS"} {
 		v := parts.FieldByName(name)
 		if !v.IsValid() || time.Duration(v.Int()) < delay {
 			t.Fatalf("missing selected fixed part %s", name)
