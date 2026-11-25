@@ -26,6 +26,7 @@ func TestWALStoreChunk_RuntimeHeadFenceLatchesNotOperational(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
+			// Move the provider's own layout HEAD, which its publications read.
 			fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 			p := layoutChunkProvider(t, t.TempDir(), fixture, v1View(), 0)
 			s := openRecovered(t, p)
