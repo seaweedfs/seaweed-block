@@ -229,17 +229,37 @@ func TestRemoveUnreachable_ASuccessorBeforeTheHeadViewStopsThePass(t *testing.T)
 	}
 }
 
-// A candidate already marked by another session is left alone.
-func TestRemoveUnreachable_LeavesAnotherSessionsMark(t *testing.T) {
+// A candidate an earlier session marked and never deleted (it died in
+// between) is reclaimed by the next cleaning, and the earlier session's
+// late delete, conditional on its own mark, fails once it is re-marked.
+func TestRemoveUnreachable_ReclaimsAnAbandonedMark(t *testing.T) {
+	ctx := context.Background()
 	o, h, _, orphans := removeFixture(t)
+	var p5 string
 	for _, c := range orphans {
 		if c.Index == 5 {
-			o.objs[path.Join(volRoot, c.Path())].meta.Mark = "c0"
+			p5 = path.Join(volRoot, c.Path())
+			o.objs[p5].meta.Mark = "c0"
 		}
 	}
 	removed, err := removeShard0(t, &memHead{h: h}, o, "c1", orphans)
-	if err != nil || len(removed) != 1 || removed[0].Index != 7 {
-		t.Fatalf("removed %v %v; want only chunk 7 (5 carries another session's mark)", removed, err)
+	if err != nil || len(removed) != 2 {
+		t.Fatalf("removed %v %v; want chunks 5 (abandoned mark) and 7", removed, err)
+	}
+	o2, _, _, orphans2 := removeFixture(t)
+	var c5 ChunkName
+	for _, c := range orphans2 {
+		if c.Index == 5 {
+			c5 = c
+			o2.objs[path.Join(volRoot, c.Path())].meta.Mark = "c0"
+		}
+	}
+	tag, _, _ := o2.Stat(ctx, c5.Path())
+	if err := o2.Mark(ctx, c5.Path(), tag, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := o2.DeleteMarked(ctx, c5.Path(), "c0"); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("the dead session's late delete after the re-mark: %v; want ErrPrecondition", err)
 	}
 }
 
@@ -296,9 +316,9 @@ func cleaningPass(v *memVolume, session string, cands []ChunkName) error {
 // writes (BeginClean, each mark, each conditional delete, EndClean), before
 // the write applies and after it applied with its reply lost; at no point
 // does HEAD reach a missing object, and the restarted holder (a new
-// session) ends idle with every orphan of shard 0 removed and every
-// reachable object present. A mark left by the killed session is cleared
-// by nothing but a reuse, so a marked orphan stays until then.
+// session) ends idle with every orphan of shard 0 removed (also one the
+// killed session marked and did not delete) and every reachable object
+// present.
 func TestCleaningPass_InterruptAtEveryStep(t *testing.T) {
 	fresh := func() (*memVolume, []ChunkName, []ChunkName) {
 		o, h, live, orphans := removeFixture(t)
@@ -341,8 +361,8 @@ func TestCleaningPass_InterruptAtEveryStep(t *testing.T) {
 				for _, c := range orphans {
 					p := path.Join(volRoot, c.Path())
 					_, present := v.objects[p]
-					if c.Index != 10001 && present && v.meta(p).Mark != "c1" {
-						t.Fatalf("orphan %s still present and not held by the killed session's mark", c)
+					if c.Index != 10001 && present {
+						t.Fatalf("orphan %s still present after the re-run (mark %q)", c, v.meta(p).Mark)
 					}
 				}
 				for _, c := range live {
