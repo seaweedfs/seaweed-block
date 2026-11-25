@@ -44,6 +44,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
 	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
 	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
+	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":       "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                          "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":             "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
@@ -266,6 +267,16 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		}
 		if st.updates != 0 {
 			t.Fatalf("layout transition over an absent HEAD wrote %d times", st.updates)
+		}
+	})
+	t.Run("LayoutAddDependent", func(t *testing.T) {
+		r, err := layout.NewReader("/swblock/chunks", "v1", func(context.Context, string) ([]byte, bool, error) { return nil, false, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := &absentLayoutHead{}
+		if _, err := layout.RunAddDependent(ctx, st, r, "daily", layout.Dependent{Target: "t", TargetID: layout.VolumeID{1}}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
+			t.Fatalf("add dependent over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, st.updates)
 		}
 	})
 	t.Run("LayoutRemoval", func(t *testing.T) {

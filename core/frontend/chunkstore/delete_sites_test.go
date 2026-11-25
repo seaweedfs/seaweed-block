@@ -23,6 +23,7 @@ var deleteSites = map[string]string{
 	"core/frontend/chunkstore/catalog.go Catalog.DeleteSnapshot -> DeleteEntry":        "a snapshot name entry, conditional on its attempt (old store)",
 	"core/frontend/chunkstore/chunk_remote.go ChunkRemote.DeleteIntent -> DeleteEntry": "an intent entry (old store)",
 	"core/frontend/chunkstore/retention.go Catalog.freeName -> DeleteEntry":            "a snapshot name entry, conditional on its attempt (old store)",
+	"core/frontend/chunkstore/layout_store.go LayoutStore.deleteObject -> DeleteEntry": "a pool, segment or root object only (object() parses the name), conditional on the volume id",
 	"core/frontend/chunkstore/swfs.go SWFS.DeleteEntry -> DeleteEntry":                 "the filer client itself",
 	"core/frontend/chunkstore/layout/read.go Image.Chunk -> VolumeDir":                 "a foreign chunk's directory from the reference's owner name and id",
 }
