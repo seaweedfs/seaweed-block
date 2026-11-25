@@ -90,6 +90,11 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 	if h.Activity != (Activity{Kind: ActSnap, Session: session}) {
 		return Head{}, false, fmt.Errorf("%w: HEAD has %s(%s), not snap(%s)", ErrNoSession, h.Activity.Kind, h.Activity.Session, session)
 	}
+	// The position is produced here: never one with no room for a next
+	// LSN (a HEAD already there keeps it, e.g. to stop).
+	if position == ^uint64(0) && position != h.Position {
+		return Head{}, false, fmt.Errorf("%w: commit at %d", ErrNoNextPosition, position)
+	}
 	if position < h.Position {
 		return Head{}, false, fmt.Errorf("%w: commit at %d, HEAD at %d", ErrPositionBehind, position, h.Position)
 	}
