@@ -739,9 +739,17 @@ func runVolume(f flags, exits *processExit) int {
 					return deadline, final != ""
 				}
 			}
-			if chunk.catalog != nil && f.chunk.snapshotSchedule.period > 0 {
+			if chunk.bCatalog != nil && f.chunk.snapshotSchedule.period > 0 {
 				cfg.ChunkSnapshotPeriod = f.chunk.snapshotSchedule.period
-				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(chunk.catalog, f.chunk.snapshotSchedule.keep)
+				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(func(ctx context.Context, name, snapshot string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
+					p, ok := any(dp).(interface {
+						SnapshotVolume(context.Context, string, string, layout.SnapshotMeta) (chunkstore.SnapshotInfo, error)
+					})
+					if !ok {
+						return chunkstore.SnapshotInfo{}, errors.New("chunk snapshot data path is not configured")
+					}
+					return p.SnapshotVolume(ctx, name, snapshot, meta)
+				}, f.chunk.snapshotSchedule.keep)
 			}
 			cfg.ChunkDetachPrecopy = f.chunk.detachPrecopy
 			cfg.ChunkUploadConcurrency = f.chunk.uploadConcurrency
@@ -844,7 +852,7 @@ func runVolume(f flags, exits *processExit) int {
 		provider = dp
 		if status != nil {
 			status.SetDurableStatusSource(dp)
-			if f.chunk.controlEndpoint && chunk.catalog != nil {
+			if f.chunk.controlEndpoint && chunk.bCatalog != nil {
 				layoutID, _ := layout.ParseVolumeID(f.layoutID)
 				status.SetChunkControl(volume.NewChunkControl(dp, chunk.bCatalog, chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}))
 			}

@@ -298,32 +298,6 @@ func chunkDetach(args []string, stdout, stderr io.Writer) int {
 	return chunkPost("detach", statusAddr, "/chunk/detach", timeout, body, stdout, stderr)
 }
 
-// chunkCatalog opens the catalog under --chunk-path on --chunk-filer.
-// It returns exit -1 on success, else the exit code after reporting.
-// chunkCatalog dials the filer and opens the catalog; a command that writes
-// (writes) first passes the single-filer start check.
-func chunkCatalog(name, filer, base string, writes bool, timeout time.Duration, stdout, stderr io.Writer) (*chunkstore.Catalog, func() error, int) {
-	if filer == "" {
-		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--chunk-filer is required", false)
-	}
-	f, closeFn, err := dialChunkFiler(filer)
-	if err != nil {
-		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
-	}
-	if writes {
-		if exit := refuseUnlessSingleFiler(name, f, timeout, stdout, stderr); exit >= 0 {
-			_ = closeFn()
-			return nil, nil, exit
-		}
-	}
-	cat, err := chunkstore.NewCatalog(f, base)
-	if err != nil {
-		_ = closeFn()
-		return nil, nil, chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
-	}
-	return cat, closeFn, -1
-}
-
 // chunkResult prints v as JSON, or err as "<code>: <message>".
 func chunkResult(name string, v any, err error, stdout, stderr io.Writer) int {
 	if err != nil {
