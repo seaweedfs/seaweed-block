@@ -38,6 +38,7 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 	type host struct {
 		id, data, ctrl, status, nvme, root string
 		d                                  *daemon
+		args                               []string
 	}
 	hosts := make([]*host, 3)
 	var nodes, placements strings.Builder
@@ -72,12 +73,12 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 		if err := os.MkdirAll(lockDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		b.d = h.start(t, "blockvolume-"+b.id, bins.volume,
-			"--volume-lock-dir-test-only", lockDir, "--master", h.masterAddr, "--server-id", b.id, "--volume-id", "v1",
+		b.args = []string{"--volume-lock-dir-test-only", lockDir, "--master", h.masterAddr, "--server-id", b.id, "--volume-id", "v1",
 			"--replica-id", fmt.Sprintf("r%d", i+1), "--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 			"--durable-root", b.root, "--durable-impl", "walstore", "--durable-blocks", "65536", "--durable-blocksize", "4096",
 			"--heartbeat-interval", "200ms", "--t1-readiness", "--replication-ack", "sync-quorum",
-			"--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN)
+			"--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}
+		b.d = h.start(t, "blockvolume-"+b.id, bins.volume, b.args...)
 		// Registered after the daemon's own cleanup, so it runs first: a
 		// stopped child is resumed before it is cancelled.
 		d := b.d
@@ -161,6 +162,9 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 	if err := os.Chmod(r3.root, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// EXPERIMENT: restart r3 so its role call runs again.
+	r3.d.kill(t)
+	r3.d = h.start(t, "blockvolume-s3-restarted", bins.volume, r3.args...)
 	waitPeersHealthy(t, r1.status, 2)
 }
 
