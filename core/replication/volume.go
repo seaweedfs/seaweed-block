@@ -550,20 +550,48 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 // is degraded like any failed barrier; its store is learned at the barrier
 // that heals it.
 func (v *ReplicationVolume) learnPeerStores(peers []*ReplicaPeer) {
-	var wg sync.WaitGroup
 	for _, peer := range peers {
-		wg.Add(1)
-		go func(peer *ReplicaPeer) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), promotionSeedBarrierTimeout)
-			defer cancel()
-			if _, err := peer.Barrier(ctx, 0); err != nil {
-				log.Printf("replication: volume %s store barrier peer=%s: %v", v.volumeID, peer.Target().ReplicaID, err)
-			}
-		}(peer)
+		go v.learnPeerStore(peer)
 	}
-	wg.Wait()
 }
+
+// learnPeerStore retries learnStore with a growing pause (up to
+// storeLearnMaxPause) until the peer's store is known, or the peer is
+// closed, replaced or no longer Healthy (a heal's barrier then teaches it),
+// or the volume closes. Nothing waits for it.
+func (v *ReplicationVolume) learnPeerStore(peer *ReplicaPeer) {
+	pause := storeLearnFirstPause
+	for attempt := 1; ; attempt++ {
+		if !peer.learningStore() || !v.holdsPeer(peer) {
+			return
+		}
+		if peer.learnStore() {
+			return
+		}
+		if attempt == 1 || attempt%20 == 0 {
+			log.Printf("replication: volume %s peer=%s store not learned yet (attempt %d); retrying", v.volumeID, peer.Target().ReplicaID, attempt)
+		}
+		time.Sleep(pause)
+		if pause *= 2; pause > storeLearnMaxPause {
+			pause = storeLearnMaxPause
+		}
+	}
+}
+
+// holdsPeer reports whether peer is still this open volume's peer.
+func (v *ReplicationVolume) holdsPeer(peer *ReplicaPeer) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return !v.closed && v.peers[peer.Target().ReplicaID] == peer
+}
+
+// The store-learning retry pauses: short first (a replica that starts a
+// moment after the primary), capped so a replica that is down costs one
+// barrier attempt per cap.
+const (
+	storeLearnFirstPause = 100 * time.Millisecond
+	storeLearnMaxPause   = 2 * time.Second
+)
 
 func (v *ReplicationVolume) closePeerQueueLocked(replicaID string) {
 	if q := v.peerQueues[replicaID]; q != nil {

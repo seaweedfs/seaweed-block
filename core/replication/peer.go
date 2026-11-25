@@ -710,6 +710,40 @@ func (p *ReplicaPeer) Barrier(ctx context.Context, targetLSN uint64) (transport.
 	return ack, nil
 }
 
+// learnStore asks the peer for its store with a barrier at LSN 0 and
+// records it. Unlike Barrier, a failure does not degrade the peer: a
+// replica that does not answer yet (it starts after the primary installed
+// it) holds nothing to be wrong about, and nothing re-probes a degraded
+// peer while no write runs. It reports whether the store is now known.
+func (p *ReplicaPeer) learnStore() bool {
+	p.mu.Lock()
+	if p.closed || p.state != ReplicaHealthy {
+		p.mu.Unlock()
+		return false
+	}
+	lineage := p.lineage
+	p.mu.Unlock()
+	ack, err := p.executor.Barrier(p.target.ReplicaID, lineage, 0)
+	if err != nil || ack.StoreID.IsZero() {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.state != ReplicaHealthy {
+		return false
+	}
+	p.storeID = ack.StoreID
+	return true
+}
+
+// learningStore reports whether a store-learning retry should go on: the
+// peer is open, Healthy and its store is still unknown.
+func (p *ReplicaPeer) learningStore() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.closed && p.state == ReplicaHealthy && p.storeID.IsZero()
+}
+
 // Fence issues a synchronous fence exchange against this peer using
 // the caller-supplied lineage. Returns nil on success or a
 // descriptive error on any failure. On error, marks the peer
