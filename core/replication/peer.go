@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
@@ -161,6 +162,10 @@ type ReplicaPeer struct {
 	mu     sync.Mutex
 	state  ReplicaState
 	closed bool
+	// storeID is the store the peer's last successful barrier reported,
+	// cleared whenever the peer leaves Healthy: a store is attested only
+	// by a barrier it answered while counting toward write ACKs.
+	storeID storage.StoreID
 	// onHealthy lets the owning ReplicationVolume reopen a terminal work
 	// queue only after recovery has returned this peer to Healthy.
 	onHealthy func()
@@ -689,6 +694,9 @@ func (p *ReplicaPeer) Barrier(ctx context.Context, targetLSN uint64) (transport.
 	}
 	log.Printf("replication: barrier ack peer=%s targetLSN=%d achievedLSN=%d",
 		p.target.ReplicaID, targetLSN, ack.AchievedLSN)
+	p.mu.Lock()
+	p.storeID = ack.StoreID
+	p.mu.Unlock()
 	return ack, nil
 }
 
@@ -762,12 +770,29 @@ func (p *ReplicaPeer) SetState(next ReplicaState) {
 		return
 	}
 	p.state = next
+	if next != ReplicaHealthy {
+		p.storeID = storage.StoreID{}
+	}
 	onHealthy := p.onHealthy
 	p.mu.Unlock()
 	log.Printf("replication: peer %s state %s → %s", p.target.ReplicaID, prev, next)
 	if prev != ReplicaHealthy && next == ReplicaHealthy && onHealthy != nil {
 		onHealthy()
 	}
+}
+
+// AttestedStore is the store this peer counts toward write ACKs with: its
+// last successful barrier's store id while the peer is Healthy. false while
+// the peer is not Healthy, or no barrier has reported a store since it
+// became Healthy (a peer healed without a barrier is attested by its next
+// one).
+func (p *ReplicaPeer) AttestedStore() (storage.StoreID, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.state != ReplicaHealthy || p.storeID.IsZero() {
+		return storage.StoreID{}, false
+	}
+	return p.storeID, true
 }
 
 func (p *ReplicaPeer) setOnHealthy(fn func()) {
@@ -866,6 +891,7 @@ func (p *ReplicaPeer) Invalidate(reason string) {
 		return
 	}
 	p.state = ReplicaDegraded
+	p.storeID = storage.StoreID{}
 	p.mu.Unlock()
 	log.Printf("replication: peer %s invalidated (prev=%s, reason=%s)",
 		p.target.ReplicaID, prev, reason)

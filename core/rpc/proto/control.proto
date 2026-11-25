@@ -139,6 +139,29 @@ message HeartbeatReport {
     // first). 0 means unknown (older reporters, platforms without statfs):
     // the master then compares machine_id and durable_root_dev only.
     uint64 durable_root_fsid = 8;
+    // store_attestation is sent by a volume's primary only: the stores of
+    // the replicas that count toward its write ACKs. The master takes it as
+    // the reference a promotion's probed store must match, and only from
+    // the server that holds the volume's current primary line at that
+    // epoch. A replica's own report of its store never sets it.
+    StoreAttestation store_attestation = 9;
+}
+
+// StoreAttestation is a primary's attestation of its write-ACK set at one
+// epoch: every replica in it with the store id (the store's superblock
+// UUID) of the store that answered its barriers, the primary's own store
+// included. A replica absent from it is not a survivor on this primary's
+// word.
+message StoreAttestation {
+    string volume_id = 1;
+    string replica_id = 2; // the primary's own replica id
+    uint64 epoch = 3;      // the primary line's epoch
+    repeated AttestedStore stores = 4;
+}
+
+message AttestedStore {
+    string replica_id = 1;
+    bytes store_id = 2; // 16 bytes
 }
 
 // HeartbeatSlot — per-replica slot fact. local_role_claim is the

@@ -125,6 +125,7 @@ type Host struct {
 	probeHub            *probeHub   // the promotion probe round (probe_round.go)
 	probeSlots          slotServers // replica -> server, for the round
 	cfg                 Config
+	attest              *storeAttestations // primaries' attested write-ACK stores
 	healthMu            sync.Mutex // orders replica health events with their accepted heartbeats (#128 rule 6)
 	log                 *log.Logger
 	boot                *bootstrap.DurableAuthorityBootstrap
@@ -259,6 +260,9 @@ func New(cfg Config) (*Host, error) {
 	// now, or a first start would compare against an unknown device forever.
 	// An unknown identity (stat error, unsupported platform) never matches.
 	h.journal.setSelf(storeident.Of(cfg.AuthorityStoreDir))
+	if h.attest, err = loadStoreAttestations(cfg.AuthorityStoreDir); err != nil {
+		return nil, fmt.Errorf("master.New: %w", err)
+	}
 
 	var sink authority.ControllerSink = ctrl
 	if len(cfg.Topology.Volumes) == 0 {

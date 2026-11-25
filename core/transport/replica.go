@@ -637,6 +637,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					AchievedLSN:      frontier,
 					LastDataEpoch:    r.epochs.LastDataRowAt(frontier).Epoch,
 					LastDataFirstLSN: r.epochs.LastDataRowAt(frontier).FirstLSN,
+					StoreID:          storage.StoreIDOf(r.store),
 				})
 				replyType, reply = MsgBarrierResp, resp
 				return true
@@ -690,6 +691,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					AchievedLSN:      frontier,
 					LastDataEpoch:    r.epochs.LastDataRowAt(frontier).Epoch,
 					LastDataFirstLSN: r.epochs.LastDataRowAt(frontier).FirstLSN,
+					StoreID:          storage.StoreIDOf(r.store),
 				})
 				replyType, reply = MsgBarrierResp, resp
 
