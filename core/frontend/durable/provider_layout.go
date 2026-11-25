@@ -41,7 +41,7 @@ func startLayoutRoot(ctx context.Context, ws *storage.WALStore, st layout.StartS
 		return layout.Head{}, errors.New("durable: legacy root has no layout identity; recreate it")
 	}
 	position, _, _ := ws.Boundaries()
-	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: uint64(ws.NumBlocks()) * uint64(ws.BlockSize()), BlockSize: uint32(ws.BlockSize()), ChunkBytes: uint64(ws.ChunkBlocks()) * uint64(ws.BlockSize())}, ClaimID: id, Fresh: fresh, Position: position})
+	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: uint64(ws.NumBlocks()) * uint64(ws.BlockSize()), BlockSize: uint32(ws.BlockSize()), ChunkBytes: uint64(ws.ChunkBlocks()) * uint64(ws.BlockSize())}, ClaimID: id, Fresh: fresh, Position: position, Seedable: ws.CanSeedChunkFrontier})
 	if err != nil {
 		if errors.Is(err, layout.ErrNotHolder) || errors.Is(err, layout.ErrStaleEpoch) || errors.Is(err, layout.ErrPrecondition) {
 			// A HEAD held by another holder at our granted epoch, or any

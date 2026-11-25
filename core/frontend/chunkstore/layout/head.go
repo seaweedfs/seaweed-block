@@ -191,7 +191,15 @@ func validName(field, v string) error {
 	return nil
 }
 
+// ErrNoNextPosition: a HEAD position with no room for a next LSN. No
+// writer may produce it; a HEAD that carries one (an older or broken
+// writer) is still read, and Start refuses to seed from it.
+var ErrNoNextPosition = fmt.Errorf("%w: HEAD position leaves no room for a next LSN", ErrMalformed)
+
 func (h Head) check() error {
+	if h.Position == ^uint64(0) {
+		return ErrNoNextPosition
+	}
 	if h.VolumeID.IsZero() {
 		return fmt.Errorf("%w: HEAD without a volume id", ErrMalformed)
 	}

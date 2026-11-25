@@ -27,7 +27,7 @@ var kernelStates = []string{"absent", "unclaimed", "idle", "snap", "clean", "det
 // kernelEntries are the kernel's entry points (DeleteVolume is their
 // composition: Reserve, MarkDeleting, release, objects, MarkDeleted).
 var kernelEntries = []string{
-	"CreateVolume", "CreateTarget", "StartHigher", "StartOwn", "StartOwnOtherFresh", "StartOwnOtherOld",
+	"CreateVolume", "CreateTarget", "StartHigher", "StartHigherUnseedable", "StartOwn", "StartOwnOtherFresh", "StartOwnOtherFreshUnseedable", "StartOwnOtherOld",
 	"Claim", "Begin", "Commit", "CommitNew", "CommitLower", "Abort", "BeginClean", "EndClean",
 	"RemoveUnreachable", "DeleteSnapshot", "RetireSnapshot", "AddDependent", "ReleaseDependent",
 	"MarkDeleting", "MarkDeleted", "DeletedHeadCreate",
@@ -38,7 +38,7 @@ var kernelRefusals = []struct {
 	err  error
 }{
 	// the local-root refusals wrap ErrNotHolder: name them first
-	{"StaleLocalRoot", ErrStaleLocalRoot}, {"MissingLocalRoot", ErrMissingLocalRoot},
+	{"StaleLocalRoot", ErrStaleLocalRoot}, {"MissingLocalRoot", ErrMissingLocalRoot}, {"UnseedablePosition", ErrUnseedablePosition},
 	{"HeadAbsent", ErrHeadAbsent}, {"NotHolder", ErrNotHolder}, {"Busy", ErrBusy}, {"NoSession", ErrNoSession},
 	{"VolumeDeleting", ErrVolumeDeleting}, {"Detached", ErrDetached}, {"StaleEpoch", ErrStaleEpoch},
 	{"Exists", ErrExists}, {"HasDependents", ErrHasDependents}, {"TargetLive", ErrTargetLive},
@@ -46,6 +46,9 @@ var kernelRefusals = []struct {
 	{"Identity", ErrIdentity}, {"NoSnapshot", ErrNoSnapshot}, {"Malformed", ErrMalformed},
 	{"HolderActive", ErrHolderActive}, {"NotDeleting", ErrNotDeleting}, {"PositionBehind", ErrPositionBehind},
 }
+
+// cannotSeed is a local store that cannot seed its frontier at any position.
+func cannotSeed(uint64) error { return errors.New("the store cannot seed this position") }
 
 func resultOf(err error, wrote bool) string {
 	if err == nil {
@@ -122,11 +125,15 @@ func kernelCell(t *testing.T, state, entry string) string {
 	case "CreateTarget":
 		_, err = CreateTarget(ctx, src, r, "daily", nv, Volume{ID: idFor("v1"), Name: "v1", Geometry: tableGeometry, Format: VolumeFormat}, func(context.Context, RootName) error { return nil })
 	case "StartHigher": // a higher granted epoch, a fresh root
-		_, err = Start(ctx, nv, &fakeLease{ended: true}, HolderID{Epoch: 4, Holder: "srv-a"}, LocalRoot{Geometry: tableGeometry, ClaimID: "k-new", Fresh: true})
+		_, err = Start(ctx, nv, &fakeLease{ended: true}, HolderID{Epoch: 4, Holder: "srv-a"}, LocalRoot{Geometry: tableGeometry, ClaimID: "k-new", Fresh: true, Seedable: anySeedable})
 	case "StartOwn": // HEAD's epoch and server, the root carrying HEAD's claim id
 		_, err = Start(ctx, nv, &fakeLease{ended: true}, HolderID{Epoch: me.Epoch, Holder: me.Holder}, LocalRoot{Geometry: tableGeometry, ClaimID: me.ClaimID, Position: h.Position})
 	case "StartOwnOtherFresh": // HEAD's epoch and server, a fresh root of another claim
-		_, err = Start(ctx, nv, &fakeLease{ended: true}, HolderID{Epoch: me.Epoch, Holder: me.Holder}, LocalRoot{Geometry: tableGeometry, ClaimID: "k-other", Fresh: true})
+		_, err = Start(ctx, nv, &fakeLease{ended: true}, HolderID{Epoch: me.Epoch, Holder: me.Holder}, LocalRoot{Geometry: tableGeometry, ClaimID: "k-other", Fresh: true, Seedable: anySeedable})
+	case "StartHigherUnseedable": // a higher granted epoch, a fresh root whose store cannot seed HEAD's position
+		_, err = Start(ctx, nv, &fakeLease{ended: true}, HolderID{Epoch: 4, Holder: "srv-a"}, LocalRoot{Geometry: tableGeometry, ClaimID: "k-new", Fresh: true, Seedable: cannotSeed})
+	case "StartOwnOtherFreshUnseedable":
+		_, err = Start(ctx, nv, &fakeLease{ended: true}, HolderID{Epoch: me.Epoch, Holder: me.Holder}, LocalRoot{Geometry: tableGeometry, ClaimID: "k-other", Fresh: true, Seedable: cannotSeed})
 	case "StartOwnOtherOld": // HEAD's epoch and server, an older root of another claim
 		_, err = Start(ctx, nv, &fakeLease{ended: true}, HolderID{Epoch: me.Epoch, Holder: me.Holder}, LocalRoot{Geometry: tableGeometry, ClaimID: "k-other", Position: h.Position})
 	case "Claim":
@@ -236,28 +243,30 @@ func kernelCell(t *testing.T, state, entry string) string {
 // source) and a claim; an unclaimed HEAD takes only the first claim and
 // the creates' replays.
 var kernelExpected = map[string]map[string]string{
-	"CreateVolume":       {"absent": "write", "unclaimed": "noop", "idle": "noop", "snap": "noop", "clean": "noop", "detached": "noop", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"CreateTarget":       {"absent": "write", "unclaimed": "Exists", "idle": "Exists", "snap": "Exists", "clean": "Exists", "detached": "Exists", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"StartHigher":        {"absent": "HeadAbsent", "unclaimed": "write", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"StartOwn":           {"absent": "HeadAbsent", "unclaimed": "StaleLocalRoot", "idle": "noop", "snap": "write", "clean": "write", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"StartOwnOtherFresh": {"absent": "HeadAbsent", "unclaimed": "write", "idle": "MissingLocalRoot", "snap": "MissingLocalRoot", "clean": "MissingLocalRoot", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"StartOwnOtherOld":   {"absent": "HeadAbsent", "unclaimed": "StaleLocalRoot", "idle": "StaleLocalRoot", "snap": "StaleLocalRoot", "clean": "StaleLocalRoot", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"Claim":              {"absent": "HeadAbsent", "unclaimed": "write", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"Begin":              {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "write", "snap": "Busy", "clean": "Busy", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"Commit":             {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "noop", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"CommitLower":        {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "NoSession", "snap": "PositionBehind", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"CommitNew":          {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "NoSession", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"Abort":              {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "noop", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"BeginClean":         {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "write", "snap": "Busy", "clean": "Busy", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"EndClean":           {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "noop", "snap": "NoSession", "clean": "write", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"RemoveUnreachable":  {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "NoSession", "snap": "NoSession", "clean": "write", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"DeleteSnapshot":     {"absent": "HeadAbsent", "unclaimed": "noop", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"RetireSnapshot":     {"absent": "HeadAbsent", "unclaimed": "noop", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"AddDependent":       {"absent": "HeadAbsent", "unclaimed": "NoSnapshot", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
-	"ReleaseDependent":   {"absent": "HeadAbsent", "unclaimed": "noop", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "unreachable", "deleted": "unreachable"},
-	"MarkDeleting":       {"absent": "HeadAbsent", "unclaimed": "write", "idle": "write", "snap": "HolderActive", "clean": "HolderActive", "detached": "write", "deleting": "noop", "deleted": "noop"},
-	"MarkDeleted":        {"absent": "HeadAbsent", "unclaimed": "NotDeleting", "idle": "NotDeleting", "snap": "NotDeleting", "clean": "NotDeleting", "detached": "NotDeleting", "deleting": "write", "deleted": "noop"},
-	"DeletedHeadCreate":  {"absent": "write", "unclaimed": "TargetLive", "idle": "TargetLive", "snap": "TargetLive", "clean": "TargetLive", "detached": "TargetLive", "deleting": "noop", "deleted": "noop"},
+	"CreateVolume":                 {"absent": "write", "unclaimed": "noop", "idle": "noop", "snap": "noop", "clean": "noop", "detached": "noop", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"CreateTarget":                 {"absent": "write", "unclaimed": "Exists", "idle": "Exists", "snap": "Exists", "clean": "Exists", "detached": "Exists", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"StartHigher":                  {"absent": "HeadAbsent", "unclaimed": "write", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"StartHigherUnseedable":        {"absent": "HeadAbsent", "unclaimed": "UnseedablePosition", "idle": "UnseedablePosition", "snap": "UnseedablePosition", "clean": "UnseedablePosition", "detached": "UnseedablePosition", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"StartOwnOtherFreshUnseedable": {"absent": "HeadAbsent", "unclaimed": "UnseedablePosition", "idle": "MissingLocalRoot", "snap": "MissingLocalRoot", "clean": "MissingLocalRoot", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"StartOwn":                     {"absent": "HeadAbsent", "unclaimed": "StaleLocalRoot", "idle": "noop", "snap": "write", "clean": "write", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"StartOwnOtherFresh":           {"absent": "HeadAbsent", "unclaimed": "write", "idle": "MissingLocalRoot", "snap": "MissingLocalRoot", "clean": "MissingLocalRoot", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"StartOwnOtherOld":             {"absent": "HeadAbsent", "unclaimed": "StaleLocalRoot", "idle": "StaleLocalRoot", "snap": "StaleLocalRoot", "clean": "StaleLocalRoot", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"Claim":                        {"absent": "HeadAbsent", "unclaimed": "write", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"Begin":                        {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "write", "snap": "Busy", "clean": "Busy", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"Commit":                       {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "noop", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"CommitLower":                  {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "NoSession", "snap": "PositionBehind", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"CommitNew":                    {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "NoSession", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"Abort":                        {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "noop", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"BeginClean":                   {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "write", "snap": "Busy", "clean": "Busy", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"EndClean":                     {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "noop", "snap": "NoSession", "clean": "write", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"RemoveUnreachable":            {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "NoSession", "snap": "NoSession", "clean": "write", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"DeleteSnapshot":               {"absent": "HeadAbsent", "unclaimed": "noop", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"RetireSnapshot":               {"absent": "HeadAbsent", "unclaimed": "noop", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"AddDependent":                 {"absent": "HeadAbsent", "unclaimed": "NoSnapshot", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"ReleaseDependent":             {"absent": "HeadAbsent", "unclaimed": "noop", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "unreachable", "deleted": "unreachable"},
+	"MarkDeleting":                 {"absent": "HeadAbsent", "unclaimed": "write", "idle": "write", "snap": "HolderActive", "clean": "HolderActive", "detached": "write", "deleting": "noop", "deleted": "noop"},
+	"MarkDeleted":                  {"absent": "HeadAbsent", "unclaimed": "NotDeleting", "idle": "NotDeleting", "snap": "NotDeleting", "clean": "NotDeleting", "detached": "NotDeleting", "deleting": "write", "deleted": "noop"},
+	"DeletedHeadCreate":            {"absent": "write", "unclaimed": "TargetLive", "idle": "TargetLive", "snap": "TargetLive", "clean": "TargetLive", "detached": "TargetLive", "deleting": "noop", "deleted": "noop"},
 }
 
 // kernelUnreachable are cells no reachable HEAD gives (a deleting source
@@ -289,7 +298,7 @@ func TestKernelTable(t *testing.T) {
 // kernelComposed are exported entry points that only compose the rows.
 var kernelEntryFuncs = map[string]string{
 	"CreateVolume": "CreateVolume", "CreateTarget": "CreateTarget", "StartHigher": "Start", "StartOwn": "Start",
-	"StartOwnOtherFresh": "Start", "StartOwnOtherOld": "Start", "Claim": "RunClaim",
+	"StartOwnOtherFresh": "Start", "StartOwnOtherOld": "Start", "StartHigherUnseedable": "Start", "StartOwnOtherFreshUnseedable": "Start", "Claim": "RunClaim",
 	"Begin": "RunBegin", "Commit": "RunCommit", "CommitNew": "RunCommit", "CommitLower": "RunCommit", "Abort": "RunAbort", "BeginClean": "RunBeginClean", "EndClean": "RunEndClean",
 	"RemoveUnreachable": "RemoveUnreachable", "DeleteSnapshot": "RunDeleteSnapshot", "RetireSnapshot": "RunRetireSnapshot",
 	"AddDependent": "RunAddDependent", "ReleaseDependent": "RunReleaseDependent", "MarkDeleting": "RunMarkDeleting",

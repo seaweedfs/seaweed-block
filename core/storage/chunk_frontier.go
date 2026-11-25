@@ -45,6 +45,38 @@ func (s *WALStore) seedChunkFrontierV3(lsn uint64) error {
 	return err
 }
 
+// CanSeedChunkFrontier reports whether SeedChunkFrontier(lsn) may proceed
+// on this store as it is now: the one precondition the seed itself checks,
+// so a caller can refuse a position before it writes anything elsewhere.
+func (s *WALStore) CanSeedChunkFrontier(lsn uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seedRefusalLocked(lsn)
+}
+
+// seedRefusalLocked is the seed precondition (the caller holds s.mu): an
+// open, unattached store without a sticky fault, no local writes beyond its
+// checkpoint, no install, an lsn at or above the checkpoint with room for a
+// next LSN, and the owned map for the checkpoint coverage.
+func (s *WALStore) seedRefusalLocked(lsn uint64) error {
+	v := s.v3
+	if s.closed || s.chunk.Load() != nil {
+		return errors.New("storage: seed frontier requires an open, unattached store")
+	}
+	if err := s.stickyIOFault(); err != nil {
+		return err
+	}
+	d := v.pub.current()
+	if lsn == ^uint64(0) || lsn < d.CheckpointLSN || v.appended.Load() > d.CheckpointLSN ||
+		s.walHead > s.checkpointLSN || s.nextLSN > lsn+1 || d.BaseState != BaseNone {
+		return errors.New("storage: seed frontier cannot replace local writes, an install or wrap LSN")
+	}
+	if v.ownedMap == nil {
+		return fmt.Errorf("%w: a v3 seed needs the owned map for its checkpoint coverage", errV3NotYet)
+	}
+	return nil
+}
+
 // seedTimes are the stage boundaries of one v3 seed (zero: not reached).
 type seedTimes struct{ start, locked, validated, synced, published time.Time }
 
@@ -57,24 +89,11 @@ func (s *WALStore) seedChunkFrontierV3Locked(lsn uint64, t *seedTimes) (err erro
 	defer s.lifecycleMu.RUnlock()
 	t.locked = time.Now()
 	s.mu.Lock()
-	if s.closed || s.chunk.Load() != nil {
-		s.mu.Unlock()
-		return errors.New("storage: seed frontier requires an open, unattached store")
-	}
-	if err := s.stickyIOFault(); err != nil {
+	if err := s.seedRefusalLocked(lsn); err != nil {
 		s.mu.Unlock()
 		return err
 	}
 	d := v.pub.current()
-	if lsn == ^uint64(0) || lsn < d.CheckpointLSN || v.appended.Load() > d.CheckpointLSN ||
-		s.walHead > s.checkpointLSN || s.nextLSN > lsn+1 || d.BaseState != BaseNone {
-		s.mu.Unlock()
-		return errors.New("storage: seed frontier cannot replace local writes, an install or wrap LSN")
-	}
-	if v.ownedMap == nil {
-		s.mu.Unlock()
-		return fmt.Errorf("%w: a v3 seed needs the owned map for its checkpoint coverage", errV3NotYet)
-	}
 	if d.CheckpointLSN == lsn && d.W >= lsn && s.nextLSN == lsn+1 {
 		s.mu.Unlock()
 		return nil
