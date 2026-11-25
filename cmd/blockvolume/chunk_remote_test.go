@@ -10,6 +10,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 )
 
@@ -219,32 +220,45 @@ func (f *lookupFailFiler) LookupEntry(ctx context.Context, dir, name string) (*f
 	return f.MemFiler.LookupEntry(ctx, dir, name)
 }
 
-// The attach check is the VOLUME entry's attach rules (B9 W2 §4.2): the first
-// attach creates VOLUME from the local geometry, a later attach with the same
-// geometry passes, and another geometry is refused.
+// Attach creates an unclaimed HEAD only in the master's identified directory.
 func TestChunkAttachCheckAppliesVolumeRules(t *testing.T) {
 	ctx := context.Background()
-	cat, err := chunkstore.NewCatalog(chunkstore.NewMemFiler(), defaultChunkPath)
+	f := &layoutAttachFiler{MemFiler: chunkstore.NewMemFiler()}
+	cat, err := chunkstore.NewBCatalog(f, f, defaultChunkPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check := chunkAttachCheck(cat)
+	id, _ := layout.ParseVolumeID("00112233445566778899aabbccddeeff")
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
+	check := chunkAttachCheck(cat, ref)
 	g := durable.ChunkGeometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}
-	if err := check(ctx, "v1", g); err != nil {
-		t.Fatalf("first attach: %v", err)
+	for i := 0; i < 2; i++ {
+		if err := check(ctx, "v1", g); err != nil {
+			t.Fatal(err)
+		}
 	}
-	v, ok, err := cat.ReadVolume(ctx, "v1")
-	if err != nil || !ok || v.Origin != chunkstore.OriginCreate || v.Geometry != (chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}) {
-		t.Fatalf("VOLUME after the first attach: %+v ok=%v %v", v, ok, err)
+	h, found, err := cat.ReadHead(ctx, ref)
+	if err != nil || !found || h.VolumeID != id || h.Epoch != 0 || h.Holder != "" || h.Current != nil {
+		t.Fatalf("unclaimed HEAD: %+v %v", h, err)
 	}
-	if err := check(ctx, "v1", g); err != nil {
-		t.Fatalf("attach with the same geometry: %v", err)
+	if err := check(ctx, "other", g); !errors.Is(err, layout.ErrIdentity) {
+		t.Fatalf("wrong name: %v", err)
 	}
-	other := g
-	other.NumBlocks = 128
-	if err := check(ctx, "v1", other); chunkstore.CodeOf(err) != chunkstore.CodeGeometryMismatch {
-		t.Fatalf("attach with another geometry: %v, want geometry_mismatch", err)
+	if err := chunkAttachCheck(cat, chunkstore.VolumeRef{Name: "v1"})(ctx, "v1", g); !errors.Is(err, layout.ErrIdentity) {
+		t.Fatalf("missing master id: %v", err)
 	}
+	if found, err := f.LookupEntry(ctx, defaultChunkPath+"/v1", "VOLUME"); err == nil || found != nil {
+		t.Fatalf("legacy directory created: %v", err)
+	}
+}
+
+type layoutAttachFiler struct{ *chunkstore.MemFiler }
+
+func (*layoutAttachFiler) Put(context.Context, []byte) (string, error) {
+	return "", errors.New("attach must not upload data")
+}
+func (*layoutAttachFiler) Get(context.Context, string) ([]byte, error) {
+	return nil, errors.New("attach must not read data")
 }
 
 // HEAD names a host as <server-id>/<replica-id>: two servers serving the same

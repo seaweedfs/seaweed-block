@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -156,6 +157,7 @@ func (s *snapshotSchedule) Set(v string) error {
 type chunkWiring struct {
 	remoteFor   func(volumeID string) (storage.ChunkRemote, error)
 	catalog     *chunkstore.Catalog
+	bCatalog    *chunkstore.BCatalog
 	maintenance func(context.Context, string) error
 	close       func() error
 }
@@ -182,6 +184,11 @@ func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
 		_ = client.Close()
 		return chunkWiring{}, err
 	}
+	bcat, err := chunkstore.NewBCatalog(client, client, c.path)
+	if err != nil {
+		_ = client.Close()
+		return chunkWiring{}, err
+	}
 	var masterAddr string
 	if len(master) > 0 {
 		masterAddr = master[0]
@@ -200,18 +207,20 @@ func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
 			}
 			return chunkstore.NewSWFSChunkRemote(client, root)
 		},
-		catalog: cat,
-		close:   func() error { return errors.Join(closeMaintenance(), client.Close()) },
+		catalog:  cat,
+		bCatalog: bcat,
+		close:    func() error { return errors.Join(closeMaintenance(), client.Close()) },
 	}, nil
 }
 
-// chunkAttachCheck applies the VOLUME entry's attach rules before the chunk
-// layer attaches (B9 W2 §4.2): create VOLUME from the local geometry when
-// it is missing, refuse geometry_mismatch, and refuse fork_incomplete for a
-// fork whose HEAD is not written yet.
-func chunkAttachCheck(cat *chunkstore.Catalog) func(context.Context, string, durable.ChunkGeometry) error {
-	return func(ctx context.Context, volumeID string, g durable.ChunkGeometry) error {
-		_, err := cat.EnsureVolume(ctx, volumeID, chunkstore.Geometry{NumBlocks: g.NumBlocks, BlockSize: g.BlockSize, ChunkBlocks: g.ChunkBlocks})
+// chunkAttachCheck creates only the master's identified volume. Geometry is
+// local/master configuration, not a second catalog record.
+func chunkAttachCheck(cat *chunkstore.BCatalog, ref chunkstore.VolumeRef) func(context.Context, string, durable.ChunkGeometry) error {
+	return func(ctx context.Context, name string, _ durable.ChunkGeometry) error {
+		if cat == nil || name != ref.Name || ref.ID.IsZero() {
+			return layout.ErrIdentity
+		}
+		_, err := cat.CreateVolume(ctx, ref)
 		return err
 	}
 }

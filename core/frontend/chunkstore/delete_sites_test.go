@@ -19,6 +19,9 @@ import (
 // master's volume record, never from a name given plus an id read from
 // that same directory. A new site fails until it is classified here.
 var deleteSites = map[string]string{
+	"cmd/blockvolume/main.go parseFlags -> VolumeDir":        "validated master layout id and volume name; TestBlockvolumeLayoutIdentitySelectsTheLocalRoot",
+	"core/launcher/k8s_renderer.go durableRoot -> VolumeDir": "persisted workload plan layout id and name; launcher layout identity controls",
+
 	"core/frontend/chunkstore/catalog.go Catalog.dropIntent -> DeleteEntry":            "an intent entry (old store)",
 	"core/frontend/chunkstore/catalog.go Catalog.DeleteSnapshot -> DeleteEntry":        "a snapshot name entry, conditional on its attempt (old store)",
 	"core/frontend/chunkstore/chunk_remote.go ChunkRemote.DeleteIntent -> DeleteEntry": "an intent entry (old store)",

@@ -21,6 +21,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
@@ -755,7 +756,8 @@ func runVolume(f flags, exits *processExit) int {
 			if chunkErr == nil {
 				cfg.ChunkRemoteFor = chunk.remoteFor
 				workspaceRemoteFor = chunk.remoteFor
-				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.catalog)
+				layoutID, _ := layout.ParseVolumeID(f.layoutID) // parseFlags validates a supplied id
+				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.bCatalog, chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID})
 				defer chunk.close()
 			}
 		}
@@ -807,7 +809,8 @@ func runVolume(f flags, exits *processExit) int {
 		if status != nil {
 			status.SetDurableStatusSource(dp)
 			if f.chunk.controlEndpoint && chunk.catalog != nil {
-				status.SetChunkControl(volume.NewChunkControl(dp, chunk.catalog))
+				layoutID, _ := layout.ParseVolumeID(f.layoutID)
+				status.SetChunkControl(volume.NewChunkControl(dp, chunk.bCatalog, chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}))
 			}
 		}
 

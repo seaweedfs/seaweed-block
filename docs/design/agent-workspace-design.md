@@ -111,6 +111,22 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 - Example: a volume holds 100 non-zero chunks when snapshot `init` is taken; then 20 of them are rewritten and snapshot `snap1` is taken. `snap1` and HEAD each list 100 keys, 80 of them the same as in `init`. The store holds 120 chunk objects, not 200. Deleting `init` frees exactly its 20 old keys, and only once GC finds them unreferenced (§6); the 80 shared objects are neither moved nor copied.
 - The cost of complete maps falls on the cut: a scattered write pattern dirties many 4 MiB chunks and many segments (§14, cut cost).
 
+### Content-named catalog callers during the cutover
+
+The host control binds a `BCatalog` to the master's `(name, layout_id)` as a `VolumeRef`. A request for a different name is refused; a missing HEAD or failed lookup is an error, never an empty catalog or an invitation to read an older incarnation.
+
+```mermaid
+flowchart LR
+  Master[Durable master name and layout id] --> Ref[VolumeRef]
+  Ref --> Attach[Attach: BCatalog.CreateVolume]
+  Ref --> List[List: read HEAD snapshots]
+  Ref --> Delete[Delete: conditional snapshot removal]
+  Ref --> Usage[Usage: HEAD and current root]
+  Data[Named snapshot data path] --> Commit[Commit snapshot name in HEAD]
+```
+
+Listings carry each snapshot's root and dependents. Usage reports snapshot/dependent counts and own/foreign current chunks; it does not synthesize the removed catalog's retention or byte accounting. Attach creates the identified VOLUME and unclaimed HEAD idempotently and never creates the legacy name-only directory. Snapshot creation belongs to the data path's HEAD commit, rather than a post-cut catalog write. The runtime cutover remains incomplete while scheduled snapshots, geometry checks and cleaning still reference the old catalog; those references must be removed before that catalog is deleted or this branch ships.
+
 ## 4. Dirty tracking
 
 - **Native v3:** the owned per-chunk LSN map and retained WAL/in-memory mutations determine dirt relative to HEAD (`captureCandidates`). UNKNOWN is conservative. Map coverage is durable with the checkpoint before reuse, and a cut certifies only unchanged captured versions after successful publication.

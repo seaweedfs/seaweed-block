@@ -29,7 +29,7 @@ var statusRoutes = []struct {
 	{"/status/peers", "replication peers of the served volume", reflect.TypeOf(peersStatusBody{})},
 	{"/status/durable", "durable store state of the served volume", reflect.TypeOf(durableStatusBody{})},
 	{"/status/recovery", "the engine's replica projection (only with recovery enabled)", reflect.TypeOf(engine.ReplicaProjection{})},
-	{"/status/chunk", "chunk store usage of a walstore-chunk volume (only with --chunk-control-endpoint)", reflect.TypeOf(chunkstore.VolumeUsage{})},
+	{"/status/chunk", "chunk store usage of a walstore-chunk volume (only with --chunk-control-endpoint)", reflect.TypeOf(chunkstore.Usage{})},
 	{"/status/nvme", "NVMe/TCP frontend counters", reflect.TypeOf(NVMeStatus{})},
 	{"/status/ublk", "ublk frontend counters", reflect.TypeOf(UblkStatus{})},
 	{"/status/frontend-capabilities", "the frontends this host can serve", reflect.TypeOf(FrontendCapabilitiesStatus{})},

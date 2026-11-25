@@ -1,6 +1,7 @@
 package volume
 
 import (
+ "github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,7 +35,7 @@ func (p *refusedDetachProvider) DetachVolumePlain(ctx context.Context, id string
 func TestChunkDetachFrozenRefusedBeforeProvider(t *testing.T) {
 	p := &refusedDetachProvider{frozenDetachProvider: &frozenDetachProvider{fakeChunkProvider: &fakeChunkProvider{
 		detach: storage.ChunkCutResult{H: 7, Head: storage.ChunkHead{Gen: 2, Epoch: 1, State: storage.ChunkHeadDetached}}, last: 7}}}
-	s := chunkServer(t, NewChunkControl(p, nil), true)
+	s := chunkServer(t, NewChunkControl(p, nil, chunkstore.VolumeRef{}), true)
 	at := time.Now().Add(-time.Second).UnixNano()
 	for _, body := range []string{
 		fmt.Sprintf(`{"volumeID":"v1","frozen":true,"freezeStartedAtNs":%d}`, at),
