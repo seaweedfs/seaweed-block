@@ -87,3 +87,53 @@ func TestLayoutIdentityWriterAndReaders(t *testing.T) {
 		}
 	}
 }
+
+// A restore's source identity is persisted once and compared on every retry.
+// Adding a new reader or writer requires a binding probe at that site.
+func TestRestoreSourceIdentitySites(t *testing.T) {
+	want := map[string]bool{
+		"core/lifecycle/store.go volumeSpecsCompatible":      true,
+		"core/lifecycle/store.go validateSpec":               true,
+		"core/host/master/services.go CreateVolume":          true,
+		"core/host/master/services.go createLifecycleVolume": true,
+	}
+	seen := map[string]bool{}
+	root := filepath.Join("..", "..")
+	for _, top := range []string{"core", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, top), func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+				return err
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
+			if err != nil {
+				return err
+			}
+			rel, _ := filepath.Rel(root, p)
+			for _, decl := range f.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				site := filepath.ToSlash(rel) + " " + fn.Name.Name
+				ast.Inspect(decl, func(n ast.Node) bool {
+					if s, ok := n.(*ast.SelectorExpr); ok && s.Sel.Name == "SourceLayoutID" {
+						seen[site] = true
+						if !want[site] {
+							t.Errorf("new source identity site needs a probe: %s", site)
+						}
+					}
+					return true
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for site := range want {
+		if !seen[site] {
+			t.Errorf("missing source identity site %s", site)
+		}
+	}
+}
