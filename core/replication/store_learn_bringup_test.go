@@ -42,7 +42,7 @@ func TestStoreLearnedOnceAReplicaListensAfterTheAssignment(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	l, err := transport.NewReplicaListener(addr, s)
 	if err != nil {
-		t.Skipf("could not re-bind %s: %v", addr, err)
+		t.Fatalf("could not re-bind %s: %v (the control did not run)", addr, err)
 	}
 	l.Serve()
 	t.Cleanup(func() { l.Stop() })
@@ -89,7 +89,7 @@ func TestStoreLearnerDoesNotRaceTheFirstWrites(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	l, err := transport.NewReplicaListener(addr, s)
 	if err != nil {
-		t.Skipf("could not re-bind %s: %v", addr, err)
+		t.Fatalf("could not re-bind %s: %v (the control did not run)", addr, err)
 	}
 	l.Serve()
 	t.Cleanup(func() { l.Stop() })
@@ -158,7 +158,7 @@ func TestStoreLearnerRedialsAfterABrokenConnection(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	l, err := transport.NewReplicaListener(addr, s)
 	if err != nil {
-		t.Skipf("could not re-bind %s: %v", addr, err)
+		t.Fatalf("could not re-bind %s: %v (the control did not run)", addr, err)
 	}
 	l.Serve()
 	t.Cleanup(func() { l.Stop() })
