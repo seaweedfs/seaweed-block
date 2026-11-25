@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -302,6 +304,75 @@ func (v *claimExitView) Projection() frontend.Projection {
 		return frontend.Projection{VolumeID: "v"}
 	}
 	return frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}
+}
+
+// A layout HEAD held by another server at the granted epoch is a final
+// refusal. The master has not delivered a newer foreign assignment, so the
+// process must derive its exit from the provider's observed HEAD.
+func TestWorkspaceLayoutForeignClaimChoosesFinalExit(t *testing.T) {
+	ctx := context.Background()
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := chunkstore.VolumeRef{Name: "v", ID: id}
+	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), &maintenanceBlobs{d: map[string][]byte{}}, "/exit-layout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := cat.Store(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, found, err := st.ReadHead(ctx)
+	if err != nil || !found {
+		t.Fatalf("initial HEAD: found=%v err=%v", found, err)
+	}
+	foreign.Epoch, foreign.Holder, foreign.ClaimID = 1, "other/r", "other-claim"
+	if err := st.UpdateHead(ctx, foreign.Gen, foreign); err != nil {
+		t.Fatal(err)
+	}
+	foreign, _, err = st.ReadHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := &claimExitView{}
+	view.assigned.Store(true)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r",
+		ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return st, nil },
+		ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			return chunkstore.NewLayoutRemote(cat, ref, me)
+		},
+	}
+	p, err := durable.NewDurableProvider(cfg, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	if _, err := p.EnsureStorage("v"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RecoverVolume(ctx, "v"); !errors.Is(err, layout.ErrNotHolder) {
+		t.Fatalf("layout Start refusal: %v; want not holder", err)
+	}
+	if _, ended := p.ChunkStartupOutcome("v"); !ended {
+		t.Fatal("foreign layout HEAD did not end startup")
+	}
+	h, _ := exitAuthorityHost(t)
+	e := newProcessExit(ctx)
+	if !chooseChunkStartupExit(e, flags{workspaceLease: true, durableImpl: "walstore-chunk", volumeID: "v"}, h, p) {
+		t.Fatal("foreign layout HEAD did not select an exit")
+	}
+	if out := <-e.decision; out.code != 78 {
+		t.Fatalf("foreign layout HEAD chose %+v; want 78", out)
+	}
+	after, _, err := st.ReadHead(ctx)
+	if err != nil || after.Gen != foreign.Gen || after.Holder != foreign.Holder || after.ClaimID != foreign.ClaimID {
+		t.Fatalf("refused Start changed HEAD: before=%+v after=%+v err=%v", foreign, after, err)
+	}
 }
 func TestWorkspaceForeignHeadClaimChoosesNoRetry(t *testing.T) {
 	for _, deferred := range []bool{false, true} {
