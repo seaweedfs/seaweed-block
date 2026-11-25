@@ -133,6 +133,10 @@ type Ref struct {
 	Chunk   ChunkName
 }
 
+// CheckOwner refuses an owner name that is not a plain path element
+// (ErrMalformed), as every reference's owner must be.
+func CheckOwner(o string) error { return checkOwner(o) }
+
 // checkOwner enforces a plain path element, as volume ids are.
 func checkOwner(o string) error {
 	if o == "" || o == "." || o == ".." || strings.ContainsAny(o, "/\\") {

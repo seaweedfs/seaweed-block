@@ -170,17 +170,29 @@ func (img *Image) Chunk(ctx context.Context, index uint64) (Chunk, error) {
 	if zero {
 		return Chunk{Zero: true}, nil
 	}
-	dir := VolumeDir(ref.Owner, ref.OwnerID)
-	id, err := img.r.VolumeID(ctx, dir)
-	if err != nil {
-		return Chunk{}, err
-	}
-	if id != ref.OwnerID {
-		return Chunk{}, fmt.Errorf("%w: chunk %d names %s id %s, VOLUME has %s", ErrIdentity, index, ref.Owner, ref.OwnerID, id)
-	}
-	b, err := img.r.get(ctx, dir, ref.Chunk.Path(), ref.Chunk.Hash)
+	b, err := img.r.ReadRef(ctx, ref)
 	if err != nil {
 		return Chunk{}, err
 	}
 	return Chunk{Ref: ref, Data: b}, nil
+}
+
+// ReadRef reads one chunk reference from the pool of its owner's directory
+// (VolumeDir of the owner name and id), after checking that directory's
+// VOLUME id is the reference's (ErrIdentity otherwise), verified by name.
+// A chunk the owner's pool lacks is ErrMissing. A restore target reads its
+// source's chunks this way; no caller builds a path from a name.
+func (r *Reader) ReadRef(ctx context.Context, ref Ref) ([]byte, error) {
+	if err := checkOwner(ref.Owner); err != nil {
+		return nil, err
+	}
+	dir := VolumeDir(ref.Owner, ref.OwnerID)
+	id, err := r.VolumeID(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	if id != ref.OwnerID {
+		return nil, fmt.Errorf("%w: chunk %d names %s id %s, VOLUME has %s", ErrIdentity, ref.Chunk.Index, ref.Owner, ref.OwnerID, id)
+	}
+	return r.get(ctx, dir, ref.Chunk.Path(), ref.Chunk.Hash)
 }
