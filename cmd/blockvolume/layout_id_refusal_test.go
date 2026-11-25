@@ -4,7 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"path"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
@@ -111,5 +117,40 @@ func TestLayoutIDMismatchIsTypedAndExits78(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+// This latched refusal has one decision writer and one reset for a new recovery.
+// A new reader/writer must be reviewed together with the recovery-generation gate.
+func TestLayoutIdentityStartupSitesAreEnumerated(t *testing.T) {
+	files, err := filepath.Glob("../../core/frontend/durable/*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if s, ok := n.(*ast.SelectorExpr); ok && s.Sel.Name == "startupIdentityRefused" {
+					got[filepath.Base(name)+":"+fn.Name.Name]++
+				}
+				return true
+			})
+		}
+	}
+	want := map[string]int{"provider.go:RecoverVolume": 1, "provider_startup.go:endChunkStartup": 1, "provider_startup.go:ChunkStartupIdentityRefused": 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("identity refusal sites = %v, want %v", got, want)
 	}
 }

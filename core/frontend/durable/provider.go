@@ -304,6 +304,10 @@ type volHandle struct {
 	// startupCure is the operator's cure of a stale-root startup end.
 	startupCure string
 
+	// startupIdentityRefused is the definite full-id refusal for startupEnded.
+	// endChunkStartup is its decision writer, guarded by p.mu.
+	startupIdentityRefused bool
+
 	// ImplWALStoreChunk. fresh: the local volume is new and starts from
 	// the remote HEAD. It mirrors the durable fresh marker beside the
 	// volume file, written before the file is created and removed only
@@ -319,17 +323,16 @@ type volHandle struct {
 	// wait, 0 if none: a recovered volume whose layer waits for master
 	// authority. A wait only acts while its generation is still the
 	// latest recovery's.
-	recoverGen             uint64
-	waitGen                uint64
-	startupIdentityRefused bool               // definite VOLUME/HEAD identity mismatch for startupEnded
-	startupSuperseded      bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
-	startupEnded           uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
-	runtimeFenced          bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
-	chunk                  storage.ChunkLayer // after RecoverVolume
-	layoutHolder           layout.HolderID    // successful Start identity; guarded by p.mu
-	layoutHead             layout.HeadStore
-	layoutRemote           storage.ChunkRemote // one runtime per attachment, including attach retries
-	chunkLineage           chunkLineage        // immutable authority captured by this attachment
+	recoverGen        uint64
+	waitGen           uint64
+	startupSuperseded bool               // exact foreign-holder claim proof for startupEnded; guarded by p.mu
+	startupEnded      uint64             // recovery generation with a terminal startup outcome; guarded by p.mu
+	runtimeFenced     bool               // the attached layer fenced after startup (HEAD has another owner); guarded by p.mu
+	chunk             storage.ChunkLayer // after RecoverVolume
+	layoutHolder      layout.HolderID    // successful Start identity; guarded by p.mu
+	layoutHead        layout.HeadStore
+	layoutRemote      storage.ChunkRemote // one runtime per attachment, including attach retries
+	chunkLineage      chunkLineage        // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
 	// chunkDetach is set (under attachMu) when DetachVolume starts and
