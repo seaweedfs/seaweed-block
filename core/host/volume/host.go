@@ -171,6 +171,8 @@ type Host struct {
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
+	// probeRoles answers the promotion probe round's role fields (probe_round.go).
+	probeRoles probeRoles
 	asnCli control.AssignmentServiceClient
 
 	cancel  context.CancelFunc
@@ -596,9 +598,10 @@ func (h *Host) Start() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 
-	h.wg.Add(2)
+	h.wg.Add(3)
 	go h.runHeartbeat(ctx)
 	go h.runSubscribe(ctx)
+	go h.runProbeRounds(ctx)
 	return ctx
 }
 

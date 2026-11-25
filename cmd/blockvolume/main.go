@@ -903,6 +903,7 @@ func runVolume(f flags, exits *processExit) int {
 		replVolume = replication.NewReplicationVolume(f.volumeID, store)
 		if status != nil {
 			status.SetPeerStatusSource(replVolume)
+			h.SetProbeRoleSource(status.ProbeRoles)
 			status.SetRuntimeRecoverySource(replVolume)
 		}
 		repMode, writeAck, err := parseReplicationAckProfile(f.replicationAck)
