@@ -267,16 +267,9 @@ func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
 				t.Fatalf("startup overrode the pending real drain: %+v", out)
 			default:
 			}
-			remote := storage.NewMemChunkRemote()
-			_, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "s/r", State: storage.ChunkHeadDetached, DetachedBy: &storage.ChunkDetachedBy{Epoch: 1, Holder: "s/r", Gen: 1}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			gen, err := workspaceDetachedGeneration(ctx, func(string) (storage.ChunkRemote, error) { return remote, nil }, request.id, "s/r")
-			if err != nil {
-				t.Fatal(err)
-			}
-			request.reply <- workspaceStopResult{gen: gen}
+			// The B HEAD proof is covered by TestWorkspaceLayoutDetachedProof.
+			// Here the resource owner supplies that proof to the real lease worker.
+			request.reply <- workspaceStopResult{gen: 1}
 			finishWorkspaceLease(e, f, h, leaseDone)
 			doneConsumed = true
 			out := <-e.decision

@@ -105,6 +105,17 @@ func TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory(t *testing.T) {
 
 }
 
+func TestPlainDetachRefusesLegacyHeadProof(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p := chunkProvider(t, t.TempDir(), storage.NewMemChunkRemote(), v1View(), 0)
+	store := openRecovered(t, p)
+	writeSync(t, store, 0, 'A')
+	if _, _, err := p.DetachVolumePlain(ctx, "v1"); !errors.Is(err, durable.ErrDetachOutcomeUnknown) {
+		t.Fatalf("plain detach accepted a legacy HEAD proof: %v", err)
+	}
+}
+
 type layoutReplayFault struct {
 	layout.StartStore
 	err             *error

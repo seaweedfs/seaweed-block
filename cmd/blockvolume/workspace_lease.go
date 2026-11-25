@@ -6,7 +6,6 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type workspaceStopResult struct {
@@ -46,26 +45,6 @@ func startWorkspaceLease(ctx context.Context, h *volume.Host) (<-chan workspaceS
 		})
 	}()
 	return requests, done
-}
-
-// CLEAN requires a prior Detach while the lease was valid. This is read-only:
-// revocation, expiry and cancellation never manufacture a final cut/proof.
-func workspaceDetachedGeneration(ctx context.Context, remoteFor func(string) (storage.ChunkRemote, error), id *control.WorkspaceIdentity, holder string) (uint64, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if remoteFor == nil || id == nil {
-		return 0, fmt.Errorf("workspace remote/identity missing")
-	}
-	remote, err := remoteFor(id.VolumeId)
-	if err != nil {
-		return 0, err
-	}
-	head, err := storage.ReadDetachedChunkHead(ctx, remote, id.Epoch, holder)
-	if err != nil {
-		return 0, err
-	}
-	return head.Gen, nil
 }
 
 // workspaceLayoutDetachedGeneration accepts only the attached Start identity's
