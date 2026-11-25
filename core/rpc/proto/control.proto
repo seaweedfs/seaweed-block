@@ -444,6 +444,7 @@ message CreateVolumeResponse {
     string layout_id = 10; // master-minted, immutable 32 lower-case hex digits
     uint32 block_size = 11;
     uint64 chunk_bytes = 12;
+    bool store_ready = 13; // false: created, store not ready; retry CreateVolume
 }
 
 message GetLifecycleVolumeRequest {

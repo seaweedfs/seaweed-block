@@ -90,6 +90,7 @@ func lifecycleVolumeResponse(rec lifecycle.VolumeRecord) (*control.CreateVolumeR
 		SizeBytes:         rec.Spec.SizeBytes,
 		BlockSize:         rec.Spec.BlockSize,
 		ChunkBytes:        rec.Spec.ChunkBytes,
+		StoreReady:        rec.StoreReady,
 		ReplicationFactor: int32(rec.Spec.ReplicationFactor),
 		Protocol:          rec.Spec.Protocol,
 		FrontendTransport: rec.Spec.FrontendTransport,

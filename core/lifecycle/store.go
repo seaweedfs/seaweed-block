@@ -53,6 +53,10 @@ type VolumeSpec struct {
 type VolumeRecord struct {
 	Spec       VolumeSpec `json:"spec"`
 	AttachedTo string     `json:"attached_to,omitempty"`
+	// StoreReady is a one-way placement hint, set only after the matching
+	// VOLUME and unclaimed HEAD have been created in the filer. Start still
+	// checks those records independently before serving.
+	StoreReady bool `json:"store_ready,omitempty"`
 }
 
 // FileStore persists one JSON record per volume ID.
@@ -185,6 +189,31 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 		return VolumeRecord{}, err
 	}
 	s.records[spec.VolumeID] = rec
+	s.publishLocked()
+	return rec, nil
+}
+
+// MarkStoreReady publishes the durable placement hint after the filer has
+// accepted both exclusive creates. A retry of the same create may repeat it;
+// another layout identity may not mark this record ready.
+func (s *FileStore) MarkStoreReady(volumeID, layoutID string) (VolumeRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[volumeID]
+	if !ok {
+		return VolumeRecord{}, ErrVolumeNotFound
+	}
+	if rec.Spec.LayoutID != layoutID {
+		return VolumeRecord{}, ErrVolumeConflict
+	}
+	if rec.StoreReady {
+		return rec, nil
+	}
+	rec.StoreReady = true
+	if err := s.putLocked(rec); err != nil {
+		return VolumeRecord{}, err
+	}
+	s.records[volumeID] = rec
 	s.publishLocked()
 	return rec, nil
 }

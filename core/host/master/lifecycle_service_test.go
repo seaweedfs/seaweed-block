@@ -36,6 +36,9 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if resp.GetBlockSize() != 4096 || resp.GetChunkBytes() != 4<<20 {
 		t.Fatalf("response geometry=%+v", resp)
 	}
+	if resp.GetStoreReady() {
+		t.Fatal("record without filer creation advertised store readiness")
+	}
 	if resp.GetPvcName() != "demo-pvc" || resp.GetPvcNamespace() != "demo-ns" || resp.GetPvcUid() != "uid-123" || resp.GetPvName() != "pvc-a" {
 		t.Fatalf("kubernetes metadata response=%+v", resp)
 	}
