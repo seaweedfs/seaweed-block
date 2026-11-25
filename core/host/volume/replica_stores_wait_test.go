@@ -16,8 +16,17 @@ import (
 // projection is not Healthy, writes through the real backend refuse, and
 // status says "creating: waiting for replica attestations (n of N)". The
 // same-generation re-send with nothing awaited opens it.
+// requiringReplication is a replication slot that counts peers only with
+// recorded stores (as replication.ReplicationVolume does on a volume host).
+type requiringReplication struct{ *stubReplication }
+
+func (requiringReplication) RequireAttestedStores() {}
+
 func TestNewVolumePrimaryServesNothingBeforeReplicaAttestations(t *testing.T) {
-	h, _, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	h, _, rep := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	h.replicationMu.Lock()
+	h.setReplicationLocked(requiringReplication{rep})
+	h.replicationMu.Unlock()
 	proj := &mutableProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 2, EndpointVersion: 1}}
 	h.view = NewAdapterProjectionView(proj, "vol1", "rB", h)
 	if err := h.SetSelfFence(&switchFencer{}); err != nil {
@@ -50,5 +59,18 @@ func TestNewVolumePrimaryServesNothingBeforeReplicaAttestations(t *testing.T) {
 	}
 	if _, err := backend.Write(ctx, 0, []byte("open")); err != nil {
 		t.Fatalf("write once nothing is awaited: %v", err)
+	}
+}
+
+// A host whose replication slot does not require recorded stores counts no
+// peer ack by store, so the wait does not apply to it: the fact's count
+// does not close its frontend.
+func TestReplicaStoresWaitOnlyWhereStoresAreRequired(t *testing.T) {
+	h, _, _ := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	fact := selfFact(2)
+	fact.ReplicaStoresAwaited, fact.ReplicaStoresInitial = 2, 2
+	h.noteReplicaStores(fact)
+	if reason := h.ReplicaStoresAwaited(); reason != "" {
+		t.Fatalf("a host without a store-requiring slot waits: %q", reason)
 	}
 }

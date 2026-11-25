@@ -14,8 +14,12 @@ func (h *Host) noteReplicaStores(f *control.AssignmentFact) {
 
 // ReplicaStoresAwaited is the reason a new volume's primary serves nothing
 // yet: "" once every initial replica's store is recorded (or the volume
-// never waited).
+// never waited). It applies where the replication slot counts peers only
+// with recorded stores; a host without one counts no peer ack at all.
 func (h *Host) ReplicaStoresAwaited() string {
+	if _, ok := h.getReplication().(storeRequirer); !ok {
+		return ""
+	}
 	v := h.storesAwaited.Load()
 	waiting, initial := v>>32, v&0xffffffff
 	if waiting == 0 {
