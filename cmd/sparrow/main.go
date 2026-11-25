@@ -257,7 +257,8 @@ func runValidationPass(state *ops.State, volumeID string, pubOpts ...authority.P
 	dir.Append(authority.AssignmentAsk{
 		VolumeID: volumeID, ReplicaID: "r1",
 		DataAddr: replicaAddr, CtrlAddr: replicaAddr,
-		Intent: authority.IntentReassign,
+		Intent:   authority.IntentReassign,
+		Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindForced}, // a demo: a forced move
 	})
 	results = append(results, buildResult("catch_up", waitForMode(adpt2, engine.ModeHealthy, 5*time.Second)))
 	bridge2Cancel()
@@ -281,7 +282,8 @@ func runValidationPass(state *ops.State, volumeID string, pubOpts ...authority.P
 	dir.Append(authority.AssignmentAsk{
 		VolumeID: volumeID, ReplicaID: "r1",
 		DataAddr: replicaAddr2, CtrlAddr: replicaAddr2,
-		Intent: authority.IntentReassign,
+		Intent:   authority.IntentReassign,
+		Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindForced}, // a demo: a forced move
 	})
 	results = append(results, buildResult("rebuild", waitForMode(adpt3, engine.ModeHealthy, 5*time.Second)))
 

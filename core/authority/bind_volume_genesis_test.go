@@ -16,6 +16,7 @@ func bindAsk(volumeID, replicaID string) AssignmentAsk {
 func reassignAsk(volumeID, replicaID string) AssignmentAsk {
 	ask := bindAsk(volumeID, replicaID)
 	ask.Intent = IntentReassign
+	ask.Evidence = testPromotion
 	return ask
 }
 
@@ -100,5 +101,26 @@ func TestPublisher_BindAfterRestartRejectedForAnySlot(t *testing.T) {
 	}
 	if got, ok := pubB.LastPublished("v1", "r2"); !ok || got.Epoch != 2 {
 		t.Fatalf("reloaded line=%+v ok=%t want r2 epoch 2", got, ok)
+	}
+}
+
+// The one mint never issues a primary change its target could not check: a
+// reassign without a kind is refused and the line stays.
+func TestPublisher_ReassignWithoutAKindIsRefused(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil))
+	if err := pub.apply(bindAsk("v1", "r1")); err != nil {
+		t.Fatal(err)
+	}
+	ask := bindAsk("v1", "r2")
+	ask.Intent = IntentReassign
+	if err := pub.apply(ask); !errors.Is(err, ErrReassignWithoutKind) {
+		t.Fatalf("a reassign without a kind: %v; want ErrReassignWithoutKind", err)
+	}
+	if line, _ := pub.VolumeAuthorityLine("v1"); line.ReplicaID != "r1" || line.Epoch != 1 {
+		t.Fatalf("the line moved: %+v", line)
+	}
+	ask.Evidence = testPromotion
+	if err := pub.apply(ask); err != nil {
+		t.Fatalf("a reassign with a kind: %v", err)
 	}
 }

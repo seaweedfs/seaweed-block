@@ -995,13 +995,17 @@ func (h *Host) ingestHeartbeatRecordingHealth(msg authority.HeartbeatMessage) er
 // assignmentFact encodes one captured publication at the stream boundary.
 func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.AssignmentFact {
 	fact := &control.AssignmentFact{
-		VolumeId:        info.VolumeID,
-		ReplicaId:       info.ReplicaID,
-		ServerId:        s.host.workspaceLineOwner(authority.PublishedLine{ReplicaID: info.ReplicaID, Epoch: info.Epoch, IssuedHost: info.ServerID, OwnerFromMove: info.OwnerFromMove}, info.VolumeID, info.ReplicaID, info.Epoch),
-		Epoch:           info.Epoch,
-		EndpointVersion: info.EndpointVersion,
-		DataAddr:        info.DataAddr,
-		CtrlAddr:        info.CtrlAddr,
+		VolumeId:           info.VolumeID,
+		ReplicaId:          info.ReplicaID,
+		ServerId:           s.host.workspaceLineOwner(authority.PublishedLine{ReplicaID: info.ReplicaID, Epoch: info.Epoch, IssuedHost: info.ServerID, OwnerFromMove: info.OwnerFromMove}, info.VolumeID, info.ReplicaID, info.Epoch),
+		Epoch:              info.Epoch,
+		EndpointVersion:    info.EndpointVersion,
+		DataAddr:           info.DataAddr,
+		CtrlAddr:           info.CtrlAddr,
+		PrimaryKind:        control.PrimaryKind(info.Primary.Kind),
+		EvidenceDurableLsn: info.Primary.DurableLSN,
+		EvidenceEpoch:      info.Primary.DataEpoch,
+		EvidenceFirstLsn:   info.Primary.DataFirstLSN,
 	}
 	// Populate the peer set from publisher LastPublished
 	// queries for every non-self replica slot in this volume's

@@ -171,6 +171,8 @@ type Host struct {
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
+	// probeRoles answers the promotion probe round's role fields (probe_round.go).
+	probeRoles probeRoles
 	asnCli control.AssignmentServiceClient
 
 	cancel  context.CancelFunc
@@ -596,9 +598,10 @@ func (h *Host) Start() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 
-	h.wg.Add(2)
+	h.wg.Add(3)
 	go h.runHeartbeat(ctx)
 	go h.runSubscribe(ctx)
+	go h.runProbeRounds(ctx)
 	return ctx
 }
 
@@ -905,11 +908,30 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		}
 	}
 
+	// The target's own store must still show what the master probed before
+	// it adopts the role (nothing is installed yet, so a refusal has no
+	// effect to undo).
+	rv := h.getReplication()
+	if src, ok := rv.(primaryEvidenceSource); ok && rv != nil {
+		st, end, err := src.LocalPrimaryEvidence()
+		if err != nil {
+			h.refusePrimary(fmt.Sprintf("epoch %d: the local store's evidence is unreadable: %v", fact.Epoch, err))
+			return
+		}
+		floor, floorErr := uint64(0), error(nil)
+		if fr, ok := h.selfFenceFloor(); ok {
+			floor, floorErr = fr.EpochFloor()
+		}
+		if reason := checkPrimaryEvidence(fact, st, end, floor, floorErr == nil && floor > 0); reason != "" {
+			h.refusePrimary(reason)
+			return
+		}
+	}
+
 	// Step (2a): install replication peer set first. Decoded via
 	// the separate host-only decodeReplicaTargets path (not through
 	// AssignmentInfo), so the TestNoOtherAssignmentInfoConstruction
 	// AST fence stays green.
-	rv := h.getReplication()
 	if rv != nil {
 		targets, gen := decodeReplicaTargets(fact)
 		if err := rv.UpdateReplicaSet(gen, targets); err != nil {
