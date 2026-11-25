@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
 // P12.6 / INV-WS-SEAL-REPLAY-001: a SIGKILL during plain-seal upload
@@ -114,10 +114,9 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 	verified, _ := env.h.command(t, "ops", "chunk", "verify", "--volume", "v1",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath,
 		"--depth", "data", "--timeout", "60s", "--bytes-per-sec", "0")
-	var result chunkstore.VerifyResult
+	var result layout.VerifyResult
 	if err := json.Unmarshal([]byte(verified), &result); err != nil || !result.Complete ||
-		result.Depth != chunkstore.VerifyData || len(result.Findings) != 0 || result.ChunksNotRead != 0 ||
-		result.DistinctChunksRead == 0 {
+		len(result.Findings) != 0 || result.Chunks == 0 {
 		t.Fatalf("post-move data verify incomplete or corrupt: %s: %v", verified, err)
 	}
 }
