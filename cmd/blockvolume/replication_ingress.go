@@ -80,9 +80,12 @@ func (r *replicationIngress) FenceAsPrimaryWithPeers(epoch uint64, hasPeers bool
 	if r.closed {
 		return fmt.Errorf("replication ingress closed")
 	}
-	if err := r.notePrimaryEpoch(epoch); err != nil {
-		return err
+	if r.epochsErr != nil {
+		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
 	}
+	// The primary's row is noted after the fence has drained every inbound
+	// apply (so the local sync cannot wait on one) and before the role call
+	// returns: no write at this epoch is accepted before the row is durable.
 	if !hasPeers {
 		if r.listener != nil {
 			if err := r.listener.FenceAsPrimary(epoch); err != nil {
@@ -90,12 +93,15 @@ func (r *replicationIngress) FenceAsPrimaryWithPeers(epoch uint64, hasPeers bool
 			}
 		}
 		r.stopLocked(true)
-		return nil
+		return r.notePrimaryEpoch(epoch)
 	}
 	if r.rf1Only != "" {
 		return fmt.Errorf("volume %s refuses a primary role with replica peers at epoch %d: %s", r.volumeID, epoch, r.rf1Only)
 	}
-	return r.roleLocked(epoch, true)
+	if err := r.roleLocked(epoch, true); err != nil {
+		return err
+	}
+	return r.notePrimaryEpoch(epoch)
 }
 func (r *replicationIngress) AdmitAsReplica(epoch uint64) error {
 	r.mu.Lock()
