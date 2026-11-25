@@ -72,3 +72,37 @@ func TestLayoutRemote_AbortNeverEndsAnotherHoldersSession(t *testing.T) {
 		t.Fatalf("HEAD after the deposed remote's Abort and read: %+v, want the newer holder's snap(s-b)", act)
 	}
 }
+
+// The bound on a given-up session with no cut after it: the next cleaning
+// tick ends it before it cleans (no Begin, no cut in between), so HEAD
+// leaves snap(s) at the next cut, cleaning tick or stop, whichever comes
+// first.
+func TestLayoutRemote_AbortedSessionEndsAtTheNextCleaningTick(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	r, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := r.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Abort()
+	if act := headActivity(t, lh); act.Kind != layout.ActSnap || act.Session != s {
+		t.Fatalf("after Abort: HEAD %+v, want the given-up snap(%s) still there", act, s)
+	}
+	ran := false
+	if err := r.Clean(ctx, func(context.Context, layout.HolderID, string) error {
+		ran = true
+		if act := headActivity(t, lh); act.Kind != layout.ActClean {
+			t.Fatalf("while cleaning: HEAD %+v, want the session ended and clean open", act)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if act := headActivity(t, lh); !ran || act.Kind != layout.ActIdle {
+		t.Fatalf("after the cleaning tick: ran=%t HEAD %+v, want idle", ran, act)
+	}
+}
