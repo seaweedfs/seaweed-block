@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // Impl-3 internals of the real WALStore (format bump v3, DESIGN r15
@@ -904,6 +905,39 @@ func (s *WALStore) refreshW() error {
 	}
 	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error { n.W = wack; return nil })
 	return err
+}
+
+// SetLayoutIdentity records this local root's layout identity: the claim
+// id its marker carries and whether it is still fresh. It is one atomic
+// descriptor publication, durable when it returns; a start calls it before
+// any claim, and again with fresh = false once the restore base is
+// durable.
+func (s *WALStore) SetLayoutIdentity(claimID string, fresh bool) error {
+	v := s.v3
+	if v == nil {
+		return errV3NotYet
+	}
+	if claimID == "" || len(claimID) > MaxLayoutClaimIDBytes || !utf8.ValidString(claimID) {
+		return fmt.Errorf("storage: layout claim id %q: 1-%d bytes of UTF-8", claimID, MaxLayoutClaimIDBytes)
+	}
+	v.syncMu.Lock()
+	defer v.syncMu.Unlock()
+	_, err := v.pub.publish(nil, nil, func(n *descriptorV3) error {
+		n.LayoutSet, n.LayoutFresh, n.LayoutClaimID = true, fresh, claimID
+		return nil
+	})
+	return err
+}
+
+// LayoutIdentity returns this local root's layout identity (ok false when
+// none was ever recorded).
+func (s *WALStore) LayoutIdentity() (claimID string, fresh bool, ok bool) {
+	v := s.v3
+	if v == nil {
+		return "", false, false
+	}
+	d := v.pub.current()
+	return d.LayoutClaimID, d.LayoutFresh, d.LayoutSet
 }
 
 // SetWMode changes the W mode (DESIGN 6.4). It runs a Sync first, so every

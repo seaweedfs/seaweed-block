@@ -54,6 +54,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                  "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
 	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
 	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                  "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                 "refuses ErrHeadAbsent (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":           "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":             "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
@@ -315,6 +316,9 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		r, err := NewLayoutRemote(c, VolumeRef{Name: "v", ID: layout.VolumeID{1}}, layout.HolderID{Epoch: 1, Holder: "a", ClaimID: "k"})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if _, err := r.ReadHead(ctx); !errors.Is(err, layout.ErrHeadAbsent) {
+			t.Fatalf("kernel HEAD read of an absent HEAD: %v; want ErrHeadAbsent", err)
 		}
 		if _, err := r.GetHead(ctx); !errors.Is(err, layout.ErrHeadAbsent) {
 			t.Fatalf("engine HEAD read of an absent HEAD: %v; want ErrHeadAbsent", err)

@@ -444,6 +444,19 @@ func (l *LayoutRemote) TakeSnapshotErr() error {
 	return err
 }
 
+// ReadHead reads the volume's HEAD as the kernel holds it (a stop's
+// unknown outcome is decided from it: detached at my epoch and position).
+func (l *LayoutRemote) ReadHead(ctx context.Context) (layout.Head, error) {
+	h, found, err := l.st.ReadHead(ctx)
+	if err != nil {
+		return layout.Head{}, err
+	}
+	if !found {
+		return layout.Head{}, layout.ErrHeadAbsent
+	}
+	return h, nil
+}
+
 // LastCommit is HEAD as this remote's last commit left it (for a stop's
 // unknown outcome, read HEAD again).
 func (l *LayoutRemote) LastCommit() layout.Head {
