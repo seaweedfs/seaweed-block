@@ -9,13 +9,14 @@ import (
 // A fresh local root seeds its frontier at HEAD's position once it starts,
 // so Start refuses a position its store cannot take BEFORE any claim: a
 // refusal writes nothing. The rule comes from the local store
-// (LocalRoot.Seedable); here a store that has no room past MaxUint64.
+// (LocalRoot.Seedable); here a store that takes positions below 5. (A
+// position of MaxUint64 cannot be written at all: the Encode test below.)
 
 var seedGeometry = Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}
 
-func noRoomPastMax(position uint64) error {
-	if position == ^uint64(0) {
-		return errors.New("no room for a next LSN")
+func seedsBelow5(position uint64) error {
+	if position >= 5 {
+		return errors.New("the store cannot seed this position")
 	}
 	return nil
 }
@@ -31,20 +32,20 @@ func TestStart_FreshRootRefusesAnUnseedablePositionBeforeClaim(t *testing.T) {
 		"unclaimed":    {unclaimed, HolderID{Epoch: 1, Holder: "s1/r1"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			local := LocalRoot{Geometry: seedGeometry, ClaimID: "k-new", Fresh: true, Seedable: noRoomPastMax}
+			local := LocalRoot{Geometry: seedGeometry, ClaimID: "k-new", Fresh: true, Seedable: seedsBelow5}
 			// control: a position the store can take is claimed
 			ok := c.h
-			ok.Position = 9
+			ok.Position = 3
 			st, _, err := start(t, ok, c.line, local)
 			if err != nil || st.updates == 0 {
-				t.Fatalf("control, position 9: %v (%d writes); want a claim", err, st.updates)
+				t.Fatalf("control, position 3: %v (%d writes); want a claim", err, st.updates)
 			}
 			bad := c.h
-			bad.Position = ^uint64(0)
+			bad.Position = 9
 			before := bad
 			st, _, err = start(t, bad, c.line, local)
 			if !errors.Is(err, ErrUnseedablePosition) {
-				t.Fatalf("HEAD position MaxUint64: %v; want ErrUnseedablePosition", err)
+				t.Fatalf("HEAD position 9: %v; want ErrUnseedablePosition", err)
 			}
 			if st.updates != 0 || st.h.Gen != before.Gen || st.h.Epoch != before.Epoch || st.h.ClaimID != before.ClaimID {
 				t.Fatalf("a refused start wrote HEAD: %+v (%d writes)", st.h, st.updates)

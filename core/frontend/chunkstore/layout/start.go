@@ -115,7 +115,28 @@ func Start(ctx context.Context, st StartStore, lease LeaseWait, line HolderID, l
 // and server a root without HEAD's claim id, and above HEAD's epoch a
 // non-fresh root of another lineage.
 func startCheck(h Head, line HolderID, local LocalRoot) error {
-	if err := startLineageCheck(h, line, local); err != nil {
+	if err := func() error {
+		if h.State == StateDetached && line.Epoch == h.Epoch {
+			return ErrDetached
+		}
+		if !local.Fresh && local.ClaimID == h.ClaimID && local.Position < h.Position && line.Epoch >= h.Epoch {
+			return fmt.Errorf("%w (%w): the local root holds position %d, HEAD published %d: an old copy of this lineage", ErrStaleLocalRoot, ErrNotHolder, local.Position, h.Position)
+		}
+		if h.Epoch == line.Epoch && h.Holder == line.Holder && h.State == StateLive {
+			switch {
+			case h.ClaimID == local.ClaimID:
+				return nil
+			case local.Fresh:
+				return fmt.Errorf("%w at epoch %d: %s", ErrMissingLocalRoot, h.Epoch, MissingLocalRootCure)
+			default:
+				return fmt.Errorf("%w (%w): HEAD holds claim %q at epoch %d, the local root carries %q: %s", ErrStaleLocalRoot, ErrNotHolder, h.ClaimID, h.Epoch, local.ClaimID, StaleLocalRootCure)
+			}
+		}
+		if line.Epoch > h.Epoch && !local.Fresh && local.ClaimID != h.ClaimID {
+			return fmt.Errorf("%w (%w): the local root carries claim %q, HEAD's lineage is %q: %s", ErrStaleLocalRoot, ErrNotHolder, local.ClaimID, h.ClaimID, StaleLocalRootCure)
+		}
+		return nil
+	}(); err != nil {
 		return err
 	}
 	// A fresh root seeds its frontier at HEAD's position once it starts:
@@ -128,29 +149,6 @@ func startCheck(h Head, line HolderID, local LocalRoot) error {
 		if err := local.Seedable(h.Position); err != nil {
 			return fmt.Errorf("%w: HEAD position %d: %w", ErrUnseedablePosition, h.Position, err)
 		}
-	}
-	return nil
-}
-
-func startLineageCheck(h Head, line HolderID, local LocalRoot) error {
-	if h.State == StateDetached && line.Epoch == h.Epoch {
-		return ErrDetached
-	}
-	if !local.Fresh && local.ClaimID == h.ClaimID && local.Position < h.Position && line.Epoch >= h.Epoch {
-		return fmt.Errorf("%w (%w): the local root holds position %d, HEAD published %d: an old copy of this lineage", ErrStaleLocalRoot, ErrNotHolder, local.Position, h.Position)
-	}
-	if h.Epoch == line.Epoch && h.Holder == line.Holder && h.State == StateLive {
-		switch {
-		case h.ClaimID == local.ClaimID:
-			return nil
-		case local.Fresh:
-			return fmt.Errorf("%w at epoch %d: %s", ErrMissingLocalRoot, h.Epoch, MissingLocalRootCure)
-		default:
-			return fmt.Errorf("%w (%w): HEAD holds claim %q at epoch %d, the local root carries %q: %s", ErrStaleLocalRoot, ErrNotHolder, h.ClaimID, h.Epoch, local.ClaimID, StaleLocalRootCure)
-		}
-	}
-	if line.Epoch > h.Epoch && !local.Fresh && local.ClaimID != h.ClaimID {
-		return fmt.Errorf("%w (%w): the local root carries claim %q, HEAD's lineage is %q: %s", ErrStaleLocalRoot, ErrNotHolder, local.ClaimID, h.ClaimID, StaleLocalRootCure)
 	}
 	return nil
 }
