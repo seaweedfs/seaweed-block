@@ -108,15 +108,23 @@ func orphanPresent(t *testing.T, s *chunkstore.LayoutStore, n layout.ChunkName) 
 	return found
 }
 
-func holderCalls(me layout.HolderID, err error) (func(context.Context) (layout.HolderID, error), *int) {
+// holderCalls is the attachment's layout remote for holder me (or err when
+// the process has no holder identity yet), counting the calls.
+func holderCalls(cat *chunkstore.BCatalog, ref chunkstore.VolumeRef, me layout.HolderID, err error) (func(context.Context) (layoutCleaner, error), *int) {
 	n := 0
-	return func(context.Context) (layout.HolderID, error) { n++; return me, err }, &n
+	return func(context.Context) (layoutCleaner, error) {
+		n++
+		if err != nil {
+			return nil, err
+		}
+		return chunkstore.NewLayoutRemote(cat, ref, me)
+	}, &n
 }
 
 // Default-off: the pass retains and never asks for a holder or removes.
 func TestMaintenanceDefaultRetainsAndDoesNotClean(t *testing.T) {
 	cat, ref, _, s, orphan := maintenanceFixture(t)
-	holder, calls := holderCalls(maintenanceHolder, nil)
+	holder, calls := holderCalls(cat, ref, maintenanceHolder, nil)
 	pass := newChunkMaintenance(cat, ref, holder, false, time.Now)
 	if err := pass(context.Background(), "v1"); err != nil {
 		t.Fatal(err)
@@ -142,7 +150,7 @@ func TestMaintenanceCleansOnlyAsTheHolder(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			cat, ref, _, s, orphan := maintenanceFixture(t)
-			holder, _ := holderCalls(tc.me, tc.err)
+			holder, _ := holderCalls(cat, ref, tc.me, tc.err)
 			err := newChunkMaintenance(cat, ref, holder, true, time.Now)(ctx, "v1")
 			if gone := !orphanPresent(t, s, orphan); gone != tc.removed || (err == nil) != tc.removed {
 				t.Fatalf("pass: err %v, orphan removed %v; want removed %v", err, gone, tc.removed)
@@ -162,7 +170,7 @@ func TestMaintenanceCleansOnlyAsTheHolder(t *testing.T) {
 // A failed retention ends the pass before the cleaning starts.
 func TestMaintenanceRetentionFailureNeverStartsCleaning(t *testing.T) {
 	cat, ref, f, s, orphan := maintenanceFixture(t)
-	holder, calls := holderCalls(maintenanceHolder, nil)
+	holder, calls := holderCalls(cat, ref, maintenanceHolder, nil)
 	f.armed = true
 	err := newChunkMaintenance(cat, ref, holder, true, time.Now)(context.Background(), "v1")
 	f.armed = false
@@ -174,7 +182,7 @@ func TestMaintenanceRetentionFailureNeverStartsCleaning(t *testing.T) {
 // The pass serves only the volume the process was started for.
 func TestMaintenanceRefusesAnotherVolume(t *testing.T) {
 	cat, ref, _, _, _ := maintenanceFixture(t)
-	holder, _ := holderCalls(maintenanceHolder, nil)
+	holder, _ := holderCalls(cat, ref, maintenanceHolder, nil)
 	if err := newChunkMaintenance(cat, ref, holder, true, time.Now)(context.Background(), "v2"); !errors.Is(err, layout.ErrIdentity) {
 		t.Fatalf("pass for another volume: %v; want ErrIdentity", err)
 	}

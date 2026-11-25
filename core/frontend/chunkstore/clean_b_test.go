@@ -60,6 +60,23 @@ func present(t *testing.T, s *LayoutStore, n layout.ChunkName) bool {
 
 var cleanHolder = layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
 
+// cleanVia runs one cleaning pass the way the holder's maintenance does:
+// through the holder's layout remote (LayoutRemote.Clean) with the
+// catalog's removal step.
+func cleanVia(ctx context.Context, c *BCatalog, v VolumeRef, me layout.HolderID) (CleanResult, *LayoutRemote, error) {
+	r, err := NewLayoutRemote(c, v, me)
+	if err != nil {
+		return CleanResult{}, nil, err
+	}
+	var res CleanResult
+	err = r.Clean(ctx, func(ctx context.Context, me layout.HolderID, s string) error {
+		var rerr error
+		res, rerr = c.RemoveUnreachableAll(ctx, v, me, s)
+		return rerr
+	})
+	return res, r, err
+}
+
 // The holder's pass removes every orphan in every shard, keeps what the
 // current root and the snapshot name, and leaves HEAD idle. With a page of
 // one name the shard cursor is exercised too.
@@ -71,7 +88,7 @@ func TestBCatalog_CleanRemovesOnlyUnreachable(t *testing.T) {
 	c, v, s, orphans := cleanFixture(t)
 	live := layout.NameChunk(1, bytes.Repeat([]byte{7}, 4096))
 
-	res, err := c.Clean(ctx, v, cleanHolder, "c1")
+	res, _, err := cleanVia(ctx, c, v, cleanHolder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +108,7 @@ func TestBCatalog_CleanRemovesOnlyUnreachable(t *testing.T) {
 		t.Fatalf("HEAD after clean: %+v %v; want idle", h.Activity, err)
 	}
 	// A second pass finds nothing more.
-	if res, err := c.Clean(ctx, v, cleanHolder, "c2"); err != nil || res.Removed != 0 {
+	if res, _, err := cleanVia(ctx, c, v, cleanHolder); err != nil || res.Removed != 0 {
 		t.Fatalf("second clean: %+v %v", res, err)
 	}
 }
@@ -106,7 +123,7 @@ func TestBCatalog_CleanIsHolderOnly(t *testing.T) {
 		"other claim":  {Epoch: 1, Holder: "s/r", ClaimID: "other"},
 		"old epoch":    {Epoch: 0, Holder: "s/r", ClaimID: "k"},
 	} {
-		if _, err := c.Clean(ctx, v, me, "c1"); err == nil {
+		if _, _, err := cleanVia(ctx, c, v, me); err == nil {
 			t.Fatalf("%s: clean succeeded; want refused", name)
 		}
 	}
@@ -121,15 +138,23 @@ func TestBCatalog_CleanIsHolderOnly(t *testing.T) {
 	}
 }
 
-// While a snapshot session is open the cleaning cannot begin (ErrBusy) and
-// removes nothing; the open session is left as it was.
+// While the holder's cut session is open the cleaning cannot begin
+// (ErrBusy) and removes nothing; the open session is left as it was.
 func TestBCatalog_CleanWaitsForAnOpenSnapshot(t *testing.T) {
 	ctx := context.Background()
 	c, v, s, orphans := cleanFixture(t)
-	if _, err := layout.RunBegin(ctx, s, cleanHolder, "snap2"); err != nil {
+	r, err := NewLayoutRemote(c, v, cleanHolder)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Clean(ctx, v, cleanHolder, "c1"); !errors.Is(err, layout.ErrBusy) {
+	snap, err := r.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Clean(ctx, func(ctx context.Context, me layout.HolderID, s string) error {
+		_, rerr := c.RemoveUnreachableAll(ctx, v, me, s)
+		return rerr
+	}); !errors.Is(err, layout.ErrBusy) {
 		t.Fatalf("clean during a snapshot: %v; want ErrBusy", err)
 	}
 	for _, n := range orphans {
@@ -138,7 +163,7 @@ func TestBCatalog_CleanWaitsForAnOpenSnapshot(t *testing.T) {
 		}
 	}
 	h, _, err := c.ReadHead(ctx, v)
-	if err != nil || h.Activity != (layout.Activity{Kind: layout.ActSnap, Session: "snap2"}) {
+	if err != nil || h.Activity != (layout.Activity{Kind: layout.ActSnap, Session: snap}) {
 		t.Fatalf("HEAD after the refused clean: %+v %v; want the snapshot session open", h.Activity, err)
 	}
 }
@@ -156,7 +181,7 @@ func TestBCatalog_CleanClosesOnError(t *testing.T) {
 	if err := s.f.CreateEntry(ctx, pool, layoutEntry("x", nil), true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Clean(ctx, v, cleanHolder, "c1"); !errors.Is(err, layout.ErrCorrupt) {
+	if _, _, err := cleanVia(ctx, c, v, cleanHolder); !errors.Is(err, layout.ErrCorrupt) {
 		t.Fatalf("clean over a malformed shard: %v; want ErrCorrupt", err)
 	}
 	h, _, err := c.ReadHead(ctx, v)
@@ -233,7 +258,7 @@ func TestBCatalog_CleanAfterOverwriteAndSnapshotDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Control: while s1 still names X, the cleaning removes nothing.
-	if res, err := c.Clean(ctx, v, cleanHolder, "c0"); err != nil || res.Removed != 0 || !present(t, s, cx) {
+	if res, _, err := cleanVia(ctx, c, v, cleanHolder); err != nil || res.Removed != 0 || !present(t, s, cx) {
 		t.Fatalf("clean with s1 held: %+v %v; want nothing removed", res, err)
 	}
 	if _, err := c.DeleteSnapshot(ctx, v, "s1"); err != nil {
@@ -243,7 +268,7 @@ func TestBCatalog_CleanAfterOverwriteAndSnapshotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.Clean(ctx, v, cleanHolder, "c1")
+	res, _, err := cleanVia(ctx, c, v, cleanHolder)
 	if err != nil || res.Removed != 1 {
 		t.Fatalf("clean: %+v %v; want exactly X's chunk removed", res, err)
 	}

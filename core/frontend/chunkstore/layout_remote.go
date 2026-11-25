@@ -158,7 +158,9 @@ func (l *LayoutRemote) openSessionLocked(ctx context.Context) error {
 	if l.session != "" {
 		return nil
 	}
-	l.stopCleaningLocked()
+	if err := l.stopCleaningLocked(ctx); err != nil {
+		return err
+	}
 	if _, err := l.rollBackLocked(ctx); err != nil {
 		return err
 	}
@@ -646,7 +648,10 @@ func (l *LayoutRemote) Clean(ctx context.Context, run func(ctx context.Context, 
 	l.mu.Unlock()
 
 	runErr := run(cctx, l.me, c)
-	eh, endErr := layout.RunEndClean(context.WithoutCancel(ctx), l.st, l.me, c)
+	// Bounded by the caller's context: a stop on a hung filer does not
+	// wait for the close; a cleaning left open is ended by the next cut
+	// (rollBackLocked) or the holder's next claim.
+	eh, endErr := layout.RunEndClean(ctx, l.st, l.me, c)
 	cancel()
 
 	l.mu.Lock()
@@ -719,15 +724,21 @@ func (l *LayoutRemote) takeAbandonLocked() {
 }
 
 // stopCleaningLocked cancels this process's open cleaning and waits for
-// it to end (it releases mu while waiting).
-func (l *LayoutRemote) stopCleaningLocked() {
+// it to end, at most until ctx ends (it releases mu while waiting).
+func (l *LayoutRemote) stopCleaningLocked(ctx context.Context) error {
 	for l.cleaning != "" {
 		cancel, done := l.cleanCancel, l.cleanDone
 		cancel()
 		l.mu.Unlock()
-		<-done
+		select {
+		case <-done:
+		case <-ctx.Done():
+			l.mu.Lock()
+			return fmt.Errorf("%w: waiting for this process's cleaning to end: %w", storage.ErrChunkRemoteUnavailable, ctx.Err())
+		}
 		l.mu.Lock()
 	}
+	return nil
 }
 
 // layoutRemoteErr maps a kernel result to the engine's action (the seam's

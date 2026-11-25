@@ -108,7 +108,10 @@ func TestLayoutFenceLatchesAtEverySite(t *testing.T) {
 					moveHead()
 				}
 				if st.observe == nil { // cleaning
-					_, cerr := lh.cat.Clean(ctx, lh.v, lh.me, "clean-x")
+					cerr := r.Clean(ctx, func(ctx context.Context, me layout.HolderID, s string) error {
+						_, rerr := lh.cat.RemoveUnreachableAll(ctx, lh.v, me, s)
+						return rerr
+					})
 					err = LayoutErr(cerr)
 					if obs, ok := l.(interface{ ObserveRemoteError(error) error }); ok {
 						_ = obs.ObserveRemoteError(err)

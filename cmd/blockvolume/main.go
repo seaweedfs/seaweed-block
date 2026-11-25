@@ -798,11 +798,19 @@ func runVolume(f flags, exits *processExit) int {
 				workspaceLayoutHead, chunkErr = chunk.bCatalog.Store(ref)
 				// The holder identity comes from Start (until it is wired, the
 				// pass retains and does not clean).
-				cfg.ChunkMaintenance = newChunkMaintenance(chunk.bCatalog, ref, func(ctx context.Context) (layout.HolderID, error) {
+				cfg.ChunkMaintenance = newChunkMaintenance(chunk.bCatalog, ref, func(ctx context.Context) (layoutCleaner, error) {
 					if dp == nil {
-						return layout.HolderID{}, errNoLayoutHolder
+						return nil, errNoLayoutHolder
 					}
-					return dp.LayoutHolder(ctx, f.volumeID)
+					r, err := dp.LayoutRemote(ctx, f.volumeID)
+					if err != nil {
+						return nil, fmt.Errorf("%w: %w", errNoLayoutHolder, err)
+					}
+					c, ok := r.(layoutCleaner)
+					if !ok {
+						return nil, fmt.Errorf("%w: the attachment's remote (%T) cannot clean", errNoLayoutHolder, r)
+					}
+					return c, nil
 				}, f.chunk.automaticGC, time.Now)
 				defer chunk.close()
 			}

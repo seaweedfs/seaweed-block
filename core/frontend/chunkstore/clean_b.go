@@ -20,35 +20,9 @@ type CleanResult struct {
 	Removed int // names deleted
 }
 
-// Clean is the holder's cleaning of v (transitions 6, 7', 8): it opens
-// clean(session) on HEAD, then for every pool shard, page by page, removes
-// the names no root in HEAD names (layout.RemoveUnreachable validates HEAD
-// after reading each page's tags, so a successor's writes are never
-// removed), and closes the cleaning. Only the holder at HEAD's epoch can
-// clean: any other caller is refused at Begin and nothing is removed. The
-// cleaning is closed on every return after a successful Begin, so a failed
-// pass never leaves snapshots blocked; a session that dies before closing
-// it is closed by the next pass with the same session id, or replaced by
-// the holder's next claim.
-func (c *BCatalog) Clean(ctx context.Context, v VolumeRef, me layout.HolderID, session string) (res CleanResult, err error) {
-	s, _, err := c.open(v)
-	if err != nil {
-		return res, err
-	}
-	if _, err := layout.RunBeginClean(ctx, s, me, session); err != nil {
-		return res, err
-	}
-	defer func() {
-		if _, endErr := layout.RunEndClean(context.WithoutCancel(ctx), s, me, session); endErr != nil {
-			err = errors.Join(err, endErr)
-		}
-	}()
-	return c.RemoveUnreachableAll(ctx, v, me, session)
-}
-
 // RemoveUnreachableAll is the cleaning's removal step over every pool shard
 // of v, page by page, for a holder whose clean(session) is open on HEAD
-// (opened by Clean, or by the engine's remote between its sessions):
+// (opened by the holder's layout remote, LayoutRemote.Clean):
 // layout.RemoveUnreachable validates HEAD after reading each page's tags,
 // so it removes nothing unless clean(session) is this holder's.
 func (c *BCatalog) RemoveUnreachableAll(ctx context.Context, v VolumeRef, me layout.HolderID, session string) (res CleanResult, err error) {
