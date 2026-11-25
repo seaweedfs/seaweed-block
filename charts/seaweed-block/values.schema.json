@@ -64,7 +64,16 @@
       "properties": {
         "masterSecret": { "type": "string", "minLength": 1 },
         "roleSecret": { "type": "string", "minLength": 1 },
-        "clientSecret": { "type": "string", "minLength": 1 },
+        "clientSecrets": {
+          "type": "object",
+          "required": ["csiController", "csiNode", "operatorStatus", "failbackExecutor"],
+          "properties": {
+            "csiController": { "type": "string", "minLength": 1 },
+            "csiNode": { "type": "string", "minLength": 1 },
+            "operatorStatus": { "type": "string", "minLength": 1 },
+            "failbackExecutor": { "type": "string", "minLength": 1 }
+          }
+        },
         "nodeSecretPrefix": { "type": "string", "minLength": 1 }
       }
     },

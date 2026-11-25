@@ -72,4 +72,4 @@ spec:
       volumes:
         - name: socket-dir
           emptyDir: {}
-        {{- include "seaweed-block.masterTLSClientVolume" . | nindent 8 }}
+        {{- include "seaweed-block.masterTLSClientVolume" .Values.tls.clientSecrets.csiController | nindent 8 }}

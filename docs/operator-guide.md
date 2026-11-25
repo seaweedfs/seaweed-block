@@ -96,6 +96,11 @@ files are read at every new connection, so a rotated file takes effect without a
 client connection after 24 hours, so a rotated or removed certificate is seen within a day even on an idle link.
 The volume's own HTTP routes (`/status`, chunk routes) are not authenticated and stay on loopback.
 
+**In Kubernetes** each in-cluster client has its own certificate and Secret, with the least role its calls need:
+the CSI node and the status operator are `viewer`; the CSI controller (it deletes volumes) and the failback executor
+are `admin`. The CSI controller's key is an admin key: guard its Secret like an operator's admin key.
+`scripts/k8s-alpha-certs.sh` issues all four for a trial.
+
 ## Size a host
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal
@@ -246,6 +251,9 @@ and the volume does not serve. A monitor that only watches for failed units does
   two hosts are kept apart by the assignment and the lease. A container needs the host's `/run/sw-block/locks`
   ([one process per volume](releases/one-process-per-volume.md)).
 - **Manual GC.** Automatic GC is off (`--chunk-maintenance-gc`): run GC passes yourself.
+- **Node reattach events under mutual TLS.** Node reattach events are not recorded in the cluster event log under
+  mutual TLS: a CSI node's certificate is `viewer`, so blockmaster refuses the event and the node logs one line per
+  reattach.
 
 ## Commands and their tests
 

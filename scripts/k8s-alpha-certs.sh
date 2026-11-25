@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Development certificates for a Kubernetes alpha install: blockmaster listens
 # on the pod network only with mutual TLS. Creates (or reuses) a CA in OUT_DIR,
-# issues the blockmaster, controller and per-server node certificates, writes
-# the role file, and applies the Secrets the chart and the alpha manifests
-# mount. For production, issue the certificates from your own CA (see
+# issues the blockmaster certificate, one certificate per in-cluster client
+# (each with the least role its calls need) and one per server, writes the
+# role file, and applies the Secrets the chart and the alpha manifests mount.
+# For production, issue the certificates from your own CA (see
 # docs/operator-guide.md, "Authenticate the control API").
 #
 # usage: scripts/k8s-alpha-certs.sh NAMESPACE OUT_DIR SERVER_ID...
@@ -47,11 +48,16 @@ fingerprint() {
 }
 
 issue master blockmaster "DNS:blockmaster.$NS.svc.cluster.local,DNS:blockmaster.$NS.svc,DNS:blockmaster,IP:127.0.0.1"
-issue controller sw-block-controller
-{
-  echo "# sw-block alpha role file: sha256:<fingerprint> <role> <id>"
-  echo "$(fingerprint "$OUT/controller.crt") admin sw-block-controller"
-} >"$OUT/roles"
+# The in-cluster clients, "name:role": certificate NAME.crt, CN and role-file
+# id sw-block-NAME, Secret sw-block-NAME-tls. The CSI controller deletes
+# volumes, the failback executor runs failbacks (both admin); the CSI node and
+# the status operator only read.
+CLIENTS=(csi-controller:admin csi-node:viewer operator-status:viewer failback-executor:admin)
+echo "# sw-block alpha role file: sha256:<fingerprint> <role> <id>" >"$OUT/roles"
+for c in "${CLIENTS[@]}"; do
+  issue "${c%%:*}" "sw-block-${c%%:*}"
+  echo "$(fingerprint "$OUT/${c%%:*}.crt") ${c##*:} sw-block-${c%%:*}" >>"$OUT/roles"
+done
 for id in "$@"; do
   if ! [[ "$id" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
     echo "server id $id cannot name a Kubernetes Secret (lowercase letters, digits, '-' and '.')" >&2
@@ -70,7 +76,9 @@ apply_tls() {
     --dry-run=client -o yaml | kubectl apply -f -
 }
 apply_tls sw-block-master-tls master
-apply_tls sw-block-client-tls controller
+for c in "${CLIENTS[@]}"; do
+  apply_tls "sw-block-${c%%:*}-tls" "${c%%:*}"
+done
 for id in "$@"; do
   apply_tls "$PREFIX-$id" "node-$id"
 done

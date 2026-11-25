@@ -60,6 +60,6 @@ spec:
       volumes:
         - name: master-tls
           secret:
-            secretName: sw-block-client-tls
+            secretName: sw-block-csi-controller-tls
         - name: socket-dir
           emptyDir: {}

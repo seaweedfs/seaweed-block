@@ -78,7 +78,7 @@ spec:
       volumes:
         - name: master-tls
           secret:
-            secretName: sw-block-client-tls
+            secretName: sw-block-csi-node-tls
         - name: socket-dir
           hostPath:
             path: /var/lib/kubelet/plugins/block.csi.seaweedfs.com

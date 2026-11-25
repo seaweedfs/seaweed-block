@@ -68,5 +68,5 @@ spec:
           volumeMounts:
             {{- include "seaweed-block.masterTLSClientMount" . | nindent 12 }}
       volumes:
-        {{- include "seaweed-block.masterTLSClientVolume" . | nindent 8 }}
+        {{- include "seaweed-block.masterTLSClientVolume" .Values.tls.clientSecrets.failbackExecutor | nindent 8 }}
 {{- end }}

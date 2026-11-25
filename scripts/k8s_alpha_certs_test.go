@@ -21,8 +21,8 @@ import (
 
 // The alpha certificate helper issues what blockmaster accepts: a role file
 // that parses, a node certificate whose CN is its server id and which
-// authenticates as that node over a real mutual-TLS link, and a controller
-// certificate that authenticates as admin.
+// authenticates as that node over a real mutual-TLS link (the in-cluster
+// clients' certificates: TestClientSecretsCarryTheLeastRole).
 func TestK8sAlphaCertsAreAcceptedByBlockmaster(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("bash and openssl script")
@@ -44,7 +44,7 @@ func TestK8sAlphaCertsAreAcceptedByBlockmaster(t *testing.T) {
 	master := link.TLSFiles{Cert: filepath.Join(out, "master.crt"), Key: filepath.Join(out, "master.key"), CA: filepath.Join(out, "ca.crt")}
 	for _, c := range []struct {
 		name, role, id string
-	}{{"node-node-a", "node", "node-a"}, {"node-node-b", "node", "node-b"}, {"controller", "admin", "sw-block-controller"}} {
+	}{{"node-node-a", "node", "node-a"}, {"node-node-b", "node", "node-b"}} {
 		client := link.TLSFiles{Cert: filepath.Join(out, c.name+".crt"), Key: filepath.Join(out, c.name+".key"), CA: filepath.Join(out, "ca.crt")}
 		p, err := handshake(t, master, client, a)
 		if err != nil {

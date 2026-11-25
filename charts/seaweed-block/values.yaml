@@ -89,9 +89,15 @@ tls:
   # The role file (key "roles"): one line per certificate,
   # "sha256:<fingerprint> <role> <id>".
   roleSecret: sw-block-roles
-  # The in-cluster controllers' certificate (CSI, operator status, failback
-  # executor): tls.crt, tls.key, ca.crt. Its role-file line is admin.
-  clientSecret: sw-block-client-tls
+  # Each in-cluster client's own certificate (tls.crt, tls.key, ca.crt), with
+  # the least role its calls need: the CSI controller deletes volumes and the
+  # failback executor runs failbacks (admin); the CSI node and the status
+  # operator only read (viewer).
+  clientSecrets:
+    csiController: sw-block-csi-controller-tls
+    csiNode: sw-block-csi-node-tls
+    operatorStatus: sw-block-operator-status-tls
+    failbackExecutor: sw-block-failback-executor-tls
   # Each volume host's certificate is the Secret <prefix>-<server id>
   # (tls.crt, tls.key, ca.crt); its CN is the server id, its role node.
   nodeSecretPrefix: sw-block-node-tls

@@ -88,7 +88,7 @@ spec:
             - name: registration-dir
               mountPath: /registration
       volumes:
-        {{- include "seaweed-block.masterTLSClientVolume" . | nindent 8 }}
+        {{- include "seaweed-block.masterTLSClientVolume" .Values.tls.clientSecrets.csiNode | nindent 8 }}
         - name: socket-dir
           hostPath:
             path: {{ .Values.csiNode.pluginPath | quote }}

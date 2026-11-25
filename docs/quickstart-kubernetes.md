@@ -166,8 +166,10 @@ certificate per server id (the `blockNodes[]` names, or their `serverID`):
 bash scripts/k8s-alpha-certs.sh kube-system ~/.sw-block-alpha-tls node-a node-b node-c
 ```
 
-It applies `sw-block-master-tls`, `sw-block-client-tls`, `sw-block-roles` and
-`sw-block-node-tls-<server id>`. Keep the directory private: a node key controls
+It applies `sw-block-master-tls`, `sw-block-roles`, one Secret per in-cluster
+client (`sw-block-csi-controller-tls`, `sw-block-csi-node-tls`,
+`sw-block-operator-status-tls`, `sw-block-failback-executor-tls`, each with the
+least role it needs) and `sw-block-node-tls-<server id>`. Keep the directory private: a node key controls
 that host's volumes. For production, issue them from your own CA
 ([operator guide](operator-guide.md#authenticate-the-control-api)).
 
