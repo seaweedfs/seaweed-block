@@ -41,6 +41,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                            "GAP: reports an empty image, no error (probe Usage)",
 	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":                     "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
+	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
 	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                          "finding ROOT_INVALID (probe Verify)",
@@ -308,6 +309,12 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatalf("operator release with the source HEAD absent: %v; want ErrHeadAbsent", err)
 		}
 	})
+	t.Run("LayoutStart", func(t *testing.T) {
+		st := &absentLayoutHead{}
+		if _, err := layout.Start(ctx, st, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "h"}, layout.LocalRoot{ClaimID: "k", Fresh: true}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
+			t.Fatalf("start over an absent HEAD: %v, %d writes; want ErrHeadAbsent and none", err, st.updates)
+		}
+	})
 	t.Run("ForkReplay", func(t *testing.T) {
 		f, b := headReaderForkFixture(t)
 		c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
@@ -386,3 +393,7 @@ func (p *presentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) err
 	p.updates++
 	return nil
 }
+
+type okClaimLease struct{}
+
+func (okClaimLease) OldLeaseEnded(context.Context, uint64) error { return nil }
