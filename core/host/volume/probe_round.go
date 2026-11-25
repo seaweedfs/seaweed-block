@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"sync/atomic"
@@ -14,6 +15,13 @@ import (
 // master's rounds for its node and answers each one for this replica from
 // the store as it is now (durable end, epoch-table row there, validity) and
 // its role. It keeps no state and reports nothing unasked.
+//
+// A fencing round (fence_epoch > 0) is answered only after its promise: when
+// the round names this replica's store, the listener's floor is raised to
+// fence_epoch, every mutation admitted before has drained and the floor is
+// durable; only then is the evidence read, so the end it reports is final
+// for every epoch below. A round naming another store raises nothing; a
+// fence that fails is not answered.
 
 // probeRoleSource is this replica's role as the promotion probe reads it
 // (StatusServer.ProbeRoles): ready to be promoted, or a primary that serves.
@@ -61,7 +69,10 @@ func (h *Host) probeStreamOnce(ctx context.Context) error {
 		if round.GetVolumeId() != h.cfg.VolumeID || round.GetReplicaId() != h.cfg.ReplicaID {
 			continue // another replica on this node answers its own rounds
 		}
-		answer := h.probeAnswer(round.GetRoundId())
+		answer, ok := h.roundAnswer(round)
+		if !ok {
+			continue
+		}
 		rpcCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		_, err = h.obsCli.AnswerProbe(rpcCtx, answer)
 		cancel()
@@ -69,6 +80,50 @@ func (h *Host) probeStreamOnce(ctx context.Context) error {
 			h.log.Printf("blockvolume: probe answer round=%d: %v", round.GetRoundId(), err)
 		}
 	}
+}
+
+// floorFencer is the replication listener's fencing-round side
+// (transport.ReplicaListener).
+type floorFencer interface {
+	FenceFloor(epoch uint64) error
+	DurableFloor() uint64
+}
+
+func (h *Host) floorFencer() (floorFencer, bool) {
+	h.selfFenceMu.Lock()
+	defer h.selfFenceMu.Unlock()
+	f, ok := h.selfFence.(floorFencer)
+	return f, ok && f != nil
+}
+
+// roundAnswer is the answer to round, or false when none may be sent: a
+// fencing round for this store whose fence did not complete.
+func (h *Host) roundAnswer(round *control.ProbeRound) (*control.ProbeAnswer, bool) {
+	fencer, hasFloor := h.floorFencer()
+	if fe := round.GetFenceEpoch(); fe > 0 && hasFloor && h.roundNamesThisStore(round) {
+		if err := fencer.FenceFloor(fe); err != nil {
+			h.log.Printf("blockvolume: fencing round=%d at epoch %d not answered: %v", round.GetRoundId(), fe, err)
+			return nil, false
+		}
+	} else if fe > 0 {
+		h.log.Printf("blockvolume: fencing round=%d at epoch %d names another store; floor unchanged", round.GetRoundId(), fe)
+	}
+	a := h.probeAnswer(round.GetRoundId())
+	if hasFloor {
+		a.Floor = fencer.DurableFloor()
+	}
+	return a, true
+}
+
+// roundNamesThisStore reports whether the round's expected store is this
+// replica's store (a store without an id never matches).
+func (h *Host) roundNamesThisStore(round *control.ProbeRound) bool {
+	sid, ok := h.getReplication().(interface{ LocalStoreID() storage.StoreID })
+	if !ok || sid == nil {
+		return false
+	}
+	id := sid.LocalStoreID()
+	return !id.IsZero() && bytes.Equal(round.GetExpectedStoreId(), id[:])
 }
 
 // probeAnswer is this replica's evidence now, for round.

@@ -786,9 +786,43 @@ func (r *ReplicaListener) FenceAsPrimary(epoch uint64) error {
 }
 
 func (r *ReplicaListener) fenceAndDrain(epoch uint64) error {
+	return r.floorAndDrain(epoch, true)
+}
+
+// FenceFloor is this replica's half of a fencing round (the ack fence): its
+// promise that nothing below epoch is applied or acknowledged any more,
+// durable before it returns. Order: the floor in memory first (every new
+// frame below epoch is refused at once), then the drain of every mutation
+// admitted before it (none of them applies or ACKs after the promise), then
+// the floor persisted. A drain timeout or a persist error is returned and the
+// caller must not answer the round (no promise was made); frames below epoch
+// stay refused. The role is unchanged: a line re-issued at epoch to the same
+// primary (a failed round's heal) is admitted by AdmitAsReplica as usual.
+func (r *ReplicaListener) FenceFloor(epoch uint64) error {
+	if err := r.floorAndDrain(epoch, false); err != nil {
+		return err
+	}
+	return r.raiseFloor(epoch)
+}
+
+// DurableFloor is the floor persisted in the volume's floor record (in
+// memory for a listener without one): the epoch below which this replica
+// has promised to apply and acknowledge nothing.
+func (r *ReplicaListener) DurableFloor() uint64 {
+	r.floorMu.Lock()
+	defer r.floorMu.Unlock()
+	return r.persisted
+}
+
+// floorAndDrain raises the in-memory floor to epoch (and, for a primary
+// fence, refuses every mutation), then waits until no mutation admitted
+// before it is still in flight.
+func (r *ReplicaListener) floorAndDrain(epoch uint64, primary bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.primary = true
+	if primary {
+		r.primary = true
+	}
 	if epoch > r.epochFloor {
 		r.epochFloor = epoch
 	}
@@ -812,7 +846,7 @@ func (r *ReplicaListener) fenceAndDrain(epoch uint64) error {
 		drained.Wait()
 	}
 	if r.inFlight > 0 {
-		return fmt.Errorf("replica listener: %d replication mutation(s) still in flight %v after fencing as primary at epoch %d", r.inFlight, timeout, epoch)
+		return fmt.Errorf("replica listener: %d replication mutation(s) still in flight %v after fencing at epoch %d", r.inFlight, timeout, epoch)
 	}
 	return nil
 }
