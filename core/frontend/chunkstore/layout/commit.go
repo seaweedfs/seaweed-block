@@ -15,6 +15,10 @@ var (
 	// ErrStaleBase: the previous manifest given is not HEAD's current
 	// root, so what is new cannot be told.
 	ErrStaleBase = errors.New("layout: previous manifest is not HEAD's current root")
+	// ErrPositionBehind: a commit's position is below HEAD's. HEAD's position
+	// only rises (an equal one names an unchanged image); a lower commit
+	// has no legitimate source, so it is fenced, never retried.
+	ErrPositionBehind = errors.New("layout: commit position below HEAD's")
 	// ErrSnapshotExists: the snapshot name is taken by another root.
 	ErrSnapshotExists = errors.New("layout: snapshot name taken")
 	// ErrTooManySnapshots: HEAD already holds MaxSnapshots.
@@ -85,6 +89,9 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 	}
 	if h.Activity != (Activity{Kind: ActSnap, Session: session}) {
 		return Head{}, false, fmt.Errorf("%w: HEAD has %s(%s), not snap(%s)", ErrNoSession, h.Activity.Kind, h.Activity.Session, session)
+	}
+	if position < h.Position {
+		return Head{}, false, fmt.Errorf("%w: commit at %d, HEAD at %d", ErrPositionBehind, position, h.Position)
 	}
 	next = h.clone()
 	if snapshot != "" {

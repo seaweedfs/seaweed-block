@@ -29,7 +29,7 @@ func (r *GRPCFailbackRuntime) ExecuteFailback(ctx context.Context, req FailbackR
 	if len(r.Opts) > 0 {
 		conn, err = link.DialWith(r.Addr, r.Opts...)
 	} else {
-		conn, err = link.Dial(r.Addr)
+		conn, err = link.DialMasterFromEnv(r.Addr)
 	}
 	if err != nil {
 		return FailbackRuntimeResult{}, err

@@ -116,7 +116,7 @@ sequenceDiagram
 
 The chart is `charts/seaweed-block`. It deploys blockmaster (with `--launcher-kubernetes-apply`), the CSI controller and node, the `CSIDriver` (`attachRequired: true`), the CRDs, RBAC, a StorageClass (default name `sw-block-dynamic`, `allowVolumeExpansion: false`), and the operator controllers below. `sw-block ops generate-helm-values` writes a values file for a cluster.
 
-Key values: `blockNodes[]`; `ports.iscsiBase`, `ports.nvmeBase`, `ports.statusBase`; `network.externalISCSI` (requires `chap.enabled`), `network.externalNVMe`, `network.externalStatus`; `stage2Multipath.enabled` (false); `restartPersistence.mode` (ephemeral by default) and `blockmaster.stateHostPath`; `replication.expectedSlotsPerVolume`, `replication.ackProfile`, `compat.launcherReplicationAckFlag` (false); `blockmaster.launcherStatus`.
+Key values: `blockNodes[]`; `ports.iscsiBase`, `ports.nvmeBase`, `ports.statusBase`; `network.externalISCSI` (requires `chap.enabled`), `network.externalNVMe`; `tls.masterSecret`, `tls.roleSecret`, `tls.clientSecret`, `tls.nodeSecretPrefix` (blockmaster runs with mutual TLS; `network.externalStatus` is refused); `stage2Multipath.enabled` (false); `restartPersistence.mode` (ephemeral by default) and `blockmaster.stateHostPath`; `replication.expectedSlotsPerVolume`, `replication.ackProfile`, `compat.launcherReplicationAckFlag` (false); `blockmaster.launcherStatus`.
 
 **Operator controllers.** Each is a Deployment running `sw-block ops <name>`; every one is off by default (`create: false`), and the executors also default to dry run.
 

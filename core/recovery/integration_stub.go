@@ -63,6 +63,8 @@ type BridgeDurableAckCallback func(replicaID ReplicaID, sessionID, acknowledgedL
 // session converges autonomously: sender.Run barriers as soon as
 // sink.DrainBacklog returns (P2c-slice B-2 lifecycle).
 type PrimaryBridge struct {
+	epochRows func() []byte // see SetEpochRows
+
 	store storage.LogicalStorage
 	coord *PeerShipCoordinator
 
@@ -125,6 +127,14 @@ func NewPrimaryBridge(store storage.LogicalStorage, coord *PeerShipCoordinator, 
 
 // SetOnDurableAck installs an optional progress callback. Safe to call
 // after construction; senders snapshot the bridge callback at ack time.
+// SetEpochRows installs the primary's epoch rows (wire form) that every
+// session's final barrier carries.
+func (b *PrimaryBridge) SetEpochRows(fn func() []byte) {
+	b.mu.Lock()
+	b.epochRows = fn
+	b.mu.Unlock()
+}
+
 func (b *PrimaryBridge) SetOnDurableAck(fn BridgeDurableAckCallback) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -222,6 +232,7 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 		sender = NewSenderWithSink(b.store, b.coord, conn, replicaID, sink)
 	}
 	sender.epoch = epoch
+	sender.epochRows = b.epochRows
 	sender.SetOnDurableAck(func(rid ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
 		b.mu.Lock()
 		cb := b.onAck

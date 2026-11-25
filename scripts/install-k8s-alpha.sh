@@ -162,12 +162,6 @@ if [[ "$LAUNCHER_EXTERNAL_ISCSI" == "1" || "$LAUNCHER_EXTERNAL_ISCSI" == "true" 
     exit 2
   fi
 fi
-if [[ "$LAUNCHER_EXTERNAL_STATUS" == "1" || "$LAUNCHER_EXTERNAL_STATUS" == "true" ]]; then
-  if [[ "$LAUNCHER_EXTERNAL_ISCSI" != "1" && "$LAUNCHER_EXTERNAL_ISCSI" != "true" ]]; then
-    echo "SW_BLOCK_LAUNCHER_EXTERNAL_STATUS requires SW_BLOCK_LAUNCHER_EXTERNAL_ISCSI=1" >&2
-    exit 2
-  fi
-fi
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
 CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
 CSI_NODE_RENDERED="$ARTIFACT_DIR/csi-node.rendered.yaml"
@@ -213,9 +207,8 @@ if [[ "$LAUNCHER_EXTERNAL_ISCSI" == "1" || "$LAUNCHER_EXTERNAL_ISCSI" == "true" 
   grep -q -- '--launcher-iscsi-chap-secret-name' "$STACK_RENDERED" || { echo "failed to inject --launcher-iscsi-chap-secret-name into $STACK_RENDERED" >&2; exit 1; }
 fi
 if [[ "$LAUNCHER_EXTERNAL_STATUS" == "1" || "$LAUNCHER_EXTERNAL_STATUS" == "true" ]]; then
-  awk '/--launcher-status/{print; print "            - \"--launcher-external-status\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
-  mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
-  grep -q -- '--launcher-external-status' "$STACK_RENDERED" || { echo "failed to inject --launcher-external-status into $STACK_RENDERED" >&2; exit 1; }
+  echo "SW_BLOCK_LAUNCHER_EXTERNAL_STATUS is not supported: blockmaster runs with mutual TLS and an authenticated volume's status listener stays on loopback" >&2
+  exit 2
 fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
@@ -269,6 +262,8 @@ log "apply RBAC"
 kubectl apply -f "$ROOT/deploy/k8s/alpha/rbac.yaml" | tee "$ARTIFACT_DIR/apply-rbac.log"
 
 log "apply seaweed-block control plane"
+log "apply mutual TLS Secrets (keys kept outside the artifact directory)"
+bash "$ROOT/scripts/k8s-alpha-certs.sh" kube-system "${SW_BLOCK_TLS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/sw-block-alpha-tls}" $(awk '/server_id:/{print $NF}' "$STACK_RENDERED" | sort -u) | tee "$ARTIFACT_DIR/apply-tls.log"
 kubectl apply -f "$STACK_RENDERED" | tee "$ARTIFACT_DIR/apply-block-stack.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --timeout=120s
 

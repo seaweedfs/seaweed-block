@@ -250,16 +250,18 @@ func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p chunkStar
 	// sources; the provider rechecks the claim generation below.
 	out := workspaceRetryOutcome("assignment_timeout", h, p.ChunkStartupSuperseded(f.volumeID, gen))
 	if h != nil {
-		// A typed MOVED or DELETED renewal refusal is permanent: 78 at once,
+		// A typed MOVED or DELETED master refusal is permanent: 78 at once,
 		// never a restart loop to the unit's start limit. It is the reason
 		// that ended the wait, so it names the exit even when a newer
 		// foreign line was also observed (superseded).
 		if _, final := h.MasterWaitState(); final != "" {
-			out = workspaceExit{code: exitWorkspaceSuperseded, reason: final}
+			out = workspaceExit{code: exitWorkspaceSuperseded, reason: final, detail: h.MasterWaitDetail()}
 		}
 	}
 	if c, ok := p.(interface{ ChunkStartupCure(string, uint64) string }); ok {
-		out.detail = c.ChunkStartupCure(f.volumeID, gen)
+		if cure := c.ChunkStartupCure(f.volumeID, gen); cure != "" {
+			out.detail = cure
+		}
 	}
 	return p.ChooseChunkStartupExit(f.volumeID, gen, func() { e.chooseChunkStartup(out) })
 }

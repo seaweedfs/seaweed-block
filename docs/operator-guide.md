@@ -55,8 +55,8 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 
 `blockmaster` authenticates every gRPC call with mutual TLS when it starts with all four of `--tls-cert`,
 `--tls-key`, `--tls-client-ca` and `--role-file`. Without them it is in development mode: plaintext, loopback only,
-and it logs `UNAUTHENTICATED CONTROL API on <addr> (development mode)` once a minute. `--insecure-external-bind`
-cannot be combined with mutual TLS.
+and it logs `UNAUTHENTICATED CONTROL API on <addr> (development mode)` once a minute. **Upgrading:** `--insecure-external-bind`
+is refused at start; drop it, and give a blockmaster that listens off-host the four mutual-TLS flags.
 
 **Who may call.** The role file has one line per certificate: `sha256:<hex fingerprint> <role> <id>`. The role is
 `viewer`, `operator`, `admin` (people and tools; each includes the one before it) or `node` (a volume host; its id is
@@ -95,6 +95,13 @@ when its certificate's CN differs from `--server-id`. **sw-block** reads `SW_BLO
 files are read at every new connection, so a rotated file takes effect without a restart. blockmaster closes each
 client connection after 24 hours, so a rotated or removed certificate is seen within a day even on an idle link.
 The volume's own HTTP routes (`/status`, chunk routes) are not authenticated and stay on loopback.
+
+**In Kubernetes** each in-cluster client has its own certificate and Secret, with the least role its calls need:
+the CSI node and the status operator are `viewer`; the CSI controller (it deletes volumes) and the failback executor
+are `admin`. The CSI controller's key is an admin key: guard its Secret like an operator's admin key. The CSI
+node's certificate must have the viewer role; check the role file (the chart refuses a CSI node or status Secret
+named like an admin client's or blockmaster's, but it cannot see a certificate's role).
+`scripts/k8s-alpha-certs.sh` issues all four for a trial.
 
 ## Size a host
 
@@ -255,6 +262,9 @@ and the volume does not serve. A monitor that only watches for failed units does
   two hosts are kept apart by the assignment and the lease. A container needs the host's `/run/sw-block/locks`
   ([one process per volume](releases/one-process-per-volume.md)).
 - **Manual GC.** Automatic GC is off (`--chunk-maintenance-gc`): run GC passes yourself.
+- **Node reattach events under mutual TLS.** Node reattach events are not recorded in the cluster event log under
+  mutual TLS: a CSI node's certificate is `viewer`, so blockmaster refuses the event and the node logs one line per
+  reattach.
 
 ## Commands and their tests
 

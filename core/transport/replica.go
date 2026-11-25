@@ -2,6 +2,7 @@ package transport
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -68,6 +69,10 @@ type ReplicaListener struct {
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
 	applyHook ApplyHook // optional gate plug-in; nil = direct apply
+	// epochs is the volume's epoch table (nil = none): a shipped entry's
+	// epoch is noted durably before the entry is applied, and the barrier
+	// reply names the last data epoch at the durable end.
+	epochs *EpochTable
 
 	mu               sync.Mutex
 	activeLineage    RecoveryLineage
@@ -350,6 +355,9 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 	// AdvanceFrontier at completion).
 	var install storage.InstallHandle
 	var installBase uint64
+	// recoveryToken is this connection's hold on the epoch table's invalid
+	// mark (0 = none): its recovery completes only under it.
+	var recoveryToken uint64
 	beginInstall := func(hint uint64) error {
 		if install != nil {
 			if hint != installBase {
@@ -357,6 +365,13 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			}
 			return nil
 		}
+		// The base's history arrives only with the done frame: the table is
+		// invalid from before the first base byte until that replace.
+		tok, err := r.epochs.Invalidate()
+		if err != nil {
+			return err
+		}
+		recoveryToken = tok
 		var id [16]byte
 		for id == ([16]byte{}) {
 			if _, err := rand.Read(id[:]); err != nil {
@@ -409,6 +424,34 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
 				}
+				// The lane ships history whose epochs arrive only at its
+				// final barrier: invalid from before its first entry until
+				// that replace.
+				// The catch-up states the LSN it starts after (8 bytes after
+				// the lineage): under the exclusive fence the replica takes
+				// the mark only if its durable end is exactly that LSN, so
+				// the start is conditional on what the primary's probe saw.
+				if len(payload) < 40 {
+					log.Printf("replica: recovery lane start without the LSN it starts after: refused")
+					return true
+				}
+				from := binary.BigEndian.Uint64(payload[32:40])
+				check := func() error {
+					end, err := r.store.Sync()
+					if err != nil {
+						return err
+					}
+					if end != from {
+						return fmt.Errorf("catch-up starts after %d, the durable end is %d", from, end)
+					}
+					return nil
+				}
+				tok, err := r.epochs.InvalidateIf(check)
+				if err != nil {
+					log.Printf("replica: recovery lane epoch table: %v", err)
+					return true
+				}
+				recoveryToken = tok
 				lane = mutationLaneRecovery
 				r.markPrefixEligibility(lineage, false)
 
@@ -423,17 +466,47 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
 					return true
 				}
+				// Live lane: the row first, then the entry, so an entry
+				// whose epoch the table cannot name is never applied. A
+				// recovery lane ships history: the session's epoch is not
+				// its entries' epoch, so nothing is noted here; the
+				// session's final barrier carries the primary's rows.
+				// Both lanes apply under the epoch table's fence: a recovery
+				// apply while its token owns the mark, a live one while the
+				// table is valid (so a recovery's Invalidate drains it and
+				// nothing live lands while a recovery owns the store).
+				apply := func(fn func() error) error {
+					if lane == mutationLaneRecovery {
+						return r.epochs.ApplyUnder(recoveryToken, fn)
+					}
+					return r.epochs.ApplyLiveUnder(fn)
+				}
+				if lane != mutationLaneRecovery {
+					// A new epoch starts exactly at this store's next LSN: a
+					// live entry of a new epoch below it would sit over an
+					// old tail (blocks of entries the primary never had), a
+					// gap above it would skip entries. Refused; the primary
+					// reconciles (diverged: rebuild; behind: catch-up).
+					if r.epochs.AppendsAt(entry.Lineage.Epoch) && entry.LSN != r.store.NextLSN() {
+						log.Printf("replica: live entry of new epoch %d at lsn %d, this store's next lsn is %d: refused", entry.Lineage.Epoch, entry.LSN, r.store.NextLSN())
+						return true
+					}
+					if err := r.epochs.Note(entry.Lineage.Epoch, entry.LSN); err != nil {
+						log.Printf("replica: epoch table lsn=%d epoch=%d: %v", entry.LSN, entry.Lineage.Epoch, err)
+						return true
+					}
+				}
 				// If the apply-gate is installed, route through it.
 				// Caller (this handler) decides lane; gate is lane-pure.
 				// Live-lane stale entries return error here → log +
 				// close conn (INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
 				if r.applyHook != nil {
-					var err error
-					if lane == mutationLaneRecovery {
-						err = r.applyHook.ApplyRecovery(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
-					} else {
-						err = r.applyHook.ApplyLive(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
-					}
+					err := apply(func() error {
+						if lane == mutationLaneRecovery {
+							return r.applyHook.ApplyRecovery(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
+						}
+						return r.applyHook.ApplyLive(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
+					})
 					if err != nil {
 						log.Printf("replica: apply gate: %v", err)
 						return true
@@ -444,7 +517,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// the apply gate does: no later entry on it is applied, so no
 				// barrier can ack a frontier past the missing LSN (#89). The
 				// primary sees the closed connection and recovers the replica.
-				if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
+				if err := apply(func() error { return r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN) }); err != nil {
 					log.Printf("replica: apply entry lsn=%d: %v", entry.LSN, err)
 					return true
 				}
@@ -504,7 +577,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: begin rebuild base: %v", err)
 					return true
 				}
-				if err := install.WriteBase(lba, data); err != nil {
+				if err := r.epochs.ApplyUnder(recoveryToken, func() error { return install.WriteBase(lba, data) }); err != nil {
 					log.Printf("replica: apply rebuild base block: %v", err)
 					return true
 				}
@@ -529,7 +602,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: begin rebuild base at done: %v", err)
 					return true
 				}
-				if err := install.MarkBaseComplete(); err != nil {
+				if err := r.epochs.ApplyUnder(recoveryToken, install.MarkBaseComplete); err != nil {
 					log.Printf("replica: complete rebuild base: %v", err)
 					return true
 				}
@@ -538,13 +611,32 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					log.Printf("replica: sync after rebuild done: %v", err)
 					return true
 				}
+				// The rebuilt image is the primary's history up to frontier:
+				// its rows cut there replace this table before the ack. A crash
+				// before the replace leaves the old rows, which reconcile as
+				// diverged: another rebuild, never a wrong count.
+				if len(payload) > 32 {
+					rows, err := DecodeEpochRows(payload[32:])
+					if err != nil {
+						log.Printf("replica: rebuild done epoch rows: %v", err)
+						return true
+					}
+					if r.epochs != nil {
+						if err := r.epochs.CompleteRecovery(RowsThrough(rows, frontier), recoveryToken, true); err != nil {
+							log.Printf("replica: rebuild done epoch table: %v", err)
+							return true
+						}
+					}
+				}
 				// A completed full BASE supplies the covered starting image.
 				r.markPrefixEligibility(lineage, true)
 				// Echo the request's full lineage in the rebuild-done ack
 				// so primary-side validators can consume it.
 				resp := EncodeBarrierResp(BarrierResponse{
-					Lineage:     lineage,
-					AchievedLSN: frontier,
+					Lineage:          lineage,
+					AchievedLSN:      frontier,
+					LastDataEpoch:    r.epochs.LastDataRowAt(frontier).Epoch,
+					LastDataFirstLSN: r.epochs.LastDataRowAt(frontier).FirstLSN,
 				})
 				replyType, reply = MsgBarrierResp, resp
 				return true
@@ -566,14 +658,38 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 					return true
 				}
-				frontier, _ := r.store.Sync()
+				frontier, syncErr := r.store.Sync()
+				// A catch-up's final barrier carries the primary's rows:
+				// the entries up to frontier are now the primary's history,
+				// so its rows cut there replace this table before the ack.
+				if len(payload) > 32 {
+					if syncErr != nil {
+						log.Printf("replica: catch-up barrier sync: %v", syncErr)
+						return true // no ack: the table is not replaced over an unknown end
+					}
+					rows, err := DecodeEpochRows(payload[32:])
+					if err != nil {
+						log.Printf("replica: catch-up barrier epoch rows: %v", err)
+						return true
+					}
+					if r.epochs != nil {
+						// A catch-up completes only over a table that was valid
+						// when it took the mark (otherwise a rebuild is needed).
+						if err := r.epochs.CompleteRecovery(RowsThrough(rows, frontier), recoveryToken, false); err != nil {
+							log.Printf("replica: catch-up barrier epoch table: %v", err)
+							return true
+						}
+					}
+				}
 				// Echo the request's full lineage in the barrier ack.
 				// The primary's DurabilityCoordinator validates this
 				// tuple against the session it is awaiting before
 				// counting the ack toward quorum.
 				resp := EncodeBarrierResp(BarrierResponse{
-					Lineage:     lineage,
-					AchievedLSN: frontier,
+					Lineage:          lineage,
+					AchievedLSN:      frontier,
+					LastDataEpoch:    r.epochs.LastDataRowAt(frontier).Epoch,
+					LastDataFirstLSN: r.epochs.LastDataRowAt(frontier).FirstLSN,
 				})
 				replyType, reply = MsgBarrierResp, resp
 
@@ -732,6 +848,29 @@ func (r *ReplicaListener) EnterDualLane(epoch uint64) (func(), error) {
 		return nil, fmt.Errorf("replica: dual-lane epoch %d: %w", epoch, err)
 	}
 	return r.endMutationFrame, nil
+}
+
+// BeginEpochRecovery (recovery.EpochRecoveryGate): a dual-lane session
+// takes the epoch table's invalid mark under a fresh token at its start,
+// before its first data frame.
+func (r *ReplicaListener) BeginEpochRecovery() (uint64, error) { return r.epochs.Invalidate() }
+
+// ApplyUnderEpochToken (recovery.EpochRecoveryGate): one apply of a
+// dual-lane session's data, under the epoch table's apply fence and only
+// while the session's token owns the mark.
+func (r *ReplicaListener) ApplyUnderEpochToken(token uint64, fn func() error) error {
+	return r.epochs.ApplyUnder(token, fn)
+}
+
+// CompleteEpochRecovery (recovery.EpochRecoveryGate): after the session's
+// data is synced, the primary's rows cut at end make the table valid, only
+// under the session's token.
+func (r *ReplicaListener) CompleteEpochRecovery(token uint64, rows []byte, end uint64) error {
+	decoded, err := DecodeEpochRows(rows)
+	if err != nil {
+		return err
+	}
+	return r.epochs.CompleteRecovery(RowsThrough(decoded, end), token, true) // a dual-lane session installs a full base
 }
 
 func (r *ReplicaListener) beginMutationFrame() {

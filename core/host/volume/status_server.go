@@ -224,13 +224,15 @@ type StatusProjection struct {
 	// credentials, "identity refused: <kind>" with kind unregistered or
 	// wrong_host, barrier, no_assignment, refused, moved, deleted), since
 	// when, and the startup wait's one bound or the master's barrier time
-	// (UntilMs, absent while there is no bound).
+	// (UntilMs, absent while there is no bound). Detail carries the master's
+	// diagnostic text for a typed final refusal, including a moved holder and epoch.
 	MasterWait *MasterWaitStatus `json:",omitempty"`
 }
 
 // MasterWaitStatus is MasterWait on /status (unix milliseconds).
 type MasterWaitStatus struct {
 	Reason  string
+	Detail  string `json:",omitempty"`
 	SinceMs int64
 	UntilMs int64 `json:",omitempty"`
 }
@@ -559,7 +561,7 @@ func (s *StatusServer) statusProjection() StatusProjection {
 			p.NotReadyReason = NotReadyLeaseNotHeld
 			if masterWait != nil {
 				if w := masterWait(); w != nil {
-					p.MasterWait = &MasterWaitStatus{Reason: w.Reason, SinceMs: w.Since.UnixMilli()}
+					p.MasterWait = &MasterWaitStatus{Reason: w.Reason, Detail: w.Detail, SinceMs: w.Since.UnixMilli()}
 					if !w.Until.IsZero() {
 						p.MasterWait.UntilMs = w.Until.UnixMilli()
 					}

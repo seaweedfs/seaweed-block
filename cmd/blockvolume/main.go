@@ -1030,6 +1030,7 @@ func runVolume(f flags, exits *processExit) int {
 			// ProductionProbeFn routes per-peer via this registry so
 			// engine.checkReplicaID accepts the events.
 			peerRegistry := volume.NewPeerAdapterRegistry(f.volumeID, f.replicaID)
+			peerRegistry.SetFrontier(store.Sync)
 			if err := replVolume.ConfigurePeerLifecycleHook(peerRegistry.OnPeerAdded, peerRegistry.OnPeerRemoved); err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: peer lifecycle hook:", err)
 				_ = replVolume.Close()
@@ -1096,6 +1097,7 @@ func runVolume(f flags, exits *processExit) int {
 		// No replication socket exists until a master assignment includes
 		// replica slots. The role gate starts/fences both lanes before admission.
 		replListen = newReplicationIngress(f, store)
+		replVolume.SetEpochTable(replListen.EpochTable())
 		if err := h.SetSelfFence(replListen); err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: replica listener role:", err)
 			replListen.Stop()
@@ -1689,6 +1691,15 @@ func hostConfig(f flags, readyCh chan<- adapter.AssignmentInfo) volume.Config {
 		RF1Only:           rf1Only(f),
 		StorageIdentity:   ident,
 	}
+}
+
+// epochTablePath is where the volume's epoch table lives, beside the floor
+// record ("" for non-durable memback runs: in memory only).
+func epochTablePath(f flags) string {
+	if f.durableRoot == "" {
+		return ""
+	}
+	return filepath.Join(f.durableRoot, f.volumeID+".epoch-table")
 }
 
 func replicaFloorPath(f flags) string {

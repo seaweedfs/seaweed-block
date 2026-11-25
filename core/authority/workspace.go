@@ -333,6 +333,31 @@ func (p *Publisher) WorkspaceState(volume string) *WorkspaceState {
 	return cloneWorkspace(p.workspace[volume])
 }
 
+// WorkspaceSourceMoved proves that a subscribing server was the source of an
+// issued move and the current line now belongs to another known server. A new
+// target with no prior line is not a moved source. This startup-only read takes
+// the publisher lock; lease renewals keep their separate nonblocking view.
+func (p *Publisher) WorkspaceSourceMoved(volume, replica, server string) (PublishedLine, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.workspaceUncertain[volume] || server == "" {
+		return PublishedLine{}, false
+	}
+	line, found := p.PublishedAuthorityLine(volume)
+	owner, moved := line.Owner()
+	if !found || !moved || owner == "" || owner == server {
+		return PublishedLine{}, false
+	}
+	if s := p.workspace[volume]; s != nil {
+		for _, r := range s.Moves {
+			if r.Issued && r.OldHost == server && r.OldReplicaID == replica && r.OldEpoch < line.Epoch {
+				return line, true
+			}
+		}
+	}
+	return PublishedLine{}, false
+}
+
 func (p *Publisher) workspaceLineLocked(volume string) (subKey, assignmentState, bool) {
 	var key subKey
 	var line assignmentState

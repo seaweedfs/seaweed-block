@@ -257,6 +257,11 @@ func (h Head) check() error {
 		if err := s.Meta.check(n); err != nil {
 			return err
 		}
+		if s.Position > h.Position {
+			// a snapshot is a past moment of this volume; HEAD's position
+			// only rises (Commit)
+			return fmt.Errorf("%w: snapshot %q at position %d, past HEAD's %d", ErrMalformed, n, s.Position, h.Position)
+		}
 		for i, d := range s.Dependents {
 			if err := validName("dependent", d.Target); err != nil {
 				return err
