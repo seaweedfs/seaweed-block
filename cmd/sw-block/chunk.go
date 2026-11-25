@@ -231,10 +231,10 @@ func chunkSnapshot(args []string, stdout, stderr io.Writer) int {
 		return chunkFail("snapshot", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--volume, --status-addr and --name are required", false)
 	}
 	if pin {
-		if class != "" && class != chunkstore.SnapshotClassPinned {
+		if class != "" && class != layout.ClassPinned {
 			return chunkFail("snapshot", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--pin conflicts with --class "+class, false)
 		}
-		class = chunkstore.SnapshotClassPinned
+		class = layout.ClassPinned
 	}
 	if expires < 0 || expires > 0 && expiresAtNs != 0 {
 		return chunkFail("snapshot", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--expires must be positive and does not combine with --expires-at-ns", false)

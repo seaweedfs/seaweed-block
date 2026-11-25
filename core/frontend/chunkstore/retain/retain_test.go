@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
 var retBase = time.Unix(1_000_000, 0)
@@ -33,7 +35,7 @@ func TestPlanRetention_NewestNWithNameTieBreak(t *testing.T) {
 	now := retBase.Add(48 * time.Hour)
 	var snaps []Snapshot
 	for i := 0; i < 15; i++ {
-		snaps = append(snaps, snapAt(fmt.Sprintf("s%02d", i), retBase.Add(time.Duration(i)*time.Minute), ClassSemantic, time.Time{}, nil))
+		snaps = append(snaps, snapAt(fmt.Sprintf("s%02d", i), retBase.Add(time.Duration(i)*time.Minute), layout.ClassSemantic, time.Time{}, nil))
 	}
 	k := kept(Plan(noYoung(), snaps, now))
 	if len(k) != 10 {
@@ -57,11 +59,11 @@ func TestPlanRetention_NewestNWithNameTieBreak(t *testing.T) {
 func TestPlanRetention_PinnedSemanticAndLabels(t *testing.T) {
 	now := retBase.Add(48 * time.Hour)
 	snaps := []Snapshot{
-		snapAt("pinned-old", retBase, ClassPinned, time.Time{}, nil),
+		snapAt("pinned-old", retBase, layout.ClassPinned, time.Time{}, nil),
 		snapAt("pinned-by-expiry", retBase, "", now.Add(time.Hour), nil),
-		snapAt("pinned-class-expiry-passed", retBase, ClassPinned, now.Add(-time.Second), nil),
+		snapAt("pinned-class-expiry-passed", retBase, layout.ClassPinned, now.Add(-time.Second), nil),
 		snapAt("expiry-passed", retBase, "", now.Add(-time.Second), nil),
-		snapAt("semantic-old", retBase, ClassSemantic, time.Time{}, nil),
+		snapAt("semantic-old", retBase, layout.ClassSemantic, time.Time{}, nil),
 		snapAt("labeled-old", retBase, "", time.Time{}, map[string]string{"agent.step": "npm-ci"}),
 	}
 	k := kept(Plan(Policy{}, snaps, now))
@@ -76,9 +78,9 @@ func TestPlanRetention_YoungAndClockSkew(t *testing.T) {
 	now := retBase.Add(48 * time.Hour)
 	p := Policy{KeepNewest: 0, KeepYoungerNs: int64(time.Hour)}
 	snaps := []Snapshot{
-		snapAt("young", now.Add(-30*time.Minute), ClassSemantic, time.Time{}, nil),
-		snapAt("future", now.Add(10*time.Minute), ClassSemantic, time.Time{}, nil),
-		snapAt("old", now.Add(-2*time.Hour), ClassSemantic, time.Time{}, nil),
+		snapAt("young", now.Add(-30*time.Minute), layout.ClassSemantic, time.Time{}, nil),
+		snapAt("future", now.Add(10*time.Minute), layout.ClassSemantic, time.Time{}, nil),
+		snapAt("old", now.Add(-2*time.Hour), layout.ClassSemantic, time.Time{}, nil),
 	}
 	k := kept(Plan(p, snaps, now))
 	if len(k) != 2 || k["young"] == nil || k["future"] == nil {
@@ -91,7 +93,7 @@ func TestPlanRetention_HourlyBuckets(t *testing.T) {
 	now := retBase.Add(48*time.Hour + 59*time.Minute) // late in an hour
 	var snaps []Snapshot
 	for i := 0; i < 12; i++ { // every 30 min over the last 6 hours
-		snaps = append(snaps, snapAt(fmt.Sprintf("s%02d", i), now.Add(-time.Duration(i)*30*time.Minute), ClassSemantic, time.Time{}, nil))
+		snaps = append(snaps, snapAt(fmt.Sprintf("s%02d", i), now.Add(-time.Duration(i)*30*time.Minute), layout.ClassSemantic, time.Time{}, nil))
 	}
 	k := kept(Plan(Policy{KeepHourly: 3}, snaps, now))
 	if len(k) != 3 {
@@ -111,7 +113,7 @@ func TestPlanRetention_AgentCheckpointingEveryStepStaysBounded(t *testing.T) {
 	start := retBase
 	var snaps []Snapshot
 	for i := 0; i < 24*60; i++ {
-		snaps = append(snaps, snapAt(fmt.Sprintf("step-%05d", i), start.Add(time.Duration(i)*time.Minute), ClassSemantic, time.Time{}, map[string]string{"agent.step": fmt.Sprint(i)}))
+		snaps = append(snaps, snapAt(fmt.Sprintf("step-%05d", i), start.Add(time.Duration(i)*time.Minute), layout.ClassSemantic, time.Time{}, map[string]string{"agent.step": fmt.Sprint(i)}))
 	}
 	now := start.Add(24 * time.Hour)
 	bound := p.KeepNewest + int(DefaultKeepYounger/time.Minute) + p.KeepHourly
@@ -120,7 +122,7 @@ func TestPlanRetention_AgentCheckpointingEveryStepStaysBounded(t *testing.T) {
 	}
 	// The bound holds however long the agent runs.
 	for i := 24 * 60; i < 7*24*60; i++ {
-		snaps = append(snaps, snapAt(fmt.Sprintf("step-%05d", i), start.Add(time.Duration(i)*time.Minute), ClassSemantic, time.Time{}, nil))
+		snaps = append(snaps, snapAt(fmt.Sprintf("step-%05d", i), start.Add(time.Duration(i)*time.Minute), layout.ClassSemantic, time.Time{}, nil))
 	}
 	if k := kept(Plan(p, snaps, start.Add(7*24*time.Hour))); len(k) > bound {
 		t.Fatalf("after a week: kept %d; want at most %d", len(k), bound)
@@ -136,7 +138,7 @@ func TestPlanRetention_ScheduledClassKeepsItsOwnNewest(t *testing.T) {
 	keep3 := map[string]string{LabelScheduleKeep: "3"}
 	var snaps []Snapshot
 	for d := 0; d < 6; d++ { // one scheduled snapshot a day, the newest first at now-1h
-		snaps = append(snaps, snapAt(fmt.Sprintf("sched-%d", d), now.Add(-time.Hour-time.Duration(d)*24*time.Hour), ClassScheduled, time.Time{}, keep3))
+		snaps = append(snaps, snapAt(fmt.Sprintf("sched-%d", d), now.Add(-time.Hour-time.Duration(d)*24*time.Hour), layout.ClassScheduled, time.Time{}, keep3))
 	}
 	snaps = append(snaps,
 		snapAt("manual-new", now.Add(-2*time.Hour), "", time.Time{}, nil),
@@ -162,11 +164,11 @@ func TestPlanRetention_ScheduledClassKeepsItsOwnNewest(t *testing.T) {
 // and takes no log-spaced window from a manual snapshot.
 func TestPlanRetention_PinnedScheduledStaysInItsClass(t *testing.T) {
 	now := retBase.Add(30 * 24 * time.Hour)
-	newest := snapAt("sched-pinned", now.Add(-10*time.Minute), ClassScheduled, now.Add(24*time.Hour), map[string]string{LabelScheduleKeep: "2"})
+	newest := snapAt("sched-pinned", now.Add(-10*time.Minute), layout.ClassScheduled, now.Add(24*time.Hour), map[string]string{LabelScheduleKeep: "2"})
 	snaps := []Snapshot{
 		newest,
-		snapAt("sched-1", now.Add(-24*time.Hour), ClassScheduled, time.Time{}, map[string]string{LabelScheduleKeep: "9"}),
-		snapAt("sched-2", now.Add(-48*time.Hour), ClassScheduled, time.Time{}, map[string]string{LabelScheduleKeep: "9"}),
+		snapAt("sched-1", now.Add(-24*time.Hour), layout.ClassScheduled, time.Time{}, map[string]string{LabelScheduleKeep: "9"}),
+		snapAt("sched-2", now.Add(-48*time.Hour), layout.ClassScheduled, time.Time{}, map[string]string{LabelScheduleKeep: "9"}),
 		snapAt("manual", now.Add(-20*time.Minute), "", time.Time{}, nil), // same hourly window as the pinned scheduled one
 	}
 	k := kept(Plan(Policy{KeepHourly: 1}, snaps, now))

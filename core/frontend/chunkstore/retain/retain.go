@@ -16,9 +16,6 @@ import (
 
 // The retention classes and the schedule label.
 const (
-	ClassSemantic  = "semantic"
-	ClassPinned    = "pinned"
-	ClassScheduled = "scheduled"
 
 	// LabelScheduleKeep, on a scheduled snapshot, is how many scheduled
 	// snapshots its schedule keeps (a decimal count).
@@ -107,7 +104,7 @@ func Plan(p Policy, snaps []Snapshot, now time.Time) []Decision {
 		// pinned at now exactly as the kernel judges it (the delete refuses the same snapshots)
 		pinned := layout.SnapshotMeta{Class: s.Class, ExpiresNs: s.ExpiresNs}.PinnedAt(nowNs)
 		d := Decision{Name: s.Name, CreatedNs: s.CreatedNs, Class: s.Class, Pinned: pinned}
-		if s.Class == ClassScheduled {
+		if s.Class == layout.ClassScheduled {
 			// Every scheduled snapshot, pinned or not, is planned here and
 			// ranked among its class; a pinned one is also kept by its pin.
 			if scheduleKeep < 0 {
