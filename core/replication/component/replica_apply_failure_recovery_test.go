@@ -112,7 +112,7 @@ func TestReplicaApplyFailure_PrimaryDegradesRecoversAndReplaysFailedLSN(t *testi
 	if err := c.primary.RepVol.ConfigurePeerLifecycleHook(registry.OnPeerAdded, registry.OnPeerRemoved); err != nil {
 		t.Fatalf("ConfigurePeerLifecycleHook: %v", err)
 	}
-	waitAdmitted(t, registry)
+	waitRegisteredIdle(t, registry)
 	ctx := context.Background()
 
 	for i := 0; i < 2; i++ {
@@ -153,7 +153,7 @@ func TestReplicaApplyFailure_PrimaryDegradesRecoversAndReplaysFailedLSN(t *testi
 		t.Fatalf("WAL replay fixture retired failed LSN %d (retained=%d)", failedLSN, retained)
 	}
 	cfg := replication.ProbeLoopConfig{Interval: 30 * time.Millisecond, MaxConcurrent: 1, CooldownBase: 20 * time.Millisecond, CooldownCap: 200 * time.Millisecond}
-	if err := c.primary.RepVol.ConfigureProbeLoop(cfg, volume.ProductionProbeFn(registry.AdapterFor), time.Now); err != nil {
+	if err := c.primary.RepVol.ConfigureProbeLoop(cfg, volume.ProductionProbeFnWithPrime(registry.AdapterForPeer, registry.PrimePendingFor), time.Now); err != nil {
 		t.Fatalf("ConfigureProbeLoop: %v", err)
 	}
 	if err := c.primary.RepVol.StartProbeLoop(); err != nil {
@@ -207,20 +207,23 @@ func TestReplicaApplyFailure_PrimaryDegradesRecoversAndReplaysFailedLSN(t *testi
 }
 
 // waitAdmitted waits for the registry adapter's assignment probe to succeed.
-func waitAdmitted(t *testing.T, registry *volume.PeerAdapterRegistry) {
+// waitRegisteredIdle waits for replica-0's registry adapter and checks it has
+// issued nothing: a healthy peer belongs to the volume's live session, and
+// its adapter is primed only when the probe loop first dispatches for it
+// (once it is degraded).
+func waitRegisteredIdle(t *testing.T, registry *volume.PeerAdapterRegistry) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if a := registry.AdapterFor("replica-0"); a != nil {
-			for _, entry := range a.Trace() {
-				if entry.Step == "event" && entry.Detail == "ProbeSucceeded" {
-					return
-				}
+			if cmds := a.CommandLog(); len(cmds) != 0 {
+				t.Fatalf("replica-0's adapter acted on a healthy peer: %v", cmds)
 			}
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("replica-0 was not admitted: no ProbeSucceeded on its registry adapter")
+	t.Fatal("replica-0 has no registry adapter")
 }
 
 func firstByte(b []byte) byte {

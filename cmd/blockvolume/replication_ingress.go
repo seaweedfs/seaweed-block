@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -131,16 +132,17 @@ func (r *replicationIngress) AdmitAsReplica(epoch uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return fmt.Errorf("replication ingress closed")
+		return fmt.Errorf("replication ingress closed: %w", volume.ErrRoleRefused)
 	}
 	if r.rf1Only != "" {
-		return fmt.Errorf("volume %s refuses a replica role at epoch %d: %s", r.volumeID, epoch, r.rf1Only)
+		return fmt.Errorf("volume %s refuses a replica role at epoch %d: %s: %w", r.volumeID, epoch, r.rf1Only, volume.ErrRoleRefused)
 	}
 	if r.epochsErr != nil {
 		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
 	}
 	return r.roleLocked(epoch, false)
 }
+
 // FenceFloor is a fencing round's promise on this replica: the listener
 // makes epoch its durable floor (refusing every frame and ACK below it)
 // before the round is answered. Without a listener (no replica role yet)
