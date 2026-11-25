@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc/codes"
@@ -51,6 +52,9 @@ func (s *services) ReserveVolumeDeletion(ctx context.Context, req *control.MarkV
 		return nil, status.Error(codes.InvalidArgument, "volume_id and token are required")
 	}
 	if err := s.host.VolumeDeleteAuthority(req.GetVolumeId(), req.GetToken()).Reserve(ctx); err != nil {
+		if errors.Is(err, authority.ErrWorkspaceDeleteRefused) {
+			return nil, status.Errorf(codes.FailedPrecondition, "reserve volume deletion: %v", err)
+		}
 		return nil, status.Errorf(codes.Unavailable, "reserve volume deletion: %v", err)
 	}
 	_, known := s.host.lifecycle.Volumes.GetVolume(req.GetVolumeId())

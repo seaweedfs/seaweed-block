@@ -121,3 +121,21 @@ func TestVolumeDeleteAuthorityRPCFailureIsUnknown(t *testing.T) {
 		t.Fatalf("lease proof without token: %v", err)
 	}
 }
+
+func TestReserveVolumeDeletionLiveLeaseIsDefiniteAndKeepsRenewing(t *testing.T) {
+	h, conn, ctx := reviewBindingHost(t)
+	reviewLegacyBind(t, h, conn, ctx, "live-delete")
+	if _, err := h.Publisher().RenewWorkspaceLease(ctx, "live-delete", "r1", 1); err != nil {
+		t.Fatal(err)
+	}
+	lc := control.NewLifecycleServiceClient(conn)
+	if _, err := lc.ReserveVolumeDeletion(ctx, &control.MarkVolumeDeletingRequest{VolumeId: "live-delete", Token: "typo"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("live reservation status: %v; want definite FailedPrecondition", err)
+	}
+	if h.lifecycle.Deletions.Reserved("live-delete") {
+		t.Fatal("refusal persisted a reservation")
+	}
+	if _, err := h.Publisher().RenewWorkspaceLease(ctx, "live-delete", "r1", 1); err != nil {
+		t.Fatalf("refused delete interrupted renewal: %v", err)
+	}
+}

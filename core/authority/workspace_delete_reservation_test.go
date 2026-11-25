@@ -39,7 +39,7 @@ func TestDeleteOfALiveVolumeIsRefusedBeforePersisting(t *testing.T) {
 	p := newLeasePublisher(t, &deleteGrantStore{}, 30*time.Second, c)
 	bindAndGrant(t, p, "v", "r")
 	persisted := false
-	if err := p.ReserveWorkspaceDeletion(ctx, "v", func() error { persisted = true; return nil }); err == nil || !strings.Contains(err.Error(), "live until") || persisted {
+	if err := p.ReserveWorkspaceDeletion(ctx, "v", func() error { persisted = true; return nil }); !errors.Is(err, ErrWorkspaceDeleteRefused) || !strings.Contains(err.Error(), "live until") || persisted {
 		t.Fatalf("reserve of a live volume: %v (persisted %t); want refused, nothing persisted", err, persisted)
 	}
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err != nil {
@@ -240,5 +240,33 @@ func TestDeleteReservationReplayAndRestart(t *testing.T) {
 	c.at(150)
 	if err := loaded.NoLiveWorkspaceLease(ctx, "v"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDeleteReservationContextAndPersistenceFailuresStayUnknown(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, stop := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer stop()
+	disk := errors.New("disk response lost")
+	for _, tc := range []struct {
+		name    string
+		ctx     context.Context
+		failure error
+	}{
+		{"cancel", canceled, context.Canceled},
+		{"deadline", expired, context.DeadlineExceeded},
+		{"persist", context.Background(), disk},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newLeasePublisher(t, &deleteGrantStore{}, 30*time.Second, newTestClock())
+			err := p.ReserveWorkspaceDeletion(tc.ctx, "v", func() error { return disk })
+			if !errors.Is(err, tc.failure) || errors.Is(err, ErrWorkspaceDeleteRefused) {
+				t.Fatalf("failure classification=%v", err)
+			}
+			if err := p.NoLiveWorkspaceLease(context.Background(), "v"); err == nil {
+				t.Fatal("failed reservation proved lease absence")
+			}
+		})
 	}
 }
