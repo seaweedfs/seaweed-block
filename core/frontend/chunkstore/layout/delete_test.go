@@ -315,9 +315,9 @@ func operatorCase(t *testing.T, tgtHead *Head, tgtVolume *VolumeID, namesSource 
 // exists and is deleted or no longer names the source: its HEAD deleting
 // or deleted, its name holding another volume (another VOLUME id), or a
 // live HEAD none of whose roots names a chunk of the source. A live target
-// that still names the source and one being created (VOLUME without HEAD)
-// are refused and the source is unchanged. A target never created (no
-// VOLUME, no HEAD) gets a deleted HEAD written exclusively in its
+// that still names the source is refused and the source is unchanged. A
+// target without HEAD (never created, or a restore that died between its
+// VOLUME and its HEAD) gets a deleted HEAD written exclusively in its
 // never-reused directory, so the restore can never create it later, and
 // only then is released.
 func TestOperatorReleaseDependent(t *testing.T) {
@@ -334,18 +334,18 @@ func TestOperatorReleaseDependent(t *testing.T) {
 		release     bool
 		want        error
 	}{
-		"live target naming the source":   {&live, &tid, true, false, ErrTargetLive},
-		"live target no longer naming it": {&live, &tid, false, true, nil},
-		"target being created":            {nil, &tid, false, false, ErrTargetLive},
-		"target never created":            {nil, nil, false, true, nil},
-		"target deleting":                 {&deleting, &tid, true, true, nil},
-		"name holds another volume":       {nil, &other, false, true, nil},
+		"live target naming the source":    {&live, &tid, true, false, ErrTargetLive},
+		"live target no longer naming it":  {&live, &tid, false, true, nil},
+		"restore died between its creates": {nil, &tid, false, true, nil},
+		"target never created":             {nil, nil, false, true, nil},
+		"target deleting":                  {&deleting, &tid, true, true, nil},
+		"name holds another volume":        {nil, &other, false, true, nil},
 	} {
 		src, tgt, r := operatorCase(t, tc.head, tc.volume, tc.namesSource)
 		before := src.updates
 		_, err := OperatorReleaseDependent(ctx, src, tgt, r, tid)
 		released := len(src.h.Snapshots["daily"].Dependents) == 0
-		if tc.head == nil && tc.volume == nil && (tgt.h == nil || tgt.h.State != StateDeleted || tgt.h.VolumeID != tid) {
+		if tc.head == nil && (tc.volume == nil || *tc.volume == tid) && (tgt.h == nil || tgt.h.State != StateDeleted || tgt.h.VolumeID != tid) {
 			t.Errorf("%s: target HEAD %+v; want a deleted HEAD (tombstone) of the target's id written before the release", name, tgt.h)
 		}
 		if tc.release && (err != nil || !released) {
@@ -382,4 +382,16 @@ func (r *raceTarget) CreateDeletedHead(ctx context.Context, h Head) error {
 		r.memHead.h, r.appear = &n, nil
 	}
 	return r.memHead.CreateDeletedHead(ctx, h)
+}
+
+// A volume delete removes only content-named objects: HEAD (which stays,
+// deleted), VOLUME and the directory are refused before any write.
+func TestDeleteVolume_RemovesOnlyObjects(t *testing.T) {
+	for _, bad := range []string{HeadName, VolumeName, "", "pool/", "pool/../HEAD", "other/x"} {
+		w := newDeleteWorld()
+		o := w.objects()
+		if err := DeleteVolume(context.Background(), w.t, gone{}, idFor("t"), []HeadStore{w.src}, o, append(append([]string(nil), w.rels...), bad)); !errors.Is(err, ErrMalformed) || w.t.updates != 0 || len(o.writes) != 0 {
+			t.Errorf("delete listing %q: %v (%d HEAD writes, %d object writes); want ErrMalformed and nothing written", bad, err, w.t.updates, len(o.writes))
+		}
+	}
 }
