@@ -8,21 +8,43 @@ import (
 )
 
 // RemoveUnreachable is the cleaning's removal (transition 7') for one pool
-// shard: for the holder with its own clean(session) open at HEAD's epoch,
-// each candidate chunk that no root in HEAD (current or any snapshot)
-// names in this volume's pool is removed in two conditional writes on its
-// own entry: MARK, expected the metadata read when the plan was made and
-// unmarked, sets the mark to this session; DELETE, expected that mark,
-// deletes it. A writer that reuses the object in between (EnsureObject:
-// new session, mark cleared) makes the mark or the delete fail its own
-// condition, however late it lands; no lease reasoning is needed. A
-// candidate already marked by another session, or moved, is left alone.
-// Chunks a restore target names stay live here: the source's snapshot
-// root names them, and that snapshot stays in HEAD while it has dependents.
-// It returns the names it deleted, in index order.
+// shard, for the holder with its own clean(session) open at HEAD's epoch,
+// in an order that makes its plan atomic with its HEAD view
+// (read-validate-write):
+//  1. read the tag (writer session, mark) of every candidate;
+//  2. only then read HEAD, require it is still this holder's with
+//     clean(session), and compute what any root in it (current or
+//     snapshot) names in this volume's pool;
+//  3. MARK each candidate no root names, expected the tag from step 1;
+//  4. DELETE it, expected that mark.
+//
+// If a successor acted before step 2, HEAD is no longer this holder's and
+// nothing is written. If it acted after, every tag from step 1 predates
+// its writes: a session that names a chunk no root named at its Begin
+// writes that chunk's entry (create, or reuse with a new tag), so the MARK
+// or the DELETE fails its condition, however late it lands. No lease
+// reasoning is needed. A candidate marked by another session is left
+// alone. Chunks a restore target names stay live: the source's snapshot
+// root names them while it has dependents. It returns the names it
+// deleted, in index order.
 func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectStore, me HolderID, session string, shard uint64, candidates []ChunkName) ([]ChunkName, error) {
 	if os == nil || r == nil {
 		return nil, errors.New("layout: removal needs a reader and an object store")
+	}
+	sorted := append([]ChunkName(nil), candidates...)
+	sort.Slice(sorted, func(a, b int) bool { return sorted[a].Index < sorted[b].Index })
+	plan := map[ChunkName]ObjectMeta{}
+	for _, c := range sorted {
+		if Shard(c.Index) != shard {
+			continue
+		}
+		meta, found, err := os.Stat(ctx, c.Path())
+		if err != nil {
+			return nil, err
+		}
+		if found && meta.Mark == "" {
+			plan[c] = meta
+		}
 	}
 	h, found, err := st.ReadHead(ctx)
 	if err != nil {
@@ -41,23 +63,15 @@ func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectSt
 	if err != nil {
 		return nil, err
 	}
-	sorted := append([]ChunkName(nil), candidates...)
-	sort.Slice(sorted, func(a, b int) bool { return sorted[a].Index < sorted[b].Index })
 	var removed []ChunkName
 	for _, c := range sorted {
-		if Shard(c.Index) != shard || live[c] {
+		tag, planned := plan[c]
+		if !planned || live[c] {
 			continue
 		}
-		plan, found, err := os.Stat(ctx, c.Path())
-		if err != nil {
-			return removed, err
-		}
-		if !found || plan.Mark != "" {
-			continue
-		}
-		if err := os.Mark(ctx, c.Path(), plan, session); err != nil {
+		if err := os.Mark(ctx, c.Path(), tag, session); err != nil {
 			if errors.Is(err, ErrPrecondition) {
-				continue // reused or marked since the plan
+				continue // written since the plan
 			}
 			return removed, fmt.Errorf("layout: mark %s: %w", c, err)
 		}

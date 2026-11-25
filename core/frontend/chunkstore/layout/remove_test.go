@@ -166,6 +166,59 @@ func TestRemoveUnreachable_AReuseAfterThePlanDefeatsTheMark(t *testing.T) {
 	}
 }
 
+// The stale remover's whole window: right after it reads HEAD, its lease
+// ends and a successor claims, reuses an orphan (EnsureObject) and commits
+// a root naming it. The remover's tags were read before its HEAD view, so
+// the reuse changed the tag and its mark fails; had it read the tags after
+// HEAD, it would mark and delete a chunk the successor's root names.
+func TestRemoveUnreachable_ASuccessorAfterTheHeadViewDefeatsTheMark(t *testing.T) {
+	o, h, _, orphans := removeFixture(t)
+	var target ChunkName
+	for _, c := range orphans {
+		if c.Index == 5 {
+			target = c
+		}
+	}
+	st := &memHead{h: h}
+	st.afterRead = func() {
+		if err := EnsureObject(context.Background(), o, target.Path(), []byte("e"), "successor"); err != nil {
+			t.Fatal(err)
+		}
+		// The successor's commit names the reused chunk; the old holder's
+		// HEAD view (already taken) still shows its own cleaning.
+		next := manifest(Ref{Owner: "v1", Chunk: target})
+		rn := writeImage(t, map[string][]byte{}, next, map[uint64][]byte{5: []byte("e")})
+		root, segs, _ := Build(next)
+		_ = root
+		for n, b := range segs {
+			o.put(n.Path(), b, "successor")
+		}
+		_, rb, _ := NameRoot(root)
+		o.put(rn.Path(), rb, "successor")
+		h.Epoch, h.Holder, h.Activity, h.Current = 4, "srv-b", Activity{Kind: ActIdle}, &rn
+	}
+	if _, err := removeShard0(t, st, o, "c1", orphans); err != nil {
+		t.Fatal(err)
+	}
+	if !inPool(o, target) {
+		t.Fatalf("chunk %s, reused and committed by the successor after the remover's HEAD view, was removed", target)
+	}
+	if err := reachableMissing(h, o.data()); err != nil {
+		t.Fatalf("the successor's HEAD reaches a missing object: %v", err)
+	}
+}
+
+// A successor that acts before the remover's HEAD view (the remover paused
+// right after BeginClean) leaves a HEAD that is no longer the remover's:
+// the pass stops before any write.
+func TestRemoveUnreachable_ASuccessorBeforeTheHeadViewStopsThePass(t *testing.T) {
+	o, h, _, orphans := removeFixture(t)
+	h.Epoch, h.Holder, h.Activity = 4, "srv-b", Activity{Kind: ActIdle}
+	if _, err := removeShard0(t, &memHead{h: h}, o, "c1", orphans); !errors.Is(err, ErrNotHolder) || len(o.writes) != 0 {
+		t.Fatalf("remover after a claim: %v, %d writes; want ErrNotHolder and none", err, len(o.writes))
+	}
+}
+
 // A candidate already marked by another session is left alone.
 func TestRemoveUnreachable_LeavesAnotherSessionsMark(t *testing.T) {
 	o, h, _, orphans := removeFixture(t)
