@@ -63,4 +63,3 @@ func TestFreshStoreRefusesWriteBeforeAssignmentThenPublishesAfterClaim(t *testin
 		t.Fatalf("remote restore lost checkpointed bytes: got=%x err=%v", sha256.Sum256(got), err)
 	}
 }
-
