@@ -712,7 +712,6 @@ func runVolume(f flags, exits *processExit) int {
 			cfg.ChunkCutTimeout = defaultChunkCutTimeout
 			cfg.ChunkMaintenanceInterval = f.chunk.maintenanceInterval
 			cfg.ChunkMaintenanceTimeout = defaultChunkMaintenanceTimeout
-			cfg.ChunkMaintenance = chunk.maintenance
 			if f.workspaceLease {
 				// The startup wait does not run out while the master gives no
 				// reply; it ends 30 s after the first reply received after the
@@ -757,7 +756,11 @@ func runVolume(f flags, exits *processExit) int {
 				cfg.ChunkRemoteFor = chunk.remoteFor
 				workspaceRemoteFor = chunk.remoteFor
 				layoutID, _ := layout.ParseVolumeID(f.layoutID) // parseFlags validates a supplied id
-				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.bCatalog, chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID})
+				ref := chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}
+				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.bCatalog, ref)
+				// The holder identity comes from Start (until it is wired, the
+				// pass retains and does not clean).
+				cfg.ChunkMaintenance = newChunkMaintenance(chunk.bCatalog, ref, func(context.Context) (layout.HolderID, error) { return layout.HolderID{}, errNoLayoutHolder }, f.chunk.automaticGC, time.Now)
 				defer chunk.close()
 			}
 		}

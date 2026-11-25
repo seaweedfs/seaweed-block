@@ -2,57 +2,57 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
-	"github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"github.com/seaweedfs/seaweed-block/core/rpc/link"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
-// Automatic GC stays default-off until restart-safe unknown-CAS settlement and
-// the 50/200-volume root-scan measurement both pass. Retention remains enabled.
-// The CLI fixes the maximum cut/copy lifetime at five minutes and the HEAD
-// hydration reader at thirty seconds. A one-minute mark fits strictly inside
-// the one-hour grace. No elapsed TTL alone authorizes capture-intent expiry.
-func newChunkMaintenance(cat *chunkstore.Catalog, blobs chunkstore.BlobDeleter, collect bool, master string) (func(context.Context, string) error, func() error, error) {
-	closeFn := func() error { return nil }
-	cfg := chunkstore.GCConfig{Grace: defaultChunkGCGrace, IntentTTL: defaultChunkIntentTTL}
-	if collect {
-		if master == "" {
-			return nil, closeFn, errors.New("automatic chunk GC requires blockmaster authority")
-		}
-		if defaultChunkGCGrace <= max(defaultChunkCutTimeout, chunkstore.DefaultOpDeadline)+defaultChunkMaintenanceTimeout {
-			return nil, closeFn, errors.New("automatic GC grace does not cover cut/copy and mark bounds")
-		}
-		conn, err := link.Dial(master, link.MasterReconnect())
-		if err != nil {
-			return nil, closeFn, err
-		}
-		closeFn = conn.Close
-		evidence := control.NewEvidenceServiceClient(conn)
-		cfg.IssuedEpoch = func(ctx context.Context, vol string) (uint64, error) {
-			reply, err := evidence.QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: vol})
-			if err != nil {
-				return 0, err
-			}
-			if reply.GetVolumeId() != vol || !reply.GetAssigned() || reply.GetEpoch() == 0 {
-				return 0, fmt.Errorf("blockmaster has no issued authority for %s", vol)
-			}
-			return reply.Epoch, nil
-		}
-	}
+// errNoLayoutHolder: the process has no holder identity for the volume yet
+// (it is not attached, or Start has not returned), so it does not clean.
+var errNoLayoutHolder = errors.New("blockvolume: no layout holder identity for the volume")
+
+// newChunkMaintenance is the holder's periodic pass over its one volume ref:
+// retention, then, when collect is set, the cleaning (chunkstore
+// BCatalog.Clean). The cleaning runs only as the holder: holderOf returns
+// the identity Start established, and Begin refuses it unless HEAD is still
+// that holder's at its epoch, so a process that lost the volume removes
+// nothing. Automatic cleaning stays default-off; retention runs either way.
+func newChunkMaintenance(cat *chunkstore.BCatalog, ref chunkstore.VolumeRef, holderOf func(context.Context) (layout.HolderID, error), collect bool, now func() time.Time) func(context.Context, string) error {
 	return func(ctx context.Context, vol string) error {
-		retained, err := cat.Retain(ctx, vol, false)
-		if err != nil {
-			return fmt.Errorf("retain deleted=%d not_attempted=%d: %w", len(retained.Deleted), len(retained.NotAttempted), err)
+		if cat == nil || vol != ref.Name || ref.ID.IsZero() {
+			return fmt.Errorf("%w: maintenance of %q, process holds %q", layout.ErrIdentity, vol, ref.Name)
+		}
+		if _, err := cat.Retain(ctx, ref, now(), false); err != nil {
+			return fmt.Errorf("retain: %w", err)
 		}
 		if !collect {
 			return nil
 		}
-		out, err := cat.ExecuteVolumeGC(ctx, vol, blobs, cfg, true)
-		log.Printf("blockvolume: maintenance volume=%s mark=%s reclaimed=%d settled=%d unknown=%v", vol, out.MarkOutcome, out.Reclaimed, out.SettledCopies, out.UnknownOutcomes)
+		me, err := holderOf(ctx)
+		if err != nil {
+			return err
+		}
+		session, err := cleanSessionID()
+		if err != nil {
+			return err
+		}
+		res, err := cat.Clean(ctx, ref, me, session)
+		log.Printf("blockvolume: maintenance volume=%s clean=%s shards=%d planned=%d removed=%d", vol, session, res.Shards, res.Planned, res.Removed)
 		return err
-	}, closeFn, nil
+	}
+}
+
+// cleanSessionID is a fresh cleaning session id per pass.
+func cleanSessionID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return "clean-" + hex.EncodeToString(b[:]), nil
 }

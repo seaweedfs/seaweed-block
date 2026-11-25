@@ -155,11 +155,10 @@ func (s *snapshotSchedule) Set(v string) error {
 }
 
 type chunkWiring struct {
-	remoteFor   func(volumeID string) (storage.ChunkRemote, error)
-	catalog     *chunkstore.Catalog
-	bCatalog    *chunkstore.BCatalog
-	maintenance func(context.Context, string) error
-	close       func() error
+	remoteFor func(volumeID string) (storage.ChunkRemote, error)
+	catalog   *chunkstore.Catalog
+	bCatalog  *chunkstore.BCatalog
+	close     func() error
 }
 
 // newChunkWiring dials the filer and refuses unless it is the only filer of
@@ -189,17 +188,7 @@ func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
 		_ = client.Close()
 		return chunkWiring{}, err
 	}
-	var masterAddr string
-	if len(master) > 0 {
-		masterAddr = master[0]
-	}
-	maintenance, closeMaintenance, err := newChunkMaintenance(cat, client, c.automaticGC, masterAddr)
-	if err != nil {
-		_ = client.Close()
-		return chunkWiring{}, err
-	}
 	return chunkWiring{
-		maintenance: maintenance,
 		remoteFor: func(volumeID string) (storage.ChunkRemote, error) {
 			root, err := chunkVolumeRoot(c.path, volumeID)
 			if err != nil {
@@ -209,7 +198,7 @@ func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
 		},
 		catalog:  cat,
 		bCatalog: bcat,
-		close:    func() error { return errors.Join(closeMaintenance(), client.Close()) },
+		close:    client.Close,
 	}, nil
 }
 
