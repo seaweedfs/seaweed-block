@@ -12,26 +12,28 @@ import (
 	"time"
 )
 
-// TestCutoverRestoreIntoMasterCreatedTarget pins the public create/restore
-// seam: the master must register the target's identity and placement before
-// restore, but that registration must not make an empty HEAD block restore.
-func TestCutoverRestoreIntoMasterCreatedTarget(t *testing.T) {
-	env := startCutoverLayoutEnv(t, true)
+// TestCutoverCreateFromSnapshot pins the public master create contract: one
+// request creates the target identity and its restored image together.
+func TestCutoverCreateFromSnapshot(t *testing.T) {
+	env := startCutoverLayoutEnv(t, false)
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	source := startCutoverVolume(t, env, "restore-source", "s1")
 	env.adopt(t, source, "s1")
 	env.writeBlock(t, "s1", 5, pattern("restore-seam-A!"))
 	env.snapshot(t, "s1", "v1", "restore-seam")
-	t.Logf("master-created target HEAD before restore: %s", env.headOf(t, "v2"))
 	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "restore-seam", "--target", "v2",
-		"--master", env.h.masterAddr, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+		"--master", env.h.masterAddr)
+	target := startCutoverVolume(t, env, "restored-target", "n-v2")
+	target.waitLog(t, 60*time.Second, "blockvolume: volume v2 adopted as PRIMARY at r1@")
+	poll(t, 60*time.Second, "restored target never ready", func() bool { return volumeFrontendReady(env.hosts["n-v2"].status, "v2") })
+	env.requireBlocks(t, "n-v2", 0, ladderLastBlock+1, map[uint64][]byte{5: pattern("restore-seam-A!")})
 }
 
 // TestCutoverWriteSnapshotKillRestartRestore follows the public path through
 // real binaries, a stock filer and the NVMe frontend. The guest is quiescent
 // at snapshot and kill; process kill is not a power-loss durability claim.
 func TestCutoverWriteSnapshotKillRestartRestore(t *testing.T) {
-	env := startCutoverLayoutEnv(t, true)
+	env := startCutoverLayoutEnv(t, false)
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	source := startCutoverVolume(t, env, "source-before-kill", "s1")
 	env.adopt(t, source, "s1")
@@ -51,7 +53,7 @@ func TestCutoverWriteSnapshotKillRestartRestore(t *testing.T) {
 	after := map[uint64][]byte{5: a, 2*ladderChunkBlocks + 7: b, 4*ladderChunkBlocks + 9: c}
 	env.requireBlocks(t, "s1", 0, ladderLastBlock+1, after)
 	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "before-kill", "--target", "v2",
-		"--master", env.h.masterAddr, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+		"--master", env.h.masterAddr)
 	target := startCutoverVolume(t, env, "restored-target", "n-v2")
 	target.waitLog(t, 60*time.Second, "blockvolume: volume v2 adopted as PRIMARY at r1@")
 	poll(t, 60*time.Second, "restored target never ready", func() bool { return volumeFrontendReady(env.hosts["n-v2"].status, "v2") })
