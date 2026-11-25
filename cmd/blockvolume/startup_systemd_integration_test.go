@@ -229,11 +229,17 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 }
 
 // gap1MovedSourceExits78 is the negative case of the in-process wait: after
-// the volume moved to another host, the old source started again learns the
-// move and exits 78 (final), which the unit's RestartPreventExitStatus keeps
-// from restarting; it never serves.
+// the volume moved to another host (and the new holder stopped), the old
+// source started again learns the move and exits 78 (final), which the unit's
+// RestartPreventExitStatus keeps from restarting; it never serves.
 func gap1MovedSourceExits78(t *testing.T, fixture *gap1Fixture, exe string, args []string, stem, statusAddr, volume string) {
 	t.Helper()
+	// The simulated hosts share this kernel's per-host volume lock directory:
+	// stop the new holder (the prestarted target) so the old source can open
+	// its root at all; on real separate hosts the two never share a lock.
+	target := stem + "-prestarted-target"
+	gap1Systemctl(t, "stop", target)
+	waitGAP1(t, "the new holder did not stop", 30*time.Second, func() bool { return gap1Unit(t, target)["MainPID"] == "0" })
 	unit := stem + "-moved-source"
 	fixture.start(t, unit, true, exe, args...)
 	waitGAP1(t, "the moved-away source never exited 78", 90*time.Second, func() bool {
