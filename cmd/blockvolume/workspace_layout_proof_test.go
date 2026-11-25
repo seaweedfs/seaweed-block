@@ -45,11 +45,15 @@ func TestWorkspaceLayoutDetachedProof(t *testing.T) {
 		{"open activity", func(s *layoutProofStore, _ *control.WorkspaceIdentity, _ *layout.HolderID) {
 			s.h.Activity = layout.Activity{Kind: layout.ActSnap, Session: "old"}
 		}, false},
+		{"zero generation", func(s *layoutProofStore, _ *control.WorkspaceIdentity, _ *layout.HolderID) { s.h.Gen = 0 }, false},
 		{"other claim", func(s *layoutProofStore, _ *control.WorkspaceIdentity, _ *layout.HolderID) { s.h.ClaimID = "other" }, false},
 		{"older HEAD epoch", func(s *layoutProofStore, _ *control.WorkspaceIdentity, _ *layout.HolderID) { s.h.Epoch-- }, false},
 		{"newer HEAD epoch", func(s *layoutProofStore, _ *control.WorkspaceIdentity, _ *layout.HolderID) { s.h.Epoch++ }, false},
 		{"other HEAD holder", func(s *layoutProofStore, _ *control.WorkspaceIdentity, _ *layout.HolderID) { s.h.Holder = "other/r" }, false},
 		{"zero request epoch", func(_ *layoutProofStore, id *control.WorkspaceIdentity, _ *layout.HolderID) { id.Epoch = 0 }, false},
+		{"zero epoch everywhere", func(s *layoutProofStore, id *control.WorkspaceIdentity, me *layout.HolderID) {
+			s.h.Epoch, id.Epoch, me.Epoch = 0, 0, 0
+		}, false},
 		{"other request server", func(_ *layoutProofStore, id *control.WorkspaceIdentity, _ *layout.HolderID) { id.ServerId = "other" }, false},
 		{"other request replica", func(_ *layoutProofStore, id *control.WorkspaceIdentity, _ *layout.HolderID) { id.ReplicaId = "other" }, false},
 		{"empty local claim", func(_ *layoutProofStore, _ *control.WorkspaceIdentity, me *layout.HolderID) { me.ClaimID = "" }, false},
