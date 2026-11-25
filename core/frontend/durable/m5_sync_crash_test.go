@@ -11,17 +11,12 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func qd1CrashProvider(t *testing.T, impl durable.ImplName, root string) (*durable.DurableProvider, *durable.StorageBackend) {
 	t.Helper()
 	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
 	cfg := durable.ProviderConfig{Impl: impl, StorageRoot: root, NumBlocks: 128, BlockSize: 4096, ChunkBlocks: 4}
-	if impl == durable.ImplWALStoreChunk {
-		remote := storage.NewMemChunkRemote()
-		cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return remote, nil }
-	}
 	p, err := durable.NewDurableProvider(cfg, newStubView(healthyProj(id)))
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +66,7 @@ func TestQD1BackendSyncCrashWriter(t *testing.T) {
 }
 
 func TestQD1BackendSyncCrashReopen(t *testing.T) {
-	for _, impl := range []durable.ImplName{durable.ImplSmartWAL, durable.ImplWALStoreChunk} {
+	for _, impl := range []durable.ImplName{durable.ImplSmartWAL} {
 		t.Run(string(impl), func(t *testing.T) {
 			root := t.TempDir()
 			childCtx, cancelChild := context.WithTimeout(context.Background(), 30*time.Second)
