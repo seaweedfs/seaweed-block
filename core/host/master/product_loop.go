@@ -37,6 +37,10 @@ type PromotionCandidateEvidence struct {
 	// TableInvalid: a recovery left the candidate's table without a known
 	// history; such a candidate is never Ready (never a promotion survivor).
 	TableInvalid bool
+	// TableValid: the candidate's evidence was read, on a present and valid
+	// epoch table. Only such an answer is evidence: one whose table is
+	// absent or could not be read says nothing about its end.
+	TableValid bool
 	// StoreID is the candidate's probed store (its superblock UUID). A
 	// candidate is Ready only when it equals the store the volume's primary
 	// last attested for it (Host.AttestedStore): a replaced store, or one
@@ -382,7 +386,7 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 	var highest uint64
 	for i := range fenced.Candidates {
 		c := &fenced.Candidates[i]
-		if c.ReplicaID != "" && c.Floor == fenced.FencedEpoch && !c.TableInvalid {
+		if c.ReplicaID != "" && c.Floor == fenced.FencedEpoch && c.TableValid {
 			counted[c.ReplicaID] = true
 			if c.DurableLSN > highest {
 				highest = c.DurableLSN
@@ -484,7 +488,7 @@ func (h *Host) healAfterFailedFence(volumeID string, current authority.Authority
 	h.promotionMu.RUnlock()
 	res, err := prober.ProbePromotionCandidates(volumeID, current, nil)
 	c := res.Current
-	if err != nil || !res.CurrentKnown || c.ReplicaID != current.ReplicaID || !c.Ready || c.TableInvalid || c.StoreID.IsZero() {
+	if err != nil || !res.CurrentKnown || c.ReplicaID != current.ReplicaID || !c.Ready || !c.TableValid || c.StoreID.IsZero() {
 		h.log.Printf("blockmaster: promotion gate volume=%s heal: primary %s did not answer ready (%v); waiting", volumeID, current.ReplicaID, err)
 		return authority.AssignmentAsk{}, false
 	}

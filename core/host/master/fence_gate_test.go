@@ -83,25 +83,28 @@ func TestPromotionGate_DecidesOnTheFencingRound(t *testing.T) {
 		want   map[string]uint64 // allowed replica -> its evidence LSN
 	}{
 		{"both fenced: the highest fenced end, not the plain one",
-			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: 2}),
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: 2, TableValid: true}),
 			map[string]uint64{"r3": 12}},
 		{"one fenced, one silent: too few",
-			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}),
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}),
 			map[string]uint64{}},
 		{"one answered at a higher floor (superseded): not counted",
-			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: 3}),
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: 3, TableValid: true}),
 			map[string]uint64{}},
 		{"one answered without the fence (another store: its floor did not move)",
-			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: 1}),
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: 1, TableValid: true}),
 			map[string]uint64{}},
 		{"r3 lagging (not ready) with a lower fenced end: counted, r2 is the target",
-			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 8, Floor: 2}),
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 8, Floor: 2, TableValid: true}),
 			map[string]uint64{"r2": 10}},
 		{"r3 lagging (not ready) holds the highest fenced end: wait",
-			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 12, Floor: 2}),
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 12, Floor: 2, TableValid: true}),
 			map[string]uint64{}},
 		{"r3 on an invalid table: not counted",
-			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 8, Floor: 2, TableInvalid: true}),
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", DurableLSN: 8, Floor: 2, TableInvalid: true}),
+			map[string]uint64{}},
+		{"r3 fenced but its evidence unreadable (table absent): not counted",
+			fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", Floor: 2}),
 			map[string]uint64{}},
 		{"the fencing round failed",
 			func(authority.AuthorityBasis, []PromotionCandidateEvidence) (PromotionProbeResult, error) {
@@ -144,8 +147,8 @@ func TestPromotionGate_EmptyVolumePrimaryLost(t *testing.T) {
 		fenced func(authority.AuthorityBasis, []PromotionCandidateEvidence) (PromotionProbeResult, error)
 		want   int
 	}{
-		"both fenced at end 0": {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, Floor: 2}), 2},
-		"one fenced":           {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2}), 0},
+		"both fenced at end 0": {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, Floor: 2, TableValid: true}), 2},
+		"one fenced":           {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2, TableValid: true}), 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
@@ -179,9 +182,9 @@ func TestPromotionGate_HealsAFailedFencingRoundOnTheCurrentPrimary(t *testing.T)
 			p := &fenceProbe{
 				plain: PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1"},
 					Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10}, {ReplicaID: "r3", Ready: true, DurableLSN: 10}}},
-				fenced: fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}), // r3 silent
+				fenced: fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}), // r3 silent
 				heal: PromotionProbeResult{CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: ready, DurableLSN: 11,
-					LastDataEpoch: 1, LastDataFirstLSN: 1, StoreID: store}},
+					LastDataEpoch: 1, LastDataFirstLSN: 1, StoreID: store, TableValid: true}},
 			}
 			h.SetPromotionEvidenceProvider(p)
 			snap := rf3DeadPrimary()
@@ -214,13 +217,13 @@ func TestPromotionGate_HealsAFailedFencingRoundOnTheCurrentPrimary(t *testing.T)
 // survivor answering above the line triggers the same heal.
 func TestPromotionGate_HealsOnALaterTick(t *testing.T) {
 	store := storage.StoreID{7}
-	healed := PromotionProbeResult{CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true, DurableLSN: 11, StoreID: store}}
+	healed := PromotionProbeResult{CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true, DurableLSN: 11, StoreID: store, TableValid: true}}
 	t.Run("remembered failed round", func(t *testing.T) {
 		h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
 		defer closeTestMaster(t, h)
 		p := &fenceProbe{
 			plain:  PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10}, {ReplicaID: "r3", Ready: true, DurableLSN: 10}}},
-			fenced: fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}),
+			fenced: fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}),
 		}
 		h.SetPromotionEvidenceProvider(p)
 		snap := rf3DeadPrimary()
@@ -242,7 +245,7 @@ func TestPromotionGate_HealsOnALaterTick(t *testing.T) {
 		defer closeTestMaster(t, h)
 		h.SetPromotionEvidenceProvider(&fenceProbe{
 			plain: PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true},
-				Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2}, {ReplicaID: "r3", Ready: true, DurableLSN: 10, Floor: 1}}},
+				Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: 2, TableValid: true}, {ReplicaID: "r3", Ready: true, DurableLSN: 10, Floor: 1, TableValid: true}}},
 			heal: healed,
 		})
 		snap := rf3DeadPrimary()

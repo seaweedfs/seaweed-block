@@ -9,6 +9,7 @@ func fenceObeyed(current authority.AuthorityBasis, survivors []PromotionCandidat
 	out := make([]PromotionCandidateEvidence, len(survivors))
 	for i, s := range survivors {
 		s.Floor = current.Epoch + 1
+		s.TableValid = true // a replica that obeys reads its evidence
 		out[i] = s
 	}
 	return PromotionProbeResult{FencedEpoch: current.Epoch + 1, Candidates: out}, nil

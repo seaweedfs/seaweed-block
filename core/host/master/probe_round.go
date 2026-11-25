@@ -154,7 +154,7 @@ func (p *roundEvidenceProvider) FencePromotionCandidates(volumeID string, curren
 	// table, is no evidence: it carries no floor for the gate to count.
 	for i := range result.Candidates {
 		c := &result.Candidates[i]
-		if ref, ok := stores[c.ReplicaID]; !ok || ref.IsZero() || c.StoreID != ref || c.TableInvalid {
+		if ref, ok := stores[c.ReplicaID]; !ok || ref.IsZero() || c.StoreID != ref || !c.TableValid {
 			c.Floor = 0
 		}
 	}
@@ -228,7 +228,7 @@ done:
 			// The current primary's own evidence (a heal continues it on it):
 			// ready as a serving primary, on a valid table.
 			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, Ready: a.GetPrimaryReady(), DurableLSN: a.GetDurableEnd(),
-				LastDataEpoch: a.GetLastDataEpoch(), LastDataFirstLSN: a.GetLastDataFirstLsn(), TableInvalid: a.GetTablePresent() && !a.GetTableValid(),
+				LastDataEpoch: a.GetLastDataEpoch(), LastDataFirstLSN: a.GetLastDataFirstLsn(), TableInvalid: a.GetTablePresent() && !a.GetTableValid(), TableValid: a.GetTablePresent() && a.GetTableValid(),
 				StoreID: store, Floor: a.GetFloor()}
 		} else {
 			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, ProbeAddr: "no answer"}
@@ -256,6 +256,7 @@ done:
 			LastDataEpoch:    a.GetLastDataEpoch(),
 			LastDataFirstLSN: a.GetLastDataFirstLsn(),
 			TableInvalid:     invalid,
+			TableValid:       a.GetTablePresent() && a.GetTableValid(),
 			StoreID:          store,
 			Floor:            a.GetFloor(),
 			// A promotion target answers as a ready replica, from a store
