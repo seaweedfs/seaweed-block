@@ -33,6 +33,9 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if resp.GetVolumeId() != "pvc-a" || resp.GetSizeBytes() != 1<<30 || resp.GetReplicationFactor() != 2 {
 		t.Fatalf("response=%+v", resp)
 	}
+	if resp.GetBlockSize() != 4096 || resp.GetChunkBytes() != 4<<20 {
+		t.Fatalf("response geometry=%+v", resp)
+	}
 	if resp.GetPvcName() != "demo-pvc" || resp.GetPvcNamespace() != "demo-ns" || resp.GetPvcUid() != "uid-123" || resp.GetPvName() != "pvc-a" {
 		t.Fatalf("kubernetes metadata response=%+v", resp)
 	}
@@ -48,6 +51,9 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	}
 	if rec.Spec.VolumeID != "pvc-a" || rec.Spec.SizeBytes != 1<<30 || rec.Spec.ReplicationFactor != 2 {
 		t.Fatalf("record=%+v", rec)
+	}
+	if rec.Spec.BlockSize != 4096 || rec.Spec.ChunkBytes != 4<<20 {
+		t.Fatalf("record geometry=%+v", rec.Spec)
 	}
 	if resp.GetLayoutId() == "" || resp.GetLayoutId() != rec.Spec.LayoutID {
 		t.Fatal("create response does not carry the durable layout identity")

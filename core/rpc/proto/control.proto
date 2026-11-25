@@ -427,6 +427,8 @@ message CreateVolumeRequest {
     string pvc_uid = 7;
     string protocol = 8; // "iscsi" default | "nvme"
     string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
+    uint32 block_size = 10; // omitted: 4096, persisted on first create
+    uint64 chunk_bytes = 11; // omitted: 4 MiB, persisted on first create
 }
 
 message CreateVolumeResponse {
@@ -440,6 +442,8 @@ message CreateVolumeResponse {
     string protocol = 8; // "iscsi" default | "nvme"
     string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
     string layout_id = 10; // master-minted, immutable 32 lower-case hex digits
+    uint32 block_size = 11;
+    uint64 chunk_bytes = 12;
 }
 
 message GetLifecycleVolumeRequest {

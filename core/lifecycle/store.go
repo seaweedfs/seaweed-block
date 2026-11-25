@@ -38,6 +38,8 @@ type VolumeSpec struct {
 	VolumeID          string `json:"volume_id"`
 	LayoutID          string `json:"layout_id,omitempty"`
 	SizeBytes         uint64 `json:"size_bytes"`
+	BlockSize         uint32 `json:"block_size"`
+	ChunkBytes        uint64 `json:"chunk_bytes"`
 	ReplicationFactor int    `json:"replication_factor"`
 	Protocol          string `json:"protocol,omitempty"`
 	FrontendTransport string `json:"frontend_transport,omitempty"`
@@ -193,6 +195,8 @@ func volumeSpecsCompatible(a, b VolumeSpec) bool {
 	return a.VolumeID == b.VolumeID &&
 		(b.LayoutID == "" || a.LayoutID == b.LayoutID) &&
 		a.SizeBytes == b.SizeBytes &&
+		a.BlockSize == b.BlockSize &&
+		a.ChunkBytes == b.ChunkBytes &&
 		a.ReplicationFactor == b.ReplicationFactor &&
 		a.Protocol == b.Protocol &&
 		a.FrontendTransport == b.FrontendTransport
@@ -361,6 +365,12 @@ func validateSpec(spec VolumeSpec) error {
 	if spec.SizeBytes == 0 {
 		return fmt.Errorf("%w: size_bytes must be > 0", ErrInvalidVolumeSpec)
 	}
+	if err := (layout.Geometry{SizeBytes: spec.SizeBytes, BlockSize: spec.BlockSize, ChunkBytes: spec.ChunkBytes}).Check(); err != nil {
+		return fmt.Errorf("%w: geometry: %v", ErrInvalidVolumeSpec, err)
+	}
+	if spec.BlockSize != 4096 || spec.ChunkBytes != 4<<20 {
+		return fmt.Errorf("%w: v1 accepts only block_size=4096 and chunk_bytes=4194304", ErrInvalidVolumeSpec)
+	}
 	if spec.ReplicationFactor <= 0 {
 		return fmt.Errorf("%w: replication_factor must be > 0", ErrInvalidVolumeSpec)
 	}
@@ -380,6 +390,12 @@ func validateSpec(spec VolumeSpec) error {
 }
 
 func normalizeVolumeSpec(spec VolumeSpec) VolumeSpec {
+	if spec.BlockSize == 0 {
+		spec.BlockSize = 4096
+	}
+	if spec.ChunkBytes == 0 {
+		spec.ChunkBytes = 4 << 20
+	}
 	if spec.Protocol == "" {
 		spec.Protocol = "iscsi"
 	}
