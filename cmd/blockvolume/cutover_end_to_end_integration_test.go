@@ -16,7 +16,7 @@ import (
 // seam: the master must register the target's identity and placement before
 // restore, but that registration must not make an empty HEAD block restore.
 func TestCutoverRestoreIntoMasterCreatedTarget(t *testing.T) {
-	env := startHandoffEnvWith(t, 1, []string{"v2"})
+	env := startCutoverLayoutEnv(t, true)
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	source := startCutoverVolume(t, env, "restore-source", "s1")
 	env.adopt(t, source, "s1")
@@ -31,7 +31,7 @@ func TestCutoverRestoreIntoMasterCreatedTarget(t *testing.T) {
 // real binaries, a stock filer and the NVMe frontend. The guest is quiescent
 // at snapshot and kill; process kill is not a power-loss durability claim.
 func TestCutoverWriteSnapshotKillRestartRestore(t *testing.T) {
-	env := startHandoffEnvWith(t, 1, []string{"v2"})
+	env := startCutoverLayoutEnv(t, true)
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	source := startCutoverVolume(t, env, "source-before-kill", "s1")
 	env.adopt(t, source, "s1")
@@ -57,6 +57,15 @@ func TestCutoverWriteSnapshotKillRestartRestore(t *testing.T) {
 	poll(t, 60*time.Second, "restored target never ready", func() bool { return volumeFrontendReady(env.hosts["n-v2"].status, "v2") })
 	env.requireBlocks(t, "n-v2", 0, ladderLastBlock+1, before)
 	env.requireBlocks(t, "s1", 0, ladderLastBlock+1, after)
+}
+
+func startCutoverLayoutEnv(t *testing.T, precreateTarget bool) *handoffEnv {
+	t.Helper()
+	var tlsCfg map[string]time.Time
+	if procedureTLSOn() {
+		tlsCfg = map[string]time.Time{}
+	}
+	return startHandoffEnvConfigured(t, 1, []string{"v2"}, tlsCfg, precreateTarget, true)
 }
 
 // Resolve the identity from the real master before launching the public CLI.

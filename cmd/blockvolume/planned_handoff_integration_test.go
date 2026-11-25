@@ -223,6 +223,13 @@ func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...st
 // startHandoffEnvTLS is startHandoffEnvWith with mutual TLS when tlsNotAfter
 // is non-nil (it overrides chosen node certificates' expiry).
 func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, masterArgs ...string) *handoffEnv {
+	return startHandoffEnvConfigured(t, n, targets, tlsNotAfter, true, false, masterArgs...)
+}
+
+// startHandoffEnvConfigured can reserve target placement without importing a
+// VolumeRecord. The restore-create test uses that form so the master creates
+// the target's identity and restored image in one request.
+func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, precreateTargets, layoutMaster bool, masterArgs ...string) *handoffEnv {
 	t.Helper()
 	h := newPlannedHandoffHarness(t)
 	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
@@ -252,16 +259,20 @@ func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[s
 	node := func(b bvHost) {
 		fmt.Fprintf(&nodes, "  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", b.id, b.data, b.ctrl)
 	}
-	volume := func(v, server string) {
-		fmt.Fprintf(&volumes, "  - id: %s\n    size_bytes: 268435456\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: r1\n", v, server)
+	volume := func(v, server string, create bool) {
+		size := ""
+		if create {
+			size = "    size_bytes: 268435456\n"
+		}
+		fmt.Fprintf(&volumes, "  - id: %s\n%s    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: r1\n", v, size, server)
 	}
 	for i := 1; i <= n; i++ {
 		node(env.hosts[fmt.Sprintf("s%d", i)])
 	}
-	volume("v1", "s1")
+	volume("v1", "s1", true)
 	for _, v := range targets {
 		node(env.hosts["n-"+v])
-		volume(v, "n-"+v)
+		volume(v, "n-"+v, precreateTargets)
 	}
 	spec := filepath.Join(h.dir, "cluster-spec.yaml")
 	must(os.WriteFile(spec, []byte("nodes:\n"+nodes.String()+"volumes:\n"+volumes.String()), 0o644))
@@ -271,8 +282,10 @@ func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[s
 	env.masterArgs = append([]string{
 		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath,
-		"--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath}, masterArgs...)
+		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)
+	if layoutMaster {
+		env.masterArgs = append(env.masterArgs, "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
+	}
 	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
 	env.masterProcess = master
 	if l := master.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded="); !strings.Contains(l, "listen="+h.masterAddr) {
