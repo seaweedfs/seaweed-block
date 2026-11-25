@@ -47,6 +47,11 @@ type LayoutRemote struct {
 	// remote's own Begin, Abort or cleaning; ownGen is HEAD's generation
 	// after this remote's last own write.
 	visible, ownGen uint64
+	// BirthLSN belongs to the engine's chunk reference, not to a layout
+	// object name. Keep the references we handed to the engine so a later
+	// HEAD position does not invent a new birth for an unchanged object.
+	refs, pendingRefs map[uint64]storage.ChunkRef
+	pendingPosition   uint64
 	// seen is the image HEAD named when visible was last set: a write of
 	// anyone else that leaves it equal (a snapshot delete, retention, a
 	// dependent added) does not move visible.
@@ -245,6 +250,7 @@ func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 		out.DetachedBy = &storage.ChunkDetachedBy{Holder: h.Holder, Epoch: h.Epoch, Gen: h.Gen}
 	}
 	if h.Current == nil {
+		l.refs, l.pendingRefs = nil, nil
 		return out, nil
 	}
 	m, err := l.manifest(ctx, *h.Current)
@@ -252,9 +258,29 @@ func (l *LayoutRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 		return storage.ChunkHead{}, err
 	}
 	for idx, ref := range m {
-		out.Chunks[idx] = storage.ChunkRef{Key: LayoutKey(ref), SHA256: ref.Chunk.Hash, Encoding: "full", BirthLSN: h.Position}
+		c := storage.ChunkRef{Key: LayoutKey(ref), SHA256: ref.Chunk.Hash, Encoding: "full", BirthLSN: h.Position}
+		if old, ok := l.refs[idx]; ok && sameLayoutObject(old, c) {
+			c.BirthLSN = old.BirthLSN
+		}
+		if old, ok := l.pendingRefs[idx]; ok && h.Position == l.pendingPosition && sameLayoutObject(old, c) {
+			c.BirthLSN = old.BirthLSN
+		}
+		out.Chunks[idx] = c
 	}
+	l.refs, l.pendingRefs = copyLayoutRefs(out.Chunks), nil
 	return out, nil
+}
+
+func sameLayoutObject(a, b storage.ChunkRef) bool {
+	return a.Key == b.Key && a.SHA256 == b.SHA256 && a.Encoding == b.Encoding
+}
+
+func copyLayoutRefs(refs map[uint64]storage.ChunkRef) map[uint64]storage.ChunkRef {
+	out := make(map[uint64]storage.ChunkRef, len(refs))
+	for idx, ref := range refs {
+		out[idx] = ref
+	}
+	return out
 }
 
 // manifest is the chunk map root names.
@@ -316,6 +342,9 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 			req.Snapshot, req.Meta = l.pending.name, l.pending.meta
 		}
 	}
+	// A lost reply can mean the commit applied. Keep its birth values until
+	// the next HEAD read decides whether the old or proposed image won.
+	l.pendingRefs, l.pendingPosition = copyLayoutRefs(next.Chunks), next.RemoteLSN
 	got, err := layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, req)
 	if err != nil && req.Snapshot != "" && snapshotRefusal(err) {
 		// This snapshot cannot be named; the cut still commits unnamed and
@@ -341,6 +370,7 @@ func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVe
 	}
 	l.session, l.pending, l.lastCommit = "", nil, got
 	l.ownGen, l.visible, l.seen = got.Gen, got.Gen, imageOf(got)
+	l.refs, l.pendingRefs = copyLayoutRefs(next.Chunks), nil
 	return got.Gen, nil
 }
 
