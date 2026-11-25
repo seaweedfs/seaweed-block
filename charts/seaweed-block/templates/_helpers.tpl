@@ -55,3 +55,46 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- .Values.storageClass.replicationFactor -}}
 {{- end -}}
 {{- end -}}
+
+{{/* Mutual TLS toward blockmaster for an in-cluster client: its own Secret
+     (one of .Values.tls.clientSecrets, passed to masterTLSClientVolume)
+     mounted at /etc/sw-block/master-tls. */}}
+{{- define "seaweed-block.masterTLSClientFlags" -}}
+- "--master-tls-cert=/etc/sw-block/master-tls/tls.crt"
+- "--master-tls-key=/etc/sw-block/master-tls/tls.key"
+- "--master-ca=/etc/sw-block/master-tls/ca.crt"
+{{- end -}}
+
+{{- define "seaweed-block.masterTLSClientEnv" -}}
+- name: SW_BLOCK_TLS_CERT
+  value: /etc/sw-block/master-tls/tls.crt
+- name: SW_BLOCK_TLS_KEY
+  value: /etc/sw-block/master-tls/tls.key
+- name: SW_BLOCK_TLS_CA
+  value: /etc/sw-block/master-tls/ca.crt
+{{- end -}}
+
+{{- define "seaweed-block.masterTLSClientMount" -}}
+- name: master-tls
+  mountPath: /etc/sw-block/master-tls
+  readOnly: true
+{{- end -}}
+
+{{/* The CSI node and the status operator only read: refuse a Secret named
+     like an admin client's or blockmaster's own (the chart sees names, not
+     roles; the role file decides the role). */}}
+{{- define "seaweed-block.readOnlyClientSecrets" -}}
+{{- $s := .Values.tls.clientSecrets -}}
+{{- if eq $s.csiNode $s.csiController $s.failbackExecutor .Values.tls.masterSecret -}}
+{{- fail (printf "tls.clientSecrets.csiNode %q is the CSI controller's, the failback executor's or blockmaster's Secret: the node plugin never mounts an admin key" $s.csiNode) -}}
+{{- end -}}
+{{- if eq $s.operatorStatus $s.csiController $s.failbackExecutor .Values.tls.masterSecret -}}
+{{- fail (printf "tls.clientSecrets.operatorStatus %q is the CSI controller's, the failback executor's or blockmaster's Secret: the status operator never mounts an admin key" $s.operatorStatus) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "seaweed-block.masterTLSClientVolume" -}}
+- name: master-tls
+  secret:
+    secretName: {{ . }}
+{{- end -}}

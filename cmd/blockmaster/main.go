@@ -57,6 +57,7 @@ type flags struct {
 	launcherExternalNVMe                  bool
 	launcherExternalStatus                bool
 	launcherCHAPSecretName                string
+	launcherMasterTLSSecretPrefix         string
 	launcherCHAPUserKey                   string
 	launcherCHAPSecretKey                 string
 	failbackRuntimeRPC                    bool
@@ -87,13 +88,13 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.lifecycleStore, "lifecycle-store", "", "optional G9D product lifecycle registration store directory (desired volumes, node inventory, placement intents); read-only with respect to assignment publication")
 	fs.StringVar(&f.lifecyclePlacementSeed, "lifecycle-placement-seed", "", "placement-only seed JSON; lifecycle volumes must already be registered (CreateVolume)")
 	fs.StringVar(&f.clusterSpec, "cluster-spec", "", "cluster spec YAML; positive size_bytes imports desired volumes before topology/placement publication")
-	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180); non-loopback requires --insecure-external-bind")
+	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180); non-loopback requires mutual TLS (--tls-cert, --tls-key, --tls-client-ca, --role-file)")
 	fs.StringVar(&f.auth.tlsCert, "tls-cert", "", "blockmaster's TLS certificate (PEM): with --tls-key, --tls-client-ca and --role-file, every gRPC call needs mutual TLS")
 	fs.StringVar(&f.auth.tlsKey, "tls-key", "", "the key of --tls-cert (PEM)")
 	fs.StringVar(&f.auth.tlsClientCA, "tls-client-ca", "", "CA (PEM) every client certificate must verify against")
 	fs.StringVar(&f.auth.auditLog, "audit-log", "", "append-only audit log (JSON lines): every operator and admin call, refused node calls, role-file reloads")
 	fs.StringVar(&f.auth.roleFile, "role-file", "", "role file: lines 'sha256:<fingerprint> <viewer|operator|admin|node> <id>'; SIGHUP reloads it")
-	fs.BoolVar(&f.insecureExternalBind, "insecure-external-bind", false, "allow the unauthenticated control listeners (--listen, --frontend-publication-runtime-listen) on non-loopback addresses")
+	fs.BoolVar(&f.insecureExternalBind, "insecure-external-bind", false, "removed: refused at start (a non-loopback --listen needs mutual TLS; the runtime HTTP listener stays on loopback)")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
 	fs.DurationVar(&f.freshnessWindow, "freshness-window", 30*time.Second, "observation freshness window before a server's heartbeat expires")
@@ -119,6 +120,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.launcherExternalISCSI, "launcher-external-iscsi", false, "render generated iSCSI frontends on node addresses instead of loopback; requires --launcher-iscsi-chap-secret-name")
 	fs.BoolVar(&f.launcherExternalNVMe, "launcher-external-nvme", false, "render generated NVMe/TCP frontends on node addresses instead of loopback; unauthenticated and intended only for explicit Kubernetes NVMe/TCP gates")
 	fs.BoolVar(&f.launcherExternalStatus, "launcher-external-status", false, "render blockvolume status endpoints on node addresses instead of loopback; intended for explicit Kubernetes node-loss gates")
+	fs.StringVar(&f.launcherMasterTLSSecretPrefix, "launcher-master-tls-secret-prefix", "", "generated blockvolume Deployments dial blockmaster with mutual TLS from the Secret <prefix>-<server id> (keys tls.crt, tls.key, ca.crt); needs blockmaster's own mutual TLS")
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
@@ -160,18 +162,27 @@ func parseFlags(args []string) (flags, error) {
 	if err := master.ValidateStatusListen(f.statusListen); err != nil {
 		return flags{}, err
 	}
-	if err := f.auth.validate(f.insecureExternalBind); err != nil {
+	if f.insecureExternalBind {
+		return flags{}, fmt.Errorf("--insecure-external-bind is no longer accepted: a plaintext control listener stays on loopback; to listen on the node network start blockmaster with mutual TLS (--tls-cert, --tls-key, --tls-client-ca, --role-file) and drop the flag")
+	}
+	if err := f.auth.validate(); err != nil {
 		return flags{}, err
 	}
 	if !f.auth.enabled() {
-		if err := master.ValidateControlListen("listen", f.listen, f.insecureExternalBind); err != nil {
-			return flags{}, err
+		if err := master.ValidateControlListen("listen", f.listen); err != nil {
+			return flags{}, fmt.Errorf("%w; start blockmaster with mutual TLS (--tls-cert, --tls-key, --tls-client-ca, --role-file) to listen on the node network", err)
 		}
 	}
 	if f.frontendPublicationRuntimeHTTP {
-		if err := master.ValidateControlListen("frontend-publication-runtime-listen", f.frontendPublicationRuntimeListen, f.insecureExternalBind); err != nil {
-			return flags{}, err
+		if err := master.ValidateControlListen("frontend-publication-runtime-listen", f.frontendPublicationRuntimeListen); err != nil {
+			return flags{}, fmt.Errorf("%w; the runtime HTTP API is unauthenticated and always stays on loopback", err)
 		}
+	}
+	if f.launcherMasterTLSSecretPrefix != "" && !f.auth.enabled() {
+		return flags{}, fmt.Errorf("--launcher-master-tls-secret-prefix needs blockmaster's own mutual TLS (--tls-cert, --tls-key, --tls-client-ca, --role-file)")
+	}
+	if f.launcherMasterTLSSecretPrefix != "" && f.launcherExternalStatus {
+		return flags{}, fmt.Errorf("--launcher-external-status cannot be combined with --launcher-master-tls-secret-prefix: an authenticated volume's status listener stays on loopback")
 	}
 	if f.launcherExternalISCSI && f.launcherCHAPSecretName == "" {
 		return flags{}, fmt.Errorf("cannot enable --launcher-external-iscsi without --launcher-iscsi-chap-secret-name")
@@ -499,6 +510,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			ExternalISCSI:                 f.launcherExternalISCSI,
 			ExternalNVMe:                  f.launcherExternalNVMe,
 			ExternalStatus:                f.launcherExternalStatus,
+			MasterTLSSecretPrefix:         f.launcherMasterTLSSecretPrefix,
 			NVMeMaxH2CDataLength:          uint32(f.launcherNVMeMaxH2CDataLength),
 			ISCSICHAP: launcher.CHAPSecretRef{
 				Name:        f.launcherCHAPSecretName,

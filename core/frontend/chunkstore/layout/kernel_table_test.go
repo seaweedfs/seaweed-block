@@ -28,7 +28,7 @@ var kernelStates = []string{"absent", "unclaimed", "idle", "snap", "clean", "det
 // composition: Reserve, MarkDeleting, release, objects, MarkDeleted).
 var kernelEntries = []string{
 	"CreateVolume", "CreateTarget", "StartHigher", "StartOwn", "StartOwnOtherFresh", "StartOwnOtherOld",
-	"Claim", "Begin", "Commit", "CommitNew", "Abort", "BeginClean", "EndClean",
+	"Claim", "Begin", "Commit", "CommitNew", "CommitLower", "Abort", "BeginClean", "EndClean",
 	"RemoveUnreachable", "DeleteSnapshot", "RetireSnapshot", "AddDependent", "ReleaseDependent",
 	"MarkDeleting", "MarkDeleted", "DeletedHeadCreate",
 }
@@ -44,7 +44,7 @@ var kernelRefusals = []struct {
 	{"Exists", ErrExists}, {"HasDependents", ErrHasDependents}, {"TargetLive", ErrTargetLive},
 	{"NotPrepared", ErrNotPrepared},
 	{"Identity", ErrIdentity}, {"NoSnapshot", ErrNoSnapshot}, {"Malformed", ErrMalformed},
-	{"HolderActive", ErrHolderActive}, {"NotDeleting", ErrNotDeleting},
+	{"HolderActive", ErrHolderActive}, {"NotDeleting", ErrNotDeleting}, {"PositionBehind", ErrPositionBehind},
 }
 
 func resultOf(err error, wrote bool) string {
@@ -69,6 +69,7 @@ func kernelCell(t *testing.T, state, entry string) string {
 	t.Helper()
 	ctx := context.Background()
 	o, h, _, orphans := removeFixture(t)
+	h.Position = 10 // a volume with commits behind it (CommitLower commits below it)
 	switch state {
 	case "unclaimed":
 		// a restore target never started: its current root names the
@@ -150,6 +151,28 @@ func kernelCell(t *testing.T, state, entry string) string {
 		prepared(t, o, cur, "s1")
 		objectWrites = len(o.writes)
 		_, err = RunCommit(ctx, nv, o, "v1", me, CommitRequest{Session: "s1", Prev: cur, Next: cur, Position: h.Position, State: StateLive})
+	case "CommitLower": // HEAD's image at a position below HEAD's
+		var cur map[uint64]Ref
+		if h.Current != nil {
+			img, oerr := r.Open(ctx, *h.Current)
+			if oerr != nil {
+				t.Fatal(oerr)
+			}
+			cur = map[uint64]Ref{}
+			for _, sh := range img.Shards() {
+				seg, _, _ := img.Segment(ctx, sh)
+				for i, ref := range seg.Chunks {
+					cur[i] = ref
+				}
+			}
+		}
+		lower := h.Position
+		if lower > 0 {
+			lower-- // (a HEAD at 0, absent or never committed, has no lower position)
+		}
+		prepared(t, o, cur, "s1")
+		objectWrites = len(o.writes)
+		_, err = RunCommit(ctx, nv, o, "v1", me, CommitRequest{Session: "s1", Prev: cur, Next: cur, Position: lower, State: StateLive})
 	case "CommitNew": // a new image (not a replay of an applied commit)
 		var cur map[uint64]Ref
 		if h.Current != nil {
@@ -222,6 +245,7 @@ var kernelExpected = map[string]map[string]string{
 	"Claim":              {"absent": "HeadAbsent", "unclaimed": "write", "idle": "write", "snap": "write", "clean": "write", "detached": "write", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
 	"Begin":              {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "write", "snap": "Busy", "clean": "Busy", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
 	"Commit":             {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "noop", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
+	"CommitLower":        {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "NoSession", "snap": "PositionBehind", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
 	"CommitNew":          {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "NoSession", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
 	"Abort":              {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "noop", "snap": "write", "clean": "NoSession", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
 	"BeginClean":         {"absent": "HeadAbsent", "unclaimed": "NotHolder", "idle": "write", "snap": "Busy", "clean": "Busy", "detached": "Detached", "deleting": "VolumeDeleting", "deleted": "VolumeDeleting"},
@@ -266,7 +290,7 @@ func TestKernelTable(t *testing.T) {
 var kernelEntryFuncs = map[string]string{
 	"CreateVolume": "CreateVolume", "CreateTarget": "CreateTarget", "StartHigher": "Start", "StartOwn": "Start",
 	"StartOwnOtherFresh": "Start", "StartOwnOtherOld": "Start", "Claim": "RunClaim",
-	"Begin": "RunBegin", "Commit": "RunCommit", "CommitNew": "RunCommit", "Abort": "RunAbort", "BeginClean": "RunBeginClean", "EndClean": "RunEndClean",
+	"Begin": "RunBegin", "Commit": "RunCommit", "CommitNew": "RunCommit", "CommitLower": "RunCommit", "Abort": "RunAbort", "BeginClean": "RunBeginClean", "EndClean": "RunEndClean",
 	"RemoveUnreachable": "RemoveUnreachable", "DeleteSnapshot": "RunDeleteSnapshot", "RetireSnapshot": "RunRetireSnapshot",
 	"AddDependent": "RunAddDependent", "ReleaseDependent": "RunReleaseDependent", "MarkDeleting": "RunMarkDeleting",
 	"MarkDeleted": "RunMarkDeleted", "DeletedHeadCreate": "OperatorReleaseDependent",

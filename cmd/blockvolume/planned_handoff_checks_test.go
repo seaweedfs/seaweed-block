@@ -103,6 +103,51 @@ func sealedHeadLSN(out string, e, g uint64) (uint64, error) {
 	return h.RemoteLSN, nil
 }
 
+// The layout HEAD exposes the committed position and the master-minted
+// holder identity. The old storage HEAD's DetachedBy proof is not a field of
+// this format; a detached layout HEAD itself is the committed stop image.
+type layoutHeadRecord struct {
+	Gen      uint64          `json:"gen"`
+	Epoch    uint64          `json:"epoch"`
+	Holder   string          `json:"holder"`
+	ClaimID  string          `json:"claimID"`
+	Position uint64          `json:"position"`
+	State    string          `json:"state"`
+	Current  json.RawMessage `json:"current"`
+}
+
+func parseLayoutHead(out string) (layoutHeadRecord, error) {
+	var shown struct {
+		Head *layoutHeadRecord `json:"head"`
+	}
+	if err := json.Unmarshal([]byte(out), &shown); err != nil || shown.Head == nil {
+		return layoutHeadRecord{}, fmt.Errorf("layout show stdout has no head: %v: %q", err, out)
+	}
+	return *shown.Head, nil
+}
+
+func sealedLayoutHeadPosition(out string, epoch, gen uint64) (uint64, error) {
+	h, err := parseLayoutHead(out)
+	if err != nil {
+		return 0, err
+	}
+	if h.Gen != gen || h.Epoch != epoch || h.Holder != "s1/r1" || h.ClaimID == "" || h.State != "detached" || len(h.Current) == 0 || string(h.Current) == "null" {
+		return 0, fmt.Errorf("layout HEAD after seal %+v; want committed detached image at gen %d epoch %d holder s1/r1", h, gen, epoch)
+	}
+	return h.Position, nil
+}
+
+func checkLayoutHeadReopened(out string, epoch, sealedGen, position uint64) error {
+	h, err := parseLayoutHead(out)
+	if err != nil {
+		return err
+	}
+	if h.Gen <= sealedGen || h.Epoch != epoch || h.Holder != "s1/r1" || h.ClaimID == "" || h.State != "" || h.Position != position || len(h.Current) == 0 || string(h.Current) == "null" {
+		return fmt.Errorf("layout HEAD after claim %+v; want live image above gen %d at epoch %d position %d holder s1/r1", h, sealedGen, epoch, position)
+	}
+	return nil
+}
+
 func checkRevoke(out string, e, g uint64) error {
 	if !strings.HasPrefix(out, fmt.Sprintf("revocation requested: volume v1 holder r1@%d expiry_ns ", e)) {
 		return fmt.Errorf("revoke stdout %q", out)

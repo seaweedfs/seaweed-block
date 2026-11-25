@@ -183,7 +183,7 @@ func TestApplyGate_WirePrefixRequiresCoveredStartingImage(t *testing.T) {
 		return err
 	}
 	c := dial()
-	if err := transport.WriteMsg(c, transport.MsgRecoveryLaneStart, transport.EncodeLineage(lineage)); err != nil {
+	if err := transport.WriteMsg(c, transport.MsgRecoveryLaneStart, transport.EncodeRecoveryLaneStart(lineage, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if err := barrier(c); err != nil {
@@ -197,7 +197,7 @@ func TestApplyGate_WirePrefixRequiresCoveredStartingImage(t *testing.T) {
 		t.Fatalf("uncertified starting R advanced P=%d", got)
 	}
 	c = dial()
-	if err := transport.WriteMsg(c, transport.MsgRecoveryLaneStart, transport.EncodeLineage(lineage)); err != nil {
+	if err := transport.WriteMsg(c, transport.MsgRecoveryLaneStart, transport.EncodeRecoveryLaneStart(lineage, 0)); err != nil {
 		t.Fatal(err)
 	}
 	want := makeData(0xAA)

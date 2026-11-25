@@ -483,7 +483,7 @@ The commands below use these placeholders:
 - `STATUS` is a blockvolume's status address (its `--status-addr`, with `--chunk-control-endpoint` set).
 
 **About the control endpoint.** `--chunk-control-endpoint` carries destructive operations (cut, snapshot, snapshot delete, detach, restore) on the status listener.
-- **Binding:** that listener binds loopback addresses only, unless `--allow-external-status-bind` is set.
+- **Binding:** that listener binds loopback addresses only, unless `--allow-external-status-bind` is set; that flag is refused together with `--master-tls-cert`.
 - **No authentication:** nothing authenticates it in this release. Keep it on loopback, or behind your own access control.
 
 ### Scheduled snapshots

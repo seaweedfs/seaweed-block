@@ -16,6 +16,10 @@ type AssignmentObserved struct {
 	EndpointVersion uint64
 	DataAddr        string
 	CtrlAddr        string
+	// PrimaryStartLSN is this primary's durable LSN when it took the primary
+	// role at Epoch; 0 = not known. Entries a replica holds above it from an
+	// older epoch were never acknowledged (a divergent tail).
+	PrimaryStartLSN uint64
 }
 
 func (AssignmentObserved) eventKind() string { return "AssignmentObserved" }

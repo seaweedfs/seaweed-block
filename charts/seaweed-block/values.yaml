@@ -78,6 +78,30 @@ replication:
   ackProfile: best-effort
   expectedSlotsPerVolume: 0
 
+# blockmaster listens on the pod network only with mutual TLS: create these
+# Secrets before installing (docs/operator-guide.md, "Authenticate the control
+# API"). Every certificate is signed by the CA in each Secret's ca.crt.
+tls:
+  # blockmaster's own certificate (tls.crt, tls.key) and the CA every client
+  # certificate must verify against (ca.crt). Its subjectAltName must include
+  # the blockmaster Service name the clients dial.
+  masterSecret: sw-block-master-tls
+  # The role file (key "roles"): one line per certificate,
+  # "sha256:<fingerprint> <role> <id>".
+  roleSecret: sw-block-roles
+  # Each in-cluster client's own certificate (tls.crt, tls.key, ca.crt), with
+  # the least role its calls need: the CSI controller deletes volumes and the
+  # failback executor runs failbacks (admin); the CSI node and the status
+  # operator only read (viewer).
+  clientSecrets:
+    csiController: sw-block-csi-controller-tls
+    csiNode: sw-block-csi-node-tls
+    operatorStatus: sw-block-operator-status-tls
+    failbackExecutor: sw-block-failback-executor-tls
+  # Each volume host's certificate is the Secret <prefix>-<server id>
+  # (tls.crt, tls.key, ca.crt); its CN is the server id, its role node.
+  nodeSecretPrefix: sw-block-node-tls
+
 network:
   externalISCSI: false
   externalNVMe: false

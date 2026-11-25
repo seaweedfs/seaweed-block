@@ -13,6 +13,10 @@ var (
 	ErrPeerQueueSaturated    = errors.New("replication: peer work queue saturated")
 	ErrPeerQueueClosed       = errors.New("replication: peer work queue closed")
 	ErrBarrierBelowTargetLSN = errors.New("replication: barrier acknowledgement below target LSN")
+	// ErrPeerNotInSync: a peer that is not healthy (degraded, catching up,
+	// or holding a divergent tail) never counts toward a sync, whatever
+	// length its barrier reports.
+	ErrPeerNotInSync = errors.New("replication: peer is not in sync")
 )
 
 type peerWorkKind uint8
@@ -66,6 +70,10 @@ func newPeerWorkQueue(peer *ReplicaPeer, depth int) *peerWorkQueue {
 			return eligible, err
 		},
 		barrier: func(ctx context.Context, targetLSN uint64) (uint64, error) {
+			// As for writes (eligible above): only a healthy peer counts.
+			if s := peer.State(); s != ReplicaHealthy {
+				return 0, fmt.Errorf("%w: peer %s is %s", ErrPeerNotInSync, peer.Target().ReplicaID, s)
+			}
 			ack, err := peer.Barrier(ctx, targetLSN)
 			if err != nil {
 				return 0, err

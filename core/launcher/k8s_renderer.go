@@ -32,6 +32,11 @@ type K8sRenderConfig struct {
 	ExternalStatus                bool
 	NVMeMaxH2CDataLength          uint32
 	ISCSICHAP                     CHAPSecretRef
+	// MasterTLSSecretPrefix, when set, gives every volume mutual TLS to
+	// blockmaster: the Secret <prefix>-<server id> (keys tls.crt, tls.key,
+	// ca.crt; the certificate's CN is the server id) is mounted read-only and
+	// passed as --master-tls-cert/--master-tls-key/--master-ca.
+	MasterTLSSecretPrefix string
 }
 
 type CHAPSecretRef struct {
@@ -86,6 +91,9 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	if cfg.MasterAddr == "" {
 		return nil, fmt.Errorf("launcher: master addr is required")
 	}
+	if cfg.MasterTLSSecretPrefix != "" && cfg.ExternalStatus {
+		return nil, fmt.Errorf("launcher: external status cannot be combined with master TLS: an authenticated volume's status listener stays on loopback")
+	}
 	namespace := cfg.Namespace
 	ownerRefs, err := ownerReferences(plan, cfg)
 	if err != nil {
@@ -103,6 +111,14 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		}
 		volumeMounts := []volumeMount{{Name: "state", MountPath: stateMountPath}}
 		volumes := []volume{stateVolume(cfg)}
+		if cfg.MasterTLSSecretPrefix != "" {
+			secret, err := masterTLSSecretName(cfg.MasterTLSSecretPrefix, replica.ServerID)
+			if err != nil {
+				return nil, err
+			}
+			volumeMounts = append(volumeMounts, volumeMount{Name: "master-tls", MountPath: masterTLSMountPath, ReadOnly: true})
+			volumes = append(volumes, volume{Name: "master-tls", Secret: &secretVolume{SecretName: secret}})
+		}
 		var securityContext *containerSecurityContext
 		if plan.Protocol == "nvme" && plan.NVMeTransport == "rdma" {
 			volumeMounts = append(volumeMounts,
@@ -169,6 +185,40 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	return out, nil
 }
 
+const masterTLSMountPath = "/etc/sw-block/master-tls"
+
+// masterTLSSecretName is the Secret holding one server's node certificate.
+// The server id is the certificate's CN, so it is used as given: an id that
+// cannot be part of a Secret name is refused, never rewritten.
+func masterTLSSecretName(prefix, serverID string) (string, error) {
+	name := prefix + "-" + serverID
+	if serverID == "" || len(name) > 253 || !dnsSubdomain(name) {
+		return "", fmt.Errorf("launcher: master TLS Secret name %q for server id %q is not a valid Kubernetes name (lowercase letters, digits, '-' and '.')", name, serverID)
+	}
+	return name, nil
+}
+
+// dnsSubdomain reports whether s is a DNS subdomain: dot-separated labels,
+// each 1 to 63 lowercase letters, digits and '-', starting and ending with a
+// letter or digit (so "a..b" and "a.-b" are refused).
+func dnsSubdomain(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for i, c := range label {
+			alnum := c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+			if !alnum && (i == 0 || i == len(label)-1 || c != '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func stateVolume(cfg K8sRenderConfig) volume {
 	if cfg.StateHostPathBase == "" {
 		return volume{Name: "state", EmptyDir: &emptyDir{}}
@@ -225,6 +275,13 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 	}
 	if cfg.WALRecoveryTestDisableFlusher {
 		args = append(args, "--durable-wal-recovery-test-disable-flusher")
+	}
+	if cfg.MasterTLSSecretPrefix != "" {
+		args = append(args,
+			"--master-tls-cert="+masterTLSMountPath+"/tls.crt",
+			"--master-tls-key="+masterTLSMountPath+"/tls.key",
+			"--master-ca="+masterTLSMountPath+"/ca.crt",
+		)
 	}
 	if cfg.EnableStatus {
 		port, err := blockVolumeStatusPort(plan, replica)
@@ -508,9 +565,14 @@ type volumeMount struct {
 }
 
 type volume struct {
-	Name     string    `yaml:"name"`
-	EmptyDir *emptyDir `yaml:"emptyDir,omitempty"`
-	HostPath *hostPath `yaml:"hostPath,omitempty"`
+	Name     string        `yaml:"name"`
+	EmptyDir *emptyDir     `yaml:"emptyDir,omitempty"`
+	HostPath *hostPath     `yaml:"hostPath,omitempty"`
+	Secret   *secretVolume `yaml:"secret,omitempty"`
+}
+
+type secretVolume struct {
+	SecretName string `yaml:"secretName"`
 }
 
 type emptyDir struct{}

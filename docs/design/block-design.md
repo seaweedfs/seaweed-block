@@ -294,22 +294,38 @@ This section is the replication engine as a core component. Kubernetes volumes u
 ```mermaid
 stateDiagram-v2
   [*] --> Unknown
-  Unknown --> Healthy: probe and barrier succeed
+  Unknown --> Healthy: probe, then a barrier whose (last data epoch, end) the primary's epoch table finds in sync
   Healthy --> Degraded: barrier or ship failure
+  Healthy --> NeedsRebuild: seed barrier finds diverged history (another epoch at the same LSNs, or a tail above the frontier), via Degraded
   Degraded --> CatchingUp: gap within the primary's WAL
   CatchingUp --> CatchingUp: identical recovery facts retain the prepared session
   CatchingUp --> CatchingUp: active session refuses promotion readiness
   Healthy --> Healthy: delayed probe retains completed durable R
   Healthy --> Healthy: completed recovery certifies P, prune version suffix
-  CatchingUp --> Healthy: caught up to the target
+  CatchingUp --> Healthy: caught up to the target and reconciled in sync by (epoch, LSN)
   CatchingUp --> Degraded: catch-up fails
-  Degraded --> Healthy: recovers
+  Degraded --> Healthy: recovers and reconciles in sync by (epoch, LSN), never by length
+  Degraded --> NeedsRebuild: a heal's reconciliation finds diverged history
   Degraded --> NeedsRebuild: gap beyond WAL retention or retries exhausted
   CatchingUp --> NeedsRebuild: WAL recycled
   NeedsRebuild --> [*]: terminal for this peer
 ```
 
-(Peer states and allowed transitions are in `core/replication/peer.go` `ReplicaState`, `replicaStateTransitionAllowed`. `NeedsRebuild` is terminal in this state machine; the rebuild itself runs as a separate dual-lane session, and the Kubernetes line drives it through an opt-in operator path, see the [Kubernetes block design](kubernetes-block-design.md#4-replication-and-failover).)
+(Peer states and allowed transitions are in `core/replication/peer.go` `ReplicaState`, `replicaStateTransitionAllowed`. Every route to `Healthy` from a recovery verdict goes through `ReplicaPeer.HealIfInSync`: a barrier in this session whose (last data epoch, end) the primary's epoch table (`core/transport/epoch_table.go`, `SharedEnd`) finds in sync; diverged history goes to `NeedsRebuild` and is never counted. `NeedsRebuild` is terminal in this state machine; the rebuild itself runs as a separate dual-lane session, and the Kubernetes line drives it through an opt-in operator path, see the [Kubernetes block design](kubernetes-block-design.md#4-replication-and-failover).)
+
+**Epoch table** (`core/transport/epoch_table.go`): each volume's durable record of the first LSN of every epoch it holds data from; an entry's identity is (epoch, LSN). A recovery ships history whose epochs arrive only at its end, so the table is invalid from before its first byte until that end, under a random token held by the newest recovery.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Valid
+  Valid --> Valid: live entry of a new epoch, row noted before the apply; primary role adopted at the next LSN; load drops rows above the next LSN
+  Valid --> Invalid: catch-up lane start, rebuild's first base byte, or dual-lane SessionStart (Invalidate, new token)
+  Invalid --> Invalid: another recovery starts (new token takes the mark, marked "took over invalid"); a completion with another token, or a catch-up's that took over an invalid table, is refused
+  Invalid --> Valid: the token's recovery synced its data, then its final barrier or rebuild-done (dual-lane too) installs the primary's rows cut at its end
+  Invalid --> Valid: primary role adopted over it: exactly [(epoch, next LSN)]
+```
+
+While invalid the volume reports no last data epoch: it reconciles as diverged, is never counted and is rebuilt, and no live entry is noted. Every recovery-data apply runs under the table's apply fence (shared) and only while its token owns the mark; a change of owner takes the fence exclusive, so it waits for in-flight applies to settle and later ones of the old owner are refused. A live apply holds the fence shared too and only while the table is valid, so a recovery's Invalidate drains it. A catch-up must state the LSN it starts after (a start without it is refused) and takes the mark only if the durable end is exactly that LSN; a live entry of a new epoch is accepted only at the store's next LSN. The unconditional reset happens only at primary adoption, after the fence: a primary refuses every inbound recovery frame (`admitMutation`, `EnterDualLane`), so no recovery's data lands under it.
 
 **Invariants.**
 

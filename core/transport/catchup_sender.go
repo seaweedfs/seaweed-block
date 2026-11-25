@@ -107,7 +107,9 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
 		return 0, fmt.Errorf("catch-up set deadline: %w", err)
 	}
-	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeLineage(session.lineage)); err != nil {
+	// The lane start states the LSN the catch-up starts after: the replica
+	// takes its epoch-table mark only if its durable end is that LSN.
+	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeRecoveryLaneStart(session.lineage, fromLSN)); err != nil {
 		return 0, fmt.Errorf("catch-up recovery lane start: %w", err)
 	}
 
@@ -184,7 +186,16 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 		return lastSent, errSessionInvalidated
 	default:
 	}
-	if err := sendBarrierReq(conn, session.lineage, recoveryConnTimeout); err != nil {
+	// The final barrier carries this primary's epoch rows: the replica's
+	// entries up to its end are now this primary's history.
+	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
+		return lastSent, fmt.Errorf("catch-up barrier: set deadline: %w", err)
+	}
+	req := EncodeLineage(session.lineage)
+	if e.epochs != nil {
+		req = append(req, EncodeEpochRows(e.epochs.Rows())...)
+	}
+	if err := WriteMsg(conn, MsgBarrierReq, req); err != nil {
 		return lastSent, fmt.Errorf("catch-up barrier: %w", err)
 	}
 	resp, err := recvBarrierResp(conn, recoveryConnTimeout)

@@ -19,15 +19,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/auth/authtest"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Real systemd owns every restart. No test goroutine relaunches the holder.
@@ -82,12 +83,20 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if err := os.WriteFile(spec, []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// The master listens off loopback, so it runs with mutual TLS: the test
+	// is an admin, s1 and s2 are nodes (certificates in root/tls).
+	tlsDir := gap1WriteTLS(t, root, target)
 	fixture.start(t, stem+"-master", false, filepath.Join(bin, "blockmaster"),
-		"--listen", masterListen, "--insecure-external-bind", "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
+		"--listen", masterListen, "--tls-cert", filepath.Join(tlsDir, "master.crt"), "--tls-key", filepath.Join(tlsDir, "master.key"),
+		"--tls-client-ca", filepath.Join(tlsDir, "ca.crt"), "--role-file", filepath.Join(tlsDir, "roles"), "--audit-log", filepath.Join(tlsDir, "audit.log"), "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
 		"--cluster-spec", spec, "--lifecycle-product-loop-interval", "200ms", "--expected-slots-per-volume", "1",
 		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base)
 	w4WaitTCP(t, masterAddr, 20*time.Second)
-	conn, err := grpc.NewClient(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	admin, err := link.ClientCredentials(link.TLSFiles{Cert: filepath.Join(tlsDir, "admin.crt"), Key: filepath.Join(tlsDir, "admin.key"), CA: filepath.Join(tlsDir, "ca.crt")}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := grpc.NewClient(masterAddr, admin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +112,9 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		layoutID = id
 		return e == nil
 	})
-	args := []string{"--master", masterAddr, "--server-id", "s1", "--volume-id", volume, "--replica-id", "r1", "--layout-id", layoutID.String(),
+	args := []string{"--master", masterAddr, "--server-id", "s1",
+		"--master-tls-cert", filepath.Join(tlsDir, "s1.crt"), "--master-tls-key", filepath.Join(tlsDir, "s1.key"), "--master-ca", filepath.Join(tlsDir, "ca.crt"),
+		"--volume-id", volume, "--replica-id", "r1", "--layout-id", layoutID.String(),
 		"--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--heartbeat-interval", "200ms", "--t1-readiness", "--status-addr", statusAddr,
 		"--durable-root", filepath.Join(root, "store"), "--durable-impl", "walstore-chunk", "--durable-blocks", "64",
 		"--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease",
@@ -254,17 +265,19 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, "r1", s["NRestarts"], s["InvocationID"])
 	gap1PrestartedTargetServesAfterMove(t, fixture, ws, remote, target, stem, filepath.Join(bin, "blockvolume"), args, root, volume, want)
-	gap1MovedSourceNeverServes(t, fixture, filepath.Join(bin, "blockvolume"), args, stem, statusAddr, volume)
+	moved, err := gap1ReadHead(t, remote)
+	if err != nil || moved.Holder != "s2/r1" {
+		t.Fatal("target did not claim the moved line", moved, err)
+	}
+	gap1MovedSourceNeverServes(t, fixture, filepath.Join(bin, "blockvolume"), args, stem, statusAddr, volume, moved.Epoch)
 }
 
 // gap1MovedSourceNeverServes is the negative case of the in-process wait:
 // after the volume moved to another host (and the new holder stopped), the
 // old source started again never serves and never adopts the line naming the
-// other host. It has no lineage of its own from the master, so it exits 75
-// (retry: zero observed-own lineage selects retry, never a fence) rather than
-// 78; the exit-78 refusal of a running holder that is moved is covered by
-// the master-wait integration tests.
-func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, args []string, stem, statusAddr, volume string) {
+// other host. The master proves it was the issued move's source and returns
+// typed MOVED even before any own assignment: exit 78, no restart loop.
+func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, args []string, stem, statusAddr, volume string, epoch uint64) {
 	t.Helper()
 	// The simulated hosts share this kernel's per-host volume lock directory:
 	// stop the new holder (the prestarted target) so the old source can open
@@ -282,32 +295,30 @@ func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, 
 		switch s["ExecMainStatus"] {
 		case "", "0":
 			return false
-		case "75":
+		case "78":
 			return true
 		}
-		t.Fatalf("the moved-away source exited %s; want 75 (retry, no lineage of its own): %+v", s["ExecMainStatus"], s)
+		t.Fatalf("the moved-away source exited %s; want 78 moved, never retry 75: %+v", s["ExecMainStatus"], s)
 		return false
 	})
 	if gap1Operational(t, statusAddr, volume) {
 		t.Fatal("the moved-away source served after its exit")
 	}
-	// The exit must come from the move, not from an unassigned or
-	// disconnected timeout: the journal shows the source received the line
-	// naming the other host, refused it as another server's, and never adopted
-	// a lineage of its own.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	journal, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat").CombinedOutput()
-	cancel()
-	if err != nil {
-		t.Fatalf("moved-away source journal: %v %s", err, journal)
-	}
-	for _, want := range []string{
-		fmt.Sprintf("assignment identity refusal volume=%q replica=%q server=%q", volume, "r1", "s2"),
-		fmt.Sprintf("foreign assignment server=%q replica=%q recorded, not adopted", "s2", "r1"),
-	} {
-		if !strings.Contains(string(journal), want) {
-			t.Fatalf("the moved-away source's journal lacks %q: its exit is not proven to come from the move\n%s", want, journal)
+	// Observe beyond the shipped 5 s RestartSec. The prestarted target above
+	// is the opposite control: a genuine 75 was restarted by the same policy.
+	end := time.Now().Add(6 * time.Second)
+	for time.Now().Before(end) {
+		s := gap1Unit(t, unit)
+		if s["NRestarts"] != "0" || s["MainPID"] != "0" || s["ExecMainStatus"] != "78" {
+			t.Fatalf("moved source restarted or lost its terminal status: %+v", s)
 		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	journal, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat").CombinedOutput()
+	if err != nil || !strings.Contains(string(journal), "status=78 reason=moved") || !strings.Contains(string(journal), fmt.Sprintf("holder s2 at epoch %d", epoch)) {
+		t.Fatalf("moved exit lacks the master's destination proof: %v %s", err, journal)
 	}
 	if strings.Contains(string(journal), "adopted as PRIMARY") {
 		t.Fatalf("the moved-away source adopted a lineage:\n%s", journal)
@@ -709,6 +720,35 @@ type gap1Target struct {
 	masterAddr, dataAddr, ctrlAddr string
 }
 
+// gap1WriteTLS writes a CA, the master's certificate (valid for loopback and
+// the target's address), node certificates for s1 and s2, an admin
+// certificate and the role file to root/tls.
+func gap1WriteTLS(t *testing.T, root string, target gap1Target) string {
+	t.Helper()
+	dir := filepath.Join(root, "tls")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	host, _, err := net.SplitHostPort(target.masterAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := authtest.NewCA(t, "gap1 CA")
+	ca.WriteCA(t, dir)
+	until := time.Now().Add(24 * time.Hour)
+	ca.Issue(t, "blockmaster", until, net.ParseIP(host)).WriteFiles(t, dir, "master")
+	var roles strings.Builder
+	for _, p := range []struct{ name, role, id string }{{"s1", "node", "s1"}, {"s2", "node", "s2"}, {"admin", "admin", "gap1-test"}} {
+		leaf := ca.Issue(t, p.id, until)
+		leaf.WriteFiles(t, dir, p.name)
+		fmt.Fprintln(&roles, leaf.Fingerprint, p.role, p.id)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "roles"), []byte(roles.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func gap1TargetAddresses(t *testing.T, masterAddr string) (gap1Target, string) {
 	t.Helper()
 	_, port, err := net.SplitHostPort(masterAddr)
@@ -760,7 +800,8 @@ func gap1PrestartedTargetServesAfterMove(t *testing.T, fixture *gap1Fixture, ws 
 	changed := append([]string(nil), args...)
 	addr, nvmeAddr := leaseBinaryAddress(t), leaseBinaryAddress(t)
 	nqn := "nqn.2026-11.test:" + stem + "-prestarted-target"
-	replacements := map[string]string{"--master": target.masterAddr, "--server-id": "s2", "--data-addr": target.dataAddr, "--ctrl-addr": target.ctrlAddr, "--status-addr": addr, "--durable-root": filepath.Join(root, "target-store"), "--nvme-listen": nvmeAddr, "--nvme-subsysnqn": nqn}
+	replacements := map[string]string{"--master": target.masterAddr, "--server-id": "s2", "--data-addr": target.dataAddr, "--ctrl-addr": target.ctrlAddr, "--status-addr": addr, "--durable-root": filepath.Join(root, "target-store"), "--nvme-listen": nvmeAddr, "--nvme-subsysnqn": nqn,
+		"--master-tls-cert": filepath.Join(root, "tls", "s2.crt"), "--master-tls-key": filepath.Join(root, "tls", "s2.key")}
 	for i := 0; i+1 < len(changed); i++ {
 		if value, ok := replacements[changed[i]]; ok {
 			changed[i+1] = value

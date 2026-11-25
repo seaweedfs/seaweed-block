@@ -1,4 +1,5 @@
 {{- if .Values.operatorStatus.create }}
+{{- include "seaweed-block.readOnlyClientSecrets" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,4 +39,10 @@ spec:
             - "--namespace={{ .Release.Namespace }}"
             - "--cluster-name={{ .Values.operatorStatus.clusterName }}"
             - "--interval={{ .Values.operatorStatus.interval }}"
+          env:
+            {{- include "seaweed-block.masterTLSClientEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "seaweed-block.masterTLSClientMount" . | nindent 12 }}
+      volumes:
+        {{- include "seaweed-block.masterTLSClientVolume" .Values.tls.clientSecrets.operatorStatus | nindent 8 }}
 {{- end }}

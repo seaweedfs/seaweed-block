@@ -146,7 +146,11 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, fron
 	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
 		return 0, fmt.Errorf("rebuild set deadline: %w", err)
 	}
-	if err := WriteMsg(conn, MsgRebuildDone, EncodeLineage(session.lineage)); err != nil {
+	done := EncodeLineage(session.lineage)
+	if e.epochs != nil {
+		done = append(done, EncodeEpochRows(e.epochs.Rows())...)
+	}
+	if err := WriteMsg(conn, MsgRebuildDone, done); err != nil {
 		return 0, fmt.Errorf("rebuild done: %w", err)
 	}
 	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
@@ -249,6 +253,12 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	//
 	sessionFromLSN := basePinLSN
 	log.Printf("g7-debug: startRebuildDualLane calling Bridge.StartRebuildSessionWithSink replica=%s sessionID=%d basePinLSN=%d frontierHint=%d", replicaID, sessionID, sessionFromLSN, frontierHint)
+	// The session's final barrier carries this primary's epoch rows, so the
+	// rebuilt replica's table names the history it now holds.
+	if e.epochs != nil {
+		epochs := e.epochs
+		dl.Bridge.SetEpochRows(func() []byte { return EncodeEpochRows(epochs.Rows()) })
+	}
 	if err := dl.Bridge.StartRebuildSessionAtEpoch(
 		context.Background(), conn, argRID, sessionID, epoch, sessionFromLSN, frontierHint, sink,
 	); err != nil {

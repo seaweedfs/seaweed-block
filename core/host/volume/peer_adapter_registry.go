@@ -30,9 +30,23 @@ type PeerAdapterRegistry struct {
 	volumeID       string
 	selfReplicaID  string // sanity guard: never register the host's own slot
 
+	// frontier is this primary's local durable frontier (nil = not known).
+	// A peer added here has received nothing from this primary at its
+	// lineage, so the frontier at the add is the start position above
+	// which anything the peer holds is a divergent old-epoch tail.
+	frontier func() (uint64, error)
+
 	mu       sync.Mutex
 	adapters map[string]*adapter.VolumeReplicaAdapter // keyed by ReplicaID
 	closed   bool
+}
+
+// SetFrontier installs the local durable frontier read at each peer add
+// (the store's Sync). Call before peers are added.
+func (r *PeerAdapterRegistry) SetFrontier(fn func() (uint64, error)) {
+	if r != nil {
+		r.frontier = fn
+	}
 }
 
 // NewPeerAdapterRegistry constructs an empty registry for the given
@@ -91,6 +105,14 @@ func (r *PeerAdapterRegistry) OnPeerAdded(peer *replication.ReplicaPeer) {
 	// apply.go: "Engine not yet initialized — accept"), but having
 	// AssignmentObserved fire first matches the production master-
 	// driven path semantics: identity comes BEFORE probe.
+	var start uint64
+	if r.frontier != nil {
+		if lsn, err := r.frontier(); err == nil {
+			start = lsn
+		} else {
+			log.Printf("PeerAdapterRegistry: peer=%s frontier unknown (%v): no divergent-tail check", target.ReplicaID, err)
+		}
+	}
 	adpt.OnAssignment(adapter.AssignmentInfo{
 		VolumeID:        r.volumeID,
 		ReplicaID:       target.ReplicaID,
@@ -98,6 +120,7 @@ func (r *PeerAdapterRegistry) OnPeerAdded(peer *replication.ReplicaPeer) {
 		EndpointVersion: target.EndpointVersion,
 		DataAddr:        target.DataAddr,
 		CtrlAddr:        target.ControlAddr,
+		PrimaryStartLSN: start,
 	})
 
 	r.adapters[target.ReplicaID] = adpt

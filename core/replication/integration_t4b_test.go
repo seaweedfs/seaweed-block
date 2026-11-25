@@ -345,9 +345,10 @@ func TestT4b6_BarrierWire_FullLineageEcho_StillEnforced(t *testing.T) {
 		},
 		AchievedLSN: 99,
 	}
+	sample.LastDataEpoch, sample.LastDataFirstLSN = 7, 31
 	encoded := transport.EncodeBarrierResp(sample)
-	if len(encoded) != 40 {
-		t.Fatalf("BarrierResp encoded length = %d; T4b-1 wire shape (40B = 32B lineage + 8B achievedLSN) regressed",
+	if len(encoded) != 56 {
+		t.Fatalf("BarrierResp encoded length = %d; wire shape (56B = 32B lineage + 8B achievedLSN + 8B lastDataEpoch + 8B lastDataFirstLSN) regressed",
 			len(encoded))
 	}
 
@@ -361,8 +362,18 @@ func TestT4b6_BarrierWire_FullLineageEcho_StillEnforced(t *testing.T) {
 	if got.Lineage != sample.Lineage {
 		t.Fatalf("lineage drift: got %+v want %+v", got.Lineage, sample.Lineage)
 	}
-	if got.AchievedLSN != sample.AchievedLSN {
-		t.Fatalf("AchievedLSN drift: got %d want %d", got.AchievedLSN, sample.AchievedLSN)
+	if got.AchievedLSN != sample.AchievedLSN || got.LastDataEpoch != sample.LastDataEpoch || got.LastDataFirstLSN != sample.LastDataFirstLSN {
+		t.Fatalf("AchievedLSN/LastDataEpoch/LastDataFirstLSN drift: got %+v want %+v", got, sample)
+	}
+	// A 40-byte response from a replica without the epoch table decodes with
+	// LastDataEpoch 0 ("no table"); lengths between are malformed.
+	if old, err := transport.DecodeBarrierResp(encoded[:40]); err != nil || old.LastDataEpoch != 0 || old.AchievedLSN != sample.AchievedLSN {
+		t.Fatalf("40B response: %+v %v; want AchievedLSN kept and no table", old, err)
+	}
+	for _, n := range []int{44, 48, 52} {
+		if _, err := transport.DecodeBarrierResp(encoded[:n]); err == nil {
+			t.Fatalf("DecodeBarrierResp on a %dB payload must reject", n)
+		}
 	}
 
 	// And: a 39-byte payload must fail decode (would happen if

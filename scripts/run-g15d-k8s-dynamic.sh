@@ -360,6 +360,8 @@ cleanup
 trap 'collect_daemon_logs; cleanup' EXIT
 
 log "apply product stack without pre-created blockvolumes"
+log "apply mutual TLS Secrets (keys kept outside the artifact directory)"
+bash "$ROOT/scripts/k8s-alpha-certs.sh" kube-system "${SW_BLOCK_TLS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/sw-block-alpha-tls}" $(awk '/server_id:/{print $NF}' "$STACK_RENDERED" | sort -u) | tee "$ARTIFACT_DIR/apply-tls.log"
 kubectl apply -f "$STACK_RENDERED" | tee "$ARTIFACT_DIR/apply-block-stack.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --timeout=120s
 if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- /usr/local/bin/blockmaster --version >"$ARTIFACT_DIR/blockmaster.version.txt" 2>"$ARTIFACT_DIR/blockmaster.version.err"; then

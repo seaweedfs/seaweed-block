@@ -18,11 +18,17 @@ the live Kubernetes nodes and writes the node names/IPs that the launcher uses
 for placement. On a single-node lab it keeps loopback/local-consumer mode; on a
 multi-node lab it switches to non-loopback iSCSI with CHAP. For the
 experimental NVMe/TCP path, pass `--protocol nvme`; this switches to
-non-loopback NVMe/TCP plus external status, without enabling iSCSI CHAP.
+non-loopback NVMe/TCP, without enabling iSCSI CHAP.
+
+blockmaster runs with mutual TLS, so create its Secrets before installing
+(`tls.*` values name them; the helper issues development certificates, one
+node certificate per server id).
 
 ```bash
 SW_BLOCK_HELM_VALUES_OUT=values.day1.yaml \
   bash scripts/generate-helm-values-day1.sh "$PWD"
+
+bash scripts/k8s-alpha-certs.sh kube-system ~/.sw-block-alpha-tls <server id>...
 
 helm install sw-block charts/seaweed-block \
   --namespace kube-system \
@@ -114,7 +120,7 @@ replication:
 network:
   externalISCSI: true
   externalNVMe: false
-  externalStatus: true
+  externalStatus: false
   rejectLoopbackPublishTargets: true
 chap:
   enabled: true
