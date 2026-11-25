@@ -12,6 +12,10 @@ import (
 // identity: written once, never changed.
 const VolumeName = "VOLUME"
 
+// HeadName is the entry, under the volume root, that holds the volume's
+// HEAD; it is never removed (a deleted volume keeps its deleted HEAD).
+const HeadName = "HEAD"
+
 // VolumeID is a volume's identity: random, chosen when the volume is
 // created. A volume's name is a path and can be created again after a
 // delete; its id cannot, so a volume created again satisfies no reference
@@ -45,6 +49,14 @@ func ParseVolumeID(s string) (VolumeID, error) {
 		return VolumeID{}, fmt.Errorf("%w: zero volume id", ErrMalformed)
 	}
 	return id, nil
+}
+
+// VolumeDir is the directory of a volume under the store's base:
+// <name>-<first 8 hex of the volume id>. It is created exclusively and
+// never reused, so a volume created again under a name gets another
+// directory; it is resolved only from the master's volume record.
+func VolumeDir(name string, id VolumeID) string {
+	return name + "-" + id.String()[:8]
 }
 
 // VolumeFormat is the layout format a VOLUME record declares.

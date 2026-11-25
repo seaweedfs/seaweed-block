@@ -63,6 +63,7 @@ type Head struct {
 	Current   *RootName // nil: no image committed yet
 	Position  uint64
 	Snapshots map[string]Snapshot
+	State     string // StateLive, StateDeleting or StateDeleted
 }
 
 type headDoc struct {
@@ -74,6 +75,7 @@ type headDoc struct {
 	Current   string             `json:"current,omitempty"`
 	Position  uint64             `json:"position"`
 	Snapshots map[string]snapDoc `json:"snapshots,omitempty"`
+	State     string             `json:"state,omitempty"`
 }
 
 type snapDoc struct {
@@ -101,6 +103,11 @@ func (h Head) check() error {
 	if h.VolumeID.IsZero() {
 		return fmt.Errorf("%w: HEAD without a volume id", ErrMalformed)
 	}
+	switch h.State {
+	case StateLive, StateDeleting, StateDeleted:
+	default:
+		return fmt.Errorf("%w: HEAD state %q", ErrMalformed, h.State)
+	}
 	for field, v := range map[string]string{"holder": h.Holder, "session": h.Activity.Session, "claim id": h.ClaimID} {
 		if err := validName(field, v); err != nil {
 			return err
@@ -118,11 +125,16 @@ func (h Head) check() error {
 	default:
 		return fmt.Errorf("%w: activity %q", ErrMalformed, h.Activity.Kind)
 	}
-	if h.Epoch == 0 || h.Holder == "" {
-		return fmt.Errorf("%w: HEAD without epoch or holder", ErrMalformed)
-	}
-	if h.ClaimID == "" {
-		return fmt.Errorf("%w: HEAD holder %q without a claim id", ErrMalformed, h.Holder)
+	// A deleted HEAD written as a tombstone for a restore target never
+	// created has no holder; every other HEAD has an epoch, a holder and
+	// the claim id of its claim.
+	if h.State != StateDeleted || h.Holder != "" {
+		if h.Epoch == 0 || h.Holder == "" {
+			return fmt.Errorf("%w: HEAD without epoch or holder", ErrMalformed)
+		}
+		if h.ClaimID == "" {
+			return fmt.Errorf("%w: HEAD holder %q without a claim id", ErrMalformed, h.Holder)
+		}
 	}
 	if len(h.Snapshots) > MaxSnapshots {
 		return fmt.Errorf("%w: %d snapshots, at most %d", ErrMalformed, len(h.Snapshots), MaxSnapshots)
@@ -160,7 +172,7 @@ func (h Head) Encode() ([]byte, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
-	d := headDoc{VolumeID: h.VolumeID.String(), Epoch: h.Epoch, Holder: h.Holder, ClaimID: h.ClaimID, Activity: h.Activity, Position: h.Position}
+	d := headDoc{VolumeID: h.VolumeID.String(), Epoch: h.Epoch, Holder: h.Holder, ClaimID: h.ClaimID, Activity: h.Activity, Position: h.Position, State: h.State}
 	if h.Current != nil {
 		d.Current = h.Current.String()
 	}
@@ -196,7 +208,7 @@ func DecodeHead(b []byte, gen uint64, volume VolumeID) (Head, error) {
 	if err != nil {
 		return Head{}, err
 	}
-	h := Head{Gen: gen, VolumeID: vid, Epoch: d.Epoch, Holder: d.Holder, ClaimID: d.ClaimID, Activity: d.Activity, Position: d.Position}
+	h := Head{Gen: gen, VolumeID: vid, Epoch: d.Epoch, Holder: d.Holder, ClaimID: d.ClaimID, Activity: d.Activity, Position: d.Position, State: d.State}
 	if d.Current != "" {
 		rn, err := ParseRootName(d.Current)
 		if err != nil {
@@ -261,6 +273,19 @@ func (h Head) heldBy(me HolderID) bool {
 	return h.Epoch == me.Epoch && h.Holder == me.Holder && h.ClaimID == me.ClaimID
 }
 
+// holderErr is the refusal of a holder transition: the volume is being
+// deleted or is deleted (ErrVolumeDeleting), or the caller is not the
+// holder at HEAD's epoch (ErrNotHolder); nil when it may act.
+func (h Head) holderErr(me HolderID) error {
+	if h.State != StateLive {
+		return fmt.Errorf("%w: HEAD is %s", ErrVolumeDeleting, h.State)
+	}
+	if !h.heldBy(me) {
+		return fmt.Errorf("%w: HEAD epoch %d holder %q claim %q, caller epoch %d holder %q claim %q", ErrNotHolder, h.Epoch, h.Holder, h.ClaimID, me.Epoch, me.Holder, me.ClaimID)
+	}
+	return nil
+}
+
 // Begin is transition 2: activity idle -> snap(session), by the holder at
 // HEAD's epoch. Begin of the session already open is a replay: it returns
 // HEAD unchanged and changed=false. Any other open activity is ErrBusy.
@@ -268,8 +293,8 @@ func (h Head) Begin(me HolderID, session string) (next Head, changed bool, err e
 	if session == "" {
 		return Head{}, false, errors.New("layout: Begin needs a session id")
 	}
-	if !h.heldBy(me) {
-		return Head{}, false, fmt.Errorf("%w: HEAD epoch %d holder %q, caller epoch %d holder %q", ErrNotHolder, h.Epoch, h.Holder, me.Epoch, me.Holder)
+	if err := h.holderErr(me); err != nil {
+		return Head{}, false, err
 	}
 	switch {
 	case h.Activity == Activity{Kind: ActSnap, Session: session}:
@@ -329,8 +354,8 @@ func (h Head) Abort(me HolderID, session string) (next Head, changed bool, err e
 	if session == "" {
 		return Head{}, false, errors.New("layout: Abort needs a session id")
 	}
-	if !h.heldBy(me) {
-		return Head{}, false, fmt.Errorf("%w: HEAD epoch %d holder %q, caller epoch %d holder %q", ErrNotHolder, h.Epoch, h.Holder, me.Epoch, me.Holder)
+	if err := h.holderErr(me); err != nil {
+		return Head{}, false, err
 	}
 	switch {
 	case h.Activity.Kind == ActIdle:

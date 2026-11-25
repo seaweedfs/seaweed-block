@@ -103,6 +103,21 @@ func (v *memVolume) Create(_ context.Context, rel string, data []byte, session s
 	})
 }
 
+func (v *memVolume) DeleteOfVolume(_ context.Context, rel string, volume VolumeID) error {
+	p := path.Join(volRoot, rel)
+	return v.objWrite("delete-of-volume "+rel, func() error {
+		if _, ok := v.objects[p]; !ok {
+			return nil
+		}
+		if v.meta(p).Volume != volume {
+			return ErrPrecondition
+		}
+		delete(v.objects, p)
+		delete(v.metas, p)
+		return nil
+	})
+}
+
 func (v *memVolume) Reuse(_ context.Context, rel string, expect ObjectMeta, session string) error {
 	p := path.Join(volRoot, rel)
 	return v.objWrite("reuse "+rel, func() error {

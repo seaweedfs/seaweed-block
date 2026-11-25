@@ -207,6 +207,29 @@ func (m *memHead) UpdateHead(_ context.Context, gen uint64, next Head) error {
 	return nil
 }
 
+// CreateDeletedHead writes a deleted HEAD exclusively (a tombstone).
+func (m *memHead) CreateDeletedHead(_ context.Context, h Head) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dead {
+		return errKilled
+	}
+	if m.h != nil {
+		return ErrExists
+	}
+	if h.State != StateDeleted {
+		return errors.New("only a deleted HEAD is created")
+	}
+	if _, err := h.Encode(); err != nil {
+		return err
+	}
+	n := h.clone()
+	n.Gen = 1
+	m.h = &n
+	m.updates++
+	return nil
+}
+
 func (m *memHead) restart() { m.mu.Lock(); m.dead = false; m.killAt = 0; m.mu.Unlock() }
 
 func TestRunBegin(t *testing.T) {

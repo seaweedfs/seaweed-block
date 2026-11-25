@@ -56,8 +56,8 @@ func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectSt
 	if !found {
 		return nil, ErrHeadAbsent
 	}
-	if !h.heldBy(me) {
-		return nil, fmt.Errorf("%w: HEAD epoch %d holder %q", ErrNotHolder, h.Epoch, h.Holder)
+	if err := h.holderErr(me); err != nil {
+		return nil, err
 	}
 	if h.Activity != (Activity{Kind: ActClean, Session: session}) {
 		return nil, fmt.Errorf("%w: HEAD has %s(%s), not clean(%s)", ErrNoSession, h.Activity.Kind, h.Activity.Session, session)
