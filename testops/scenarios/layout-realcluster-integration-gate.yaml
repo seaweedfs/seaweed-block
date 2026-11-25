@@ -20,6 +20,8 @@
 #   catalog      TestIntegration_CatalogRestoreAndDelete
 #   cutover-e2e  TestCutoverWriteSnapshotKillRestartRestore (write, snapshot,
 #                kill, restart, restore)
+#   cutover-create  TestCutoverCreateFromSnapshot (the master creates the
+#                target identity and its restored image in one request)
 #
 # Expected invocation (on the Linux host):
 #   swblock run \
@@ -73,7 +75,7 @@ phases:
           case "$GATE_ROOT" in *[!0-9A-Za-z_./-]*|*..*) fail 'scratch_root has unexpected characters' ;; esac
           case "$GATE_TESTS" in *[!0-9a-z\ -]*|'') fail 'tests must be entry names separated by spaces' ;; esac
           for t in $GATE_TESTS; do
-            case "$t" in move|lease|systemd|catalog|cutover-e2e) ;; *) fail "unknown entry: $t" ;; esac
+            case "$t" in move|lease|systemd|catalog|cutover-e2e|cutover-create) ;; *) fail "unknown entry: $t" ;; esac
           done
           [ -x "$GATE_GO/go" ] || fail 'go_bin/go is not executable'
           [ -f "$GATE_WEED" ] || fail 'weed_binary is not a file'
@@ -140,6 +142,7 @@ phases:
               systemd)     pkg=cmd/blockvolume bin=blockvolume-systemd.test name=TestSystemdExpiredStartupExits75ThenRegrantServes to=14m extra=GAP1_SYSTEMD_AUTHORIZED=1 ;;
               catalog)     pkg=core/frontend/chunkstore bin=chunkstore.test name=TestIntegration_CatalogRestoreAndDelete to=9m ;;
               cutover-e2e) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverWriteSnapshotKillRestartRestore to=40m ;;
+              cutover-create) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverCreateFromSnapshot to=20m ;;
               *) echo "unknown entry: $t" >&2; exit 2 ;;
             esac
             log="$d/evidence/$t.log"
