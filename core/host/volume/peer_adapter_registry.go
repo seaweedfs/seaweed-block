@@ -46,6 +46,11 @@ type PeerAdapterRegistry struct {
 	// a lineage bump replaces the peer under the same ReplicaID.
 	peers  map[string]*replication.ReplicaPeer
 	closed bool
+
+	// afterPrimeUnlock, when set (tests only), runs between the release of
+	// mu and the adapter's OnAssignment: the window in which the peer can
+	// be replaced after the identity check.
+	afterPrimeUnlock func()
 }
 
 // SetFrontier installs the local durable frontier read at each peer add
@@ -177,8 +182,20 @@ func (r *PeerAdapterRegistry) OnPeerRemoved(replicaID string) {
 // seed barrier) and turns Degraded only after its own live session failed
 // and was invalidated; a degraded peer is not shipped to. So the adapter's
 // first session starts only after the volume's session on that peer has
-// ended: there is no window in which both act on the replica. A dispatch
-// acts only for the exact peer the loop admitted (PrimePendingFor,
+// ended: there is no window in which both act on the replica.
+//
+// After the check, mu is released before OnAssignment, so the peer can be
+// replaced in between. That window is closed by the executor, not by this
+// lock: every command the adapter issues (probe, fence, catch-up, rebuild,
+// recovery session) runs through the peer's own BlockExecutor and enters
+// through beginAsyncOperation, which checks stopped and joins asyncWG under
+// the executor's mu. UpdateReplicaSet detaches a replaced peer's executor
+// and Stop()s it (stopped set under that mu, then asyncWG drained) before it
+// creates the replacement and runs its seed barrier. A late command is
+// therefore refused (ErrExecutorStopped), or it finished before the
+// replacement existed.
+//
+// A dispatch acts only for the exact peer the loop admitted (PrimePendingFor,
 // AdapterForPeer compare the *ReplicaPeer under r.mu): a dispatch admitted
 // for an old degraded peer and resumed after a lineage bump replaced it
 // under the same ReplicaID finds nothing, so it never primes or probes the
@@ -229,10 +246,18 @@ func (r *PeerAdapterRegistry) primeLocked(replicaID string) bool {
 	info, ok := r.pending[replicaID]
 	delete(r.pending, replicaID)
 	adpt := r.adapters[replicaID]
+	hook := r.afterPrimeUnlock
 	r.mu.Unlock()
 	if !ok || adpt == nil {
 		return false
 	}
+	if hook != nil {
+		hook()
+	}
+	// The peer may be replaced from here on. The adapter's commands all run
+	// through the peer's own executor, which the volume stops before it
+	// installs the replacement (see the lock graph on PrimePending), so a
+	// command issued late is refused, never sent to the replica.
 	adpt.OnAssignment(info)
 	return true
 }
