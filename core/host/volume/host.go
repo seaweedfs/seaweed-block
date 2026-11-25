@@ -905,11 +905,26 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		}
 	}
 
+	// The target's own store must still show what the master probed before
+	// it adopts the role (nothing is installed yet, so a refusal has no
+	// effect to undo).
+	rv := h.getReplication()
+	if src, ok := rv.(primaryEvidenceSource); ok && rv != nil {
+		st, end, err := src.LocalPrimaryEvidence()
+		if err != nil {
+			h.refusePrimary(fmt.Sprintf("epoch %d: the local store's evidence is unreadable: %v", fact.Epoch, err))
+			return
+		}
+		if reason := checkPrimaryEvidence(fact, st, end); reason != "" {
+			h.refusePrimary(reason)
+			return
+		}
+	}
+
 	// Step (2a): install replication peer set first. Decoded via
 	// the separate host-only decodeReplicaTargets path (not through
 	// AssignmentInfo), so the TestNoOtherAssignmentInfoConstruction
 	// AST fence stays green.
-	rv := h.getReplication()
 	if rv != nil {
 		targets, gen := decodeReplicaTargets(fact)
 		if err := rv.UpdateReplicaSet(gen, targets); err != nil {

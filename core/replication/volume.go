@@ -253,6 +253,14 @@ func (v *ReplicationVolume) EpochTableStatus() EpochTableStatus {
 	return EpochTableStatus{Rows: t.Rows(), Invalid: t.Invalid(), Present: true}
 }
 
+// LocalPrimaryEvidence is this volume's epoch table and durable end, as a
+// primary line's target checks them before adopting the role.
+func (v *ReplicationVolume) LocalPrimaryEvidence() (EpochTableStatus, uint64, error) {
+	st := v.EpochTableStatus()
+	end, err := v.store.Sync()
+	return st, end, err
+}
+
 // reconcilePeer asks the peer for its (last data epoch, end) in a barrier
 // to this node's frontier and answers from the epoch table: in sync, diverged
 // (entries this primary never had), or neither (behind, or no answer).
