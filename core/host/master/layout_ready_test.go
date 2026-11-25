@@ -29,6 +29,20 @@ func TestLayoutStoreNotReadyCannotBePlacedOrMoved(t *testing.T) {
 	if _, ok := stores.Placements.GetPlacement("v"); ok {
 		t.Fatal("record without VOLUME and HEAD was placed")
 	}
+	// A persisted intent can predate a failed filer create (or survive a
+	// restart). Neither workload planning nor the product assignment loop
+	// may treat that intent as authority while store_ready is false.
+	if results := lifecycle.ReconcilePlacement([]lifecycle.VolumeRecord{rec}, stores.Nodes.ListNodes(), stores.Placements); len(results) != 1 || !results[0].Applied {
+		t.Fatalf("fixture placement: %+v", results)
+	}
+	plans, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{})
+	if err != nil || plans.PlannedVolumes != 0 {
+		t.Fatalf("unready workload plans=%+v err=%v", plans, err)
+	}
+	tick, err := h.RunLifecycleProductTick()
+	if err != nil || tick.PublishedAsks != 0 || tick.PromotionProbes != 0 {
+		t.Fatalf("unready assignment/promotion tick=%+v err=%v", tick, err)
+	}
 	if err := newServices(h).workspaceVolume("v"); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("move admission before store ready: %v", err)
 	}
