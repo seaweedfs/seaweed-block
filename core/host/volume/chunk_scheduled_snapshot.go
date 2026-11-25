@@ -36,3 +36,27 @@ func ScheduledSnapshot(cat *chunkstore.Catalog, keep int) func(context.Context, 
 		return nil
 	}
 }
+
+// sealSnapshot resolves sreq against the catalog first: a retry of a
+// recorded request returns that snapshot and another request for the name
+// fails, both without cutting. Only a free name is cut, and the HEAD that
+// cut installed is stored.
+func sealSnapshot(ctx context.Context, cat *chunkstore.Catalog, volumeID string, sreq chunkstore.SnapshotRequest, cut func(context.Context) (storage.ChunkHead, error)) (chunkstore.SnapshotInfo, error) {
+	if info, replayed, err := cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
+		return info, err
+	}
+	// The share begins before the cut that produces the sealed HEAD.
+	if g := cat.ShareGuard(); g != nil {
+		token, err := g.Begin(ctx, volumeID)
+		if err != nil {
+			return chunkstore.SnapshotInfo{}, err
+		}
+		sreq.ShareToken = token
+	}
+	head, err := cut(ctx)
+	if err != nil {
+		return chunkstore.SnapshotInfo{}, err
+	}
+	sreq.SourceReadAt = time.Now()
+	return cat.CreateSnapshot(ctx, volumeID, sreq, head)
+}

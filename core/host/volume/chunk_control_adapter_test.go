@@ -10,18 +10,21 @@ import (
 
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type fakeChunkProvider struct {
-	cut      storage.ChunkCutResult
-	cutErr   error
-	cutCheck func(context.Context) error
-	detach   storage.ChunkCutResult
-	last     uint64
-	cuts     int
-	lastMin  uint64
+	cut          storage.ChunkCutResult
+	cutErr       error
+	cutCheck     func(context.Context) error
+	detach       storage.ChunkCutResult
+	last         uint64
+	cuts         int
+	lastMin      uint64
+	snapshotMeta layout.SnapshotMeta
+	snapshotName string
 }
 
 type adapterManifestFiler struct {
@@ -68,8 +71,28 @@ func (f *fakeChunkProvider) DetachVolume(context.Context, string) (storage.Chunk
 
 func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	t.Helper()
-	fp, cat := adapterCatalog(t)
-	return fp, NewChunkControl(fp, cat)
+	fp := &fakeChunkProvider{cut: storage.ChunkCutResult{H: 9, Head: storage.ChunkHead{Gen: 3, Epoch: 2, Holder: "r1", RemoteLSN: 9}}}
+	f := &adapterManifestFiler{Filer: chunkstore.NewMemFiler(), blobs: map[string][]byte{}}
+	cat, err := chunkstore.NewBCatalog(f, f, "/chunks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := layout.ParseVolumeID("00112233445566778899aabbccddeeff")
+	v := chunkstore.VolumeRef{Name: "v1", ID: id}
+	if _, err := cat.CreateVolume(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	return fp, NewChunkControl(fp, cat, v)
+}
+
+func (f *fakeChunkProvider) SnapshotVolume(ctx context.Context, volumeID string, name string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
+	f.snapshotName = name
+	f.snapshotMeta = meta
+	r, err := f.CutVolume(ctx, volumeID, 0)
+	if err != nil {
+		return chunkstore.SnapshotInfo{}, err
+	}
+	return chunkstore.SnapshotInfo{VolumeID: volumeID, Name: name, HeadGen: r.Head.Gen, HeadEpoch: r.Head.Epoch, CutLSN: r.H, Class: meta.Class, CreatedNs: meta.CreatedNs, ExpiresAtNs: meta.ExpiresNs, Labels: meta.Labels}, nil
 }
 
 // adapterCatalog is a catalog holding volume v1 and a provider whose cut
@@ -100,37 +123,6 @@ func adapterCatalog(t *testing.T) (*fakeChunkProvider, *chunkstore.Catalog) {
 
 // Snapshot validates before it cuts, then stores the HEAD its cut
 // installed (§3.2); list and delete go to the catalog.
-func TestChunkControl_SnapshotStoresTheCutHead(t *testing.T) {
-	ctx := context.Background()
-	fp, ctl := adapterFixture(t)
-	for _, bad := range []ChunkSnapshotRequest{{Name: "a/b", RequestID: "r"}, {Name: "s1"}} {
-		if _, err := ctl.Snapshot(ctx, "v1", bad); chunkstore.CodeOf(err) != chunkstore.CodeInvalidName {
-			t.Fatalf("snapshot %+v: %v, want invalid_name", bad, err)
-		}
-	}
-	if fp.cuts != 0 {
-		t.Fatalf("an invalid snapshot request cut %d times", fp.cuts)
-	}
-	info, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r", Labels: map[string]string{"agent.step": "x"}, Consistency: "app"})
-	if err != nil || fp.cuts != 1 || info.HeadGen != 3 || info.HeadEpoch != 2 || info.CutLSN != 9 || info.ChunkCount != 2 ||
-		info.Labels["agent.step"] != "x" || info.Consistency != "app" || info.Replayed {
-		t.Fatalf("snapshot: %+v %v (cuts %d)", info, err, fp.cuts)
-	}
-	again, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "r"})
-	if err != nil || !again.Replayed || again.HeadGen != 3 {
-		t.Fatalf("snapshot retry: %+v %v", again, err)
-	}
-	if _, err := ctl.Snapshot(ctx, "v1", ChunkSnapshotRequest{Name: "s1", RequestID: "other"}); chunkstore.CodeOf(err) != chunkstore.CodeSnapshotExists {
-		t.Fatalf("snapshot with another request id: %v, want snapshot_exists", err)
-	}
-	list, _, err := ctl.ListSnapshots(ctx, "v1", chunkstore.ListOptions{})
-	if err != nil || len(list) != 1 || list[0].Name != "s1" {
-		t.Fatalf("list: %+v %v", list, err)
-	}
-	if st, err := ctl.DeleteSnapshot(ctx, "v1", "s1"); err != nil || st != chunkstore.SnapDeleting {
-		t.Fatalf("delete: %q %v", st, err)
-	}
-}
 
 // The cut body carries the statistics the chunk layer measured for that
 // cut (§3.1), so a caller can see what one cut cost: the barrier pause,

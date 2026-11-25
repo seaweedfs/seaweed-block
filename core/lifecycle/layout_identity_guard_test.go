@@ -19,6 +19,7 @@ func TestLayoutIdentityWriterAndReaders(t *testing.T) {
 		"core/host/master/services.go lifecycleVolumeResponse":     true,
 		"core/launcher/k8s_renderer.go blockVolumeArgs":            true,
 		"core/launcher/k8s_renderer.go durableRoot":                true,
+		"cmd/blockvolume/main.go runVolume":                        true,
 		"cmd/blockvolume/main.go parseFlags":                       true,
 		"core/rpc/lifecycleclient/identity.go ResolveVolume":       true,
 	}

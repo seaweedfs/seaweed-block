@@ -321,33 +321,14 @@ The engine's replica projection (only with recovery enabled). Go type `engine.Re
 
 ### `GET /status/chunk`
 
-Chunk store usage of a walstore-chunk volume (only with --chunk-control-endpoint). Go type `chunkstore.VolumeUsage`.
+Chunk store usage of a walstore-chunk volume (only with --chunk-control-endpoint). Go type `chunkstore.Usage`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `volumeID` | string | the volume |
-| `chunkBytes` | uint64 | one full chunk |
-| `liveChunks` | int | chunks HEAD references |
-| `liveBytes` | uint64 | their bytes (the last chunk clipped) |
-| `snapshots[]` | object | one entry per live snapshot |
-| `snapshots[].name` | string | the snapshot name |
-| `snapshots[].createdNs` | int64 | when it was created (Unix ns) |
-| `snapshots[].class` | string | its retention class |
-| `snapshots[].pinned` | bool | retention never deletes it |
-| `snapshots[].chunks` | int | chunks its manifest references |
-| `snapshots[].exclusiveBytes` | uint64 | bytes no other holder references: what deleting it makes eligible for GC |
-| `manifestBindings` | int | stored chunk-key bindings some manifest references |
-| `manifestBytes` | uint64 | their exact bytes |
-| `storedBindings` | int | all chunk-key bindings in the filer, referenced or not |
-| `storedBytes` | uint64 | their bytes; unreferenced ones counted at full chunk size |
-| `storedUpperBound` | bool | StoredBytes is an upper bound (some bindings are unreferenced) |
-| `policy` | object | the snapshot retention policy in force |
-| `policy.keepNewest` | int | keep the newest N unpinned snapshots |
-| `policy.keepYoungerNs` | int64 | keep every snapshot younger than this (ns) |
-| `policy.keepHourly` | int | keep the newest snapshot of each of the last N hours |
-| `policy.keepDaily` | int | keep the newest snapshot of each of the last N days |
-| `policy.keepWeekly` | int | keep the newest snapshot of each of the last N weeks |
-| `policySet` | bool | the volume set its own policy (else the default applies) |
+| `snapshots` | int | — |
+| `dependents` | int | — |
+| `own_chunks` | int | — |
+| `foreign_chunks` | int | — |
 
 ### `GET /status/nvme`
 

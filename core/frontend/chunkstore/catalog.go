@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"path"
 	"strconv"
 	"strings"
@@ -212,21 +213,23 @@ type snapDoc struct {
 // SnapshotInfo describes one snapshot, with the field names of the HTTP API
 // (spec §3.2-§3.3).
 type SnapshotInfo struct {
-	VolumeID      string            `json:"volumeID"`
-	Name          string            `json:"name"`
-	HeadGen       uint64            `json:"headGen"`
-	HeadEpoch     uint64            `json:"headEpoch"`
-	CutLSN        uint64            `json:"cutLSN"`
-	CreatedNs     int64             `json:"createdNs"`
-	State         string            `json:"state"`
-	ChunkCount    int               `json:"chunkCount"`
-	ManifestBytes int               `json:"manifestBytes"`
-	Consistency   string            `json:"consistency"`
-	Labels        map[string]string `json:"labels"`
-	Parent        *Parent           `json:"parent"`
-	ExpiresAtNs   int64             `json:"expiresAtNs"`
-	Replayed      bool              `json:"replayed"`
-	Class         string            `json:"class"`
+	Root          string             `json:"root,omitempty"`
+	Dependents    []layout.Dependent `json:"dependents,omitempty"`
+	VolumeID      string             `json:"volumeID"`
+	Name          string             `json:"name"`
+	HeadGen       uint64             `json:"headGen"`
+	HeadEpoch     uint64             `json:"headEpoch"`
+	CutLSN        uint64             `json:"cutLSN"`
+	CreatedNs     int64              `json:"createdNs"`
+	State         string             `json:"state"`
+	ChunkCount    int                `json:"chunkCount"`
+	ManifestBytes int                `json:"manifestBytes"`
+	Consistency   string             `json:"consistency"`
+	Labels        map[string]string  `json:"labels"`
+	Parent        *Parent            `json:"parent"`
+	ExpiresAtNs   int64              `json:"expiresAtNs"`
+	Replayed      bool               `json:"replayed"`
+	Class         string             `json:"class"`
 
 	attempt string // the attempt the name resolved to, when read by name
 

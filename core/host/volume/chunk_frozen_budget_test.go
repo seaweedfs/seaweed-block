@@ -1,6 +1,7 @@
 package volume
 
 import (
+ "github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,7 +26,7 @@ func (p *frozenDetachProvider) DetachVolumeFrozen(_ context.Context, _ string, o
 }
 func TestChunkFrozenDetachWireContractAndPrecedence(t *testing.T) {
 	p := &frozenDetachProvider{fakeChunkProvider: &fakeChunkProvider{detach: storage.ChunkCutResult{H: 7, Head: storage.ChunkHead{Gen: 2, Epoch: 1, State: storage.ChunkHeadDetached}}, last: 7}}
-	s := chunkServer(t, NewChunkControl(p, nil), true)
+	s := chunkServer(t, NewChunkControl(p, nil, chunkstore.VolumeRef{}), true)
 	at := time.Now().Add(-time.Second).UnixNano()
 	body := fmt.Sprintf(`{"volumeID":"v1","frozen":true,"freezeStartedAtNs":%d,"allowOverBudget":true}`, at)
 	w := serve(t, s, http.MethodPost, "/chunk/detach", body, "")
@@ -59,7 +60,7 @@ func TestChunkFrozenDetachWireContractAndPrecedence(t *testing.T) {
 func TestChunkCheckpointCarriesCandidateTail(t *testing.T) {
 	tail := &storage.ChunkCandidateTail{Bytes: 4096, Estimate: time.Second, Known: true, RateSamples: 3, BytesPerSecond: 4096}
 	p := &fakeChunkProvider{cut: storage.ChunkCutResult{CandidateTail: tail}}
-	s := chunkServer(t, NewChunkControl(p, nil), true)
+	s := chunkServer(t, NewChunkControl(p, nil, chunkstore.VolumeRef{}), true)
 	w := serve(t, s, http.MethodPost, "/chunk/cut", `{"volumeID":"v1"}`, "")
 	var body ChunkCutResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != 200 || body.CandidateTail == nil || *body.CandidateTail != *tail {
@@ -69,7 +70,7 @@ func TestChunkCheckpointCarriesCandidateTail(t *testing.T) {
 
 func TestChunkFrozenValidationHasDistinctPreMutationCode(t *testing.T) {
 	p := &frozenDetachProvider{fakeChunkProvider: &fakeChunkProvider{}}
-	s := chunkServer(t, NewChunkControl(p, nil), true)
+	s := chunkServer(t, NewChunkControl(p, nil, chunkstore.VolumeRef{}), true)
 	past := time.Now().Add(-time.Second).UnixNano()
 	for _, body := range []string{
 		`{"volumeID":"v1","frozen":true}`,
@@ -115,7 +116,7 @@ func TestChunkFrozenRequestRefusalCarriesNoBudget(t *testing.T) {
 	report := storage.PrecopyReport{FrozenBudget: storage.FrozenBudget{FrozenEstimate: 5570 * time.Millisecond, FrozenEstimateKnown: true, FreezeLimit: 5 * time.Second}, Estimate: 5570 * time.Millisecond, RemainingFreeze: 4 * time.Second, GuestFreezeElapsed: time.Second, Reason: "frozen_tail_too_large"}
 	refusal := &storage.FrozenRefusal{Report: report}
 	p := &frozenDetachProvider{fakeChunkProvider: &fakeChunkProvider{}, err: refusal}
-	srv := chunkServer(t, NewChunkControl(p, nil), true)
+	srv := chunkServer(t, NewChunkControl(p, nil, chunkstore.VolumeRef{}), true)
 	body := fmt.Sprintf(`{"volumeID":"v1","frozen":true,"freezeStartedAtNs":%d}`, time.Now().Add(-time.Second).UnixNano())
 	w := serve(t, srv, http.MethodPost, "/chunk/detach", body, "")
 	var got map[string]json.RawMessage
