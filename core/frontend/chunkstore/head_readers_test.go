@@ -24,7 +24,7 @@ import (
 // pins it. "GAP" marks a reader that takes an absent HEAD for an empty
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
-	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                           "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopReadsHeadBeforeResuming)",
+	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                           "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopAbortMustConfirmItsOutcome)",
 	"cmd/blockvolume/workspace_lease.go workspaceLayoutDetachedGeneration -> ReadHead":                "absent refuses ACK (probe TestWorkspaceLayoutDetachedProof)",
 	"core/frontend/chunkstore/layout_store.go ReadHead -> DecodeLayoutHeadEntry":                      "shared canonical entry decoder; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",
 	"core/host/master/workspace_layout_head.go NewLayoutWorkspaceHEADReader -> DecodeLayoutHeadEntry": "any missing/failed metadata refuses; identity comes from master intent (TestWorkspaceLayoutHEADRefusalsAndStates)",
@@ -55,6 +55,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/retain_b.go Retain -> ReadHead":                        "refuses ErrHeadAbsent, deletes nothing (probe BCatalog)",
 	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                  "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
 	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
+	"core/frontend/chunkstore/layout_remote.go AbortOpenSession -> ReadHead":         "refuses ErrHeadAbsent, aborts nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                  "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                 "refuses ErrHeadAbsent (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":           "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
@@ -318,6 +319,9 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		r, err := NewLayoutRemote(c, VolumeRef{Name: "v", ID: layout.VolumeID{1}}, layout.HolderID{Epoch: 1, Holder: "a", ClaimID: "k"})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if _, err := r.AbortOpenSession(ctx); !errors.Is(err, layout.ErrHeadAbsent) {
+			t.Fatalf("settling a stop over an absent HEAD: %v; want ErrHeadAbsent", err)
 		}
 		if _, err := r.ReadHead(ctx); !errors.Is(err, layout.ErrHeadAbsent) {
 			t.Fatalf("kernel HEAD read of an absent HEAD: %v; want ErrHeadAbsent", err)

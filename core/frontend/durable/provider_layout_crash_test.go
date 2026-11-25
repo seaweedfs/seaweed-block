@@ -157,39 +157,3 @@ func TestLayoutStartCrashAtEachDurableArrow(t *testing.T) {
 		}
 	}
 }
-
-type layoutStopHead struct {
-	h     layout.Head
-	found bool
-	err   error
-	reads int
-}
-
-func (s *layoutStopHead) ReadHead(context.Context) (layout.Head, bool, error) {
-	s.reads++
-	return s.h, s.found, s.err
-}
-func (s *layoutStopHead) UpdateHead(context.Context, uint64, layout.Head) error {
-	return errors.New("settlement must read")
-}
-func TestLayoutStopReadsHeadBeforeResuming(t *testing.T) {
-	me := layout.HolderID{Epoch: 2, Holder: "s/r", ClaimID: "k"}
-	for _, tc := range []struct {
-		name string
-		st   layoutStopHead
-		want storage.DetachSettlement
-		bad  bool
-	}{
-		{"absent", layoutStopHead{}, 0, true}, {"unknown", layoutStopHead{err: errors.New("offline")}, 0, true},
-		{"live", layoutStopHead{h: layout.Head{Epoch: 2, Holder: "s/r", ClaimID: "k", State: layout.StateLive, Activity: layout.Activity{Kind: layout.ActIdle}}, found: true}, storage.DetachNotPublished, false},
-		{"detached", layoutStopHead{h: layout.Head{Gen: 7, Epoch: 2, Holder: "s/r", ClaimID: "k", State: layout.StateDetached}, found: true}, storage.DetachApplied, false},
-		{"foreign", layoutStopHead{h: layout.Head{Epoch: 2, Holder: "s/r", ClaimID: "other", State: layout.StateLive}, found: true}, storage.DetachFenced, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := settleLayoutStop(context.Background(), &tc.st, me, "")
-			if tc.st.reads != 1 || (err != nil) != tc.bad || (!tc.bad && got != tc.want) {
-				t.Fatalf("reads=%d how=%v err=%v", tc.st.reads, got, err)
-			}
-		})
-	}
-}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -238,6 +239,9 @@ func TestLayoutRemote_ErrorMap(t *testing.T) {
 		{layout.ErrVolumeDeleting, storage.ErrChunkHeadDeleted},
 		{layout.ErrBusy, storage.ErrChunkRemoteUnavailable},
 		{other, storage.ErrChunkRemoteUnavailable},
+		{layout.ErrCorrupt, ErrRemoteDamaged},
+		{layout.ErrIdentity, ErrRemoteDamaged},
+		{layout.ErrMissing, ErrRemoteDamaged},
 		{layout.ErrNotPrepared, nil},
 		{layout.ErrTooManySnapshots, nil},
 		{layout.ErrSnapshotExists, nil},
@@ -249,7 +253,7 @@ func TestLayoutRemote_ErrorMap(t *testing.T) {
 		if c.want != nil && !errors.Is(got, c.want) {
 			t.Errorf("%v: mapped to %v; want %v", c.err, got, c.want)
 		}
-		for _, cls := range []error{storage.ErrChunkLayerFenced, storage.ErrChunkHeadPrecondition, storage.ErrChunkHeadDeleted, storage.ErrChunkRemoteUnavailable} {
+		for _, cls := range []error{storage.ErrChunkLayerFenced, storage.ErrChunkHeadPrecondition, storage.ErrChunkHeadDeleted, storage.ErrChunkRemoteUnavailable, ErrRemoteDamaged} {
 			if cls != c.want && errors.Is(got, cls) {
 				t.Errorf("%v: also maps to %v", c.err, cls)
 			}
@@ -528,5 +532,203 @@ func TestLayoutRemote_ABadSnapshotNameIsRefusedBeforeTheCommit(t *testing.T) {
 	}
 	if hd := lh.head(); hd.Position != h || len(hd.Snapshots) != 0 {
 		t.Fatalf("HEAD after the refused name: %+v", hd)
+	}
+}
+
+// Writes of others that leave the image alone (a snapshot delete, a
+// retention pass) do not move the engine's view: the next cut commits
+// without a precondition and uploads nothing.
+func TestLayoutRemote_AForeignSnapshotDeleteDoesNotMoveTheView(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{2: block(2)})
+	r.SetSnapshot("old", layout.SnapshotMeta{CreatedNs: 1})
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lh.cat.DeleteSnapshot(ctx, lh.v, "old"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := r.GetHead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Gen != before.Gen {
+		t.Fatalf("a snapshot delete moved the engine's view: gen %d -> %d", before.Gen, after.Gen)
+	}
+	writeSync(t, s, map[uint32][]byte{3: block(3)})
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatalf("cut after a foreign snapshot delete: %v", err)
+	}
+}
+
+// After an abandoned cut, a cleaning is not refused busy: it takes the
+// abandon notice first.
+func TestLayoutRemote_CleaningAfterAnAbandonedCut(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	r, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+		t.Fatal(err)
+	}
+	r.AbortCut()
+	if err := r.Clean(ctx, func(context.Context, layout.HolderID, string) error { return nil }); err != nil {
+		t.Fatalf("cleaning after an abandoned cut: %v", err)
+	}
+	if h := lh.head(); h.Activity.Kind != layout.ActIdle {
+		t.Fatalf("HEAD after the cleaning: %+v", h.Activity)
+	}
+}
+
+// AbortOpenSession settles a stop: an open session (held here, or left by
+// a dead process) is rolled back and its pending name dropped; a detached
+// HEAD of this holder reports detached; nothing open reports idle.
+func TestLayoutRemote_AbortOpenSession(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	r, err := NewLayoutRemote(lh.cat, lh.v, lh.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionIdle {
+		t.Fatalf("nothing open: %q %v", got, err)
+	}
+	r.SetSnapshot("x", layout.SnapshotMeta{})
+	if _, err := r.PutIntent(ctx, storage.ChunkIntent{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionAborted || lh.head().Activity.Kind != layout.ActIdle {
+		t.Fatalf("own open session: %q %v, HEAD %+v", got, err, lh.head().Activity)
+	}
+	if _, err := r.GetHead(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r.pending != nil || r.session != "" {
+		t.Fatal("the aborted session or its pending name is still held after the next call")
+	}
+	// A dead process's session.
+	st, _ := lh.cat.Store(lh.v)
+	if _, err := layout.RunBegin(ctx, st, lh.me, "s-dead"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionAborted {
+		t.Fatalf("a dead process's session: %q %v", got, err)
+	}
+	// A detached HEAD of this holder.
+	s, l, _ := lh.attach("a", true, true)
+	defer s.Close()
+	writeSync(t, s, map[uint32][]byte{1: block(1)})
+	if _, err := l.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := lh.head()
+	if _, err := layout.RunBegin(ctx, st, lh.me, "s-stop"); err != nil {
+		t.Fatal(err)
+	}
+	{
+		// The stop's final commit: the current image, detached.
+		m := map[uint64]layout.Ref{}
+		img, _ := layout.NewReader("/blocks", lh.v.Dir(), st.Fetch)
+		im, _ := img.Open(ctx, *h.Current)
+		for _, sh := range im.Shards() {
+			seg, _, _ := im.Segment(ctx, sh)
+			for i, ref := range seg.Chunks {
+				m[i] = ref
+			}
+		}
+		root, segs, _ := layout.Build(m)
+		rn, rb, _ := layout.NameRoot(root)
+		for n, b := range segs {
+			_ = layout.EnsureObject(ctx, st, n.Path(), b, "s-stop")
+		}
+		_ = layout.EnsureObject(ctx, st, rn.Path(), rb, "s-stop")
+		if _, err := layout.RunCommit(ctx, st, st, lh.v.Name, lh.me, layout.CommitRequest{Session: "s-stop", Prev: m, Next: m, Position: h.Position, State: layout.StateDetached}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := r.AbortOpenSession(ctx); err != nil || got != SessionDetached {
+		t.Fatalf("a detached HEAD: %q %v", got, err)
+	}
+}
+
+// blockingCommitStore holds the next commit (an idle HEAD update) inside
+// its update until released.
+type blockingCommitStore struct {
+	sessionStore
+	entered, release chan struct{}
+}
+
+func (s *blockingCommitStore) UpdateHead(ctx context.Context, gen uint64, next layout.Head) error {
+	if next.Activity.Kind == layout.ActIdle && s.entered != nil {
+		close(s.entered)
+		s.entered = nil
+		<-s.release
+	}
+	return s.sessionStore.UpdateHead(ctx, gen, next)
+}
+
+// The abort never waits behind the commit it aborts: while a commit is held
+// inside its HEAD update, AbortOpenSession completes (aborted), and the
+// commit then fails its condition.
+func TestLayoutRemote_AbortOpenSessionDoesNotWaitForAHeldCommit(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	s, l, r := lh.attach("a", true, true)
+	defer s.Close()
+	hold := &blockingCommitStore{sessionStore: r.st, entered: make(chan struct{}), release: make(chan struct{})}
+	entered := hold.entered
+	r.st = hold
+	writeSync(t, s, map[uint32][]byte{7: block(7)})
+	cut := make(chan error, 1)
+	go func() { _, err := l.Capture(ctx); cut <- err }()
+	<-entered
+	done := make(chan struct{})
+	var got string
+	var aerr error
+	go func() { got, aerr = r.AbortOpenSession(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(hold.release)
+		t.Fatal("AbortOpenSession waited behind the held commit")
+	}
+	if aerr != nil || got != SessionAborted {
+		t.Fatalf("abort during a held commit: %q %v; want aborted", got, aerr)
+	}
+	close(hold.release)
+	if err := <-cut; err == nil {
+		t.Fatal("the held commit applied after its session was aborted")
+	}
+	if h := lh.head(); h.Activity.Kind != layout.ActIdle {
+		t.Fatalf("HEAD after the abort: %+v", h.Activity)
+	}
+}
+
+// A HEAD of another holder, epoch or claim id is a fence for the stop's
+// settle, never idle (which would let it resume).
+func TestLayoutRemote_AbortOpenSessionFencesAForeignHead(t *testing.T) {
+	ctx := context.Background()
+	lh := newLayoutHost(t)
+	for name, me := range map[string]layout.HolderID{
+		"another holder":   {Epoch: 1, Holder: "b", ClaimID: "k-a"},
+		"another epoch":    {Epoch: 2, Holder: "a", ClaimID: "k-a"},
+		"another claim id": {Epoch: 1, Holder: "a", ClaimID: "k-other"},
+	} {
+		r, err := NewLayoutRemote(lh.cat, lh.v, me)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := r.AbortOpenSession(ctx); !errors.Is(err, storage.ErrChunkLayerFenced) {
+			t.Errorf("%s: %q %v; want ErrChunkLayerFenced", name, got, err)
+		}
 	}
 }
