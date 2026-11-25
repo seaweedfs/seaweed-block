@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -10,6 +11,36 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestCreateVolumeRetriesFilerCreateBeforeStoreReady(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	failure := errors.New("filer unavailable")
+	var calls []lifecycle.VolumeSpec
+	h.cfg.LayoutCreateVolume = func(_ context.Context, spec lifecycle.VolumeSpec) error {
+		calls = append(calls, spec)
+		if len(calls) == 1 {
+			return failure
+		}
+		return nil
+	}
+	svc := newServices(h)
+	req := &control.CreateVolumeRequest{VolumeId: "v", SizeBytes: 1 << 20, ReplicationFactor: 1}
+	if _, err := svc.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+		t.Fatalf("first create=%v, want retryable unavailable", err)
+	}
+	partial, ok := h.Lifecycle().Volumes.GetVolume("v")
+	if !ok || partial.StoreReady {
+		t.Fatalf("partial create advertised readiness: %+v", partial)
+	}
+	resp, err := svc.CreateVolume(context.Background(), req)
+	if err != nil || !resp.GetStoreReady() {
+		t.Fatalf("replay did not heal: response=%+v err=%v", resp, err)
+	}
+	if len(calls) != 2 || calls[0] != calls[1] || calls[0].LayoutID != partial.Spec.LayoutID {
+		t.Fatalf("replay changed persisted identity: calls=%+v partial=%+v", calls, partial)
+	}
+}
 
 func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	h := newTestMaster(t, t.TempDir())
