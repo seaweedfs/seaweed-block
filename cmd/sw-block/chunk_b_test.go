@@ -238,3 +238,23 @@ func TestOpsChunk_VolumeDeleteOnTheLayout(t *testing.T) {
 		t.Fatalf("delete the released snapshot: %d %q", code, out)
 	}
 }
+
+// A volume never created: snapshots refuses volume_not_found, show prints
+// a null head, volume-delete refuses before asking the master.
+func TestOpsChunk_AbsentVolume(t *testing.T) {
+	store := newMemChunkStore()
+	useMemChunkStore(t, store)
+	id, _ := layout.NewVolumeID()
+	v := chunkstore.VolumeRef{Name: "never", ID: id}
+	if code, out, _ := runChunk(cliArgs("snapshots", volArgs("volume", v))...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "volume_not_found" {
+		t.Fatalf("snapshots of an absent volume: %d %q", code, out)
+	}
+	if code, out, _ := runChunk(cliArgs("show", volArgs("volume", v))...); code != 0 || !strings.Contains(out, `"head":null`) {
+		t.Fatalf("show of an absent volume: %d %q", code, out)
+	}
+	lc := &fakeLifecycle{}
+	addr := startFakeLifecycle(t, lc)
+	if code, out, _ := runChunk(cliArgs("volume-delete", volArgs("volume", v), []string{"--master", addr, "--request-id", "r"})...); code != chunkExitFailed || chunkErrorOut(t, out).Code != "volume_not_found" || len(lc.calls) != 0 {
+		t.Fatalf("delete of an absent volume: %d %q calls %v; want volume_not_found before any admission", code, out, lc.calls)
+	}
+}
