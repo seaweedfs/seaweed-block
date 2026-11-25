@@ -2,7 +2,6 @@ package master
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
