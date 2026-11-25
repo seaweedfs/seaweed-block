@@ -1,6 +1,6 @@
 Feature: <roadmap item>
 Machine/INV: <kind> / <INV rows>
-Model: <spec + cfg + result, or NONE: reason>
+Model: <Module.Action; OtherModule.Action, or NONE (pure function of Module) for mapped files>
 Red-first: <commit + test that failed on the base, or NONE: reason>
 Simplest: <the simplest version, and what this PR did not add>
 
@@ -23,4 +23,8 @@ DOCS may still change contract text (docs/design/invariants.md): the reviewer is
 
 NONE needs a reason of at least 10 characters. Simplest is required when the PR
 changes non-test Go under core/ or cmd/.
+
+Mapped files in .github/model-code-trace.tsv require a listed Module.Action
+or NONE (pure function of Module). Separate citations for multiple modules
+with semicolons. Unmapped files retain the existing Model trace policy.
 -->
