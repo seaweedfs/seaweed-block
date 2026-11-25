@@ -40,6 +40,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/share_guard.go beginShare -> ReadHead":           "refuses outcome_unknown: the HEAD to share is no longer current",
 	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                      "GAP: reports an empty image, no error (probe Usage)",
 	"core/frontend/chunkstore/verify.go readHead -> LookupEntry":               "finding ROOT_INVALID (probe Verify)",
+	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":  "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":        "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                    "finding ROOT_INVALID (probe Verify)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":       "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
@@ -264,6 +265,19 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 			t.Fatalf("layout transition over an absent HEAD wrote %d times", st.updates)
 		}
 	})
+	t.Run("LayoutRemoval", func(t *testing.T) {
+		r, err := layout.NewReader("/swblock/chunks", "v1", func(context.Context, string) ([]byte, bool, error) { return nil, false, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool := &countingPool{}
+		if _, err := layout.RemoveUnreachable(ctx, &absentLayoutHead{}, r, pool, layout.HolderID{Epoch: 1, Holder: "h"}, "c", 0, []layout.ChunkName{layout.NameChunk(1, []byte("x"))}); !errors.Is(err, layout.ErrHeadAbsent) {
+			t.Fatalf("layout removal over an absent HEAD: %v; want ErrHeadAbsent", err)
+		}
+		if pool.writes != 0 {
+			t.Fatalf("layout removal over an absent HEAD wrote %d times to the objects", pool.writes)
+		}
+	})
 	t.Run("ForkReplay", func(t *testing.T) {
 		f, b := headReaderForkFixture(t)
 		c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
@@ -297,3 +311,21 @@ func (a *absentLayoutHead) UpdateHead(context.Context, uint64, layout.Head) erro
 	a.updates++
 	return nil
 }
+
+// countingPool is a layout object store that counts writes and holds
+// nothing.
+type countingPool struct{ writes int }
+
+func (p *countingPool) Stat(context.Context, string) (layout.ObjectMeta, bool, error) {
+	return layout.ObjectMeta{}, false, nil
+}
+func (p *countingPool) Create(context.Context, string, []byte, string) error { p.writes++; return nil }
+func (p *countingPool) Reuse(context.Context, string, layout.ObjectMeta, string) error {
+	p.writes++
+	return nil
+}
+func (p *countingPool) Mark(context.Context, string, layout.ObjectMeta, string) error {
+	p.writes++
+	return nil
+}
+func (p *countingPool) DeleteMarked(context.Context, string, string) error { p.writes++; return nil }

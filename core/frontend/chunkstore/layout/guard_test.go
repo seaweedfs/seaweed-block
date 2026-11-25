@@ -123,9 +123,10 @@ func owners(m map[string]bool) []string {
 //   - Lease, claim half: OldLeaseEnded is used only in RunClaim, and
 //     RunClaim, when it is declared, uses it.
 //   - Every declared exported Run function goes through runTransition.
-//   - Pool: no name starting with Delete or Remove is used yet; the
-//     removal that comes with cleaning must bring its lease re-check and
-//     its own row here.
+//   - Pool: a name starting with Delete or Remove is used only in
+//     RemoveUnreachable, and there every delete is preceded, in the same
+//     loop body, by the remover's own lease check (StillHeld); see
+//     removerOrderFindings.
 //
 // These are syntactic checks of this package's own files: they see any
 // use of these names, but not a store effect reached through a name they
@@ -167,10 +168,120 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 	}
 	for name, by := range code {
 		if strings.HasPrefix(name, "Delete") || strings.HasPrefix(name, "Remove") {
-			bad = append(bad, strings.Join(owners(by), ", ")+" uses "+name+": a store remover needs its lease re-check and its own guard row")
+			for _, fn := range owners(by) {
+				if fn != "RemoveUnreachable" {
+					bad = append(bad, fn+" uses "+name+": only RemoveUnreachable removes, after its lease re-check")
+				}
+			}
 		}
 	}
 	sort.Strings(bad)
+	return bad
+}
+
+// removerOrderFindings checks the removal rule (7') in the sources: in
+// RemoveUnreachable the only removal call is DeleteMarked (a delete
+// conditional on the remover's own mark), and each is IMMEDIATELY
+// preceded, in the same block, by a mark gate: an if statement whose init
+// calls Mark and whose body leaves on its error (return or continue). An
+// unconditional delete, an ignored mark, one mark reused for a second
+// delete and an unlisted removal method each fail.
+func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
+	t.Helper()
+	removals := func(n ast.Node) []string {
+		var names []string
+		ast.Inspect(n, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := c.Fun.(*ast.SelectorExpr); ok && (strings.HasPrefix(sel.Sel.Name, "Delete") || strings.HasPrefix(sel.Sel.Name, "Remove")) {
+					names = append(names, sel.Sel.Name)
+				}
+			}
+			return true
+		})
+		return names
+	}
+	markGate := func(st ast.Stmt) bool {
+		is, ok := st.(*ast.IfStmt)
+		if !ok || is.Init == nil {
+			return false
+		}
+		as, ok := is.Init.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 || len(as.Lhs) != 1 {
+			return false
+		}
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Mark" {
+			return false
+		}
+		errName, ok := as.Lhs[0].(*ast.Ident)
+		cond, ok2 := is.Cond.(*ast.BinaryExpr)
+		if !ok || !ok2 || cond.Op != token.NEQ {
+			return false
+		}
+		if x, ok := cond.X.(*ast.Ident); !ok || x.Name != errName.Name {
+			return false
+		}
+		leaves := false
+		ast.Inspect(is.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.ReturnStmt:
+				leaves = true
+			case *ast.BranchStmt:
+				if x.Tok == token.CONTINUE {
+					leaves = true
+				}
+			}
+			return !leaves
+		})
+		return leaves
+	}
+	var bad []string
+	for fname, src := range srcs {
+		file, err := parser.ParseFile(token.NewFileSet(), fname, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "RemoveUnreachable" {
+				continue
+			}
+			deletes := 0
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				blk, ok := n.(*ast.BlockStmt)
+				if !ok {
+					return true
+				}
+				for i, st := range blk.List {
+					switch st.(type) {
+					case *ast.BlockStmt, *ast.RangeStmt, *ast.ForStmt:
+						continue // their bodies are checked as their own blocks
+					}
+					names := removals(st)
+					if len(names) == 0 {
+						continue
+					}
+					deletes++
+					for _, name := range names {
+						if name != "DeleteMarked" {
+							bad = append(bad, "RemoveUnreachable calls "+name+": its only removal is DeleteMarked, conditional on its own mark")
+						}
+					}
+					if i == 0 || !markGate(blk.List[i-1]) {
+						bad = append(bad, "RemoveUnreachable removes without a mark gate immediately before it (an if on Mark's error that leaves)")
+					}
+				}
+				return true
+			})
+			if deletes == 0 {
+				bad = append(bad, "RemoveUnreachable is declared and has no delete: the scan is broken")
+			}
+		}
+	}
 	return bad
 }
 
@@ -196,7 +307,7 @@ func TestGuard_WritersTransitionsAndRemovers(t *testing.T) {
 	src := packageSources(t, false)
 	code := refs(t, src)
 	tests := declared(t, packageSources(t, true))
-	if bad := guardFindings(code, declared(t, src), tests); len(bad) != 0 {
+	if bad := append(guardFindings(code, declared(t, src), tests), removerOrderFindings(t, src)...); len(bad) != 0 {
 		t.Fatalf("guard: %s", strings.Join(bad, "\n"))
 	}
 	st := reflect.TypeOf((*HeadStore)(nil)).Elem()
@@ -229,14 +340,18 @@ func TestGuard_Controls(t *testing.T) {
 		"runTransition alias":      {src: `func w(ctx context.Context, st HeadStore) { f := runTransition; _, _ = f(ctx, st, nil) }`, want: "uses runTransition; transitions are exported"},
 		"untested transition":      {src: `func RunZz(ctx context.Context, st HeadStore) (Head, error) { return runTransition(ctx, st, nil) }`, want: "has no TestZz_Closure"},
 		"lease wait outside claim": {src: `func w(ctx context.Context, l LeaseWait) error { return l.OldLeaseEnded(ctx, 1) }`, want: "only RunClaim claims"},
-		"remover": {src: `type p interface{ DeleteObject(context.Context, string) error }
-func w(ctx context.Context, x p) error { return x.DeleteObject(ctx, "o") }`, want: "a store remover"},
+		"remover outside RemoveUnreachable": {src: `type p interface{ DeleteObject(context.Context, string) error }
+func w(ctx context.Context, x p) error { return x.DeleteObject(ctx, "o") }`, want: "only RemoveUnreachable removes"},
 		"claim without lease wait": {src: `func RunClaim(ctx context.Context, st HeadStore, lease LeaseWait, me HolderID) (Head, error) {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h, false, nil })
 }`, want: "does not wait for the old lease", file: "claim.go"},
 		"transition not through runTransition": {src: `func RunZz(ctx context.Context, st HeadStore) (Head, error) { h, _, err := st.ReadHead(ctx); return h, err }`, want: "does not go through runTransition"},
+		"unconditional delete":                 {file: "remove.go", src: removeVariant(t, "unconditional"), want: "its only removal is DeleteMarked"},
+		"ignored mark":                         {file: "remove.go", src: removeVariant(t, "ignored"), want: "without a mark gate immediately before it"},
+		"one mark, two deletes":                {file: "remove.go", src: removeVariant(t, "second"), want: "without a mark gate immediately before it"},
+		"unlisted removal method":              {file: "remove.go", src: removeVariant(t, "other"), want: "without a mark gate immediately before it"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
-func w(x p) { f := x.RemoveName; f("o") }`, want: "a store remover"},
+func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable removes"},
 	} {
 		srcs := packageSources(t, false)
 		file := c.file
@@ -244,9 +359,38 @@ func w(x p) { f := x.RemoveName; f("o") }`, want: "a store remover"},
 			file = "zz_control.go"
 		}
 		srcs[file] = "package layout\n\nimport \"context\"\n\nvar _ context.Context\n\n" + c.src + "\n"
-		bad := guardFindings(refs(t, srcs), declared(t, srcs), tests)
+		bad := append(guardFindings(refs(t, srcs), declared(t, srcs), tests), removerOrderFindings(t, srcs)...)
 		if !strings.Contains(strings.Join(bad, "\n"), c.want) {
 			t.Errorf("control %q: findings %q; want one containing %q", name, bad, c.want)
 		}
 	}
+}
+
+// removeVariant returns remove.go's real source changed in one way, minus
+// its package clause and imports (the controls add their own header).
+func removeVariant(t *testing.T, mode string) string {
+	t.Helper()
+	b, err := os.ReadFile("remove.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := strings.ReplaceAll(string(b), "\r\n", "\n")
+	gate := "if err := os.Mark(ctx, c.Path(), tag, session); err != nil {"
+	if !strings.Contains(src, gate) {
+		t.Fatal("remove.go mark gate not found")
+	}
+	switch mode {
+	case "ignored":
+		i := strings.Index(src, gate)
+		j := strings.Index(src[i:], "\n\t\t}\n") + i + len("\n\t\t}\n")
+		src = src[:i] + "_ = os.Mark(ctx, c.Path(), plan, session)\n" + src[j:]
+	case "second":
+		src = strings.Replace(src, "removed = append(removed, c)", "_ = os.DeleteMarked(ctx, c.Path(), session)\n\t\tremoved = append(removed, c)", 1)
+	case "other":
+		src = strings.Replace(src, "removed = append(removed, c)", "_ = os.RemoveOther(ctx, c.Path())\n\t\tremoved = append(removed, c)", 1)
+	case "unconditional":
+		src = strings.Replace(src, "if err := os.DeleteMarked(ctx, c.Path(), session); err != nil {", "if err := os.DeleteObject(ctx, c.Path()); err != nil {", 1)
+	}
+	i := strings.Index(src, ")\n")
+	return src[i+2:]
 }
