@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -59,7 +60,7 @@ func TestWALStoreChunk_TimedOutDetachRetriesShareOneDrain(t *testing.T) {
 }
 
 func TestWALStoreChunk_CutVolumeSurvivesCloseAfterResolve(t *testing.T) {
-	p := chunkProvider(t, t.TempDir(), storage.NewMemChunkRemote(), v1View(), 0)
+	p := layoutChunkProvider(t, t.TempDir(), testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), v1View(), 0)
 	s := openRecovered(t, p)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
