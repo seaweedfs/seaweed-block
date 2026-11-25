@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 func clusterVolume(volumeID string, authority AuthorityBasis, slots ...ReplicaCandidate) VolumeTopologySnapshot {
@@ -15,16 +17,20 @@ func clusterVolume(volumeID string, authority AuthorityBasis, slots ...ReplicaCa
 	}
 }
 
+// candidate is a replica as the promotion gate leaves it when it allows it:
+// ready, with the gate's probed evidence (a primary change is published only
+// with it).
 func candidate(replicaID, serverID, dataAddr, ctrlAddr string, evidence uint64) ReplicaCandidate {
 	return ReplicaCandidate{
-		ReplicaID:       replicaID,
-		ServerID:        serverID,
-		DataAddr:        dataAddr,
-		CtrlAddr:        ctrlAddr,
-		Reachable:       true,
-		ReadyForPrimary: true,
-		Eligible:        true,
-		EvidenceScore:   evidence,
+		ReplicaID:         replicaID,
+		ServerID:          serverID,
+		DataAddr:          dataAddr,
+		CtrlAddr:          ctrlAddr,
+		Reachable:         true,
+		ReadyForPrimary:   true,
+		Eligible:          true,
+		EvidenceScore:     evidence,
+		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: evidence},
 	}
 }
 
