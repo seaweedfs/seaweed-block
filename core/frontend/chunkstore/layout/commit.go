@@ -105,7 +105,7 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 			if err := meta.check(snapshot); err != nil {
 				return Head{}, false, err
 			}
-			next.Snapshots[snapshot] = Snapshot{Root: root, Meta: meta.clone()}
+			next.Snapshots[snapshot] = Snapshot{Root: root, Position: position, Meta: meta.clone()}
 		}
 	}
 	rn := root
