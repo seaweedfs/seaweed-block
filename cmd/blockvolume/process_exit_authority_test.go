@@ -22,14 +22,15 @@ type exitAssignmentStream struct {
 	control.UnimplementedAssignmentServiceServer
 	control.UnimplementedObservationServiceServer
 	control.UnimplementedWorkspaceServiceServer
-	revoke   bool
-	refuse   error // when set, every renewal is refused with it
+	revoke       bool
+	refuse       error // when set, every renewal is refused with it
+	streamRefuse error // the master may refuse a restarted source before an assignment
 	// identityRefusals: the first this many stream calls are refused with
 	// the typed IDENTITY detail.
 	identityRefusals atomic.Int32
-	ackError error
-	acks     atomic.Int32
-	facts    chan *control.AssignmentFact
+	ackError         error
+	acks             atomic.Int32
+	facts            chan *control.AssignmentFact
 }
 
 func (s *exitAssignmentStream) RenewWorkspaceLease(_ context.Context, id *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
@@ -49,6 +50,9 @@ func (s *exitAssignmentStream) ReportHeartbeat(context.Context, *control.Heartbe
 	return &control.HeartbeatAck{}, nil
 }
 func (s *exitAssignmentStream) SubscribeAssignments(_ *control.SubscribeRequest, stream control.AssignmentService_SubscribeAssignmentsServer) error {
+	if s.streamRefuse != nil {
+		return s.streamRefuse
+	}
 	if s.identityRefusals.Add(-1) >= 0 {
 		st, _ := status.New(codes.FailedPrecondition, `assignment stream: server id "s" is not registered`).
 			WithDetails(&control.WorkspaceLeaseRefusal{Kind: control.WorkspaceLeaseRefusal_IDENTITY, Identity: "unregistered"})
@@ -63,6 +67,37 @@ func (s *exitAssignmentStream) SubscribeAssignments(_ *control.SubscribeRequest,
 				return err
 			}
 		}
+	}
+}
+
+func TestRestartedMovedSourceExits78WithoutAnOwnLine(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	refusal, err := status.New(codes.FailedPrecondition, "workspace moved to holder node-b at epoch 8").
+		WithDetails(&control.WorkspaceLeaseRefusal{Kind: control.WorkspaceLeaseRefusal_MOVED})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := exitAuthorityHost(t, func(s *exitAssignmentStream) { s.streamRefuse = refusal.Err() })
+	for {
+		if _, final := h.MasterWaitState(); final == "moved" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("the master's typed MOVED never reached the restarted source")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if h.Adapter().Projection().Epoch != 0 || h.IsCurrentReplicaSuperseded() {
+		t.Fatal("fixture acquired an own line or inferred supersession")
+	}
+	e := newProcessExit(ctx)
+	if !chooseChunkStartupExit(e, flags{workspaceLease: true, durableImpl: "walstore-chunk", volumeID: "v"}, h, &exitStartupOutcome{expired: true}) {
+		t.Fatal("no startup decision")
+	}
+	if out := <-e.decision; out.code != 78 || out.reason != "moved" || out.detail != refusal.Message() {
+		t.Fatalf("moved restart chose %+v; want 78 moved, never retry 75", out)
 	}
 }
 func exitAuthorityHost(t *testing.T, configure ...func(*exitAssignmentStream)) (*volume.Host, func(string, uint64)) {
