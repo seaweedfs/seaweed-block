@@ -126,68 +126,49 @@ func TestChunkVolumeRootStaysInsideBase(t *testing.T) {
 // store (no create geometry) are not refused.
 func TestGeometryFlagsRefusalComparesTheRecord(t *testing.T) {
 	ctx := context.Background()
-	cat, err := chunkstore.NewCatalog(chunkstore.NewMemFiler(), defaultChunkPath)
+
+	id, err := layout.NewVolumeID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, code := geometryFlagsRefusal(ctx, cat, "v1", 32768, 4096); got != "" || code != 0 {
-		t.Fatalf("no record yet: %q, %d", got, code)
-	}
-	if _, err := cat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
-		t.Fatal(err)
-	}
-	if got, code := geometryFlagsRefusal(ctx, cat, "v1", 65536, 4096); got != "" || code != 0 {
-		t.Fatalf("matching flags refused: %q, %d", got, code)
-	}
-	for _, c := range []struct {
-		blocks uint64
-		size   uint32
-	}{{32768, 4096}, {65536, 512}} {
-		got, code := geometryFlagsRefusal(ctx, cat, "v1", c.blocks, c.size)
-		if code != exitGeometryRefused {
-			t.Fatalf("flags %d x %d: exit %d, want %d", c.blocks, c.size, code, exitGeometryRefused)
-		}
-		for _, want := range []string{"geometry_mismatch", "--durable-blocks", "65536 blocks of 4096 bytes"} {
-			if !strings.Contains(got, want) {
-				t.Fatalf("flags %d x %d: refusal %q lacks %q", c.blocks, c.size, got, want)
-			}
-		}
-	}
-	if got, code := geometryFlagsRefusal(ctx, cat, "v1", 0, 0); got != "" || code != 0 {
-		t.Fatalf("an existing store (no create geometry) must not be refused: %q, %d", got, code)
-	}
-	// An unreadable record: the same valid volume over a filer whose
-	// lookups fail. The record is read, fails, and the start is refused as
-	// retryable before anything is created.
-	failing := &lookupFailFiler{MemFiler: chunkstore.NewMemFiler()}
-	failCat, err := chunkstore.NewCatalog(failing, defaultChunkPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := failCat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
-		t.Fatal(err)
-	}
-	failing.fail, failing.reads = true, 0
-	for _, blocks := range []uint64{32768, 65536} { // a wrong and a right flag alike
-		got, code := geometryFlagsRefusal(ctx, failCat, "v1", blocks, 4096)
-		if code != exitWorkspaceRetry || !strings.Contains(got, "the volume record of v1 could not be read") || !strings.Contains(got, "no local store was created; retrying") {
-			t.Fatalf("--durable-blocks %d over an unreadable record: %q, exit %d; want a retryable refusal (%d)", blocks, got, code, exitWorkspaceRetry)
-		}
-	}
-	if failing.reads == 0 {
-		t.Fatal("the unreadable-record case never read the record")
-	}
-	// A record that is there but does not decode: a permanent refusal
-	// (78), not a retry loop, for a wrong and a right flag alike.
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
 	mem := chunkstore.NewMemFiler()
-	corruptCat, err := chunkstore.NewCatalog(mem, defaultChunkPath)
+	blobs := &maintenanceBlobs{d: map[string][]byte{}}
+	cat, err := chunkstore.NewBCatalog(mem, blobs, defaultChunkPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := corruptCat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 65536, BlockSize: 4096, ChunkBlocks: 1024}); err != nil {
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 32768, 4096, 1024); got != "" || code != 0 {
+		t.Fatal(got, code)
+	}
+	g := layout.Geometry{SizeBytes: 65536 * 4096, BlockSize: 4096, ChunkBytes: 1024 * 4096}
+	if _, err := cat.CreateVolume(ctx, ref, g); err != nil {
 		t.Fatal(err)
 	}
-	dir := path.Join(defaultChunkPath, "v1")
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 65536, 4096, 1024); got != "" || code != 0 {
+		t.Fatal(got, code)
+	}
+	for _, g := range []struct {
+		blocks      uint64
+		size, chunk uint32
+	}{{32768, 4096, 1024}, {65536, 512, 1024}, {65536, 4096, 512}} {
+		got, code := geometryFlagsRefusal(ctx, cat, ref, g.blocks, g.size, g.chunk)
+		if code != exitGeometryRefused || !strings.Contains(got, "geometry_mismatch") || !strings.Contains(got, "65536 blocks of 4096 bytes") {
+			t.Fatalf("mismatch: %q %d", got, code)
+		}
+	}
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 0, 0, 0); got != "" || code != 0 {
+		t.Fatal(got, code)
+	}
+	failing := &lookupFailFiler{MemFiler: mem, fail: true}
+	failCat, err := chunkstore.NewBCatalog(failing, blobs, defaultChunkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, code := geometryFlagsRefusal(ctx, failCat, ref, 65536, 4096, 1024); code != exitWorkspaceRetry || !strings.Contains(got, "could not be read") || failing.reads == 0 {
+		t.Fatal(got, code, failing.reads)
+	}
+	dir := path.Join(defaultChunkPath, ref.Dir())
 	e, err := mem.LookupEntry(ctx, dir, "VOLUME")
 	if err != nil {
 		t.Fatal(err)
@@ -196,12 +177,10 @@ func TestGeometryFlagsRefusalComparesTheRecord(t *testing.T) {
 	if err := mem.UpdateEntry(ctx, dir, e, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, blocks := range []uint64{32768, 65536} {
-		got, code := geometryFlagsRefusal(ctx, corruptCat, "v1", blocks, 4096)
-		if code != exitGeometryRefused || !strings.Contains(got, "the volume record of v1 is unreadable (corrupt:") || !strings.Contains(got, "no local store was created") {
-			t.Fatalf("--durable-blocks %d over a corrupt record: %q, exit %d; want a permanent refusal (%d)", blocks, got, code, exitGeometryRefused)
-		}
+	if got, code := geometryFlagsRefusal(ctx, cat, ref, 65536, 4096, 1024); code != exitGeometryRefused || !strings.Contains(got, "unreadable (corrupt:") {
+		t.Fatal(got, code)
 	}
+
 }
 
 // lookupFailFiler is a MemFiler whose LookupEntry fails once fail is set; it

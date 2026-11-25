@@ -888,6 +888,16 @@ func (s *WALStore) NumBlocks() uint32 {
 // BlockSize returns the IO unit size in bytes.
 func (s *WALStore) BlockSize() int { return int(s.sb.BlockSize) }
 
+// ChunkBlocks is the immutable chunk-map shape stored with this local root.
+func (s *WALStore) ChunkBlocks() uint64 {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.v3 == nil || s.v3.ownedMap == nil {
+		return 0
+	}
+	return s.v3.ownedMap.chunkBlocks
+}
+
 // SetRecoveryRetentionLSNs configures the WAL retention window past
 // checkpointLSN. After this is set, the recovery scan accepts
 // fromLSN > checkpointLSN - retentionLSNs. Zero (the default)

@@ -40,9 +40,22 @@ func CreateVolume(ctx context.Context, st NewVolumeStore, v Volume) (Head, error
 // current = that root. Its HEAD is never written before the dependent: an
 // operator's release of a target without HEAD writes the deleted HEAD
 // first, and the target's HEAD create then fails.
-func CreateTarget(ctx context.Context, src HeadStore, srcReader *Reader, snapshot string, st NewVolumeStore, v Volume, copy func(ctx context.Context, root RootName) error) (Head, error) {
+func CreateTarget(ctx context.Context, src StartStore, srcReader *Reader, snapshot string, st NewVolumeStore, v Volume, copy func(ctx context.Context, root RootName) error) (Head, error) {
 	if copy == nil {
 		return Head{}, errors.New("layout: CreateTarget needs a copy of the snapshot's root")
+	}
+	source, found, err := src.ReadVolumeRecord(ctx)
+	if err != nil {
+		return Head{}, err
+	}
+	if !found {
+		return Head{}, ErrMissing
+	}
+	if err := source.Geometry.Check(); err != nil {
+		return Head{}, err
+	}
+	if v.Geometry != source.Geometry {
+		return Head{}, ErrGeometryMismatch
 	}
 	sh, err := RunAddDependent(ctx, src, srcReader, snapshot, Dependent{Target: v.Name, TargetID: v.ID})
 	if err != nil {
@@ -73,6 +86,10 @@ func createVolume(ctx context.Context, st NewVolumeStore, v Volume, current *Roo
 		if !found || got.ID != v.ID {
 			return Head{}, fmt.Errorf("%w: VOLUME holds %s, not %s", ErrIdentity, got.ID, v.ID)
 		}
+		if got.Geometry != v.Geometry {
+			return Head{}, ErrGeometryMismatch
+		}
+
 	}
 	h := Unclaimed(v.ID, current)
 	if err := h.check(); err != nil {

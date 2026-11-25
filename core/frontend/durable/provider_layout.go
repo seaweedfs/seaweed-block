@@ -35,13 +35,13 @@ func (g grantedLayoutLine) OldLeaseEnded(ctx context.Context, epoch uint64) erro
 	return nil
 }
 
-func startLayoutRoot(ctx context.Context, ws *storage.WALStore, st layout.HeadStore, line layout.HolderID) (layout.Head, error) {
+func startLayoutRoot(ctx context.Context, ws *storage.WALStore, st layout.StartStore, line layout.HolderID) (layout.Head, error) {
 	id, fresh, ok := ws.LayoutIdentity()
 	if !ok {
 		return layout.Head{}, errors.New("durable: legacy root has no layout identity; recreate it")
 	}
 	position, _, _ := ws.Boundaries()
-	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{ClaimID: id, Fresh: fresh, Position: position})
+	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: uint64(ws.NumBlocks()) * uint64(ws.BlockSize()), BlockSize: uint32(ws.BlockSize()), ChunkBytes: uint64(ws.ChunkBlocks()) * uint64(ws.BlockSize())}, ClaimID: id, Fresh: fresh, Position: position})
 	if err != nil {
 		return layout.Head{}, fmt.Errorf("durable: layout Start: %w", err)
 	}

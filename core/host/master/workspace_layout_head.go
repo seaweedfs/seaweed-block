@@ -37,7 +37,7 @@ func NewLayoutWorkspaceHEADReader(base string, resolve func(context.Context, str
 		if v.Name != name {
 			return authority.WorkspaceHead{}, layout.ErrIdentity
 		}
-		if _, err := (layout.Volume{ID: v.ID, Name: v.Name, Format: layout.VolumeFormat}).Encode(); err != nil {
+		if err := (layout.Volume{ID: v.ID, Name: v.Name, Format: layout.VolumeFormat}).CheckIdentity(); err != nil {
 			return authority.WorkspaceHead{}, err
 		}
 		endpoint := *u

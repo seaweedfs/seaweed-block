@@ -255,7 +255,7 @@ func TestNewReader_RefusesBadInput(t *testing.T) {
 // putVolume writes vol's VOLUME record with its test id.
 func putVolume(t *testing.T, put func(dir, rel string, b []byte), name, dir string) {
 	t.Helper()
-	b, err := Volume{ID: idFor(name), Name: name, Format: VolumeFormat}.Encode()
+	b, err := Volume{ID: idFor(name), Name: name, Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func putVolume(t *testing.T, put func(dir, rel string, b []byte), name, dir stri
 func TestRead_ForeignChunkNeedsTheOwnersVolumeID(t *testing.T) {
 	ctx := context.Background()
 	s, rn, m := readFixture(t)
-	b, err := Volume{ID: idFor("src again"), Name: "src", Format: VolumeFormat}.Encode()
+	b, err := Volume{ID: idFor("src again"), Name: "src", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}

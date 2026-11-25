@@ -52,12 +52,12 @@ func (c *BCatalog) open(v VolumeRef) (*LayoutStore, *layout.Reader, error) {
 }
 
 // CreateVolume creates the volume with its unclaimed HEAD.
-func (c *BCatalog) CreateVolume(ctx context.Context, v VolumeRef) (layout.Head, error) {
+func (c *BCatalog) CreateVolume(ctx context.Context, v VolumeRef, geometry layout.Geometry) (layout.Head, error) {
 	s, err := c.Store(v)
 	if err != nil {
 		return layout.Head{}, err
 	}
-	return layout.CreateVolume(ctx, s, layout.Volume{ID: v.ID, Name: v.Name, Format: layout.VolumeFormat})
+	return layout.CreateVolume(ctx, s, layout.Volume{ID: v.ID, Name: v.Name, Format: layout.VolumeFormat, Geometry: geometry})
 }
 
 // ReadHead reads the volume's HEAD.
@@ -119,7 +119,14 @@ func (c *BCatalog) Restore(ctx context.Context, src VolumeRef, snapshot string, 
 		}
 		return layout.EnsureObject(ctx, ts, rn.Path(), raw, session)
 	}
-	return layout.CreateTarget(ctx, ss, sr, snapshot, ts, layout.Volume{ID: target.ID, Name: target.Name, Format: layout.VolumeFormat}, copyRoot)
+	source, found, err := ss.ReadVolumeRecord(ctx)
+	if err != nil {
+		return layout.Head{}, err
+	}
+	if !found {
+		return layout.Head{}, layout.ErrMissing
+	}
+	return layout.CreateTarget(ctx, ss, sr, snapshot, ts, layout.Volume{ID: target.ID, Name: target.Name, Format: layout.VolumeFormat, Geometry: source.Geometry}, copyRoot)
 }
 
 func (c *BCatalog) fetchVerified(ctx context.Context, s *LayoutStore, v VolumeRef, rel string, want layout.Hash) ([]byte, error) {

@@ -67,7 +67,7 @@ func TestBCatalog_RetainKeepsTheOldBehaviour(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := newRef(t, "v")
-	if _, err := c.CreateVolume(ctx, v); err != nil {
+	if _, err := c.CreateVolume(ctx, v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	commitSnapshot(t, c, v, []byte("data"), "")
@@ -137,7 +137,7 @@ func TestBCatalog_RetentionPolicyIsConditional(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := newRef(t, "v")
-	if _, err := c.CreateVolume(ctx, v); err != nil {
+	if _, err := c.CreateVolume(ctx, v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := c.Store(v)

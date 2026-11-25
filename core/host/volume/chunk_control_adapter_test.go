@@ -79,7 +79,7 @@ func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	}
 	id, _ := layout.ParseVolumeID("00112233445566778899aabbccddeeff")
 	v := chunkstore.VolumeRef{Name: "v1", ID: id}
-	if _, err := cat.CreateVolume(context.Background(), v); err != nil {
+	if _, err := cat.CreateVolume(context.Background(), v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	return fp, NewChunkControl(fp, cat, v)

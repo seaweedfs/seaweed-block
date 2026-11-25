@@ -30,6 +30,7 @@ const MissingLocalRootCure = "check for a wrong or unmounted data directory; if 
 // reported non-fresh before that, its position below HEAD's would be
 // refused as an old copy.
 type LocalRoot struct {
+	Geometry
 	ClaimID  string
 	Fresh    bool
 	Position uint64 // the position the local root holds synced
@@ -47,7 +48,12 @@ type LocalRoot struct {
 // older than HEAD's image and is ErrStaleLocalRoot. An older epoch,
 // another server at HEAD's epoch, a deleting volume and an absent HEAD
 // are refused.
-func Start(ctx context.Context, st HeadStore, lease LeaseWait, line HolderID, local LocalRoot) (Head, error) {
+type StartStore interface {
+	HeadStore
+	ReadVolumeRecord(context.Context) (Volume, bool, error)
+}
+
+func Start(ctx context.Context, st StartStore, lease LeaseWait, line HolderID, local LocalRoot) (Head, error) {
 	if local.ClaimID == "" {
 		return Head{}, errors.New("layout: start needs the local root's claim id")
 	}
@@ -57,6 +63,22 @@ func Start(ctx context.Context, st HeadStore, lease LeaseWait, line HolderID, lo
 	}
 	if !found {
 		return Head{}, ErrHeadAbsent
+	}
+	v, present, err := st.ReadVolumeRecord(ctx)
+	if err != nil {
+		return Head{}, err
+	}
+	if !present {
+		return Head{}, ErrMissing
+	}
+	if v.ID != h.VolumeID {
+		return Head{}, ErrIdentity
+	}
+	if err := v.Geometry.Check(); err != nil {
+		return Head{}, err
+	}
+	if local.Geometry != v.Geometry {
+		return Head{}, fmt.Errorf("%w: local %+v differs from VOLUME %+v", ErrGeometryMismatch, local.Geometry, v.Geometry)
 	}
 	if err := startCheck(h, line, local); err != nil {
 		return Head{}, err

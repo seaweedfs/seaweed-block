@@ -28,7 +28,7 @@ func removeFixture(t *testing.T) (*memObjects, *Head, []ChunkName, []ChunkName) 
 		data[path.Join(volRoot, c.Path())] = []byte(d)
 		orphans = append(orphans, c)
 	}
-	vb, err := Volume{ID: idFor("v1"), Name: "v1", Format: VolumeFormat}.Encode()
+	vb, err := Volume{ID: idFor("v1"), Name: "v1", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}

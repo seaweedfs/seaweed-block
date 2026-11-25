@@ -21,7 +21,7 @@ func cleanFixture(t *testing.T) (*BCatalog, VolumeRef, *LayoutStore, []layout.Ch
 		t.Fatal(err)
 	}
 	v := newRef(t, "v1")
-	if _, err := c.CreateVolume(ctx, v); err != nil {
+	if _, err := c.CreateVolume(ctx, v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	commitSnapshot(t, c, v, bytes.Repeat([]byte{7}, 4096), "s")
@@ -213,14 +213,14 @@ func TestBCatalog_CleanAfterOverwriteAndSnapshotDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := newRef(t, "v1")
-	if _, err := c.CreateVolume(ctx, v); err != nil {
+	if _, err := c.CreateVolume(ctx, v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	s, err := c.Store(v)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{ClaimID: "k", Fresh: true}); err != nil {
+	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true}); err != nil {
 		t.Fatal(err)
 	}
 	x, y := bytes.Repeat([]byte{'X'}, 4096), bytes.Repeat([]byte{'Y'}, 4096)

@@ -23,7 +23,7 @@ func commitSnapshot(t *testing.T, c *BCatalog, v VolumeRef, data []byte, name st
 		t.Fatal(err)
 	}
 	me := layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
-	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{ClaimID: "k", Fresh: true}); err != nil {
+	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := layout.RunBegin(ctx, s, me, "s1"); err != nil {
@@ -74,7 +74,7 @@ func TestBCatalog_RestoreThenDeleteTheTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	src, tgt := newRef(t, "src"), newRef(t, "t")
-	if _, err := c.CreateVolume(ctx, src); err != nil {
+	if _, err := c.CreateVolume(ctx, src, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	data := []byte("source chunk")
@@ -138,7 +138,7 @@ func TestBCatalog_RestoreOfARestoreTargetIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	src, tgt, again := newRef(t, "src"), newRef(t, "t"), newRef(t, "t2")
-	if _, err := c.CreateVolume(ctx, src); err != nil {
+	if _, err := c.CreateVolume(ctx, src, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	commitSnapshot(t, c, src, []byte("x"), "daily")
@@ -147,7 +147,7 @@ func TestBCatalog_RestoreOfARestoreTargetIsRefused(t *testing.T) {
 	}
 	ts, _ := c.Store(tgt)
 	me := layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
-	if _, err := layout.Start(ctx, ts, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{ClaimID: "k", Fresh: true}); err != nil {
+	if _, err := layout.Start(ctx, ts, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true}); err != nil {
 		t.Fatal(err)
 	}
 	h, _, _ := ts.ReadHead(ctx)

@@ -57,12 +57,12 @@ func TestLayoutStartCrashAtEachDurableArrow(t *testing.T) {
 					t.Fatal(err)
 				}
 				ref := chunkstore.VolumeRef{Name: "v", ID: id}
-				if _, err = cat.CreateVolume(ctx, ref); err != nil {
+				if _, err = cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 					t.Fatal(err)
 				}
 				makeP := func(root string, epoch uint64) (*DurableProvider, *storage.WALStore) {
 					t.Helper()
-					p, err := NewDurableProvider(ProviderConfig{Impl: ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r", ChunkLayoutHeadFor: func(string) (layout.HeadStore, error) { return cat.Store(ref) }, ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+					p, err := NewDurableProvider(ProviderConfig{Impl: ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r", ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return cat.Store(ref) }, ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
 						return chunkstore.NewLayoutRemote(cat, ref, me)
 					}}, layoutCrashView{epoch})
 					if err != nil {
@@ -106,7 +106,7 @@ func TestLayoutStartCrashAtEachDurableArrow(t *testing.T) {
 				crash := errors.New("fixture: interrupted at " + point)
 				switch point {
 				case "identity":
-					p.cfg.ChunkLayoutHeadFor = func(string) (layout.HeadStore, error) { return nil, crash }
+					p.cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return nil, crash }
 				case "claim":
 					p.cfg.ChunkLayoutRemoteFor = func(string, layout.HolderID) (storage.ChunkRemote, error) { return nil, crash }
 				case "base":

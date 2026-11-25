@@ -38,7 +38,7 @@ func verifyCLIFixture(t *testing.T) (*manifestFixtureFiler, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vb, err := layout.Volume{ID: id, Name: "v1", Format: layout.VolumeFormat}.Encode()
+	vb, err := layout.Volume{ID: id, Name: "v1", Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: layout.VolumeFormat}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}

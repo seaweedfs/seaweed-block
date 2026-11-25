@@ -302,6 +302,8 @@ func chunkErrorCode(err error) (int, string, bool) {
 	case errors.Is(err, durable.ErrDetachOutcomeUnknown):
 		// Before any cause: the detach may still have landed; I/O stays stopped.
 		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
+	case errors.Is(err, layout.ErrGeometryMismatch):
+		return http.StatusConflict, chunkstore.CodeGeometryMismatch, false
 	case errors.Is(err, layout.ErrHeadAbsent), errors.Is(err, layout.ErrNoSnapshot):
 		return http.StatusNotFound, "not_found", false
 	case errors.Is(err, layout.ErrHasDependents), errors.Is(err, layout.ErrVolumeDeleting), errors.Is(err, layout.ErrDetached), errors.Is(err, layout.ErrIdentity):

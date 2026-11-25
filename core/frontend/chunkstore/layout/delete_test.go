@@ -309,7 +309,7 @@ func operatorCase(t *testing.T, tgtHead *Head, tgtVolume *VolumeID, namesSource 
 	objs := map[string][]byte{}
 	put := func(rel string, b []byte) { objs[path.Join(removeBase, "t", rel)] = b }
 	if tgtVolume != nil {
-		b, err := Volume{ID: *tgtVolume, Name: "t", Format: VolumeFormat}.Encode()
+		b, err := Volume{ID: *tgtVolume, Name: "t", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}.Encode()
 		if err != nil {
 			t.Fatal(err)
 		}

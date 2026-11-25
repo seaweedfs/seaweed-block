@@ -335,7 +335,7 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 	})
 	t.Run("LayoutCreate", func(t *testing.T) {
 		st := &existsButAbsent{}
-		if _, err := layout.CreateVolume(ctx, st, layout.Volume{ID: layout.VolumeID{1}, Name: "v", Format: layout.VolumeFormat}); !errors.Is(err, layout.ErrIdentity) {
+		if _, err := layout.CreateVolume(ctx, st, layout.Volume{ID: layout.VolumeID{1}, Name: "v", Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: layout.VolumeFormat}); !errors.Is(err, layout.ErrIdentity) {
 			t.Fatalf("create whose HEAD create found one that then reads absent: %v; want ErrIdentity", err)
 		}
 	})
@@ -357,7 +357,7 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		vb, err := layout.Volume{ID: tid, Name: "t", Format: layout.VolumeFormat}.Encode()
+		vb, err := layout.Volume{ID: tid, Name: "t", Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: layout.VolumeFormat}.Encode()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,7 +383,7 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 	})
 	t.Run("LayoutStart", func(t *testing.T) {
 		st := &absentLayoutHead{}
-		if _, err := layout.Start(ctx, st, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "h"}, layout.LocalRoot{ClaimID: "k", Fresh: true}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
+		if _, err := layout.Start(ctx, st, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "h"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
 			t.Fatalf("start over an absent HEAD: %v, %d writes; want ErrHeadAbsent and none", err, st.updates)
 		}
 	})
@@ -480,5 +480,9 @@ func (existsButAbsent) ReadHead(context.Context) (layout.Head, bool, error) {
 func (existsButAbsent) CreateHead(context.Context, layout.Head) error           { return layout.ErrExists }
 func (existsButAbsent) CreateVolumeRecord(context.Context, layout.Volume) error { return nil }
 func (existsButAbsent) ReadVolumeRecord(context.Context) (layout.Volume, bool, error) {
+	return layout.Volume{}, false, nil
+}
+
+func (s *absentLayoutHead) ReadVolumeRecord(context.Context) (layout.Volume, bool, error) {
 	return layout.Volume{}, false, nil
 }
