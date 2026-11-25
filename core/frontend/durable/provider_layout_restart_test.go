@@ -14,24 +14,21 @@ import (
 	"time"
 )
 
-type orderedAttachRemote struct {
-	*chunkstore.LayoutRemote
-	settled bool
-	fail    error
+type restartStartStore struct {
+	layout.StartStore
+	failClosure bool
+	closureSeen bool
 }
 
-func (r *orderedAttachRemote) AbortOpenSession(ctx context.Context) (string, error) {
-	r.settled = true
-	if r.fail != nil {
-		return "", r.fail
+func (s *restartStartStore) UpdateHead(ctx context.Context, gen uint64, next layout.Head) error {
+	if next.Activity.Kind == layout.ActIdle && s.failClosure {
+		s.closureSeen = true
+		return errors.New("fixture: conditional Start closure failed")
 	}
-	return r.LayoutRemote.AbortOpenSession(ctx)
-}
-func (r *orderedAttachRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
-	if !r.settled {
-		return storage.ChunkHead{}, errors.New("fixture: GetHead preceded explicit attach settlement")
+	if next.Activity.Kind == layout.ActIdle {
+		s.closureSeen = true
 	}
-	return r.LayoutRemote.GetHead(ctx)
+	return s.StartStore.UpdateHead(ctx, gen, next)
 }
 
 type heldRestartDetach struct {
@@ -49,9 +46,9 @@ func (s *heldRestartDetach) UpdateHead(ctx context.Context, gen uint64, next lay
 
 // This uses the real provider open/close/reopen and kernel commit paths;
 // process SIGKILL/systemd qualification is a separate real-cluster gate.
-func TestLayoutRestartExplicitlyAbortsBeforeGuestWrites(t *testing.T) {
+func TestLayoutRestartClosesActivityBeforeGuestWrites(t *testing.T) {
 	for _, abortFails := range []bool{false, true} {
-		t.Run(map[bool]string{false: "held detach", true: "abort failure"}[abortFails], func(t *testing.T) {
+		t.Run(map[bool]string{false: "held detach", true: "Start closure failure"}[abortFails], func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), &layoutProviderBlobs{blobs: map[string][]byte{}}, "/restart")
@@ -67,17 +64,12 @@ func TestLayoutRestartExplicitlyAbortsBeforeGuestWrites(t *testing.T) {
 			st, _ := cat.Store(ref)
 			dir, locks := t.TempDir(), t.TempDir()
 			view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}))
-			var remote *orderedAttachRemote
+			startStore := &restartStartStore{StartStore: st}
 			open := func(root string) (*durable.DurableProvider, *storage.WALStore) {
 				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r1", HostVolumeLock: true, VolumeLockDirTestOnly: locks,
-					ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return st, nil },
+					ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return startStore, nil },
 					ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
-						r, e := chunkstore.NewLayoutRemote(cat, ref, me)
-						remote = &orderedAttachRemote{LayoutRemote: r}
-						if abortFails {
-							remote.fail = errors.New("fixture abort failed")
-						}
-						return remote, e
+						return chunkstore.NewLayoutRemote(cat, ref, me)
 					},
 				}, view)
 				if err != nil {
@@ -121,14 +113,16 @@ func TestLayoutRestartExplicitlyAbortsBeforeGuestWrites(t *testing.T) {
 			if err := old.Close(); err != nil {
 				t.Fatal(err)
 			} // releases local store + host lock
+			startStore.closureSeen = false
+			startStore.failClosure = abortFails
 			p, newWS := open(dir)
 			_, err = p.RecoverVolume(ctx, "v1")
-			if remote == nil || !remote.settled {
-				t.Fatal("attach did not explicitly settle its activity")
+			if !startStore.closureSeen {
+				t.Fatal("Start did not conditionally close the old activity")
 			}
 			if abortFails {
 				if err == nil {
-					t.Fatal("failed abort allowed attach")
+					t.Fatal("failed Start closure allowed attach")
 				}
 				if _, err := newWS.Write(0, bytes.Repeat([]byte{'B'}, 4096)); !errors.Is(err, storage.ErrLayoutFresh) {
 					t.Fatal("failed attach enabled writes", err)
