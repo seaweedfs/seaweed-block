@@ -553,9 +553,9 @@ func (h *Host) runRoleRetry(ctx context.Context) {
 			// until it is done, so no newer transition lands in between.
 			// (The completion takes no host lock: the adapter's executor is
 			// local, the watchdog and the marker have their own.)
-			if p := h.pendingSupport; p != nil && p.info.Epoch == epoch && h.factEpochSeen <= epoch {
+			if p := h.pendingSupport; p != nil && p.info.Epoch == epoch {
 				h.pendingSupport = nil
-				h.completeSupporting(p.info, p.primary)
+				h.completeSupportingIfCurrentLocked(p.info, p.primary)
 			}
 			h.selfFenceMu.Unlock()
 			delay = roleRetryMin
@@ -568,8 +568,28 @@ func (h *Host) runRoleRetry(ctx context.Context) {
 	}
 }
 
+// completeSupportingIfCurrentLocked is the one completion of a supporting
+// assignment, for the fact's own successful role call and for the retry's:
+// it completes only while the desired role is still replica at info's epoch
+// and no newer fact has been seen (factEpochSeen), checked and completed
+// without releasing selfFenceMu (held by the caller). A newer fact records
+// its epoch under that lock before it acts at all, so it either was seen
+// here (nothing old is completed) or waits until this completion is done:
+// no older admission, watchdog step or marker lands after it. Facts run
+// concurrently by design (a replay beside the stream); only this and the
+// record at applyFact's start are under the lock.
+func (h *Host) completeSupportingIfCurrentLocked(info adapter.AssignmentInfo, primary string) {
+	if h.selfRole != selfRoleReplica || h.selfEpoch != info.Epoch || h.factEpochSeen > info.Epoch {
+		h.log.Printf("blockvolume: volume %s supporting assignment at epoch %d superseded before its completion (desired %v@%d, newest fact %d)",
+			h.cfg.VolumeID, info.Epoch, h.selfRole, h.selfEpoch, h.factEpochSeen)
+		return
+	}
+	h.completeSupporting(info, primary)
+}
+
 // completeSupporting applies a supporting assignment once its replica role
 // call succeeded: the adapter's identity, the watchdog, the ready marker.
+// Called only through completeSupportingIfCurrentLocked.
 func (h *Host) completeSupporting(info adapter.AssignmentInfo, primary string) {
 	h.adpt.OnAssignment(info)
 	h.wd.supportingAdmitted(info.Epoch)
@@ -1044,8 +1064,8 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 			}
 			h.selfFenceMu.Lock()
 			h.pendingSupport = nil // this fact supersedes any skipped one
+			h.completeSupportingIfCurrentLocked(info, fact.ReplicaId)
 			h.selfFenceMu.Unlock()
-			h.completeSupporting(info, fact.ReplicaId)
 			return
 		}
 		// The new authoritative set excludes us: close assignment-gated

@@ -162,3 +162,84 @@ func TestRoleRetryCompletionNeverLandsAfterANewerTransition(t *testing.T) {
 		})
 	}
 }
+
+// The direct path: a supporting fact at epoch 2 whose own role call
+// succeeds has its completion held in its first step while a newer fact at
+// epoch 3 is applied concurrently (facts run concurrently by design: a
+// replay beside the stream): this host's own primary line, or a line that
+// excludes it. The old completion must not land after the newer
+// transition: no adapter step back to 2, no supporting admission clearing
+// the primary watchdog at 3, no old marker after a newer one.
+func TestDirectSupportingCompletionNeverLandsAfterANewerTransition(t *testing.T) {
+	selfPrimary := func() *control.AssignmentFact {
+		return &control.AssignmentFact{ServerId: "sB", VolumeId: "vol1", ReplicaId: "rB", Epoch: 3, EndpointVersion: 1, DataAddr: "127.0.0.1:5", CtrlAddr: "127.0.0.1:6", PeerSetGeneration: 3}
+	}
+	excluding := func() *control.AssignmentFact {
+		return &control.AssignmentFact{VolumeId: "vol1", ReplicaId: "rA", Epoch: 3, EndpointVersion: 1, DataAddr: "127.0.0.1:3", CtrlAddr: "127.0.0.1:4", PeerSetGeneration: 3,
+			Peers: []*control.ReplicaDescriptor{{ReplicaId: "rC", Epoch: 3, EndpointVersion: 1, DataAddr: "127.0.0.1:7", CtrlAddr: "127.0.0.1:8"}}}
+	}
+	for name, newer := range map[string]func() *control.AssignmentFact{"self-primary": selfPrimary, "excluding": excluding} {
+		t.Run(name, func(t *testing.T) {
+			markers := make(chan adapter.AssignmentInfo, 8)
+			h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "sB", VolumeID: "vol1", ReplicaID: "rB", DataAddr: "127.0.0.1:5", CtrlAddr: "127.0.0.1:6", ReadyMarker: markers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := &orderLog{}
+			adpt := &heldAdapter{log: log, holdAt: 2, entered: make(chan struct{}), release: make(chan struct{})}
+			h.adpt = adpt
+			if err := h.SetSelfFence(&orderListener{log: log}); err != nil {
+				t.Fatal(err)
+			}
+
+			first := make(chan struct{})
+			go func() { h.applyFact(supportingFact(2)); close(first) }()
+			select {
+			case <-adpt.entered: // its role call succeeded; its completion is held
+			case <-time.After(2 * time.Second):
+				t.Fatal("the supporting fact never reached its completion")
+			}
+			second := make(chan struct{})
+			go func() { h.applyFact(newer()); close(second) }()
+			time.Sleep(100 * time.Millisecond) // the newer fact runs as far as it can
+			close(adpt.release)
+			for _, c := range []chan struct{}{first, second} {
+				select {
+				case <-c:
+				case <-time.After(2 * time.Second):
+					t.Fatal("a fact never finished")
+				}
+			}
+
+			seq := log.snapshot()
+			old, newerRole := log.index("assign@2"), log.index("primary@3")
+			if old < 0 || newerRole < 0 {
+				t.Fatalf("sequence %v; want the completion at 2 and the newer role call at 3", seq)
+			}
+			if old > newerRole {
+				t.Fatalf("sequence %v: the completion for epoch 2 landed after the newer transition at 3", seq)
+			}
+			if name == "self-primary" {
+				if last := seq[len(seq)-1]; last != "assign@3" {
+					t.Fatalf("sequence %v: the adapter ended at %s; want assign@3", seq, last)
+				}
+				h.wd.mu.Lock()
+				pe := h.wd.primaryEpoch
+				h.wd.mu.Unlock()
+				if pe != 3 {
+					t.Fatalf("primary watchdog epoch %d after the primary line at 3; want 3 (an old supporting admission cleared it)", pe)
+				}
+			}
+			close(markers)
+			var order []uint64
+			for m := range markers {
+				order = append(order, m.Epoch)
+			}
+			for i := 1; i < len(order); i++ {
+				if order[i] < order[i-1] {
+					t.Fatalf("ready markers %v: an old marker followed a newer one", order)
+				}
+			}
+		})
+	}
+}
