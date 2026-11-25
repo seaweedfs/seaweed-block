@@ -87,6 +87,18 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 		t.Fatal("block A did not read back at epoch 1")
 	}
 	c.close()
+	// The gate has seen both replicas ready on the stores r1 attested (its
+	// probe of a ready primary logs each candidate's readiness).
+	poll(t, 30*time.Second, "the gate never saw r2 and r3 ready on attested stores", func() bool {
+		data, _ := os.ReadFile(master.log)
+		for _, l := range strings.Split(string(data), string(rune(10))) {
+			if strings.Contains(l, "promotion gate volume=v1 current=r1") && strings.Contains(l, "{r2 true") && strings.Contains(l, "{r3 true") {
+				return true
+			}
+		}
+		return false
+	})
+
 	// 2. r3 can no longer persist a floor; r1 stops: a fencing round at 2
 	// gets only r2, publishes nothing, and r1 cannot answer the heal.
 	if err := os.Chmod(r3.root, 0o555); err != nil {
