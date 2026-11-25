@@ -187,15 +187,36 @@ func newChunkWiring(c chunkFlags, masterTLS grpc.DialOption, master ...string) (
 	}, nil
 }
 
-// chunkAttachCheck creates only the master's identified volume. Geometry is
-// written once in VOLUME; no second catalog record is created.
+// chunkAttachCheck admits only a volume the master already created in the
+// store. Starting a holder never creates VOLUME or HEAD.
 func chunkAttachCheck(cat *chunkstore.BCatalog, ref chunkstore.VolumeRef) func(context.Context, string, durable.ChunkGeometry) error {
 	return func(ctx context.Context, name string, g durable.ChunkGeometry) error {
 		if cat == nil || name != ref.Name || ref.ID.IsZero() {
 			return layout.ErrIdentity
 		}
-		_, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: g.NumBlocks * uint64(g.BlockSize), BlockSize: g.BlockSize, ChunkBytes: uint64(g.ChunkBlocks) * uint64(g.BlockSize)})
-		return err
+		st, err := cat.Store(ref)
+		if err != nil {
+			return err
+		}
+		v, found, err := st.ReadVolumeRecord(ctx)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: volume %s not created in the store", layout.ErrMissing, name)
+		}
+		want := layout.Geometry{SizeBytes: g.NumBlocks * uint64(g.BlockSize), BlockSize: g.BlockSize, ChunkBytes: uint64(g.ChunkBlocks) * uint64(g.BlockSize)}
+		if v.Geometry != want {
+			return fmt.Errorf("%w: local %+v differs from VOLUME %+v", layout.ErrGeometryMismatch, want, v.Geometry)
+		}
+		_, found, err = cat.ReadHead(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: volume %s not created in the store", layout.ErrHeadAbsent, name)
+		}
+		return nil
 	}
 }
 
@@ -222,7 +243,10 @@ func geometryFlagsRefusal(ctx context.Context, cat *chunkstore.BCatalog, ref chu
 		}
 		return fmt.Sprintf("blockvolume: the volume record of %s could not be read (%v); no local store was created; retrying", ref.Name, err), exitWorkspaceRetry
 	}
-	if !found || (v.SizeBytes == numBlocks*uint64(blockSize) && v.BlockSize == blockSize && v.ChunkBytes == uint64(chunkBlocks)*uint64(blockSize)) {
+	if !found {
+		return fmt.Sprintf("blockvolume: volume %s was not created in the store; no local store was created; retry the master CreateVolume operation", ref.Name), exitGeometryRefused
+	}
+	if v.SizeBytes == numBlocks*uint64(blockSize) && v.BlockSize == blockSize && v.ChunkBytes == uint64(chunkBlocks)*uint64(blockSize) {
 		return "", 0
 	}
 	return fmt.Sprintf("blockvolume: geometry_mismatch: --durable-blocks %d --durable-blocksize %d --chunk-blocks %d disagree with the volume record of %s (%d blocks of %d bytes, chunk_bytes %d); no local store was created; start it with the record's geometry", numBlocks, blockSize, chunkBlocks, ref.Name, v.SizeBytes/uint64(v.BlockSize), v.BlockSize, v.ChunkBytes), exitGeometryRefused
