@@ -11,10 +11,11 @@ import (
 	"testing"
 )
 
-// Storage's ChunkHead generation is the adapter's synthetic engine-view token,
-// not the filer's HEAD generation. Check the kernel and all consumers outside
-// that engine. Conditional-update implementations and one tagged image-cache
-// short-circuit own comparisons; literal-zero presence probes stay legal.
+// Compare generation scalars throughout product code, including storage.
+// Conditional-update implementations and one tagged image-cache short-circuit
+// own comparisons; literal-zero presence probes stay legal. Scalar aliases are
+// followed, but whole-struct comparisons carrying generations are NOT detected:
+// this syntax guard has no type/dataflow analysis across aggregate values.
 func headGenerationComparisons(name string, src []byte) ([]string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, name, src, 0)
@@ -40,7 +41,7 @@ func headGenerationComparisons(name string, src []byte) ([]string, error) {
 			ast.Inspect(n, func(n ast.Node) bool {
 				switch x := n.(type) {
 				case *ast.SelectorExpr:
-					found = found || x.Sel.Name == "Gen" || x.Sel.Name == "HeadGen" || x.Sel.Name == "ownGen"
+					found = found || x.Sel.Name == "Gen" || x.Sel.Name == "HeadGen" || x.Sel.Name == "ownGen" || x.Sel.Name == "headGen" || x.Sel.Name == "visible"
 				case *ast.Ident:
 					found = found || x.Obj != nil && aliases[x.Obj]
 				}
@@ -130,6 +131,8 @@ func TestHeadGenerationSourceGuardDetector(t *testing.T) {
 		bad bool
 	}{
 		{"package p; func f(h H) bool { return h.Gen == other.Gen }", true},
+		{"package p; func f(h H) bool { return h.headGen == other.Gen }", true},
+		{"package p; func f(h H) bool { return h.visible == other.Gen }", true},
 		{"package p; func f(h H) bool { g := h.Gen; k := g; return k != other.Gen }", true},
 		{"package p; func f(h H) { switch h.Gen { case other.Gen: } }", true},
 		{"package p; func f(h H) bool { return h.Gen == 0 }", false},
@@ -178,7 +181,7 @@ func TestHeadGenerationComparedOnlyByConditionalUpdate(t *testing.T) {
 		}
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == "vendor" || rel == "core/storage" {
+			if d.Name() == ".git" || d.Name() == "vendor" {
 				return filepath.SkipDir
 			}
 			return nil
