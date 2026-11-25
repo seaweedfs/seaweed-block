@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +42,10 @@ const (
 	// OutcomeReadoutUnproven: the lost range cannot be read (missing record
 	// or failed checks); it must never be reported as "no loss".
 	OutcomeReadoutUnproven
+	// OutcomeNotAuthorized: blockmaster did not accept this caller (no
+	// certificate, one not in its role file, or a role that may not do this);
+	// nothing was done.
+	OutcomeNotAuthorized
 )
 
 // ErrConfirmation refuses a forced move locally: the confirmation must be
@@ -76,7 +81,15 @@ func classify(op string, err error) error {
 		return nil
 	}
 	switch status.Code(err) {
-	case codes.FailedPrecondition, codes.InvalidArgument, codes.NotFound, codes.PermissionDenied, codes.Unimplemented:
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return &Error{Outcome: OutcomeNotAuthorized, Op: op, Err: fmt.Errorf("not authorized by blockmaster: %s (its role file must list this certificate's fingerprint with a role allowed to do this)", status.Convert(err).Message())}
+	case codes.Unavailable:
+		// A plaintext client against blockmaster with mutual TLS: the server
+		// closes the connection before its HTTP/2 preface.
+		if os.Getenv(link.EnvTLSCert) == "" && strings.Contains(status.Convert(err).Message(), "error reading server preface") {
+			return &Error{Outcome: OutcomeNotAuthorized, Op: op, Err: fmt.Errorf("blockmaster refused this plaintext connection: it requires mutual TLS; set %s, %s and %s to a certificate in its role file and its CA", link.EnvTLSCert, link.EnvTLSKey, link.EnvTLSCA)}
+		}
+	case codes.FailedPrecondition, codes.InvalidArgument, codes.NotFound, codes.Unimplemented:
 		return &Error{Outcome: OutcomeRefused, Op: op, Err: errors.New(status.Convert(err).Message())}
 	case codes.DataLoss:
 		return &Error{Outcome: OutcomeReadoutUnproven, Op: op, Err: errors.New(status.Convert(err).Message())}
@@ -124,7 +137,7 @@ func New(rpc control.WorkspaceServiceClient) *Client { return &Client{rpc: rpc} 
 // Dial connects to the blockmaster gRPC address (plaintext, as the other
 // operator commands).
 func Dial(addr string) (*Client, error) {
-	conn, err := link.Dial(addr)
+	conn, err := link.DialMasterFromEnv(addr)
 	if err != nil {
 		return nil, err
 	}

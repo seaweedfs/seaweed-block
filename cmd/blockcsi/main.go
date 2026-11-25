@@ -37,6 +37,7 @@ type flags struct {
 	rejectLoopbackPublishTargets bool
 	version                      bool
 	printReadyLine               bool
+	masterTLS                    link.TLSFiles // mutual TLS to blockmaster (all three or none)
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -44,6 +45,9 @@ func parseFlags(args []string) (flags, error) {
 	fs := flag.NewFlagSet("blockcsi", flag.ContinueOnError)
 	fs.StringVar(&f.endpoint, "endpoint", "unix:///var/lib/kubelet/plugins/block.csi.seaweedfs.com/csi.sock", "CSI endpoint, e.g. unix:///path/csi.sock or tcp://127.0.0.1:0")
 	fs.StringVar(&f.masterAddr, "master", "", "blockmaster gRPC address for read-only publish-target lookup")
+	fs.StringVar(&f.masterTLS.Cert, "master-tls-cert", "", "certificate presented to blockmaster (mutual TLS; with --master-tls-key and --master-ca)")
+	fs.StringVar(&f.masterTLS.Key, "master-tls-key", "", "key of --master-tls-cert")
+	fs.StringVar(&f.masterTLS.CA, "master-ca", "", "CA that blockmaster's certificate must verify against")
 	fs.StringVar(&f.nodeID, "node-id", "", "CSI node ID; defaults to hostname")
 	fs.StringVar(&f.iqnPrefix, "iqn-prefix", "iqn.2026-05.io.seaweedfs", "fallback IQN prefix for unstage after plugin restart")
 	fs.BoolVar(&f.pvcUIDLookup, "kubernetes-pvc-uid-lookup", false, "opt-in: resolve PVC UID through the in-cluster Kubernetes API before CreateVolume is sent to blockmaster")
@@ -66,6 +70,12 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.masterAddr == "" && (f.stage2Multipath || f.nvmeReconnectOwner || f.rejectLoopbackPublishTargets || f.pvcUIDLookup || f.swBlockVolumeCRNamespace != "") {
 		return flags{}, fmt.Errorf("--stage2-multipath, --nvme-reconnect-owner, --reject-loopback-publish-targets, --kubernetes-pvc-uid-lookup, and --swblockvolume-cr-namespace require --master")
+	}
+	if f.masterTLS.Enabled() && f.masterAddr == "" {
+		return flags{}, fmt.Errorf("--master-tls-cert, --master-tls-key and --master-ca require --master")
+	}
+	if err := f.masterTLS.Check(); err != nil {
+		return flags{}, err
 	}
 	if f.nodeID == "" {
 		host, err := os.Hostname()
@@ -127,7 +137,14 @@ func run(f flags) int {
 		registrar   blockcsi.VolumeObjectRegistrar
 	)
 	if f.masterAddr != "" {
-		masterConn, err = link.Dial(f.masterAddr)
+		var tls grpc.DialOption
+		if f.masterTLS.Enabled() {
+			if tls, err = link.ClientCredentials(f.masterTLS, ""); err != nil {
+				fmt.Fprintln(os.Stderr, "blockcsi: master TLS:", err)
+				return 1
+			}
+		}
+		masterConn, err = link.DialMaster(f.masterAddr, tls)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockcsi: master dial:", err)
 			return 1

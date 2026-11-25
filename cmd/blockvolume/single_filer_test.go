@@ -76,7 +76,7 @@ func TestChunkWiringRefusesAMultiFilerGroup(t *testing.T) {
 			filerpb.RegisterSeaweedFilerServer(srv, &groupFiler{master: "127.0.0.1:9333." + mport})
 			go func() { _ = srv.Serve(lis) }()
 			t.Cleanup(srv.Stop)
-			w, err := newChunkWiring(chunkFlags{filer: filer, path: defaultChunkPath})
+			w, err := newChunkWiring(chunkFlags{filer: filer, path: defaultChunkPath}, nil)
 			if c.ok {
 				if err != nil {
 					t.Fatalf("one filer refused: %v", err)

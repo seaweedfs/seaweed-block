@@ -61,7 +61,7 @@ type volumeFlags struct {
 // resolveVolumeID resolves a volume name to its layout id at the master.
 // Tests replace it.
 var resolveVolumeID = func(ctx context.Context, master, name string) (layout.VolumeID, error) {
-	conn, err := link.Dial(master)
+	conn, err := link.DialMasterFromEnv(master)
 	if err != nil {
 		return layout.VolumeID{}, err
 	}

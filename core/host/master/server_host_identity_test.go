@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/auth"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/csi"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
@@ -295,7 +296,7 @@ func TestWorkspaceHolderRefusedFromAnotherHostAtRenewAckAndStream(t *testing.T) 
 
 // loopbackPeer is ctx as an RPC from 127.0.0.1 arrives at the master (in-process service calls carry no peer).
 func loopbackPeer(ctx context.Context) context.Context {
-	return peer.NewContext(ctx, &peer.Peer{Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
+	return peer.NewContext(auth.DevCall(ctx), &peer.Peer{Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
 }
 
 // registerWorkspaceHolder registers server on 127.0.0.1 (a workspace holder must be registered).

@@ -77,7 +77,7 @@ func chunkGC(args []string, stdout, stderr io.Writer) int {
 // masterEvidence dials the blockmaster's evidence service (gc and
 // volume-delete read volume status from it).
 func masterEvidence(master string) (control.EvidenceServiceClient, func() error, error) {
-	conn, e := link.Dial(master)
+	conn, e := link.DialMasterFromEnv(master)
 	if e != nil {
 		return nil, nil, e
 	}

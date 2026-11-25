@@ -19,6 +19,7 @@ const (
 	wsExitRefusedLocally   = 2 // bad usage or confirmation; no RPC was sent
 	wsExitUnknown          = 3 // outcome unknown: rerun with the SAME --request-id
 	wsExitReadoutUnproven  = 4 // move issued (or ranges exist) but the lost range is not proven
+	wsExitNotAuthorized    = 5 // blockmaster did not accept this caller; nothing was done
 	wsDefaultTimeout       = 30 * time.Second
 	workspaceForceMoveName = "sw-block ops workspace force-move"
 	workspaceLostRangeName = "sw-block ops workspace lost-range"
@@ -68,7 +69,9 @@ for a forced move whose record is missing or fails its checks.
 exit: 0 done; 1 refused by the master (nothing moved); 2 refused locally (usage
 or confirmation; nothing sent); 3 outcome unknown: rerun with the SAME
 --request-id; 4 the move is issued but its lost range is not proven (or a
-stored range is unreadable).
+stored range is unreadable); 5 not authorized by blockmaster (no client
+certificate where it requires mutual TLS, or a certificate or role its role
+file does not admit; set SW_BLOCK_TLS_CERT, SW_BLOCK_TLS_KEY, SW_BLOCK_TLS_CA).
 `
 
 // workspaceDial is swapped by tests.
@@ -111,6 +114,8 @@ func workspaceExit(o wsclient.Outcome) int {
 		return wsExitRefused
 	case wsclient.OutcomeReadoutUnproven:
 		return wsExitReadoutUnproven
+	case wsclient.OutcomeNotAuthorized:
+		return wsExitNotAuthorized
 	}
 	return wsExitUnknown
 }
