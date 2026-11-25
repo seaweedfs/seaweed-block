@@ -33,6 +33,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"github.com/seaweedfs/seaweed-block/core/transport"
@@ -72,6 +73,7 @@ type flags struct {
 	// External status bind is off by default. Node-loss gates opt in so
 	// blockmaster can probe surviving replicas across Kubernetes nodes.
 	allowExternalStatusBind bool
+	masterTLS               link.TLSFiles // the master link's mutual TLS (phase 0)
 	runtimeRebuildEndpoint  bool
 
 	// iSCSI frontend flags. iscsiListen is the TCP address the iSCSI
@@ -180,6 +182,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.Int64Var(&f.memoryLimitMiB, "memory-limit-mib", 4*storage.DefaultCutPayloadMemoryBudget/(1<<20), "process Go soft memory limit in MiB (0 preserves GOMEMLIMIT); explicit GOMEMLIMIT is preserved unless this flag is set")
 	fs.StringVar(&f.masterAddr, "master", "", "master gRPC address (required)")
 	fs.StringVar(&f.serverID, "server-id", "", "this server identity (required)")
+	fs.StringVar(&f.masterTLS.Cert, "master-tls-cert", "", "this node's certificate (PEM) for mutual TLS to blockmaster; its CN must equal --server-id")
+	fs.StringVar(&f.masterTLS.Key, "master-tls-key", "", "the key of --master-tls-cert (PEM)")
+	fs.StringVar(&f.masterTLS.CA, "master-ca", "", "CA (PEM) blockmaster's certificate must verify against")
 	fs.StringVar(&f.volumeID, "volume-id", "", "served volume (required)")
 	fs.StringVar(&f.replicaID, "replica-id", "", "served replica (required)")
 	fs.StringVar(&f.dataAddr, "data-addr", "", "data-path address (required)")
@@ -292,6 +297,9 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.version {
 		return f, nil
+	}
+	if err := checkMasterTLS(f); err != nil {
+		return flags{}, err
 	}
 	if f.volumeLockDirTestOnly != "" && os.Getenv("INVOCATION_ID") != "" {
 		return flags{}, fmt.Errorf("--%s is test-only and refused under systemd (INVOCATION_ID is set): the one-process-per-host guarantee needs %s", volumeLockDirTestOnlyFlag, durable.HostVolumeLockDir)
@@ -617,7 +625,14 @@ func runVolume(f flags, exits *processExit) int {
 	defer stopProfile()
 	readyCh := make(chan adapter.AssignmentInfo, 16)
 
-	h, err := volume.New(hostConfig(f, readyCh))
+	dialTLS, err := masterDialTLS(f)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "blockvolume:", err)
+		return 1
+	}
+	hc := hostConfig(f, readyCh)
+	hc.MasterTLS = dialTLS
+	h, err := volume.New(hc)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
 		return 1
@@ -690,7 +705,7 @@ func runVolume(f flags, exits *processExit) int {
 		var chunkErr error
 		var chunk chunkWiring
 		if cfg.Impl == durable.ImplWALStoreChunk {
-			chunk, chunkErr = newChunkWiring(f.chunk, f.masterAddr)
+			chunk, chunkErr = newChunkWiring(f.chunk, dialTLS, f.masterAddr)
 			cfg.ChunkCaptureInterval = f.chunk.captureInterval
 			cfg.ChunkCutTimeout = defaultChunkCutTimeout
 			cfg.ChunkMaintenanceInterval = f.chunk.maintenanceInterval

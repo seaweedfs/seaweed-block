@@ -16,7 +16,6 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // P13.6 / INV-WS-CLEAN-MOVE-001 / INV-WS-REVOKE-ACK-001:
@@ -43,7 +42,7 @@ func masterKilledWhileRevoking(t *testing.T, freeze bool) {
 	l := env.sealedLSN(t, e, g)
 	// Freeze only the owned holder so it cannot race an ACK past the
 	// observed Revoking/no-ACK boundary. This is not a graceful master stop.
-	conn, err := grpc.NewClient(env.h.masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(env.h.masterAddr, env.masterDialOption(t, "s1")) // it renews as the holder
 	if err != nil {
 		t.Fatal(err)
 	}

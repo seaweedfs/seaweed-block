@@ -50,7 +50,7 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		return exit
 	}
 	defer closeFn()
-	conn, err := link.Dial(master)
+	conn, err := link.DialMasterFromEnv(master)
 	if err != nil {
 		return chunkResult("volume-delete", nil, err, stdout, stderr)
 	}

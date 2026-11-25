@@ -234,5 +234,17 @@ func (h *Host) statusHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(h.WorkspaceLeaseStatus())
 	})
+	mux.HandleFunc("/status/audit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		dropped, on := h.cfg.Auth.AuditDropped()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			AuditLog bool `json:"audit_log"`
+			Dropped  int  `json:"dropped_or_failed_lines"`
+		}{on, dropped})
+	})
 	return mux
 }

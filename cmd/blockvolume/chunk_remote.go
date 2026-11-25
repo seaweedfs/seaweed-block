@@ -18,6 +18,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"google.golang.org/grpc"
 )
 
 const (
@@ -162,7 +163,7 @@ type chunkWiring struct {
 
 // newChunkWiring dials the filer and refuses unless it is the only filer of
 // its group (chunkstore.CheckSingleFiler).
-func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
+func newChunkWiring(c chunkFlags, masterTLS grpc.DialOption, master ...string) (chunkWiring, error) {
 	client, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{
 		FilerGRPC:   c.filer,
 		Collection:  c.collection,
@@ -186,7 +187,7 @@ func newChunkWiring(c chunkFlags, master ...string) (chunkWiring, error) {
 	if len(master) > 0 {
 		masterAddr = master[0]
 	}
-	maintenance, closeMaintenance, err := newChunkMaintenance(cat, client, c.automaticGC, masterAddr)
+	maintenance, closeMaintenance, err := newChunkMaintenance(cat, client, c.automaticGC, masterAddr, masterTLS)
 	if err != nil {
 		_ = client.Close()
 		return chunkWiring{}, err
