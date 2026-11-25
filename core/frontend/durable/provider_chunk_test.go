@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
@@ -27,8 +28,34 @@ const (
 
 func chunkProvider(t *testing.T, root string, remote storage.ChunkRemote, view *stubView, interval time.Duration) *durable.DurableProvider {
 	t.Helper()
-	_ = remote // legacy callers migrate to an explicit shared layout fixture.
-	return layoutChunkProvider(t, root, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), view, interval)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	if gated, ok := remote.(*gatedRemote); ok {
+		gated.fixture = fixture
+		cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkCaptureInterval: interval}
+		fixture.Configure(&cfg)
+		st, err := fixture.Catalog.Store(fixture.Ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gated.StartStore = st
+		cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return gated, nil }
+		cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			inner, err := chunkstore.NewLayoutRemote(fixture.Catalog, fixture.Ref, me)
+			if err != nil {
+				return nil, err
+			}
+			gated.ChunkRemote = inner
+			return gated, nil
+		}
+		p, err := durable.NewDurableProvider(cfg, view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = p.Close() })
+		return p
+	}
+	_ = remote // plain legacy callers migrate to explicit shared fixtures.
+	return layoutChunkProvider(t, root, fixture, view, interval)
 }
 
 func layoutChunkProvider(t *testing.T, root string, fixture *testutil.LayoutFixture, view *stubView, interval time.Duration) *durable.DurableProvider {

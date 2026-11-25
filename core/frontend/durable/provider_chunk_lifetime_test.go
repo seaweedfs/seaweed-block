@@ -29,6 +29,8 @@ import (
 // gatedRemote wraps a remote with failure and hold points.
 type gatedRemote struct {
 	storage.ChunkRemote
+	layout.StartStore
+	fixture *testutil.LayoutFixture
 
 	mu          sync.Mutex
 	failGetHead int           // fail the next N GetHead calls
@@ -81,6 +83,38 @@ func (g *gatedRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
 		return storage.ChunkHead{}, err
 	}
 	return g.ChunkRemote.GetHead(ctx)
+}
+
+// B Start reads HEAD through StartStore before constructing its content
+// remote. Keep the same failure/hold schedule at that earlier seam.
+func (g *gatedRemote) ReadHead(ctx context.Context) (layout.Head, bool, error) {
+	g.mu.Lock()
+	fail := g.failGetHead > 0
+	if fail {
+		g.failGetHead--
+	}
+	ch := g.holdGetHead
+	g.mu.Unlock()
+	if fail {
+		return layout.Head{}, false, errors.New("injected ReadHead failure")
+	}
+	var h layout.Head
+	var found bool
+	var err error
+	if g.holdAfter {
+		h, found, err = g.StartStore.ReadHead(ctx)
+	}
+	if err := g.hold(ctx, "gethead", ch); err != nil {
+		return layout.Head{}, false, err
+	}
+	if !g.holdAfter {
+		h, found, err = g.StartStore.ReadHead(ctx)
+	}
+	return h, found, err
+}
+
+func (g *gatedRemote) ChunkKey(index uint64, sum [32]byte) string {
+	return g.ChunkRemote.(storage.ChunkKeyer).ChunkKey(index, sum)
 }
 
 func (g *gatedRemote) Put(ctx context.Context, key string, data []byte) error {
@@ -360,7 +394,7 @@ func TestWALStoreChunk_LineageDriftDuringHeldUploadRefusesPublication(t *testing
 	view := v1View()
 	p := chunkProvider(t, t.TempDir(), g, view, 0)
 	s := openRecovered(t, p)
-	claimed := freshV1Claim(t, remote)
+	claimed := layoutHead(t, g.fixture)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -374,8 +408,8 @@ func TestWALStoreChunk_LineageDriftDuringHeldUploadRefusesPublication(t *testing
 	if err := recvErr(t, errc, "CaptureVolume"); !errors.Is(err, storage.ErrChunkCaptureRefused) {
 		t.Fatalf("capture whose lineage moved during upload: %v; want refused", err)
 	}
-	if head, _ := remote.GetHead(context.Background()); head.Gen != claimed.Gen {
-		t.Fatalf("stale lineage published HEAD gen %d", head.Gen)
+	if head := layoutHead(t, g.fixture); head.Current != nil || head.Position != claimed.Position {
+		t.Fatalf("stale lineage published an image: %+v", head)
 	}
 }
 
