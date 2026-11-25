@@ -24,6 +24,7 @@ import (
 // pins it. "GAP" marks a reader that takes an absent HEAD for an empty
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
+	"core/frontend/durable/provider_seal_replay.go readLayoutSeal -> ReadHead":                        "absent, unreadable and foreign layout proof refuse without cached success (TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory)",
 	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                           "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopAbortMustConfirmItsOutcome)",
 	"cmd/blockvolume/workspace_lease.go workspaceLayoutDetachedGeneration -> ReadHead":                "absent refuses ACK (probe TestWorkspaceLayoutDetachedProof)",
 	"core/frontend/chunkstore/layout_store.go ReadHead -> DecodeLayoutHeadEntry":                      "shared canonical entry decoder; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",

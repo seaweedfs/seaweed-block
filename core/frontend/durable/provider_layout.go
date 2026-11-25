@@ -118,8 +118,12 @@ func settleLayoutStop(ctx context.Context, remote layoutStopRemote, me layout.Ho
 			return storage.DetachFenced, storage.ChunkCutResult{}, nil
 		}
 		if h.State == layout.StateDetached {
-			return storage.DetachApplied, storage.ChunkCutResult{H: h.Position, Head: storage.ChunkHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, State: storage.ChunkHeadDetached, DetachedBy: &storage.ChunkDetachedBy{Holder: h.Holder, Epoch: h.Epoch, Gen: h.Gen}}}, nil
+			return storage.DetachApplied, layoutDetachResult(h), nil
 		}
 	}
 	return 0, storage.ChunkCutResult{}, ErrDetachOutcomeUnknown
+}
+
+func layoutDetachResult(h layout.Head) storage.ChunkCutResult {
+	return storage.ChunkCutResult{H: h.Position, Head: storage.ChunkHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, State: storage.ChunkHeadDetached, DetachedBy: &storage.ChunkDetachedBy{Holder: h.Holder, Epoch: h.Epoch, Gen: h.Gen}}}
 }

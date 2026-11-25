@@ -1,0 +1,126 @@
+package durable_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/storage"
+	"testing"
+	"time"
+)
+
+func TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), &layoutProviderBlobs{blobs: map[string][]byte{}}, "/plain-replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
+	if _, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}))
+	var proofErr error
+	var absent, foreign bool
+	open := func() (*durable.DurableProvider, *storage.WALStore) {
+		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: dir, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r1",
+			ChunkLayoutHeadFor: func(string) (layout.StartStore, error) {
+				st, err := cat.Store(ref)
+				if err != nil {
+					return nil, err
+				}
+				return &layoutReplayFault{StartStore: st, err: &proofErr, absent: &absent, foreign: &foreign}, nil
+			},
+			ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+				return chunkstore.NewLayoutRemote(cat, ref, me)
+			},
+		}, view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = p.Close() })
+		s, err := p.EnsureStorage("v1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p, s.(*storage.WALStore)
+	}
+	p, ws := open()
+	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Write(0, bytes.Repeat([]byte{'A'}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	first, last, err := p.DetachVolumePlain(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Head.State != storage.ChunkHeadDetached || first.H != last {
+		t.Fatalf("detach proof %+v last=%d", first, last)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, _ := open()
+	if _, err := restarted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrDetached) {
+		t.Fatalf("same epoch restart: %v", err)
+	}
+	replay, again, err := restarted.DetachVolumePlain(ctx, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.Head.Gen != first.Head.Gen || replay.H != first.H || again != last {
+		t.Fatalf("replay changed detached proof: %+v %d", replay, again)
+	}
+	for _, mode := range []string{"unreadable", "absent", "foreign"} {
+		proofErr = nil
+		absent = false
+		foreign = false
+		switch mode {
+		case "unreadable":
+			proofErr = errors.New("fixture filer unavailable")
+		case "absent":
+			absent = true
+		case "foreign":
+			foreign = true
+		}
+		if _, _, err := restarted.DetachVolumePlain(ctx, "v1"); err == nil {
+			t.Fatalf("%s detached proof returned cached success", mode)
+		}
+	}
+
+}
+
+type layoutReplayFault struct {
+	layout.StartStore
+	err             *error
+	absent, foreign *bool
+}
+
+func (s *layoutReplayFault) ReadHead(ctx context.Context) (layout.Head, bool, error) {
+	if *s.err != nil {
+		return layout.Head{}, false, *s.err
+	}
+	if *s.absent {
+		return layout.Head{}, false, nil
+	}
+	h, found, err := s.StartStore.ReadHead(ctx)
+	if *s.foreign {
+		h.ClaimID = "foreign"
+	}
+	return h, found, err
+}
