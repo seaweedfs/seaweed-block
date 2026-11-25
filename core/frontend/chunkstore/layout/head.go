@@ -478,6 +478,7 @@ type HeadStore interface {
 // update. A lost reply is resolved by a re-run with the same session: it
 // finds snap(session) and returns without writing. An absent HEAD refuses
 // (no path creates a HEAD here).
+// model: SnapshotRemoval.Begin
 func RunBegin(ctx context.Context, st HeadStore, me HolderID, session string) (Head, error) {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.Begin(me, session) })
 }
@@ -510,6 +511,7 @@ func (h Head) Abort(me HolderID, session string) (next Head, changed bool, err e
 
 // RunAbort reads HEAD, applies Abort and commits it by one conditional
 // update. An absent HEAD refuses.
+// model: SnapshotRemoval.Abort
 func RunAbort(ctx context.Context, st HeadStore, me HolderID, session string) (Head, error) {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.Abort(me, session) })
 }

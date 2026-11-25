@@ -55,6 +55,7 @@ const maxEnsureRounds = 8
 // that sets the session and clears any mark, so a cleaning's planned mark
 // or delete of it fails its own condition from then on. An entry already
 // written by this session and unmarked needs nothing.
+// model: SnapshotRemoval.Upload
 func EnsureObject(ctx context.Context, os ObjectStore, rel string, data []byte, session string) error {
 	if session == "" {
 		return errors.New("layout: EnsureObject needs a session")

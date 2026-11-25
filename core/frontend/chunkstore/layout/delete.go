@@ -166,6 +166,7 @@ func RunReleaseDependent(ctx context.Context, source HeadStore, target VolumeID)
 // holder uploaded before the reservation escapes the listing. A re-run on
 // a deleted HEAD lists and deletes again: the operator's sweep for a late
 // object of a dead holder.
+// model: RestoreTarget.DeleteTarget
 func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id VolumeID, sources []HeadStore, os ObjectStore, list func(context.Context) ([]string, error)) error {
 	if auth == nil || os == nil || list == nil {
 		return errors.New("layout: delete needs the master's delete authority, an object store and a lister")
@@ -214,6 +215,8 @@ func DeleteVolume(ctx context.Context, st HeadStore, auth DeleteAuthority, id Vo
 // target that still names the source, and one whose HEAD appeared before
 // the tombstone, are refused (ErrTargetLive); the source is not written
 // then.
+// model: RestoreTarget.OpTomb
+// model: RestoreTarget.OpRelease
 func OperatorReleaseDependent(ctx context.Context, source HeadStore, target TargetStore, r *Reader, targetID VolumeID) (Head, error) {
 	sh, found, err := source.ReadHead(ctx)
 	if err != nil {

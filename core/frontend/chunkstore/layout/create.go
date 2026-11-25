@@ -68,6 +68,8 @@ func CreateTarget(ctx context.Context, src StartStore, srcReader *Reader, snapsh
 	return createVolume(ctx, st, v, &root)
 }
 
+// model: RestoreTarget.CreateVol
+// model: RestoreTarget.CreateHead
 func createVolume(ctx context.Context, st NewVolumeStore, v Volume, current *RootName) (Head, error) {
 	if st == nil {
 		return Head{}, errors.New("layout: create needs the volume's store")

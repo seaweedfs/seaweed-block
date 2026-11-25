@@ -52,6 +52,7 @@ func (h Head) Claim(me HolderID) (next Head, changed bool, err error) {
 // RunClaim reads HEAD, applies Claim, waits for the old lease's end (the
 // check runs after the read and before the update), and commits by one
 // conditional update. An absent HEAD refuses.
+// model: SnapshotRemoval.Claim
 func RunClaim(ctx context.Context, st HeadStore, lease LeaseWait, me HolderID, pre ...func(Head) error) (Head, error) {
 	if lease == nil {
 		return Head{}, errors.New("layout: Claim needs a lease wait")

@@ -80,6 +80,8 @@ func (h Head) AddDependent(name string, target Dependent, root RootName) (next H
 }
 
 // RunDeleteSnapshot applies DeleteSnapshot by one conditional update.
+// model: RestoreTarget.DeleteSnapS
+// model: SnapshotRemoval.DeleteSnap
 func RunDeleteSnapshot(ctx context.Context, st HeadStore, name string) (Head, error) {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.DeleteSnapshot(name) })
 }
@@ -87,6 +89,7 @@ func RunDeleteSnapshot(ctx context.Context, st HeadStore, name string) (Head, er
 // RunAddDependent checks that the named snapshot's root names no chunk of
 // another volume (read through r, the source's reader), then records the
 // dependent by one conditional update conditional on that root.
+// model: RestoreTarget.AddDep
 func RunAddDependent(ctx context.Context, st HeadStore, r *Reader, name string, target Dependent) (Head, error) {
 	h, found, err := st.ReadHead(ctx)
 	if err != nil {

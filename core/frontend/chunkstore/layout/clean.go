@@ -51,11 +51,13 @@ func (h Head) EndClean(me HolderID, session string) (next Head, changed bool, er
 }
 
 // RunBeginClean applies BeginClean by one conditional update.
+// model: SnapshotRemoval.BeginClean
 func RunBeginClean(ctx context.Context, st HeadStore, me HolderID, session string) (Head, error) {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.BeginClean(me, session) })
 }
 
 // RunEndClean applies EndClean by one conditional update.
+// model: SnapshotRemoval.EndClean
 func RunEndClean(ctx context.Context, st HeadStore, me HolderID, session string) (Head, error) {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h.EndClean(me, session) })
 }
