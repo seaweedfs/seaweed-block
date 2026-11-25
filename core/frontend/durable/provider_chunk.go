@@ -127,7 +127,9 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
-	if errors.Is(err, storage.ErrChunkLayerFenced) || finalLayoutStartRefusal(err) {
+	if (errors.Is(err, storage.ErrChunkLayerFenced) &&
+		(!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim))) ||
+		finalLayoutStartRefusal(err) {
 		p.endChunkStartup(h, gen, err)
 	}
 	return err == nil, err
