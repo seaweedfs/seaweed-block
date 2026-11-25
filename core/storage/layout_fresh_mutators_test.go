@@ -28,7 +28,7 @@ var walStoreMethods = map[string]string{
 	"SetRecycleFloorSource": "control", "AllowBaseRetirementV3": "control", "DeferBaseRetirementV3": "control",
 	"DisableAutoFlushForRecoveryTest": "test control", "ResetFlusherForMeasurement": "test control", "Sync": "control", "Close": "control",
 
-	"AllBlocks": "read", "AppliedLSNs": "read", "BlockSize": "read", "Boundaries": "read", "CheckpointLSN": "read",
+	"AllBlocks": "read", "AppliedLSNs": "read", "BlockSize": "read", "ChunkBlocks": "read (immutable local map shape)", "Boundaries": "read", "CheckpointLSN": "read",
 	"CheckpointLSNForPOC": "read", "CheckpointPersistence": "read", "ChunkMapStatsV3": "read", "DataSyncPolicy": "read",
 	"DurabilityLatency": "read", "FlushCount": "read", "FlusherInstrumentation": "read", "HolesSuspected": "read",
 	"InstalledBaseLSN": "read", "LayoutIdentity": "read", "NextLSN": "read", "NumBlocks": "read",
