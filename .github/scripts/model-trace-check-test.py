@@ -13,24 +13,24 @@ spec.loader.exec_module(checker)
 
 
 class ModelTraceTests(unittest.TestCase):
-    mapping = {"core/a.go": {"Kernel.Begin", "Kernel.Commit"}, "core/b.go": {"Lease.Renew"}}
+    mapping = {"core/a.go": {"EngineAdapter.Begin", "EngineAdapter.NoOpCut"}, "core/b.go": {"MoveAdmission.Revoke"}}
 
     def test_each_mapped_file_needs_its_own_citation(self):
-        problems = checker.check("Kernel.Begin", ["core/a.go", "core/b.go"], self.mapping)
+        problems = checker.check("EngineAdapter.Begin", ["core/a.go", "core/b.go"], self.mapping)
         self.assertEqual(len(problems), 1)
         self.assertIn("core/b.go", problems[0])
-        self.assertEqual(checker.check("Kernel.Begin; Lease.Renew", list(self.mapping), self.mapping), [])
+        self.assertEqual(checker.check("EngineAdapter.Begin; MoveAdmission.Revoke", list(self.mapping), self.mapping), [])
 
     def test_mapped_file_refuses_free_text_wrong_actions_and_lookalikes(self):
-        for model in ("exhausted", "Kernel.Unknown", "Other.Begin", "Kernel.BeginExtra",
-                      "docs/Kernel.Begin", "example: Kernel.Begin", "NONE: no state changes",
-                      "NONE (pure function of Other)", "NONE (pure function of Kernel) extra"):
+        for model in ("exhausted", "EngineAdapter.Unknown", "Other.Begin", "EngineAdapter.BeginExtra",
+                      "docs/EngineAdapter.Begin", "example: EngineAdapter.Begin", "NONE: no state changes",
+                      "NONE (pure function of Other)", "NONE (pure function of EngineAdapter) extra"):
             with self.subTest(model=model):
                 self.assertEqual(len(checker.check(model, ["core/a.go"], self.mapping)), 1)
 
     def test_pure_function_exception_is_module_specific(self):
-        self.assertEqual(checker.check("NONE (pure function of Kernel)", ["core/a.go"], self.mapping), [])
-        self.assertEqual(len(checker.check("NONE (pure function of Kernel)", ["core/b.go"], self.mapping)), 1)
+        self.assertEqual(checker.check("NONE (pure function of EngineAdapter)", ["core/a.go"], self.mapping), [])
+        self.assertEqual(len(checker.check("NONE (pure function of EngineAdapter)", ["core/b.go"], self.mapping)), 1)
 
     def test_unmapped_files_keep_existing_policy(self):
         self.assertEqual(checker.check("existing prose", ["docs/a.md", "core/a.go.bak"], self.mapping), [])
@@ -38,23 +38,23 @@ class ModelTraceTests(unittest.TestCase):
     def test_cli_checks_nul_paths_and_model_citations(self):
         with tempfile.TemporaryDirectory() as tmp:
             mapping = Path(tmp) / "map.tsv"
-            mapping.write_text("# exact paths\ncore/a.go\tKernel.Begin\n", encoding="utf-8")
+            mapping.write_text("# exact paths\ncore/a.go\tEngineAdapter.Begin\n", encoding="utf-8")
             def run(model, paths):
                 return subprocess.run([sys.executable, str(SCRIPT), str(mapping), model],
                                       input=paths, capture_output=True).returncode
-            self.assertEqual(run("Kernel.Begin", b"core/a.go\0"), 0)
+            self.assertEqual(run("EngineAdapter.Begin", b"core/a.go\0"), 0)
             self.assertEqual(run("unstructured prose", b"core/a.go\0"), 1)
-            self.assertEqual(run("Kernel.Begin", b"core/a.go"), 2)
-            self.assertEqual(run("Kernel.Begin", b"\0"), 2)
+            self.assertEqual(run("EngineAdapter.Begin", b"core/a.go"), 2)
+            self.assertEqual(run("EngineAdapter.Begin", b"\0"), 2)
 
     def test_mapping_refuses_missing_empty_and_malformed_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             mapping = Path(tmp) / "map.tsv"
             with self.assertRaises(OSError):
                 checker.read_mapping(mapping)
-            for content in ("# not populated\n", "core/a.go Kernel.Begin\n",
-                            "../core/a.go\tKernel.Begin\n", "core//a.go\tKernel.Begin\n",
-                            "core/a.go\tKernel\n", "core/a.go\tKernel.Begin extra\n"):
+            for content in ("# not populated\n", "core/a.go EngineAdapter.Begin\n",
+                            "../core/a.go\tEngineAdapter.Begin\n", "core//a.go\tEngineAdapter.Begin\n",
+                            "core/a.go\tKernel\n", "core/a.go\tEngineAdapter.Begin extra\n"):
                 with self.subTest(content=content):
                     mapping.write_text(content, encoding="utf-8")
                     with self.assertRaises(ValueError):

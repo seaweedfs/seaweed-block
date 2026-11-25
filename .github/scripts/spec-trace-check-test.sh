@@ -136,16 +136,16 @@ expect_map() {
 		fail=1
 	fi
 }
-printf 'core/x/s.go\tKernel.Begin\ncore/y/s.go\tLease.Renew\n' >"$tmp/map.tsv"
-expect_map 0 "mapped action" "Kernel.Begin" M core/x/s.go
-expect_map 0 "mapped pure function" "NONE (pure function of Kernel)" M core/x/s.go
-expect_map 0 "all mapped modules cited" "Kernel.Begin; Lease.Renew" M core/x/s.go M core/y/s.go
-expect_map 1 "mapped file rejects old prose" "docs/spec/Kernel.tla, exhausted" M core/x/s.go
+printf 'core/x/s.go\tEngineAdapter.Begin\ncore/y/s.go\tMoveAdmission.Revoke\n' >"$tmp/map.tsv"
+expect_map 0 "mapped action" "EngineAdapter.Begin" M core/x/s.go
+expect_map 0 "mapped pure function" "NONE (pure function of EngineAdapter)" M core/x/s.go
+expect_map 0 "all mapped modules cited" "EngineAdapter.Begin; MoveAdmission.Revoke" M core/x/s.go M core/y/s.go
+expect_map 1 "mapped file rejects old prose" "docs/spec/EngineAdapter.tla, exhausted" M core/x/s.go
 expect_map 1 "deleted mapped file still needs model" "NONE: deletion has no new code" D core/x/s.go
-expect_map 1 "one citation cannot cover another module" "Kernel.Begin" M core/x/s.go M core/y/s.go
-expect_map 0 "unmapped file keeps old policy" "docs/spec/Kernel.tla, exhausted" M core/z/s.go
+expect_map 1 "one citation cannot cover another module" "EngineAdapter.Begin" M core/x/s.go M core/y/s.go
+expect_map 0 "unmapped file keeps old policy" "docs/spec/EngineAdapter.tla, exhausted" M core/z/s.go
 printf '# no canonical rows yet\n' >"$tmp/map.tsv"
-expect_map 2 "empty map is not silently disabled" "Kernel.Begin" M core/x/s.go
+expect_map 2 "empty map is not silently disabled" "EngineAdapter.Begin" M core/x/s.go
 
 [[ $fail == 0 ]] && echo "spec-trace self-test: ok"
 exit $fail
