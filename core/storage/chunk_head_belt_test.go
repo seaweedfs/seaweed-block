@@ -2,13 +2,14 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 )
 
 // The fake's direct root replacement models a delayed request accepted at a
 // second serialization point; it deliberately bypasses the first filer's CAS.
-func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
+func TestHeadBeltOldCASUnconfirmedKeepsSessionAndFrontier(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	layer := mustAttach(t, s, f, ctConfig(1))
@@ -20,6 +21,7 @@ func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.afterCAS = func(f *fakeChunkRemote) { f.failGet = errors.New("confirmation unavailable near lease horizon") }
+	mark := len(f.stats().ops)
 	_, err := layer.Cut(ctTimeout(t))
 	if err == nil {
 		t.Fatal("unconfirmed CAS returned success")
@@ -27,8 +29,10 @@ func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
 	if layer.RemoteLSN() != 0 {
 		t.Fatal("unconfirmed CAS advanced remoteLSN", layer.RemoteLSN())
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("unconfirmed CAS removed its intent")
+	// The CAS landed (its commit ended the session at the remote) but the
+	// layer could not confirm it: the layer must not Abort.
+	if n := countOps(opsSince(f, mark), "abort:"); n != 0 {
+		t.Fatal("unconfirmed CAS aborted its session")
 	}
 	if got, err := s.Read(0); err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("local acknowledged bytes changed: %v", err)
@@ -36,8 +40,8 @@ func TestHeadBeltOldCASUnconfirmedKeepsIntentsAndFrontier(t *testing.T) {
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("Close removed unconfirmed publication roots")
+	if n := countOps(opsSince(f, mark), "abort:"); n != 0 {
+		t.Fatal("Close aborted an unconfirmed commit's session")
 	}
 }
 
@@ -63,8 +67,9 @@ func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
 	if layer.RemoteLSN() != frontier {
 		t.Fatal("refused cut advanced remote frontier")
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("fenced cut removed its intent")
+	// fenced: what it staged is dropped, and with it its own session
+	if f.openSession() != "" {
+		t.Fatal("fenced cut kept its session")
 	}
 	calls := f.stats().cas
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || f.stats().cas != calls {
@@ -73,8 +78,8 @@ func TestHeadBeltLowerEpochConflictFencesWithoutCleanup(t *testing.T) {
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("Close removed fenced publication roots")
+	if f.openSession() != "" {
+		t.Fatal("a session is open after the fenced layer closed")
 	}
 }
 
@@ -91,8 +96,8 @@ func TestHeadBeltEmptyBaseForeignPublicationFences(t *testing.T) {
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || !layer.Fenced() {
 		t.Fatalf("empty-base foreign publication not fenced: %v", err)
 	}
-	if layer.RemoteLSN() != 0 || len(liveIntents(t, f)) == 0 {
-		t.Fatal("fenced first cut settled or deleted intents")
+	if layer.RemoteLSN() != 0 || f.openSession() != "" {
+		t.Fatal("fenced first cut settled, or kept its session")
 	}
 	calls := f.stats().cas
 	if _, err := layer.Cut(ctTimeout(t)); !errors.Is(err, ErrChunkLayerFenced) || f.stats().cas != calls {
@@ -101,7 +106,40 @@ func TestHeadBeltEmptyBaseForeignPublicationFences(t *testing.T) {
 	if err := layer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("Close removed first-cut intents")
+	if f.openSession() != "" {
+		t.Fatal("a session is open after the fenced layer closed")
+	}
+}
+
+type rootOnlyBeltRemote struct {
+	*fakeChunkRemote
+	rootReads int
+}
+
+func (r *rootOnlyBeltRemote) GetHeadRoot(ctx context.Context) (ChunkHead, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rootReads++
+	return ChunkHead{Gen: r.head.Gen, Epoch: r.head.Epoch, Holder: r.head.Holder}, nil
+}
+
+func TestHeadBeltConfirmationUsesOnlyRoot(t *testing.T) {
+	s, _ := newChunkTestStore(t)
+	f := newFakeChunkRemote()
+	r := &rootOnlyBeltRemote{fakeChunkRemote: f}
+	layer := mustAttach(t, s, r, ctConfig(1))
+	if _, err := s.Write(0, makeBlock(4096, 0x42)); err != nil {
+		t.Fatal(err)
+	}
+	f.afterCAS = func(f *fakeChunkRemote) { f.failGet = errors.New("full manifest read unavailable") }
+	result, err := layer.Cut(ctTimeout(t))
+	if err != nil {
+		t.Fatalf("root confirmation depended on full manifest read: %v", err)
+	}
+	if r.rootReads != 1 || result.H != 1 || layer.RemoteLSN() != 1 {
+		t.Fatalf("root confirmation reads=%d result=%d remote=%d", r.rootReads, result.H, layer.RemoteLSN())
+	}
+	if got := f.imageOf(t, f.stats().head); !bytes.Equal(got[:4096], makeBlock(4096, 0x42)) {
+		t.Fatal("confirmed wrong image")
 	}
 }

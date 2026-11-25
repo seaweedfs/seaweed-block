@@ -70,7 +70,7 @@ func TestOfflineSealUsesCallerDeadline(t *testing.T) {
 type cancelSealRemote struct {
 	storage.ChunkRemote
 	keyer   storage.ChunkKeyer
-	aborter storage.CutAborter
+	aborter storage.ChunkRemote
 	once    sync.Once
 	cancel  context.CancelFunc
 }
@@ -78,7 +78,7 @@ type cancelSealRemote struct {
 func (r *cancelSealRemote) ChunkKey(idx uint64, sum [32]byte) string {
 	return r.keyer.ChunkKey(idx, sum)
 }
-func (r *cancelSealRemote) AbortCut() { r.aborter.AbortCut() }
+func (r *cancelSealRemote) Abort() { r.aborter.Abort() }
 
 func (r *cancelSealRemote) Put(ctx context.Context, key string, b []byte) error {
 	r.once.Do(r.cancel)

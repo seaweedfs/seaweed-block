@@ -39,21 +39,19 @@ func hotChunkKeys(indices map[uint64]bool, recent map[uint64]uint64) []uint64 {
 
 // Preallocate metadata keys once per round. Each worker owns one immutable
 // image through PUT/retry, then reads its next candidate independently of slow
-// workers. One durable intent covers all candidate keys before the first PUT;
-// unused keys are harmless and retain no payload memory.
+// workers. The holder's session is begun before the first PUT; unused keys
+// are harmless and retain no payload memory.
 //
 // staging says the batch is a staging round (before the barrier): each chunk
 // it finishes is counted in Stats.StagedChunks as it finishes.
-func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, head chunkHead, staging bool, read func(context.Context, uint64) (capturedChunk, error)) ([]capturedChunk, []string, error) {
+func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, head chunkHead, staging bool, read func(context.Context, uint64) (capturedChunk, error)) ([]capturedChunk, error) {
 	out := make([]capturedChunk, len(batch))
 	keys := make([]string, len(batch))
 	for i, idx := range batch {
 		keys[i] = l.newKey(idx)
 	}
-	var intents []string
 	var once sync.Once
-	var intent string
-	var intentErr error
+	var beginErr error
 	put := l.beginPutRound(len(batch))
 	err := l.uploadBatch(ctx, len(batch), func(ctx context.Context, i int) error {
 		c, err := read(ctx, batch[i])
@@ -63,16 +61,10 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 		ref, had := head.Chunks[c.idx]
 		if !c.zero && !(had && ref.SHA256 == c.sum && !l.owning(c.idx)) {
 			c.key, c.size = l.keyFor(c.idx, c.sum, keys[i]), len(c.data)
-			once.Do(func() {
-				intent, intentErr = l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
-				if intentErr == nil {
-					intents = append(intents, intent)
-				}
-			})
-			if intentErr != nil {
-				return fmt.Errorf("storage: capture intent: %w: %w", errChunkRemoteUnavailable, intentErr)
+			once.Do(func() { _, beginErr = l.remote.Begin(ctx) })
+			if beginErr != nil {
+				return fmt.Errorf("storage: capture session: %w: %w", errChunkRemoteUnavailable, beginErr)
 			}
-			c.intent = intent
 			if err := l.putCapturedWith(ctx, c.key, c.data, func(ctx context.Context) error { return put(ctx, i, c.key, c.data) }); err != nil {
 				return fmt.Errorf("storage: capture upload: %w", errors.Join(errChunkRemoteUnavailable, errCutUpload, err))
 			}
@@ -83,13 +75,13 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 		return nil
 	})
 	if err != nil {
-		return nil, intents, err
+		return nil, err
 	}
-	return out, intents, nil
+	return out, nil
 }
 
-func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, versions map[uint64]uint64, head chunkHead, st *chunkCutStats) (map[uint64]stagedChunk, []string, error) {
-	out, intents, err := l.streamCutPayloads(ctx, batch, head, true, func(ctx context.Context, idx uint64) (capturedChunk, error) {
+func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, versions map[uint64]uint64, head chunkHead, st *chunkCutStats) (map[uint64]stagedChunk, error) {
+	out, err := l.streamCutPayloads(ctx, batch, head, true, func(ctx context.Context, idx uint64) (capturedChunk, error) {
 		data, err := l.readChunk(idx)
 		if err != nil {
 			return capturedChunk{}, err
@@ -100,7 +92,7 @@ func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, 
 		return capturedChunk{idx: idx, version: versions[idx], data: data, sum: sha256.Sum256(data), zero: isAllZero(data)}, nil
 	})
 	if err != nil {
-		return nil, intents, err
+		return nil, err
 	}
 	chunks := make(map[uint64]stagedChunk, len(out))
 	for _, c := range out {
@@ -110,7 +102,7 @@ func (l *chunkLayerImpl) stagePayloadRound(ctx context.Context, batch []uint64, 
 			st.UploadedBytes += int64(c.size)
 		}
 	}
-	return chunks, intents, nil
+	return chunks, nil
 }
 
 // Only immutable metadata survives an attempt. The intent remains a GC root

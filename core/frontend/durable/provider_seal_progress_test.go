@@ -19,7 +19,7 @@ type sealProgressRemote struct {
 	storage.ChunkRemote
 	layoutRemote *chunkstore.LayoutRemote
 	keyer        storage.ChunkKeyer
-	aborter      storage.CutAborter
+	aborter      storage.ChunkRemote
 	mu           sync.Mutex
 	expire       context.CancelCauseFunc
 	keys         []string
@@ -38,7 +38,7 @@ func (r *sealProgressRemote) ReadHead(ctx context.Context) (layout.Head, error) 
 func (r *sealProgressRemote) ChunkKey(idx uint64, sum [32]byte) string {
 	return r.keyer.ChunkKey(idx, sum)
 }
-func (r *sealProgressRemote) AbortCut() { r.aborter.AbortCut() }
+func (r *sealProgressRemote) Abort() { r.aborter.Abort() }
 
 func (r *sealProgressRemote) Put(ctx context.Context, key string, b []byte) error {
 	if err := ctx.Err(); err != nil {
