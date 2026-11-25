@@ -22,7 +22,7 @@ type readyGate struct{}
 func (readyGate) ProbePromotionCandidates(_ string, _ authority.AuthorityBasis, cs []authority.ReplicaCandidate) (master.PromotionProbeResult, error) {
 	res := master.PromotionProbeResult{AckProfile: "sync_all", SyncAckKnown: true}
 	for _, c := range cs {
-		res.Candidates = append(res.Candidates, master.PromotionCandidateEvidence{ReplicaID: c.ReplicaID, Ready: true})
+		res.Candidates = append(res.Candidates, master.PromotionCandidateEvidence{ReplicaID: c.ReplicaID, Ready: true, DurableLSN: 1})
 	}
 	return res, nil
 }
