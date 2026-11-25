@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -253,30 +256,30 @@ func TestWorkspaceHostStopResumedClearsOnlyTheLatestAttempt(t *testing.T) {
 	}
 }
 
-// detachFaultRemote makes the next detach fail one way.
+// detachFaultRemote makes the next B-layout detach fail one way.
 type detachFaultRemote struct {
-	*storage.MemChunkRemote
-	mu         sync.Mutex
-	casMode    string // "refuse": precondition, not applied; "lost": not applied, error
-	getHeadErr error
+	*chunkstore.LayoutRemote
+	mu       sync.Mutex
+	casMode  string // "refuse": precondition, not applied; "lost": not applied, error
+	abortErr error
 }
 
 var errInjectedRemote = errors.New("injected remote fault")
 
-func (r *detachFaultRemote) set(mode string, headErr error) {
+func (r *detachFaultRemote) set(mode string, abortErr error) {
 	r.mu.Lock()
-	r.casMode, r.getHeadErr = mode, headErr
+	r.casMode, r.abortErr = mode, abortErr
 	r.mu.Unlock()
 }
 
-func (r *detachFaultRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+func (r *detachFaultRemote) AbortOpenSession(ctx context.Context) (string, error) {
 	r.mu.Lock()
-	err := r.getHeadErr
+	err := r.abortErr
 	r.mu.Unlock()
 	if err != nil {
-		return storage.ChunkHead{}, err
+		return "", err
 	}
-	return r.MemChunkRemote.GetHead(ctx)
+	return r.LayoutRemote.AbortOpenSession(ctx)
 }
 
 func (r *detachFaultRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
@@ -290,28 +293,38 @@ func (r *detachFaultRemote) CASHead(ctx context.Context, expected storage.ChunkH
 	case "lost":
 		return 0, errInjectedRemote
 	}
-	return r.MemChunkRemote.CASHead(ctx, expected, next)
+	return r.LayoutRemote.CASHead(ctx, expected, next)
 }
 
 // detachHost is a leased workspace host whose provider reports detaches to
 // it through both hooks, as blockvolume wires them.
 type detachHost struct {
-	h      *Host
-	p      *durable.DurableProvider
-	wire   *runtimeLeaseServer
-	remote *detachFaultRemote
-	done   <-chan error
+	h       *Host
+	p       *durable.DurableProvider
+	wire    *runtimeLeaseServer
+	remote  *detachFaultRemote
+	fixture *testutil.LayoutFixture
+	done    <-chan error
 }
 
 func newDetachHost(t *testing.T) *detachHost {
 	t.Helper()
 	var stopped atomic.Bool
-	d := &detachHost{wire: &runtimeLeaseServer{ttl: 30 * time.Second, stopped: &stopped}, remote: &detachFaultRemote{MemChunkRemote: storage.NewMemChunkRemote()}}
+	d := &detachHost{wire: &runtimeLeaseServer{ttl: 30 * time.Second, stopped: &stopped}, remote: &detachFaultRemote{}, fixture: testutil.NewLayoutFixture(t, "v1", 64, 8)}
 	d.h = workspaceRuntimeHost(t, runtimeWire(t, d.wire), true)
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8, ChunkHolder: "node-a/r1",
-		ChunkRemoteFor:       func(string) (storage.ChunkRemote, error) { return d.remote, nil },
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8, ChunkHolder: "node-a/r1",
 		OnChunkDetach:        d.h.WorkspaceStopPending,
-		OnChunkDetachResumed: d.h.WorkspaceStopResumed}, d.h.ProjectionView())
+		OnChunkDetachResumed: d.h.WorkspaceStopResumed}
+	d.fixture.Configure(&cfg)
+	cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+		inner, err := chunkstore.NewLayoutRemote(d.fixture.Catalog, d.fixture.Ref, me)
+		if err != nil {
+			return nil, err
+		}
+		d.remote.LayoutRemote = inner
+		return d.remote, nil
+	}
+	p, err := durable.NewDurableProvider(cfg, d.h.ProjectionView())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +350,10 @@ func newDetachHost(t *testing.T) *detachHost {
 				return 0, err
 			}
 			stopped.Store(true)
-			head, err := d.remote.MemChunkRemote.GetHead(c)
+			head, found, err := d.fixture.Catalog.ReadHead(c, d.fixture.Ref)
+			if err == nil && !found {
+				err = errors.New("HEAD absent")
+			}
 			return head.Gen, err
 		})
 	}, func() { _ = p.Close() })
@@ -433,13 +449,14 @@ func TestWorkspaceHostFailedDetachStopPendingByOutcome(t *testing.T) {
 	t.Run("fenced-stays-pending", func(t *testing.T) {
 		d := newDetachHost(t)
 		ctx := context.Background()
-		cur, err := d.remote.MemChunkRemote.GetHead(ctx)
+		cur := runtimeLayoutHead(t, d.fixture)
+		newer := cur
+		newer.Epoch, newer.Holder, newer.ClaimID = max(cur.Epoch, 3)+1, "another-holder", "foreign-claim" // above assignment epoch 3
+		st, err := d.fixture.Catalog.Store(d.fixture.Ref)
 		if err != nil {
 			t.Fatal(err)
 		}
-		newer := cur
-		newer.Epoch, newer.Holder = max(cur.Epoch, 3)+1, "another-holder" // above the host's assignment epoch 3
-		if _, err := d.remote.MemChunkRemote.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, newer); err != nil {
+		if err := st.UpdateHead(ctx, cur.Gen, newer); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, err := d.p.DetachVolume(ctx, "v1"); !errors.Is(err, storage.ErrChunkLayerFenced) {
