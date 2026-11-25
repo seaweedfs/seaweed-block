@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -18,14 +20,17 @@ func TestChunkAssignmentTimeoutExposesCurrentRecoveryOutcome(t *testing.T) {
 	logs := &lockedLog{}
 	captureWriteLogs(t, logs)
 	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 		BlockSize: 4096, ChunkBlocks: 4, ChunkAssignmentTimeout: time.Millisecond,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
-			t.Error("remote reached without authority")
-			return storage.NewMemChunkRemote(), nil
-		},
-	}, v)
+	}
+	testutil.NewLayoutFixture(t, "v1", 64, 4).Configure(&cfg)
+	start := cfg.ChunkLayoutHeadFor
+	cfg.ChunkLayoutHeadFor = func(name string) (layout.StartStore, error) {
+		t.Error("layout reached without authority")
+		return start(name)
+	}
+	p, err := durable.NewDurableProvider(cfg, v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +129,7 @@ func TestChunkStartupRetainedDispositionWinsExpiredAttachContext(t *testing.T) {
 			waiting.Healthy = false
 			view.set(waiting)
 			var entered atomic.Bool
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			cfg := durable.ProviderConfig{
 				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 				ChunkAssignmentTimeout: 250 * time.Millisecond,
 				ChunkAttachCheck: func(ctx context.Context, _ string, _ durable.ChunkGeometry) error {
@@ -132,11 +137,14 @@ func TestChunkStartupRetainedDispositionWinsExpiredAttachContext(t *testing.T) {
 					<-ctx.Done()
 					return tc.err
 				},
-				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
-					t.Error("retained attach reached remote")
-					return storage.NewMemChunkRemote(), nil
-				},
-			}, view)
+			}
+			testutil.NewLayoutFixture(t, "v1", 64, 4).Configure(&cfg)
+			start := cfg.ChunkLayoutHeadFor
+			cfg.ChunkLayoutHeadFor = func(name string) (layout.StartStore, error) {
+				t.Error("retained attach reached layout")
+				return start(name)
+			}
+			p, err := durable.NewDurableProvider(cfg, view)
 			if err != nil {
 				t.Fatal(err)
 			}
