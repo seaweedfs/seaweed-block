@@ -553,7 +553,6 @@ stateDiagram-v2
 
 ## Part B. Invariant ledger
 
-364 rows: 293 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 349 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
