@@ -17,9 +17,17 @@ type MemoryBlobs struct {
 	mu   sync.Mutex
 	next uint64
 	data map[string][]byte
+	// PutHook can hold or refuse a payload upload in a test. Set it before
+	// starting concurrent provider work.
+	PutHook func(context.Context) error
 }
 
-func (b *MemoryBlobs) Put(_ context.Context, data []byte) (string, error) {
+func (b *MemoryBlobs) Put(ctx context.Context, data []byte) (string, error) {
+	if b.PutHook != nil {
+		if err := b.PutHook(ctx); err != nil {
+			return "", err
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.next++

@@ -9,18 +9,17 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 func TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock(t *testing.T) {
 	entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	finish := func() { once.Do(func() { close(release) }) }
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return remote, nil },
 		ChunkMaintenanceInterval: time.Millisecond,
 		ChunkMaintenance: func(ctx context.Context, vol string) error {
 			close(entered)
@@ -29,7 +28,9 @@ func TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock(t *testing.T) {
 			<-release
 			return ctx.Err()
 		},
-	}, v1View())
+	}
+	testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks).Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +96,8 @@ func TestMaintenanceCloseCancelsAndJoinsWithoutGuestLock(t *testing.T) {
 func TestMaintenanceAuthorityLossCancelsHeldPass(t *testing.T) {
 	view := v1View()
 	entered, cancelled := make(chan struct{}), make(chan struct{})
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 		ChunkMaintenanceInterval: time.Millisecond,
 		ChunkMaintenance: func(ctx context.Context, _ string) error {
 			close(entered)
@@ -105,7 +105,9 @@ func TestMaintenanceAuthorityLossCancelsHeldPass(t *testing.T) {
 			close(cancelled)
 			return ctx.Err()
 		},
-	}, view)
+	}
+	testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks).Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,9 +130,8 @@ func TestMaintenancePassHasOneDeadline(t *testing.T) {
 	entered := make(chan error, 1)
 	three := make(chan struct{})
 	var completed atomic.Int32
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 		ChunkMaintenanceInterval: time.Millisecond, ChunkMaintenanceTimeout: 10 * time.Millisecond,
 		ChunkMaintenance: func(ctx context.Context, _ string) error {
 			<-ctx.Done()
@@ -143,7 +144,9 @@ func TestMaintenancePassHasOneDeadline(t *testing.T) {
 			}
 			return ctx.Err()
 		},
-	}, v1View())
+	}
+	testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks).Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,24 +183,24 @@ func TestMaintenancePassHasOneDeadline(t *testing.T) {
 	}
 }
 
-type pendingMaintenancePut struct{ *storage.MemChunkRemote }
-
-func (r pendingMaintenancePut) Put(ctx context.Context, _ string, _ []byte) error {
-	<-ctx.Done()
-	return ctx.Err()
-}
 func TestCutDeadlineIncludesUploadWithBackgroundCaller(t *testing.T) {
-	remote := pendingMaintenancePut{storage.NewMemChunkRemote()}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	fixture.Blobs.PutHook = func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }, ChunkCutTimeout: 10 * time.Millisecond,
-	}, v1View())
+		ChunkCutTimeout: 10 * time.Millisecond,
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Close() })
 	s := openRecovered(t, p)
-	claimed := freshV1Claim(t, remote.MemChunkRemote)
+	claimed, found, err := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
+	if err != nil || !found {
+		t.Fatalf("initial layout HEAD: found=%v err=%v", found, err)
+	}
 	if _, err = s.Write(1, block(0x48)); err != nil {
 		t.Fatal(err)
 	}
@@ -205,8 +208,8 @@ func TestCutDeadlineIncludesUploadWithBackgroundCaller(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("whole cut did not expire: %v", err)
 	}
-	h, err := remote.GetHead(context.Background())
-	if err != nil || h.Gen != claimed.Gen {
+	h, found, err := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
+	if err != nil || !found || h.Gen != claimed.Gen {
 		t.Fatalf("expired upload published: %+v %v", h, err)
 	}
 }
@@ -216,9 +219,8 @@ func TestMaintenanceCoalescesWhileOnePassIsHeld(t *testing.T) {
 	var once sync.Once
 	finish := func() { once.Do(func() { close(release) }) }
 	var calls atomic.Int32
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-		ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 		ChunkMaintenanceInterval: time.Millisecond,
 		ChunkMaintenance: func(ctx context.Context, _ string) error {
 			if calls.Add(1) == 1 {
@@ -230,7 +232,9 @@ func TestMaintenanceCoalescesWhileOnePassIsHeld(t *testing.T) {
 			}
 			return ctx.Err()
 		},
-	}, v1View())
+	}
+	testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks).Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,8 +260,15 @@ func TestMaintenanceCoalescesWhileOnePassIsHeld(t *testing.T) {
 }
 
 func TestMaintenancePeriodicNoopDoesNotChurnHead(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
-	p := schedProvider(t, remote, time.Millisecond)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
+		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkCaptureInterval: time.Millisecond}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
 	s := openRecovered(t, p)
 	lsn, err := s.Write(1, block(0x91))
 	if err != nil {
@@ -265,13 +276,14 @@ func TestMaintenancePeriodicNoopDoesNotChurnHead(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var first storage.ChunkHead
+	var first layout.Head
 	for {
-		first, err = remote.GetHead(ctx)
-		if err != nil {
-			t.Fatal(err)
+		var found bool
+		first, found, err = fixture.Catalog.ReadHead(ctx, fixture.Ref)
+		if err != nil || !found {
+			t.Fatalf("layout HEAD: found=%v err=%v", found, err)
 		}
-		if first.RemoteLSN >= lsn {
+		if first.Position >= lsn {
 			break
 		}
 		select {
@@ -300,8 +312,8 @@ func TestMaintenancePeriodicNoopDoesNotChurnHead(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
-	after, err := remote.GetHead(ctx)
-	if err != nil || after.Gen != first.Gen {
+	after, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found || after.Gen != first.Gen {
 		t.Fatalf("noop churned HEAD: before=%d after=%d err=%v", first.Gen, after.Gen, err)
 	}
 }
@@ -312,9 +324,8 @@ func TestMaintenanceHealthyLineageChangeCancelsHeldPass(t *testing.T) {
 			view := v1View()
 			entered, cancelled := make(chan struct{}), make(chan struct{})
 			var enterOnce, cancelOnce sync.Once
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			cfg := durable.ProviderConfig{
 				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-				ChunkRemoteFor:           func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
 				ChunkMaintenanceInterval: time.Millisecond,
 				ChunkMaintenance: func(ctx context.Context, _ string) error {
 					enterOnce.Do(func() { close(entered) })
@@ -322,7 +333,9 @@ func TestMaintenanceHealthyLineageChangeCancelsHeldPass(t *testing.T) {
 					cancelOnce.Do(func() { close(cancelled) })
 					return ctx.Err()
 				},
-			}, view)
+			}
+			testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks).Configure(&cfg)
+			p, err := durable.NewDurableProvider(cfg, view)
 			if err != nil {
 				t.Fatal(err)
 			}
