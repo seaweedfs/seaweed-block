@@ -3,27 +3,27 @@ package durable
 import (
 	"context"
 	"errors"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-func TestChunkSettledIntentCleanupAfterProviderCancellation(t *testing.T) {
+// After the provider is cancelled (Close), an ordinary call through the
+// bound remote ends with the provider, while the cut's Abort still reaches
+// the remote: a session left open is ended, never stranded.
+func TestSession_ProviderCancellationAbortsTheOpenSession(t *testing.T) {
 	inner := storage.NewMemChunkRemote()
-	id, err := inner.PutIntent(context.Background(), storage.ChunkIntent{Keys: []string{"unpublished"}})
-	if err != nil {
+	if _, err := inner.Begin(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	done, cancel := context.WithCancel(context.Background())
 	cancel()
 	bound := &closeBoundRemote{ChunkRemote: inner, done: done}
-	if err = bound.DeleteIntent(context.Background(), id); !errors.Is(err, context.Canceled) {
+	if _, err := bound.Begin(context.Background()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ordinary operation escaped Close: %v", err)
 	}
-	if err = bound.DeleteSettledIntent(context.Background(), id); err != nil {
-		t.Fatal(err)
-	}
-	left, err := inner.ListIntents(context.Background())
-	if err != nil || len(left) != 0 {
-		t.Fatalf("settled roots=%d err=%v", len(left), err)
+	bound.Abort()
+	if s := inner.OpenSession(); s != "" {
+		t.Fatalf("session %q left open after the provider's Abort", s)
 	}
 }

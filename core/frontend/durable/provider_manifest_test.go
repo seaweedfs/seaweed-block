@@ -13,9 +13,9 @@ type manifestAwareRemote struct {
 	prepared atomic.Int32
 }
 
-func (r *manifestAwareRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, []string, error) {
+func (r *manifestAwareRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, error) {
 	r.prepared.Add(1)
-	return next, nil, ctx.Err()
+	return next, ctx.Err()
 }
 func TestWALStoreChunk_ProviderPreservesManifestCapability(t *testing.T) {
 	r := &manifestAwareRemote{MemChunkRemote: storage.NewMemChunkRemote()}

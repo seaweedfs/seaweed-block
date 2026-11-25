@@ -20,11 +20,15 @@ import (
 type layoutProviderBlobs struct {
 	sync.Mutex
 	blobs map[string][]byte
+	fail  error // Put fails with it while set
 }
 
 func (b *layoutProviderBlobs) Put(_ context.Context, raw []byte) (string, error) {
 	b.Lock()
 	defer b.Unlock()
+	if b.fail != nil {
+		return "", b.fail
+	}
 	id := fmt.Sprint(len(b.blobs) + 1)
 	b.blobs[id] = append([]byte(nil), raw...)
 	return id, nil

@@ -56,7 +56,7 @@ type LayoutRemote struct {
 	// the engine staged in it is void and must be dropped.
 	forceView bool
 	// abandoned is set by the engine when a cut ends without a commit
-	// (AbortCut): the next call drops the session and the pending name.
+	// (Abort): the next call drops the session and the pending name.
 	abandoned atomic.Bool
 	pending   *pendingSnapshot
 	// snapErr is why the last commit could not name its snapshot (the cut
@@ -78,7 +78,6 @@ type pendingSnapshot struct {
 var (
 	_ storage.ChunkRemote = (*LayoutRemote)(nil)
 	_ storage.ChunkKeyer  = (*LayoutRemote)(nil)
-	_ storage.CutAborter  = (*LayoutRemote)(nil)
 )
 
 // NewLayoutRemote returns the remote of volume v for the holder me (the
@@ -100,6 +99,16 @@ func (l *LayoutRemote) SetSnapshot(name string, meta layout.SnapshotMeta) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.pending = &pendingSnapshot{name: name, meta: meta}
+}
+
+// DropSnapshot withdraws a pending snapshot name whose request gave up (its
+// cut failed): the name never rides onto a later cut, which would name an
+// image the requester was told was not taken. A cut that keeps its session
+// for a retry does not drop it by itself.
+func (l *LayoutRemote) DropSnapshot() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pending = nil
 }
 
 // layoutKeyPrefix marks a key that is a layout reference.
@@ -384,21 +393,17 @@ func (l *LayoutRemote) writeRootLocked(ctx context.Context, next map[uint64]layo
 	return layoutRemoteErr(err)
 }
 
-// The engine's intents are the session on the layout: these exist on the
-// cutover branch only and go with the old store.
-func (l *LayoutRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (string, error) {
+// Begin opens the cut's session on HEAD (the kernel's Begin), or replays
+// the open one, and returns it.
+func (l *LayoutRemote) Begin(ctx context.Context) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.takeAbandonLocked()
 	if err := l.openSessionLocked(ctx); err != nil {
 		return "", err
 	}
-	return storage.NewChunkIntentID(in.Gen)
+	return l.session, nil
 }
-
-func (l *LayoutRemote) DeleteIntent(context.Context, string) error { return nil }
-
-func (l *LayoutRemote) ListIntents(context.Context) ([]storage.ChunkIntent, error) { return nil, nil }
 
 // Delete is not a removal path on the layout (cleaning removes names).
 func (l *LayoutRemote) Delete(context.Context, string) error { return nil }
@@ -663,11 +668,11 @@ func imageOf(h layout.Head) imageTuple {
 	return t
 }
 
-// AbortCut is the engine's notice that a cut ended without a commit. It
+// Abort is the engine's notice that a cut ended without a commit. It
 // never blocks: the next call drops the session (HEAD's read then rolls
 // it back) and the pending snapshot name, which never rides onto a later
 // cut.
-func (l *LayoutRemote) AbortCut() { l.abandoned.Store(true) }
+func (l *LayoutRemote) Abort() { l.abandoned.Store(true) }
 
 func (l *LayoutRemote) takeAbandonLocked() {
 	if l.abandoned.Swap(false) {

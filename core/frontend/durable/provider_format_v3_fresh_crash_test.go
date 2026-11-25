@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -125,7 +126,7 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !bytes.Equal(beforeBytes, afterBytes) {
+				if !bytes.Equal(beforeBytes, afterBytes) || fixture.head(t).Activity != (layout.Activity{Kind: layout.ActIdle}) {
 					t.Fatal("refused precommit publication changed remote state")
 				}
 				p.mu.Lock()
