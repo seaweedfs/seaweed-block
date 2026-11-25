@@ -10,7 +10,6 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	master "github.com/seaweedfs/seaweed-block/core/host/master"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -78,7 +77,8 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			h, err = master.New(master.Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: enabled, WorkspaceHeadReader: reader})
+			h, err = master.New(master.Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: enabled, WorkspaceHeadReader: reader,
+				LayoutCreateVolume: layoutMasterWriter(t, cluster, base)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -89,14 +89,9 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 				_ = h.Close(ctx)
 			})
 			dataAddr, ctrlAddr, statusAddr, nvmeAddr := leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t)
-			rec, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 64 * 4096, ReplicationFactor: 1})
-			if err != nil {
-				t.Fatal(err)
-			}
-			layoutID, err := layout.ParseVolumeID(rec.Spec.LayoutID)
-			if err != nil {
-				t.Fatalf("master-minted layout id %q: %v", rec.Spec.LayoutID, err)
-			}
+			// The master's create writes VOLUME and the unclaimed HEAD, then
+			// marks the record store-ready; only a store-ready volume gets a placement.
+			layoutID := createStoreReadyVolume(t, h, "vol-a", 64*4096)
 			if _, err = h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-a", DataAddr: dataAddr, CtrlAddr: ctrlAddr}); err != nil {
 				t.Fatal(err)
 			}

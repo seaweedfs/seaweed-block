@@ -90,7 +90,9 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		"--listen", masterListen, "--tls-cert", filepath.Join(tlsDir, "master.crt"), "--tls-key", filepath.Join(tlsDir, "master.key"),
 		"--tls-client-ca", filepath.Join(tlsDir, "ca.crt"), "--role-file", filepath.Join(tlsDir, "roles"), "--audit-log", filepath.Join(tlsDir, "audit.log"), "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
 		"--cluster-spec", spec, "--lifecycle-product-loop-interval", "200ms", "--expected-slots-per-volume", "1",
-		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base)
+		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base,
+		// A workspace master writes the layout VOLUME and unclaimed HEAD itself.
+		"--chunk-filer", cluster.filerGRPC, "--chunk-path", base)
 	w4WaitTCP(t, masterAddr, 20*time.Second)
 	admin, err := link.ClientCredentials(link.TLSFiles{Cert: filepath.Join(tlsDir, "admin.crt"), Key: filepath.Join(tlsDir, "admin.key"), CA: filepath.Join(tlsDir, "ca.crt")}, "")
 	if err != nil {

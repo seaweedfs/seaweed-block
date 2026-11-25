@@ -154,7 +154,8 @@ func layoutMove(t *testing.T, exe string, cluster *w4WeedCluster, kind string) {
 		t.Fatal(err)
 	}
 	h, err = master.New(master.Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0",
-		WorkspaceRPC: true, WorkspaceHeadReader: reader, WorkspaceMaxClockSkew: 100 * time.Millisecond})
+		WorkspaceRPC: true, WorkspaceHeadReader: reader, WorkspaceMaxClockSkew: 100 * time.Millisecond,
+		LayoutCreateVolume: layoutMasterWriter(t, cluster, base)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,14 +166,9 @@ func layoutMove(t *testing.T, exe string, cluster *w4WeedCluster, kind string) {
 		_ = h.Close(ctx)
 	})
 	src, dst := newMoveHost(t, "node-a", "nqn.2026-11.test:move-src-"+kind), newMoveHost(t, "node-b", "nqn.2026-11.test:move-dst-"+kind)
-	rec, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 64 * 4096, ReplicationFactor: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	layoutID, err := layout.ParseVolumeID(rec.Spec.LayoutID)
-	if err != nil {
-		t.Fatalf("master-minted layout id %q: %v", rec.Spec.LayoutID, err)
-	}
+	// The master's create writes VOLUME and the unclaimed HEAD, then marks
+	// the record store-ready; only a store-ready volume gets a placement.
+	layoutID := createStoreReadyVolume(t, h, "vol-a", 64*4096)
 	ref := chunkstore.VolumeRef{Name: "vol-a", ID: layoutID}
 	for _, n := range []*moveHost{src, dst} {
 		if _, err = h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: n.server, DataAddr: n.data, CtrlAddr: n.ctrl}); err != nil {
