@@ -32,7 +32,6 @@ type PrecopyFixedParts struct {
 	PublishPrepare time.Duration  `json:"publishPrepareNs"`
 	Manifest       time.Duration  `json:"manifestNs"`
 	CommitState    time.Duration  `json:"commitStateNs"`
-	IntentCleanup  time.Duration  `json:"intentCleanupNs"`
 	NonPayloadCopy time.Duration  `json:"nonPayloadCopyNs"`
 
 	Drain        time.Duration `json:"drainNs"`
@@ -45,7 +44,7 @@ type PrecopyFixedParts struct {
 }
 
 func precopyFixedParts(st chunkCutStats, fixed time.Duration) PrecopyFixedParts {
-	p := PrecopyFixedParts{SyncPhases: st.SyncPhases, Candidate: time.Duration(st.CandidateNs), WindowSetup: time.Duration(st.WindowSetupNs), PublishPrepare: time.Duration(st.PublishPrepareNs), Manifest: time.Duration(st.ManifestNs), CommitState: time.Duration(st.CommitStateNs), IntentCleanup: time.Duration(st.IntentCleanupNs), NonPayloadCopy: time.Duration(st.NonPayloadCopyNs), Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs), MapPersist: time.Duration(st.MapPersistNs)}
+	p := PrecopyFixedParts{SyncPhases: st.SyncPhases, Candidate: time.Duration(st.CandidateNs), WindowSetup: time.Duration(st.WindowSetupNs), PublishPrepare: time.Duration(st.PublishPrepareNs), Manifest: time.Duration(st.ManifestNs), CommitState: time.Duration(st.CommitStateNs), NonPayloadCopy: time.Duration(st.NonPayloadCopyNs), Drain: time.Duration(st.DrainNs), StoreLock: time.Duration(max(int64(0), st.LockWaitNs-st.DrainNs)), DataSync: time.Duration(st.SyncNs), HeadCAS: time.Duration(st.CASWriteNs), HeadReadback: time.Duration(st.HeadReadbackNs), MapPersist: time.Duration(st.MapPersistNs)}
 	p.Other = max(time.Duration(0), fixed-p.measured())
 	return p
 }
@@ -495,7 +494,7 @@ func comparablePrecopyAttempt(a *PrecopyAttempt) bool {
 }
 
 func (p PrecopyFixedParts) measured() time.Duration {
-	return p.Drain + p.StoreLock + p.DataSync + p.HeadCAS + p.HeadReadback + p.MapPersist + p.Candidate + p.WindowSetup + p.PublishPrepare + p.Manifest + p.CommitState + p.IntentCleanup + p.NonPayloadCopy
+	return p.Drain + p.StoreLock + p.DataSync + p.HeadCAS + p.HeadReadback + p.MapPersist + p.Candidate + p.WindowSetup + p.PublishPrepare + p.Manifest + p.CommitState + p.NonPayloadCopy
 }
 
 // Candidate count is conservative and advisory while guest writes continue.

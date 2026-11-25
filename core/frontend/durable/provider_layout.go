@@ -97,11 +97,7 @@ func (r *layoutBoundRemote) ChunkKey(index uint64, sum [32]byte) string {
 	return r.keyer.ChunkKey(index, sum)
 }
 
-func (r *layoutBoundRemote) AbortCut() {
-	if a, ok := r.ChunkRemote.(storage.CutAborter); ok {
-		a.AbortCut()
-	}
-}
+func (r *layoutBoundRemote) Abort() { r.ChunkRemote.Abort() }
 
 type layoutStopRemote interface {
 	AbortOpenSession(context.Context) (string, error)

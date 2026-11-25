@@ -25,6 +25,10 @@
 #   fence-heal   TestFencingRoundHealContinuesThePrimary (a failed fencing
 #                round heals by continuing the primary). Not in the default
 #                set until the promotion fence is on the base.
+#   fence-rejoin TestFencingRoundSurvivorRejoins (the fence-heal scenario
+#                carried on: the survivor that could not fence rejoins the
+#                healed primary). Not in the default set until the promotion
+#                fence is on the base.
 #   double-failover  TestDoubleFailoverReadsBackEveryAckedWrite (RF3
 #                sync_quorum: two failovers, the first primary rejoining in
 #                between; every acknowledged write reads back on the last
@@ -85,7 +89,7 @@ phases:
           case "$GATE_TESTS" in *[!0-9a-z\ -]*|'') fail 'tests must be entry names separated by spaces' ;; esac
           n=0
           for t in $GATE_TESTS; do
-            case "$t" in move|lease|systemd|catalog|cutover-e2e|cutover-create|fence-heal|double-failover) ;; *) fail "unknown entry: $t" ;; esac
+            case "$t" in move|lease|systemd|catalog|cutover-e2e|cutover-create|fence-heal|fence-rejoin|double-failover) ;; *) fail "unknown entry: $t" ;; esac
             n=$((n + 1))
           done
           [ "$n" -gt 0 ] || fail 'tests names no entry'
@@ -185,6 +189,7 @@ phases:
               cutover-e2e) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverWriteSnapshotKillRestartRestore to=40m ;;
               cutover-create) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverCreateFromSnapshot to=20m ;;
               fence-heal)  pkg=cmd/blockvolume bin=blockvolume.test name=TestFencingRoundHealContinuesThePrimary to=10m ;;
+              fence-rejoin) pkg=cmd/blockvolume bin=blockvolume.test name=TestFencingRoundSurvivorRejoins to=10m ;;
               double-failover) pkg=cmd/blockvolume bin=blockvolume.test name=TestDoubleFailoverReadsBackEveryAckedWrite to=15m ;;
               *) echo "unknown entry: $t" >&2; exit 2 ;;
             esac
