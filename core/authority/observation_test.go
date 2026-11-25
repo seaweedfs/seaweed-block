@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // ============================================================
@@ -48,10 +50,10 @@ type fakeClock struct {
 	t  time.Time
 }
 
-func newFakeClock(t time.Time) *fakeClock                 { return &fakeClock{t: t} }
-func (c *fakeClock) Now() time.Time                       { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
-func (c *fakeClock) Advance(d time.Duration)              { c.mu.Lock(); defer c.mu.Unlock(); c.t = c.t.Add(d) }
-func (c *fakeClock) Set(t time.Time)                      { c.mu.Lock(); defer c.mu.Unlock(); c.t = t }
+func newFakeClock(t time.Time) *fakeClock    { return &fakeClock{t: t} }
+func (c *fakeClock) Now() time.Time          { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *fakeClock) Advance(d time.Duration) { c.mu.Lock(); defer c.mu.Unlock(); c.t = c.t.Add(d) }
+func (c *fakeClock) Set(t time.Time)         { c.mu.Lock(); defer c.mu.Unlock(); c.t = t }
 
 // recordingSink captures submitted observed-state calls for
 // assertions. Implements ControllerSink's SubmitObservedState —
@@ -971,9 +973,9 @@ func exprString(e ast.Expr) string {
 // that need to drive observation-fed snapshots with controlled
 // per-volume authority basis values.
 type fakeReaderForHost struct {
-	mu       sync.Mutex
-	perVol   map[string]AuthorityBasis
-	perSlot  map[string]AuthorityBasis
+	mu      sync.Mutex
+	perVol  map[string]AuthorityBasis
+	perSlot map[string]AuthorityBasis
 }
 
 func newFakeReaderForHost() *fakeReaderForHost {
@@ -1275,10 +1277,12 @@ func TestObservationHost_IdenticalSupportedSnapshots_NoDuplicateAsks(t *testing.
 	secondarySlot := ReplicaCandidate{
 		ReplicaID: "r2", ServerID: "s2", DataAddr: "d2", CtrlAddr: "c2",
 		Reachable: true, ReadyForPrimary: true, Eligible: true,
+		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned}, // the gate allowed it
 	}
 	tertiarySlot := ReplicaCandidate{
 		ReplicaID: "r3", ServerID: "s3", DataAddr: "d3", CtrlAddr: "c3",
 		Reachable: true, ReadyForPrimary: true, Eligible: true,
+		PromotionEvidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, Basis: adapter.BasisPlanned}, // the gate allowed it
 	}
 	snap := ClusterSnapshot{
 		CollectedRevision: 1,

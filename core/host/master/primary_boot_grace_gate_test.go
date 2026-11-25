@@ -59,10 +59,14 @@ func ingestRF3Incarnations(t *testing.T, h *Host, r1, r2, r3 rf3Slot) {
 	}
 }
 
-// switchProbe is the promotion probe: r2 is always a ready survivor;
+// switchProbe is the promotion probe: r2 is always a ready survivor, r3
+// answers as a lagging replica (not ready; its end is r3End, 60 when unset);
 // the current primary r1 is ready only while currentReady is set.
 type switchProbe struct {
 	mu           sync.Mutex
+	r3End        uint64
+	fenceSilent  bool // no survivor answers the fencing round
+	fenceCalls   int
 	currentReady bool
 	// currentUnknown: the current primary did not answer (status GET
 	// refused or timed out), so CurrentKnown is false.
@@ -99,13 +103,20 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 	defer p.mu.Unlock()
 	return PromotionProbeResult{
 		AckProfile: "sync-quorum",
-		// Only r2 is seen, so its promotion needs a known frontier
-		// it covers (#181); r3 is silent in these tests.
+		// Only r2 is ready, so its promotion needs a known frontier it
+		// covers (#181); r3 answers but lags. A fencing round counts both.
 		SyncAckLSN:   70,
 		CurrentKnown: !p.currentUnknown,
 		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, DurableLSN: 70},
-		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}},
+		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}, {ReplicaID: "r3", DurableLSN: p.lagEnd()}},
 	}, nil
+}
+
+func (p *switchProbe) lagEnd() uint64 {
+	if p.r3End == 0 {
+		return 60
+	}
+	return p.r3End
 }
 
 func probeOf(t *testing.T, h *Host) *switchProbe {
@@ -232,6 +243,60 @@ func TestUnsupportedPathNeverReassignsOnAnUnansweredPrimary(t *testing.T) {
 	expectLineStaysR1(t, h, "status probe of the current primary timed out")
 	unsupportedTick(t, h, readySlot("r1-a"))
 	expectLineStaysR1(t, h, "still unanswered on the next tick")
+}
+
+// The unsupported path decides a failover on a fencing round too: with the
+// round unanswered nothing is published, however ready the survivor looked
+// in the plain round; answered, the line carries the fenced epoch.
+func TestUnsupportedPathFailsOverOnlyOnAFencingRound(t *testing.T) {
+	ineligible := restarting
+	ineligible.eligible = false
+	t.Run("fencing round unanswered", func(t *testing.T) {
+		h := newBootGraceMaster(t, Config{})
+		defer closeTestMaster(t, h)
+		p := probeOf(t, h)
+		p.mu.Lock()
+		p.fenceSilent = true
+		p.mu.Unlock()
+		unsupportedTick(t, h, ineligible)
+		expectLineStaysR1(t, h, "the survivors did not answer the fencing round")
+	})
+	t.Run("fencing round answered", func(t *testing.T) {
+		h := newBootGraceMaster(t, Config{})
+		defer closeTestMaster(t, h)
+		unsupportedTick(t, h, ineligible)
+		expectFailoverToR2(t, h, "fenced survivors")
+		if info, _ := h.Publisher().LastPublished("vol-rf3", "r2"); info.Primary.FencedEpoch != 2 {
+			t.Fatalf("failover line evidence %+v; want fenced at 2", info.Primary)
+		}
+	})
+}
+
+// A primary restarting inside its boot grace is not replaced, so no fencing
+// round cuts its replicas off from it; past the grace it is fenced.
+func TestBootGrace_NoFencingRoundInsideTheGrace(t *testing.T) {
+	h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 600 * time.Millisecond}})
+	defer closeTestMaster(t, h)
+	p := probeOf(t, h)
+	calls := func() int { p.mu.Lock(); defer p.mu.Unlock(); return p.fenceCalls }
+
+	ingestRF3Incarnations(t, h, restarting, readySlot("r2-a"), readySlot("r3-a"))
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls(); n != 0 {
+		t.Fatalf("%d fencing rounds against a primary inside its boot grace", n)
+	}
+	expectLineStaysR1(t, h, "restarted primary inside its boot grace")
+
+	time.Sleep(600 * time.Millisecond)
+	ingestRF3Incarnations(t, h, restarting, readySlot("r2-a"), readySlot("r3-a"))
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	if calls() == 0 {
+		t.Fatal("no fencing round once the grace has passed")
+	}
 }
 
 // An explicit unhealthy current primary gets no grace on this path.

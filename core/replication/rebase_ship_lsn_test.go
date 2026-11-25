@@ -117,3 +117,36 @@ func TestReplicationVolume_RebaseShipLSNReleasesWaitingSync(t *testing.T) {
 		t.Fatal("a Sync waiting before the rebase was not released")
 	}
 }
+
+// A replica's store takes entries through replication, never through its
+// own ship order. Taking the primary role it moves the ship order to the
+// store (RebaseShipToStore); without that, its first local write would wait
+// for an LSN that never comes as a local write.
+func TestReplicationVolume_RebaseShipToStoreAfterReplicatedEntries(t *testing.T) {
+	for _, rebase := range []bool{false, true} {
+		store := storage.NewBlockStore(64, 4096)
+		v := NewReplicationVolume("vol1", store)
+		// Entries the store took as a replica (not through this volume).
+		for i := 0; i < 3; i++ {
+			if _, err := store.Write(uint32(i), make([]byte, 4096)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		next := store.NextLSN()
+		if rebase {
+			if err := v.RebaseShipToStore(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		err := v.OnLocalWrite(ctx, LocalWrite{LBA: 9, Data: make([]byte, 4096), LSN: next})
+		cancel()
+		_ = v.Close()
+		if rebase && err != nil {
+			t.Fatalf("first local write after the rebase: %v", err)
+		}
+		if !rebase && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("without the rebase the first local write should wait for the replicated LSNs: %v", err)
+		}
+	}
+}

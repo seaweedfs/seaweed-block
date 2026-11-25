@@ -18,6 +18,7 @@ import (
 func TestHostFailbackAuthorityRuntimeUsesLivePublisher(t *testing.T) {
 	h := newTestMaster(t, t.TempDir())
 	defer closeTestMaster(t, h)
+	installPlannedMoveGate(h) // the operator's planned move decides on the promotion gate
 	seedVerifiedExistingReplicaPlacement(t, h)
 
 	if _, err := h.RunLifecycleProductTick(); err != nil {
@@ -66,6 +67,7 @@ func TestHostFailbackAuthorityRuntimeUsesLivePublisher(t *testing.T) {
 func TestHostFrontendPublicationRuntimeHTTPConfirmsPostFailbackAuthorityLine(t *testing.T) {
 	h := newTestMasterWithFrontendPublicationRuntimeHTTP(t)
 	defer closeTestMaster(t, h)
+	installPlannedMoveGate(h) // the operator's planned move decides on the promotion gate
 	seedVerifiedExistingReplicaPlacement(t, h)
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatalf("product tick: %v", err)
@@ -196,6 +198,7 @@ func TestFailbackServiceDefaultDisabled(t *testing.T) {
 func TestFailbackServiceEnabledUsesHostRuntime(t *testing.T) {
 	h := newTestMasterWithFailbackRuntimeRPC(t)
 	defer closeTestMaster(t, h)
+	installPlannedMoveGate(h) // the operator's planned move decides on the promotion gate
 	seedVerifiedExistingReplicaPlacement(t, h)
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatalf("product tick: %v", err)
@@ -238,6 +241,7 @@ func TestFailbackServiceEnabledUsesHostRuntime(t *testing.T) {
 func TestFailbackExecutorGRPCRuntimeUsesRealMasterService(t *testing.T) {
 	h := newTestMasterWithFailbackRuntimeRPC(t)
 	defer closeTestMaster(t, h)
+	installPlannedMoveGate(h) // the operator's planned move decides on the promotion gate
 	seedVerifiedExistingReplicaPlacement(t, h)
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatalf("product tick: %v", err)
@@ -366,4 +370,14 @@ func (c *failbackExecutorMasterServiceClient) ListSwBlockReplicaFailbacks(contex
 func (c *failbackExecutorMasterServiceClient) WriteReplicaFailbackStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaFailbackCRDStatus) error {
 	c.writes = append(c.writes, failbackExecutorMasterServiceWrite{ref: ref, status: status})
 	return nil
+}
+
+// installPlannedMoveGate gives the master a promotion gate under which a
+// planned move to r1 is allowed: sync_all (the target is in every
+// acknowledgement set) and r1 answers the probe round ready.
+func installPlannedMoveGate(h *Host) {
+	h.SetPromotionEvidenceProvider(staticPromotionProbe{result: PromotionProbeResult{
+		AckProfile: "sync_all",
+		Candidates: []PromotionCandidateEvidence{{ReplicaID: "r1", Ready: true, DurableLSN: 1}},
+	}})
 }

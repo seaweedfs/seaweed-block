@@ -1,6 +1,7 @@
 package master
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"sort"
@@ -171,6 +172,19 @@ func (h *Host) observationVolume(volumeID string, rec lifecycle.VolumeRecord, pl
 			Message:  fmt.Sprintf("observed %d of %d desired replicas", volume.ObservedReplicas, volume.DesiredReplicas),
 		})
 	}
+	if h.attest != nil {
+		// A condition only: the wait is a normal step of creating a volume,
+		// not a degradation (the primary's own status says it serves nothing).
+		if waiting, initial := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID)); waiting > 0 {
+			volume.Conditions = append(volume.Conditions, ops.ObservationCondition{
+				Type:     "ReplicaStoresAttested",
+				Status:   "false",
+				Reason:   ops.ReasonAwaitingReplicaAttestations,
+				Severity: "info",
+				Message:  fmt.Sprintf("creating: waiting for replica attestations (%d of %d)", initial-waiting, initial),
+			})
+		}
+	}
 	if !hasLine || !line.Assigned {
 		if volume.Status == ops.ObservationStatusOK {
 			volume.Status = ops.ObservationStatusDegraded
@@ -226,6 +240,9 @@ func (h *Host) observationReplicas(volumeID string, placement lifecycle.Placemen
 			KubernetesNode:  slot.ServerID,
 			Role:            "unknown",
 			ReplicationRole: "unavailable",
+		}
+		if id, ok := h.AttestedStore(volumeID, replicaID); ok {
+			replica.StoreAttested, replica.StoreID = true, hex.EncodeToString(id[:])
 		}
 		if hasLine && line.Assigned && replicaID == line.ReplicaID {
 			replica.Role = "primary"

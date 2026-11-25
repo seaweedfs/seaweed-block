@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
@@ -29,6 +30,10 @@ type ReplicaTarget struct {
 	ControlAddr     string
 	Epoch           uint64
 	EndpointVersion uint64
+	// StoreID is the replica's store the master recorded. Where stores are
+	// required, the peer counts toward write ACKs only while its barrier
+	// reports this store; zero never matches.
+	StoreID storage.StoreID
 }
 
 // ReplicaState is the coarse peer health state. The state machine
@@ -161,6 +166,15 @@ type ReplicaPeer struct {
 	mu     sync.Mutex
 	state  ReplicaState
 	closed bool
+	// storeID is the store the peer's last successful barrier reported,
+	// cleared whenever the peer leaves Healthy: a store is attested only
+	// by a barrier it answered while counting toward write ACKs.
+	storeID storage.StoreID
+	// requireAttest: the peer counts toward write ACKs only while its
+	// barrier-reported store equals expected, the store the master recorded
+	// for it (set by the volume when a host attests).
+	requireAttest bool
+	expected      storage.StoreID
 	// onHealthy lets the owning ReplicationVolume reopen a terminal work
 	// queue only after recovery has returned this peer to Healthy.
 	onHealthy func()
@@ -234,6 +248,7 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 		lineage:     lineage,
 		state:       ReplicaHealthy,
 		cooldownCfg: DefaultPeerProbeCooldown(),
+		expected:    target.StoreID,
 	}, nil
 }
 
@@ -689,7 +704,44 @@ func (p *ReplicaPeer) Barrier(ctx context.Context, targetLSN uint64) (transport.
 	}
 	log.Printf("replication: barrier ack peer=%s targetLSN=%d achievedLSN=%d",
 		p.target.ReplicaID, targetLSN, ack.AchievedLSN)
+	p.mu.Lock()
+	p.storeID = ack.StoreID
+	p.mu.Unlock()
 	return ack, nil
+}
+
+// learnStore asks the peer for its store with a barrier at LSN 0 and
+// records it. Unlike Barrier, a failure does not degrade the peer: a
+// replica that does not answer yet (it starts after the primary installed
+// it) holds nothing to be wrong about, and nothing re-probes a degraded
+// peer while no write runs. It reports whether the store is now known.
+func (p *ReplicaPeer) learnStore() bool {
+	p.mu.Lock()
+	if p.closed || p.state != ReplicaHealthy {
+		p.mu.Unlock()
+		return false
+	}
+	lineage := p.lineage
+	p.mu.Unlock()
+	ack, err := p.executor.Barrier(p.target.ReplicaID, lineage, 0)
+	if err != nil || ack.StoreID.IsZero() {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.state != ReplicaHealthy {
+		return false
+	}
+	p.storeID = ack.StoreID
+	return true
+}
+
+// learningStore reports whether a store-learning retry should go on: the
+// peer is open, Healthy and its store is still unknown.
+func (p *ReplicaPeer) learningStore() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.closed && p.state == ReplicaHealthy && p.storeID.IsZero()
 }
 
 // Fence issues a synchronous fence exchange against this peer using
@@ -762,12 +814,58 @@ func (p *ReplicaPeer) SetState(next ReplicaState) {
 		return
 	}
 	p.state = next
+	if next != ReplicaHealthy {
+		p.storeID = storage.StoreID{}
+	}
 	onHealthy := p.onHealthy
 	p.mu.Unlock()
 	log.Printf("replication: peer %s state %s → %s", p.target.ReplicaID, prev, next)
 	if prev != ReplicaHealthy && next == ReplicaHealthy && onHealthy != nil {
 		onHealthy()
 	}
+}
+
+// AttestedStore is the store this peer counts toward write ACKs with: its
+// last successful barrier's store id while the peer is Healthy. false while
+// the peer is not Healthy, or no barrier has reported a store since it
+// became Healthy (a peer healed without a barrier is attested by its next
+// one).
+func (p *ReplicaPeer) AttestedStore() (storage.StoreID, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.state != ReplicaHealthy || p.storeID.IsZero() {
+		return storage.StoreID{}, false
+	}
+	return p.storeID, true
+}
+
+// countsTowardAcks reports whether a write or barrier this peer answers
+// counts toward the volume's write ACKs: it is Healthy and, where stores
+// are required, its barrier-reported store is the one the master recorded
+// for it. A peer rebuilt onto a new store answers barriers (that is how its
+// store is learned) but does not count until the master records that store:
+// otherwise it could hold the only copy of an acknowledged write that no
+// promotion could verify.
+func (p *ReplicaPeer) countsTowardAcks() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.state != ReplicaHealthy {
+		return false
+	}
+	return !p.requireAttest || (!p.storeID.IsZero() && p.expected == p.storeID)
+}
+
+func (p *ReplicaPeer) setRequireAttest() {
+	p.mu.Lock()
+	p.requireAttest = true
+	p.mu.Unlock()
+}
+
+// setExpectedStore replaces the store the master recorded for this peer.
+func (p *ReplicaPeer) setExpectedStore(id storage.StoreID) {
+	p.mu.Lock()
+	p.expected = id
+	p.mu.Unlock()
 }
 
 func (p *ReplicaPeer) setOnHealthy(fn func()) {
@@ -866,6 +964,7 @@ func (p *ReplicaPeer) Invalidate(reason string) {
 		return
 	}
 	p.state = ReplicaDegraded
+	p.storeID = storage.StoreID{}
 	p.mu.Unlock()
 	log.Printf("replication: peer %s invalidated (prev=%s, reason=%s)",
 		p.target.ReplicaID, prev, reason)

@@ -249,9 +249,9 @@ func parseFlags(args []string) (flags, error) {
 			"smartwal (fixed-size ring) bounds retention via --durable-blocks instead "+
 			"and ignores this flag. Recommended starting value for sustained-write "+
 			"workloads on walstore: 10000 LSNs (sized to expected replica lag).")
-	fs.DurationVar(&f.degradedProbeInterval, "degraded-probe-interval", 0,
-		"primary-side degraded-peer probe loop interval; 0 = OFF (default). "+
-			"Recommended production value: 5s. Distinct from --degraded-probe-cooldown-base: this is how often "+
+	fs.DurationVar(&f.degradedProbeInterval, "degraded-probe-interval", 5*time.Second,
+		"primary-side degraded-peer probe loop interval; 0 = OFF. "+
+			"On by default: a replica that fell out of the volume rejoins without an operator. Distinct from --degraded-probe-cooldown-base: this is how often "+
 			"the loop wakes up; cooldown-base is how long a single peer is gated AFTER a probe attempt.")
 	fs.DurationVar(&f.degradedProbeCooldownBase, "degraded-probe-cooldown-base", 5*time.Second,
 		"per-peer cooldown after a probe attempt (also the reset value after a successful probe). "+
@@ -961,6 +961,7 @@ func runVolume(f flags, exits *processExit) int {
 		replVolume = replication.NewReplicationVolume(f.volumeID, store)
 		if status != nil {
 			status.SetPeerStatusSource(replVolume)
+			h.SetProbeRoleSource(status.ProbeRoles)
 			status.SetRuntimeRecoverySource(replVolume)
 		}
 		repMode, writeAck, err := parseReplicationAckProfile(f.replicationAck)
@@ -1057,7 +1058,7 @@ func runVolume(f flags, exits *processExit) int {
 				CooldownBase:  f.degradedProbeCooldownBase,
 				CooldownCap:   f.degradedProbeCooldownCap,
 			}
-			probeFn := volume.ProductionProbeFn(peerRegistry.AdapterFor)
+			probeFn := volume.ProductionProbeFnWithPrime(peerRegistry.AdapterForPeer, peerRegistry.PrimePendingFor)
 			if err := replVolume.ConfigureProbeLoop(loopCfg, probeFn, time.Now); err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: probe loop configure:", err)
 				_ = replVolume.Close()

@@ -40,8 +40,10 @@ func TestMasterAuthorizationTableCoversEveryMethod(t *testing.T) {
 	if len(missing) > 0 || len(stale) > 0 {
 		t.Fatalf("authorization table out of date: methods without a rule %v; rules without a method %v", missing, stale)
 	}
-	if len(registered) != 27 {
-		t.Fatalf("%d registered methods; the table was written for 27: review the new ones", len(registered))
+	// SubscribeProbeRounds and AnswerProbe (the promotion probe round) are
+	// node-only, each for the caller's own server id.
+	if len(registered) != 29 {
+		t.Fatalf("%d registered methods; the table was written for 29: review the new ones", len(registered))
 	}
 }
 

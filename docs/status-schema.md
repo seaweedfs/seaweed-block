@@ -77,6 +77,7 @@ Durable store state of the served volume. Go type `volume.durableStatusBody`.
 | `Volumes[].Path` | string | its store path under --durable-root |
 | `Volumes[].Impl` | string | the durable implementation (walstore, smartwal, walstore-chunk, ...) |
 | `Volumes[].ReplicaID` | string | the replica this store holds |
+| `Volumes[].StoreID` | string | the store's superblock UUID (hex); empty when it carries none (omitted when empty) |
 | `Volumes[].Epoch` | uint64 | the epoch the store is latched to; 0 before an assignment |
 | `Volumes[].EndpointVersion` | uint64 | the endpoint version it is latched to |
 | `Volumes[].Latched` | bool | an assignment latched the store (epoch and endpoint version set) |

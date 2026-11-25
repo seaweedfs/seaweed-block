@@ -24,6 +24,11 @@ func TestPeerAdapterRegistry_DivergentTailAboveTheFrontierAtAddIsRebuilt(t *test
 			reg := NewPeerAdapterRegistry("vol1", "r1")
 			reg.SetFrontier(c.frontier)
 			reg.OnPeerAdded(newPeerForRegistryTest(t, "r2", 2, 1))
+			// The frontier was read at the add; the probe loop primes the
+			// adapter when the peer is first degraded.
+			if !reg.PrimePending("r2") {
+				t.Fatal("r2 was not pending")
+			}
 			adpt := reg.AdapterFor("r2")
 			if adpt == nil {
 				t.Fatal("no adapter for r2")

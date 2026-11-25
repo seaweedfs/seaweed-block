@@ -291,6 +291,9 @@ func (p *Publisher) reloadFromStore() {
 			},
 			present: true,
 		}
+		if rec.Primary != nil {
+			loaded.info.Primary = *rec.Primary
+		}
 		p.captureAssignmentOwner(&loaded.info, rec.Workspace)
 		p.state[key] = loaded
 		if rec.WriteSeq > p.writeSeqByVolume[rec.VolumeID] {
@@ -536,6 +539,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			EndpointVersion: 1,
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
+			Primary:         adapter.PrimaryEvidence{Kind: adapter.PrimaryKindBootstrap},
 		}
 
 	case IntentRefreshEndpoint:
@@ -555,6 +559,13 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 		next.CtrlAddr = ask.CtrlAddr
 
 	case IntentReassign:
+		// A primary change carries how it was decided (a kind, and for a
+		// promotion the gate's evidence): the mint never issues a line its
+		// target could not check.
+		if ask.Evidence.Kind == adapter.PrimaryKindUnspecified {
+			p.mu.Unlock()
+			return fmt.Errorf("%w: volume %s replica %s", ErrReassignWithoutKind, ask.VolumeID, ask.ReplicaID)
+		}
 		// Per the P14 S3 "reassign semantic" boundary note
 		// (sw-block/design/v3-phase-14-s3-reassign-semantic.md):
 		// IntentReassign is a PER-VOLUME authority advance, not a
@@ -582,9 +593,26 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			EndpointVersion: 1,
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
+			Primary:         ask.Evidence,
 		}
 		if reservedEpoch != 0 {
 			next.Epoch = reservedEpoch
+		}
+		// A decision made on a fencing round holds only for the epoch its
+		// survivors were fenced at: the line must still be at the epoch
+		// below it.
+		if ask.Evidence.FencedEpoch != 0 && next.Epoch != ask.Evidence.FencedEpoch {
+			p.mu.Unlock()
+			return fmt.Errorf("%w: volume %s fenced at %d, the next epoch is %d", ErrFenceSuperseded, ask.VolumeID, ask.Evidence.FencedEpoch, next.Epoch)
+		}
+		// A promotion states its basis, exactly one: fenced (at this epoch),
+		// planned (after the planned-move guard, no fence), or heal (the
+		// line's own primary, at this epoch). No path mints one without.
+		if ask.Evidence.Kind == adapter.PrimaryKindPromotion {
+			if err := promotionBasisHolds(ask, next.Epoch, p.state, maxEpoch); err != nil {
+				p.mu.Unlock()
+				return fmt.Errorf("%w: volume %s replica %s: %v", ErrPromotionUnfenced, ask.VolumeID, ask.ReplicaID, err)
+			}
 		}
 
 	default:
@@ -614,6 +642,10 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			CtrlAddr:        next.CtrlAddr,
 			WriteSeq:        nextSeq,
 			Workspace:       cloneWorkspace(p.workspace[ask.VolumeID]),
+		}
+		if next.Primary != (adapter.PrimaryEvidence{}) {
+			pe := next.Primary
+			record.Primary = &pe
 		}
 		if issuedWorkspace != nil {
 			record.Workspace = cloneWorkspace(issuedWorkspace)

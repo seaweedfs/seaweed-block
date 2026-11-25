@@ -115,6 +115,8 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 	// The authority runtime, not either provider, allocates the next epoch.
 	// Admission evidence is supplied by this fixture, as in the runtime's
 	// existing tests; this is not a VM-stop or physical fencing qualification.
+	// The planned move decides on the promotion gate (its fixture, too).
+	installPlannedMoveGate(m)
 	if _, err := m.FailbackAuthorityRuntime().ExecuteFailback(ctx, authority.FailbackRuntimeRequest{
 		VolumeID: "vol-a", ReplicaID: "r1", TargetDataAddr: "127.0.0.1:9201", TargetCtrlAddr: "127.0.0.1:9101",
 		ExpectedCurrentReplicaID: oldLine.ReplicaID, ExpectedCurrentEpoch: oldLine.Epoch,

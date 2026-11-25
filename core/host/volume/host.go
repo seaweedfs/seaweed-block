@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storeident"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
@@ -153,12 +156,42 @@ type Host struct {
 	selfRole     selfRole
 	selfEpoch    uint64
 	selfHasPeers bool
+	// shipPrepared: the replication ship order was moved to the store since
+	// this host last took a replica role (from which it may apply
+	// replicated entries that never pass its own ship order). Separate from
+	// selfRole, which a primary fence sets before the move succeeds (and
+	// which the excluded-replica path sets only to close ingress).
+	shipPrepared bool
 	// roleAdmissionFailed (G1) latches a failed role call on the listener
 	// (a floor that could not be persisted, or a fence that did not drain).
 	// While set, the frontend projection is not Healthy, so writes refuse
 	// even on a host that was healthy at its prior epoch; only a later
 	// successful role call for the current role and epoch clears it.
 	roleAdmissionFailed atomic.Value // string reason; "" = not failed
+	// storesAwaited: the primary fact's (awaited<<32 | initial) replica
+	// store count (ReplicaStoresAwaited).
+	storesAwaited atomic.Uint64
+	// roleRetry: the last replica role call failed with an error a retry
+	// may outlast (a floor that could not be persisted); runRoleRetry
+	// re-applies the current role until it succeeds or is refused for good.
+	// Under selfFenceMu.
+	roleRetry bool
+	// pendingSupport (under selfFenceMu): the supporting assignment a fact
+	// skipped because its replica role call failed with an error a retry
+	// may outlast. runRoleRetry completes it, under selfFenceMu, once the
+	// role call succeeds while the desired role is still replica at that
+	// epoch and no newer fact has been seen (factEpochSeen).
+	pendingSupport *pendingSupport
+	// factEpochSeen (under selfFenceMu): the highest epoch of any fact
+	// applyFact has started on, recorded at its very start, before the fact
+	// acts in any way (the watchdog, the role call, the adapter). The retry
+	// completes a pending assignment, under selfFenceMu, only while no newer
+	// epoch was seen; a newer fact arriving meanwhile waits at that record
+	// until the completion is done, so none of its actions precede it and no
+	// older completion lands after a newer transition. The record is the
+	// only part of applyFact under the lock: facts applied concurrently (a
+	// replay beside the stream, one inside another's hook) do not nest it.
+	factEpochSeen uint64
 	// RF1Only admission state, one unit under rf1Mu (field access only, no
 	// calls): the highest refused epoch with its reason ("" = cleared), and the
 	// highest epoch an RF1 fact was admitted at. A clear removes only the
@@ -171,7 +204,9 @@ type Host struct {
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
-	asnCli control.AssignmentServiceClient
+	// probeRoles answers the promotion probe round's role fields (probe_round.go).
+	probeRoles probeRoles
+	asnCli     control.AssignmentServiceClient
 
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -380,6 +415,11 @@ func (h *Host) SetReplicationVolume(rv *replication.ReplicationVolume) {
 // goroutine has visibility yet).
 func (h *Host) setReplicationLocked(rv replicaSetUpdater) {
 	h.replication = rv
+	// This host attests its peers' stores to the master: a peer counts only
+	// while its store is the one the master recorded.
+	if c, ok := rv.(storeRequirer); ok && c != nil {
+		c.RequireAttestedStores()
+	}
 }
 
 func (h *Host) storeLocalReadinessReplayFact(fact *control.AssignmentFact) {
@@ -454,6 +494,7 @@ func (h *Host) SetSelfFence(f selfFencer) error {
 // latch (projection not Healthy); a success clears it. Caller holds
 // selfFenceMu.
 func (h *Host) latchRoleAdmission(role selfRole, epoch uint64, err error) {
+	h.roleRetry = role == selfRoleReplica && err != nil && !errors.Is(err, ErrRoleRefused)
 	if role == selfRoleNone {
 		return
 	}
@@ -462,6 +503,109 @@ func (h *Host) latchRoleAdmission(role selfRole, epoch uint64, err error) {
 		return
 	}
 	h.roleAdmissionFailed.Store("")
+}
+
+// pendingSupport is a supporting assignment waiting for its role call.
+type pendingSupport struct {
+	info    adapter.AssignmentInfo
+	primary string
+}
+
+// ErrRoleRefused marks a role call refused for good (the listener is closed,
+// or the volume refuses replica peers): retrying cannot succeed, so the
+// latch stays with its reason and no retry runs.
+var ErrRoleRefused = errors.New("role refused")
+
+// roleRetryMin and roleRetryMax bound the backoff between retries of a
+// failed replica role call.
+var roleRetryMin, roleRetryMax = 250 * time.Millisecond, 10 * time.Second
+
+// runRoleRetry re-applies a failed replica role call with backoff, so a
+// replica whose floor could not be persisted (a full or read-only disk)
+// rejoins once it can, with no operator: the latch clears on success and
+// the primary's probe of degraded peers finds it ready again.
+func (h *Host) runRoleRetry(ctx context.Context) {
+	defer h.wg.Done()
+	delay := roleRetryMin
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		h.selfFenceMu.Lock()
+		if !h.roleRetry || h.selfFence == nil || h.selfRole != selfRoleReplica {
+			h.selfFenceMu.Unlock()
+			delay = roleRetryMin
+			continue
+		}
+		role, epoch := h.selfRole, h.selfEpoch
+		// Re-applied directly, not through fenceSelfWithPeers: the desired
+		// role is unchanged, and shipPrepared was already cleared when this
+		// replica role was first taken there.
+		err := applySelfRoleWithPeers(h.selfFence, role, epoch, h.selfHasPeers)
+		h.latchRoleAdmission(role, epoch, err)
+		if err == nil {
+			h.log.Printf("blockvolume: replica role at epoch %d admitted on retry", epoch)
+			// Finish what the fact skipped when its role call failed, as the
+			// assignment path would have after a successful one, still under
+			// selfFenceMu: the desired role and epoch read above cannot move
+			// until it is done, so no newer transition lands in between.
+			// (The completion takes no host lock: the adapter's executor is
+			// local, the watchdog and the marker have their own.)
+			if p := h.pendingSupport; p != nil && p.info.Epoch == epoch {
+				h.pendingSupport = nil
+				h.completeSupportingIfCurrentLocked(p.info, p.primary)
+			}
+			h.selfFenceMu.Unlock()
+			delay = roleRetryMin
+			continue
+		}
+		h.selfFenceMu.Unlock()
+		if delay *= 2; delay > roleRetryMax {
+			delay = roleRetryMax
+		}
+	}
+}
+
+// supersedesPendingLocked reports whether a supporting fact at epoch may
+// clear or replace the pending assignment: only one at its epoch or below
+// (selfFenceMu held).
+func (h *Host) supersedesPendingLocked(epoch uint64) bool {
+	return h.pendingSupport == nil || h.pendingSupport.info.Epoch <= epoch
+}
+
+// completeSupportingIfCurrentLocked is the one completion of a supporting
+// assignment, for the fact's own successful role call and for the retry's:
+// it completes only while the desired role is still replica at info's epoch
+// and no newer fact has been seen (factEpochSeen), checked and completed
+// without releasing selfFenceMu (held by the caller). A newer fact records
+// its epoch under that lock before it acts at all, so it either was seen
+// here (nothing old is completed) or waits until this completion is done:
+// no older admission, watchdog step or marker lands after it. Facts run
+// concurrently by design (a replay beside the stream); only this and the
+// record at applyFact's start are under the lock.
+func (h *Host) completeSupportingIfCurrentLocked(info adapter.AssignmentInfo, primary string) {
+	if h.selfRole != selfRoleReplica || h.selfEpoch != info.Epoch || h.factEpochSeen > info.Epoch {
+		h.log.Printf("blockvolume: volume %s supporting assignment at epoch %d superseded before its completion (desired %v@%d, newest fact %d)",
+			h.cfg.VolumeID, info.Epoch, h.selfRole, h.selfEpoch, h.factEpochSeen)
+		return
+	}
+	h.completeSupporting(info, primary)
+}
+
+// completeSupporting applies a supporting assignment once its replica role
+// call succeeded: the adapter's identity, the watchdog, the ready marker.
+// Called only through completeSupportingIfCurrentLocked.
+func (h *Host) completeSupporting(info adapter.AssignmentInfo, primary string) {
+	h.adpt.OnAssignment(info)
+	h.wd.supportingAdmitted(info.Epoch)
+	h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
+		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, primary)
+	// Supporting replicas need durable lineage latching for promotion-readiness,
+	// but this must not consume the primary readyOnce. A later promotion to
+	// PRIMARY has to emit its own marker for the promoted lineage.
+	h.emitSupportingReadyMarker(info)
 }
 
 // RoleAdmissionFailure reports the G1 admission latch: whether the last role
@@ -497,6 +641,9 @@ func (h *Host) fenceSelfWithPeers(role selfRole, epoch uint64, hasPeers bool) er
 		return fmt.Errorf("stale role call at epoch %d (current desired epoch %d)", epoch, h.selfEpoch)
 	}
 	h.selfRole, h.selfEpoch, h.selfHasPeers = role, epoch, hasPeers
+	if role == selfRoleReplica {
+		h.shipPrepared = false
+	}
 	if h.selfFence == nil {
 		return nil
 	}
@@ -596,9 +743,11 @@ func (h *Host) Start() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 
-	h.wg.Add(2)
+	h.wg.Add(4)
 	go h.runHeartbeat(ctx)
 	go h.runSubscribe(ctx)
+	go h.runProbeRounds(ctx)
+	go h.runRoleRetry(ctx)
 	return ctx
 }
 
@@ -659,9 +808,10 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 		Reachable: true,
 		Eligible:  true,
 		// Raw identity facts; the master compares them with its own store.
-		MachineId:       h.cfg.StorageIdentity.MachineID,
-		DurableRootDev:  h.cfg.StorageIdentity.Dev,
-		DurableRootFsid: h.cfg.StorageIdentity.FSID,
+		MachineId:        h.cfg.StorageIdentity.MachineID,
+		DurableRootDev:   h.cfg.StorageIdentity.Dev,
+		DurableRootFsid:  h.cfg.StorageIdentity.FSID,
+		StoreAttestation: h.storeAttestation(),
 		Slots: []*control.HeartbeatSlot{
 			{
 				VolumeId:        h.cfg.VolumeID,
@@ -677,6 +827,57 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 			},
 		},
 	}
+}
+
+// storeAttester is the replication slot's view of its write-ACK set
+// (replication.ReplicationVolume).
+type storeAttester interface {
+	LocalStoreID() storage.StoreID
+	AttestedStores() map[string]storage.StoreID
+}
+
+// storeRequirer is the replication slot's switch that makes peers count
+// only with the store the master recorded (replication.ReplicationVolume).
+type storeRequirer interface {
+	RequireAttestedStores()
+}
+
+
+// storeAttestation is this node's attestation of its write-ACK set while it
+// holds the primary role (admitted, at its current epoch): its own store and
+// every Healthy peer's last barrier store. nil on a replica, before the
+// role is admitted, or while the local store carries no id.
+func (h *Host) storeAttestation() *control.StoreAttestation {
+	h.selfFenceMu.Lock()
+	role, epoch := h.selfRole, h.selfEpoch
+	h.selfFenceMu.Unlock()
+	if role != selfRolePrimary || epoch == 0 {
+		return nil
+	}
+	if reason, _ := h.roleAdmissionFailed.Load().(string); reason != "" {
+		return nil
+	}
+	rv, ok := h.getReplication().(storeAttester)
+	if !ok || rv == nil {
+		return nil
+	}
+	own := rv.LocalStoreID()
+	if own.IsZero() {
+		return nil
+	}
+	att := &control.StoreAttestation{VolumeId: h.cfg.VolumeID, ReplicaId: h.cfg.ReplicaID, Epoch: epoch,
+		Stores: []*control.AttestedStore{{ReplicaId: h.cfg.ReplicaID, StoreId: append([]byte(nil), own[:]...)}}}
+	peers := rv.AttestedStores()
+	ids := make([]string, 0, len(peers))
+	for id := range peers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		sid := peers[id]
+		att.Stores = append(att.Stores, &control.AttestedStore{ReplicaId: id, StoreId: append([]byte(nil), sid[:]...)})
+	}
+	return att
 }
 
 // newIncarnation returns a random process incarnation id.
@@ -827,6 +1028,12 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // OnAssignment could flip the projection Healthy before peers were
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
+	// Record the fact's epoch before it acts (see factEpochSeen).
+	h.selfFenceMu.Lock()
+	if fact.GetEpoch() > h.factEpochSeen {
+		h.factEpochSeen = fact.GetEpoch()
+	}
+	h.selfFenceMu.Unlock()
 	// INV-AUTH-HOLDER-IDENTITY-001: matching r1 and loopback endpoints do not identify a host.
 	if h.refusePrimaryAssignment(fact) {
 		return
@@ -849,20 +1056,29 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 				return
 			}
 			if err := h.fenceSelf(selfRoleReplica, info.Epoch); err != nil {
-				// G1: fail closed, as for the primary path; stream replay
-				// redelivers the fact and a later success clears the latch.
+				// G1: fail closed, as for the primary path. The role call is
+				// retried (runRoleRetry), which completes this assignment
+				// once it succeeds; a later fact supersedes it.
 				h.log.Printf("blockvolume: volume %s could not admit its replica listener at epoch %d: %v — NOT admitting supporting replica (fail-closed)",
 					h.cfg.VolumeID, info.Epoch, err)
+				h.selfFenceMu.Lock()
+				// An older fact (a late replay) never touches a newer
+				// pending assignment: it neither clears nor replaces it.
+				if h.supersedesPendingLocked(info.Epoch) {
+					h.pendingSupport = nil
+					if !errors.Is(err, ErrRoleRefused) && h.selfRole == selfRoleReplica && h.selfEpoch == info.Epoch {
+						h.pendingSupport = &pendingSupport{info: info, primary: fact.ReplicaId}
+					}
+				}
+				h.selfFenceMu.Unlock()
 				return
 			}
-			h.adpt.OnAssignment(info)
-			h.wd.supportingAdmitted(info.Epoch)
-			h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
-				h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, fact.ReplicaId)
-			// Supporting replicas need durable lineage latching for promotion-readiness,
-			// but this must not consume the primary readyOnce. A later promotion to
-			// PRIMARY has to emit its own marker for the promoted lineage.
-			h.emitSupportingReadyMarker(info)
+			h.selfFenceMu.Lock()
+			if h.supersedesPendingLocked(info.Epoch) {
+				h.pendingSupport = nil // this fact supersedes a skipped one at its epoch or below
+			}
+			h.completeSupportingIfCurrentLocked(info, fact.ReplicaId)
+			h.selfFenceMu.Unlock()
 			return
 		}
 		// The new authoritative set excludes us: close assignment-gated
@@ -876,6 +1092,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	}
 
 	h.recordSelfAssignment(fact)
+	h.noteReplicaStores(fact)
 	h.reportAssignmentEndpoints(fact)
 
 	// The recovery watchdog runs from the primary assignment, before any
@@ -905,11 +1122,34 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		}
 	}
 
+	// The target's own store must still show what the master probed before
+	// it adopts the role (nothing is installed yet, so a refusal has no
+	// effect to undo).
+	rv := h.getReplication()
+	if src, ok := rv.(primaryEvidenceSource); ok && rv != nil {
+		st, end, err := src.LocalPrimaryEvidence()
+		if err != nil {
+			h.refusePrimary(fmt.Sprintf("epoch %d: the local store's evidence is unreadable: %v", fact.Epoch, err))
+			return
+		}
+		floor, floorErr := uint64(0), error(nil)
+		if fr, ok := h.selfFenceFloor(); ok {
+			floor, floorErr = fr.EpochFloor()
+		}
+		var store storage.StoreID
+		if sid, ok := rv.(interface{ LocalStoreID() storage.StoreID }); ok {
+			store = sid.LocalStoreID()
+		}
+		if reason := checkPrimaryEvidence(fact, st, end, floor, floorErr == nil && floor > 0, store); reason != "" {
+			h.refusePrimary(reason)
+			return
+		}
+	}
+
 	// Step (2a): install replication peer set first. Decoded via
 	// the separate host-only decodeReplicaTargets path (not through
 	// AssignmentInfo), so the TestNoOtherAssignmentInfoConstruction
 	// AST fence stays green.
-	rv := h.getReplication()
 	if rv != nil {
 		targets, gen := decodeReplicaTargets(fact)
 		if err := rv.UpdateReplicaSet(gen, targets); err != nil {
@@ -942,6 +1182,25 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		h.log.Printf("blockvolume: volume %s could not fence its own replica listener at epoch %d: %v — NOT applying to adapter (fail-closed)",
 			h.cfg.VolumeID, info.Epoch, err)
 		return
+	}
+	// A node taking the primary role from another role holds entries it
+	// applied as a replica, which never passed its own ship order: move the
+	// ship cursor to the store's next LSN before it serves, or its first
+	// write waits for an LSN that never comes. Its listener is fenced as
+	// primary now (no replicated entry lands any more) and the frontend is
+	// not serving yet (no local write is pending).
+	h.selfFenceMu.Lock()
+	prepared := h.shipPrepared
+	h.selfFenceMu.Unlock()
+	if r, ok := rv.(interface{ RebaseShipToStore() error }); ok && rv != nil && !prepared {
+		if err := r.RebaseShipToStore(); err != nil {
+			h.log.Printf("blockvolume: volume %s could not move its ship order to the store at epoch %d: %v — NOT applying to adapter (fail-closed)",
+				h.cfg.VolumeID, info.Epoch, err)
+			return
+		}
+		h.selfFenceMu.Lock()
+		h.shipPrepared = true
+		h.selfFenceMu.Unlock()
 	}
 	if h.cfg.RF1Only != "" && !h.admitRF1(fact.Epoch) {
 		h.log.Printf("blockvolume: volume %s RF1 assignment at epoch %d overtaken by a newer refusal — NOT applying to adapter",

@@ -34,7 +34,55 @@ type AssignmentInfo struct {
 	DataAddr        string
 	CtrlAddr        string
 	PrimaryStartLSN uint64 // see engine.AssignmentObserved.PrimaryStartLSN; 0 = not known
+	// Primary is how this line made its primary the primary, with the
+	// evidence the master probed on the target; the target checks it before
+	// adopting the role. The zero value is a line without a kind.
+	Primary PrimaryEvidence
 }
+
+// PrimaryKind is how a line made its primary the primary.
+type PrimaryKind uint8
+
+const (
+	PrimaryKindUnspecified PrimaryKind = iota // a line without a kind (a pre-release master)
+	PrimaryKindBootstrap                      // the volume's first primary: the target holds no data
+	PrimaryKindPromotion                      // promoted on the master's probed evidence
+	PrimaryKindForced                         // the operator's forced promotion: no evidence
+)
+
+// PrimaryEvidence is a line's kind and, for a promotion, what the master
+// probed on the target: its durable LSN and its epoch-table row at that LSN.
+type PrimaryEvidence struct {
+	Kind         PrimaryKind
+	DurableLSN   uint64
+	DataEpoch    uint64 // the target's epoch-table row at DurableLSN
+	DataFirstLSN uint64
+	StoreID      [16]byte // the probed store's id (its superblock UUID)
+	// FencedEpoch: the survivors made this epoch their durable floor before
+	// answering (a fencing round); the line is minted only at this epoch.
+	// 0: no fencing round (a planned move).
+	FencedEpoch uint64
+	// Basis is why a promotion may be minted; a promotion without one is
+	// refused.
+	Basis PromotionBasis
+}
+
+// PromotionBasis is the one reason a promotion is minted.
+type PromotionBasis uint8
+
+const (
+	BasisNone PromotionBasis = iota
+	// BasisFenced: decided on a fencing round's answers; FencedEpoch is the
+	// epoch minted.
+	BasisFenced
+	// BasisPlanned: a planned move after its guard (the target in every
+	// acknowledgement set while the current primary is alive); no fencing
+	// round, FencedEpoch 0.
+	BasisPlanned
+	// BasisHeal: the line's own primary continued at FencedEpoch after a
+	// fencing round that published nothing.
+	BasisHeal
+)
 
 // ProbeResult is the outcome of a transport probe.
 type ProbeResult struct {

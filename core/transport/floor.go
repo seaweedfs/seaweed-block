@@ -152,6 +152,9 @@ func rejectDuplicateKeys(raw []byte) error {
 	return nil
 }
 
+// LoadFloorRecord reads the replica epoch floor record at path (see loadFloor).
+func LoadFloorRecord(path, volumeID string) (uint64, error) { return loadFloor(path, volumeID) }
+
 // loadFloor reads the floor record at path. A missing record is
 // ErrFloorRecordMissing; any other read or parse problem is an error.
 func loadFloor(path, volumeID string) (uint64, error) {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // TopologyController is the multi-volume, cluster-scoped directive
@@ -493,12 +495,20 @@ func (c *TopologyController) decideVolume(
 			}, "endpoint refresh", true
 		}
 		if target, ok := chooseRebalanceCandidate(vol, current, serverIndex, currentLoad, projectedLoad, c.config.RebalanceSkew); ok {
+			// A primary change goes out only with the promotion gate's
+			// evidence for its target (one decider): none, no rebalance. The
+			// current primary is alive, so it is a planned move: the same
+			// guard as a failback (the target in every acknowledgement set).
+			if target.PromotionEvidence.Kind != adapter.PrimaryKindPromotion || !target.PlannedMoveAllowed {
+				return AssignmentAsk{}, "", false
+			}
 			return AssignmentAsk{
 				VolumeID:  vol.VolumeID,
 				ReplicaID: target.ReplicaID,
 				DataAddr:  target.DataAddr,
 				CtrlAddr:  target.CtrlAddr,
 				Intent:    IntentReassign,
+				Evidence:  plannedEvidence(target.PromotionEvidence),
 			}, "rebalance", true
 		}
 		return AssignmentAsk{}, "", false
@@ -523,13 +533,18 @@ func (c *TopologyController) decideVolume(
 	other := acceptableCandidatesExcept(vol, serverIndex, current.ReplicaID)
 	if len(other) > 0 {
 		best := chooseFailoverCandidate(other, projectedLoad)
-		return AssignmentAsk{
-			VolumeID:  vol.VolumeID,
-			ReplicaID: best.ReplicaID,
-			DataAddr:  best.DataAddr,
-			CtrlAddr:  best.CtrlAddr,
-			Intent:    IntentReassign,
-		}, "failover", true
+		// A failover goes out only with the promotion gate's evidence for
+		// its target (one decider): no evidence, no promotion.
+		if best.PromotionEvidence.Kind == adapter.PrimaryKindPromotion {
+			return AssignmentAsk{
+				VolumeID:  vol.VolumeID,
+				ReplicaID: best.ReplicaID,
+				DataAddr:  best.DataAddr,
+				CtrlAddr:  best.CtrlAddr,
+				Intent:    IntentReassign,
+				Evidence:  best.PromotionEvidence,
+			}, "failover", true
+		}
 	}
 	// No promotion-ready peer exists. Keep the current authority endpoint fresh
 	// when the current replica is still reachable/eligible; this preserves
@@ -728,4 +743,11 @@ func sameAsk(a, b AssignmentAsk) bool {
 		a.DataAddr == b.DataAddr &&
 		a.CtrlAddr == b.CtrlAddr &&
 		a.Intent == b.Intent
+}
+
+// plannedEvidence is a rebalance's evidence: the gate's probe of the target,
+// a planned move after the planned-move guard (PlannedMoveAllowed).
+func plannedEvidence(ev adapter.PrimaryEvidence) adapter.PrimaryEvidence {
+	ev.FencedEpoch, ev.Basis = 0, adapter.BasisPlanned
+	return ev
 }

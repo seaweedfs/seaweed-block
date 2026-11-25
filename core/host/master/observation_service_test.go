@@ -89,6 +89,7 @@ func TestClusterEvidenceService_GRPCRegistered(t *testing.T) {
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatalf("product tick: %v", err)
 	}
+	waitAuthorityLine(t, h.Publisher(), "pvc-a") // the bind publishes asynchronously
 
 	conn, err := grpc.NewClient(h.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {

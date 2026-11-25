@@ -107,7 +107,7 @@ func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, 
 	p := v.projector.Projection()
 	healthy := p.Mode == engine.ModeHealthy
 	superseded := healthy && v.isSupersededLine(p.Epoch, p.EndpointVersion)
-	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) || v.roleAdmissionFailed() {
+	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) || v.roleAdmissionFailed() || v.replicaStoresAwaited() != "" {
 		healthy = false
 	}
 	result := frontend.Projection{
@@ -151,6 +151,20 @@ func (v *AdapterProjectionView) supportingReplicaReady(selfEpoch, selfEV uint64)
 	return other.GetReplicaId() != v.replicaID &&
 		other.GetEpoch() == selfEpoch &&
 		other.GetEndpointVersion() == selfEV
+}
+
+// replicaStoresAwaited: a new volume's primary serves nothing until the
+// master has recorded every initial replica's attested store (until then no
+// peer's ack can count); "" when nothing is awaited.
+func (v *AdapterProjectionView) replicaStoresAwaited() string {
+	if v == nil || v.probe == nil {
+		return ""
+	}
+	probe, ok := v.probe.(interface{ ReplicaStoresAwaited() string })
+	if !ok {
+		return ""
+	}
+	return probe.ReplicaStoresAwaited()
 }
 
 // roleAdmissionFailed is the G1 admission latch from the volume host: a role

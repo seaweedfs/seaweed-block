@@ -93,6 +93,9 @@ type ReplicationVolume struct {
 	updateMu              sync.Mutex // serializes membership replacement with Close
 	mu                    sync.Mutex // protects membership, lineage, and lifecycle snapshots
 	peers                 map[string]*ReplicaPeer
+	// requireAttest: peers count toward write ACKs only while their barrier
+	// store is the one the master recorded (RequireAttestedStores).
+	requireAttest bool
 	executors             map[string]*transport.BlockExecutor
 	peerQueues            map[string]*peerWorkQueue
 	peerQueueDepth        int
@@ -233,6 +236,35 @@ func (v *ReplicationVolume) SetEpochTable(t *transport.EpochTable) {
 	v.mu.Lock()
 	v.epochs = t
 	v.mu.Unlock()
+}
+
+// EpochTableStatus is the volume's epoch table as the promotion probe reads it.
+type EpochTableStatus struct {
+	Rows    []transport.EpochRow
+	Invalid bool // a recovery left the table without a known history
+	Present bool // the volume keeps a table at all
+}
+
+// EpochTableStatus reports the volume's epoch table.
+func (v *ReplicationVolume) EpochTableStatus() EpochTableStatus {
+	v.mu.Lock()
+	t := v.epochs
+	v.mu.Unlock()
+	if t == nil {
+		return EpochTableStatus{}
+	}
+	return EpochTableStatus{Rows: t.Rows(), Invalid: t.Invalid(), Present: true}
+}
+
+// LocalPrimaryEvidence is this volume's epoch table and durable end, as a
+// primary line's target checks them before adopting the role.
+func (v *ReplicationVolume) LocalPrimaryEvidence() (EpochTableStatus, uint64, error) {
+	// Sync first, then read the table: a row appended in between is then
+	// read with an end that already covers it (never an old row with a
+	// newer end).
+	end, err := v.store.Sync()
+	st := v.EpochTableStatus()
+	return st, end, err
 }
 
 // reconcilePeer asks the peer for its (last data epoch, end) in a barrier
@@ -378,6 +410,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		// peer ID set; `got` is the incoming set. Equal sets are the
 		// normal replay case; unequal sets indicate a master-side
 		// oddity worth a grep.
+		// The master's store record for a peer may change without a new
+		// generation (it records a rebuilt replica's store): apply it.
+		v.applyExpectedStoresLocked(targets)
 		had := peerIDSet(v.peers)
 		got := targetIDSet(targets)
 		if !stringSetEqual(had, got) {
@@ -465,6 +500,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		peer.setOnHealthy(func() {
 			v.resetTerminalPeerQueue(peer)
 		})
+		if v.requireAttest {
+			peer.setRequireAttest()
+		}
 		if v.epochs != nil {
 			peer.setReconcile(func(ctx context.Context) (bool, bool, string) { return v.reconcilePeer(ctx, peer) })
 			executor.SetEpochTable(v.epochs)
@@ -493,7 +531,8 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		addedPeers = append(addedPeers, peer)
 	}
 
-	v.seedNewPeerLiveCursorsLocked(addedPeers)
+	learn := v.seedNewPeerLiveCursorsLocked(addedPeers)
+	v.applyExpectedStoresLocked(targets)
 
 	// Advance the monotonic guard only for real (non-zero) generations.
 	if generation > 0 {
@@ -501,8 +540,79 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 	}
 	v.membershipUpdating = false
 	v.mu.Unlock()
+	v.learnPeerStores(learn)
 	return nil
 }
+
+// learnPeerStores runs a barrier at LSN 0 to each peer, in parallel and
+// without v.mu (only the UpdateReplicaSet call waits, at most one barrier
+// timeout): the answer carries the peer's store. A peer that does not answer
+// is degraded like any failed barrier; its store is learned at the barrier
+// that heals it.
+func (v *ReplicationVolume) learnPeerStores(peers []*ReplicaPeer) {
+	for _, peer := range peers {
+		go v.learnPeerStore(peer)
+	}
+}
+
+// learnPeerStore retries learnStore with a growing pause (up to
+// storeLearnMaxPause) until the peer's store is known, or the peer is
+// closed, replaced or no longer Healthy (a heal's barrier then teaches it),
+// or the volume closes. Nothing waits for it.
+func (v *ReplicationVolume) learnPeerStore(peer *ReplicaPeer) {
+	pause := storeLearnFirstPause
+	for attempt := 1; ; attempt++ {
+		if !peer.learningStore() {
+			return
+		}
+		q, ok := v.peerQueueFor(peer)
+		if !ok {
+			return
+		}
+		if v.learnThroughQueue(q) {
+			return
+		}
+		if attempt == 1 || attempt%20 == 0 {
+			log.Printf("replication: volume %s peer=%s store not learned yet (attempt %d); retrying", v.volumeID, peer.Target().ReplicaID, attempt)
+		}
+		time.Sleep(pause)
+		if pause *= 2; pause > storeLearnMaxPause {
+			pause = storeLearnMaxPause
+		}
+	}
+}
+
+// peerQueueFor returns peer's work queue while peer is still this open
+// volume's peer.
+func (v *ReplicationVolume) peerQueueFor(peer *ReplicaPeer) (*peerWorkQueue, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	id := peer.Target().ReplicaID
+	if v.closed || v.peers[id] != peer || v.peerQueues[id] == nil {
+		return nil, false
+	}
+	return v.peerQueues[id], true
+}
+
+// learnThroughQueue runs one store-learning attempt on the peer's queue
+// worker (the connection's single writer) and reports whether the store is
+// now known. A full or closed queue is an attempt that did not run.
+func (v *ReplicationVolume) learnThroughQueue(q *peerWorkQueue) bool {
+	result := make(chan peerWorkResult, 1)
+	if !q.tryLearnStore(result) {
+		return false
+	}
+	r := <-result
+	return r.err == nil && r.eligible
+}
+
+// The store-learning retry pauses: short first (a replica that starts a
+// moment after the primary), capped so a replica that is down costs one
+// barrier attempt per cap.
+const (
+	storeLearnFirstPause = 100 * time.Millisecond
+	storeLearnMaxPause   = 2 * time.Second
+)
 
 func (v *ReplicationVolume) closePeerQueueLocked(replicaID string) {
 	if q := v.peerQueues[replicaID]; q != nil {
@@ -556,18 +666,28 @@ func (v *ReplicationVolume) replaceTerminalPeerQueueLocked(id string, old *peerW
 // cannot satisfy sync-quorum/sync-all write acknowledgement. A peer that
 // answers above the frontier holds a divergent old-epoch tail and is
 // degraded too (it needs a rebuild, never counts by length).
-func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
+//
+// It returns the peers whose store is still to be learned (a new volume
+// where stores are required): the caller runs learnPeerStores on them after
+// releasing v.mu.
+func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) []*ReplicaPeer {
 	if len(peers) == 0 {
-		return
+		return nil
 	}
 	frontier, err := v.store.Sync()
 	if err != nil {
 		log.Printf("replication: volume %s live cursor seed skipped: local sync failed: %v",
 			v.volumeID, err)
-		return
+		return nil
 	}
 	if frontier == 0 {
-		return
+		// Nothing to seed. Where stores are required, a barrier at 0 still
+		// teaches the primary each new peer's store, so it can attest it
+		// before any write (a new volume serves nothing until then).
+		if v.requireAttest {
+			return peers
+		}
+		return nil
 	}
 	for _, peer := range peers {
 		if peer == nil {
@@ -611,6 +731,7 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 		}
 		peer.SeedLiveShipCursor(frontier, "assignment frontier barrier")
 	}
+	return nil
 }
 
 // peerIDSet extracts the set of peer IDs from the current peers map.
@@ -732,6 +853,12 @@ func (v *ReplicationVolume) enqueueLocalWrite(w LocalWrite) (*orderedLocalWrite,
 		go v.drainOrderedWrites()
 	}
 	return req, nil
+}
+
+// RebaseShipToStore moves the ship order to the store's next LSN, for a
+// node taking the primary role after applying entries as a replica.
+func (v *ReplicationVolume) RebaseShipToStore() error {
+	return v.RebaseShipLSN(v.store.NextLSN())
 }
 
 // RebaseShipLSN moves the next LSN to ship forward to lsn. The volume
@@ -1078,6 +1205,54 @@ func replicationDurationNanos(d time.Duration) uint64 {
 		return 1
 	}
 	return uint64(d.Nanoseconds())
+}
+
+// LocalStoreID is the id of the store this volume replicates from (zero
+// when the store carries none).
+func (v *ReplicationVolume) LocalStoreID() storage.StoreID { return storage.StoreIDOf(v.store) }
+
+// applyExpectedStoresLocked sets each kept peer's expected store from its
+// target, when the target names the peer's current lineage.
+func (v *ReplicationVolume) applyExpectedStoresLocked(targets []ReplicaTarget) {
+	for _, t := range targets {
+		p, ok := v.peers[t.ReplicaID]
+		if !ok {
+			continue
+		}
+		cur := p.Target()
+		if cur.Epoch == t.Epoch && cur.EndpointVersion == t.EndpointVersion && cur.DataAddr == t.DataAddr {
+			p.setExpectedStore(t.StoreID)
+		}
+	}
+}
+
+// RequireAttestedStores makes every peer count toward write ACKs only while
+// its barrier reports the store the master recorded for it (the target's
+// StoreID). A host that attests its stores to a master sets it.
+func (v *ReplicationVolume) RequireAttestedStores() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.requireAttest = true
+	for _, p := range v.peers {
+		p.setRequireAttest()
+	}
+}
+
+// AttestedStores is the primary's attestation of its write-ACK set: each
+// Healthy peer with the store its last barrier reported (replica id ->
+// store id). A peer that is not Healthy, or has not answered a barrier
+// since it became Healthy, is absent: the master never takes it as a
+// survivor on this primary's word.
+func (v *ReplicationVolume) AttestedStores() map[string]storage.StoreID {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := map[string]storage.StoreID{}
+	for id, peer := range v.peers {
+		if sid, ok := peer.AttestedStore(); ok {
+			out[id] = sid
+		}
+	}
+	return out
 }
 
 // PeerStatuses returns a stable, sorted diagnostic snapshot of all

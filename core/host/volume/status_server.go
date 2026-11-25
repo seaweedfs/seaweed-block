@@ -569,6 +569,8 @@ func (s *StatusServer) statusProjection() StatusProjection {
 			}
 		case backendReason != "":
 			p.NotReadyReason = backendReason
+		case s.view.replicaStoresAwaited() != "":
+			p.NotReadyReason = s.view.replicaStoresAwaited()
 		case nvmePending:
 			p.NotReadyReason = "frontend target not listening yet"
 		case !authorityReady:
@@ -576,6 +578,13 @@ func (s *StatusServer) statusProjection() StatusProjection {
 		}
 	}
 	return p
+}
+
+// ProbeRoles is this replica's role as the promotion probe round reads it:
+// a replica ready to be promoted, or a primary that serves.
+func (s *StatusServer) ProbeRoles() (replicaReady, primaryReady bool) {
+	p := s.authorityProjection()
+	return p.ReplicationRole == ReplicationRoleReady, p.FrontendPrimaryReady
 }
 
 // authorityProjection preserves the storage/authority gate used by runtime

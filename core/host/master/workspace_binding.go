@@ -202,6 +202,11 @@ func (s *services) PlaceWorkspace(ctx context.Context, q *control.WorkspacePlace
 // admitWorkspacePublication owns the last local boundary before an ordinary
 // Publisher mint. Guarded Move already owns workspaceMu in its RPC path.
 func (h *Host) admitWorkspacePublication(ask authority.AssignmentAsk, publish func() error) error {
+	// A volume's first bind records its initial replicas before the line
+	// exists, so its primary is never served without the wait.
+	if err := h.openStoreRecord(ask.VolumeID); err != nil {
+		return err
+	}
 	if h.lifecycle == nil {
 		return publish()
 	}
@@ -244,7 +249,10 @@ func (h *Host) admitWorkspacePublication(ask authority.AssignmentAsk, publish fu
 	// A supported snapshot and its direct promotion fallback may both be
 	// dequeued before either commits. Apply the product loop's existing
 	// already-current check again here, rather than advancing the epoch twice.
-	if ask.Intent == authority.IntentReassign && h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
+	// A fenced reassign needs no such check: the mint takes it only at its
+	// fenced epoch, so it cannot advance twice (and the heal of a failed
+	// fencing round names the current replica on purpose).
+	if ask.Intent == authority.IntentReassign && ask.Evidence.FencedEpoch == 0 && h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
 		return nil
 	}
 	// The same mutex covers Register/Delete. It stays held through the actual

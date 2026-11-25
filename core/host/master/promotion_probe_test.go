@@ -32,7 +32,7 @@ func TestWorkloadPlanPromotionEvidenceProvider_ProbesDurableFrontiers(t *testing
 			_ = json.NewEncoder(w).Encode(struct {
 				Volumes []durable.VolumeStatus
 			}{Volumes: []durable.VolumeStatus{{
-				VolumeID: "vol-rf3", ReplicaID: "r2", FrontierKnown: true, DurableLSN: 52,
+				VolumeID: "vol-rf3", ReplicaID: "r2", StoreID: testStoreHex, FrontierKnown: true, DurableLSN: 52,
 			}}})
 		default:
 			http.NotFound(w, r)
@@ -47,6 +47,7 @@ func TestWorkloadPlanPromotionEvidenceProvider_ProbesDurableFrontiers(t *testing
 			ReplicaID: "r2", ISCSIListenPort: 3260,
 		}},
 	}}, WorkloadPlanPromotionProbeConfig{
+		Attested:            attestEvery(testStoreID),
 		AckProfile:          "sync-quorum",
 		RequiredLSNByVolume: map[string]uint64{"vol-rf3": 52},
 		HTTPClient:          rewriteHTTPClient(server.URL, "127.0.0.1:23260"),
@@ -83,7 +84,7 @@ func TestWorkloadPlanPromotionEvidenceProvider_NotReadyWithoutReplicaReadyRole(t
 			_ = json.NewEncoder(w).Encode(struct {
 				Volumes []durable.VolumeStatus
 			}{Volumes: []durable.VolumeStatus{{
-				VolumeID: "vol-rf3", ReplicaID: "r2", FrontierKnown: true, DurableLSN: 90,
+				VolumeID: "vol-rf3", ReplicaID: "r2", StoreID: testStoreHex, FrontierKnown: true, DurableLSN: 90,
 			}}})
 		default:
 			http.NotFound(w, r)
@@ -98,6 +99,7 @@ func TestWorkloadPlanPromotionEvidenceProvider_NotReadyWithoutReplicaReadyRole(t
 			ReplicaID: "r2", ISCSIListenPort: 3260,
 		}},
 	}}, WorkloadPlanPromotionProbeConfig{
+		Attested:   attestEvery(testStoreID),
 		AckProfile: "sync-quorum",
 		HTTPClient: rewriteHTTPClient(server.URL, "127.0.0.1:23260"),
 	})
@@ -114,6 +116,7 @@ func TestWorkloadPlanPromotionEvidenceProvider_NotReadyWithoutReplicaReadyRole(t
 
 func TestWorkloadPlanPromotionEvidenceProvider_CurrentUnknownWithoutProbeAddress(t *testing.T) {
 	provider := NewWorkloadPlanPromotionEvidenceProvider(nil, WorkloadPlanPromotionProbeConfig{
+		Attested:   attestEvery(testStoreID),
 		AckProfile: "sync-quorum",
 	})
 	result, err := provider.ProbePromotionCandidates("vol-rf3", authority.AuthorityBasis{ReplicaID: "r1"}, nil)
@@ -141,7 +144,7 @@ func TestWorkloadPlanPromotionEvidenceProvider_CurrentKnownAfterSuccessfulProbe(
 			_ = json.NewEncoder(w).Encode(struct {
 				Volumes []durable.VolumeStatus
 			}{Volumes: []durable.VolumeStatus{{
-				VolumeID: "vol-rf3", ReplicaID: "r1", FrontierKnown: true, DurableLSN: 52,
+				VolumeID: "vol-rf3", ReplicaID: "r1", StoreID: testStoreHex, FrontierKnown: true, DurableLSN: 52,
 			}}})
 		default:
 			http.NotFound(w, r)
@@ -156,6 +159,7 @@ func TestWorkloadPlanPromotionEvidenceProvider_CurrentKnownAfterSuccessfulProbe(
 			ReplicaID: "r1", ISCSIListenPort: 3260,
 		}},
 	}}, WorkloadPlanPromotionProbeConfig{
+		Attested:   attestEvery(testStoreID),
 		AckProfile: "sync-quorum",
 		HTTPClient: rewriteHTTPClient(server.URL, "127.0.0.1:23260"),
 	})
@@ -180,7 +184,7 @@ func TestNodeLoss_WorkloadPlanPromotionEvidenceProvider_ExternalStatusUsesNodeAd
 			_ = json.NewEncoder(w).Encode(struct {
 				Volumes []durable.VolumeStatus
 			}{Volumes: []durable.VolumeStatus{{
-				VolumeID: "vol-rf3", ReplicaID: "r2", FrontierKnown: true, DurableLSN: 52,
+				VolumeID: "vol-rf3", ReplicaID: "r2", StoreID: testStoreHex, FrontierKnown: true, DurableLSN: 52,
 			}}})
 		default:
 			http.NotFound(w, r)
@@ -195,6 +199,7 @@ func TestNodeLoss_WorkloadPlanPromotionEvidenceProvider_ExternalStatusUsesNodeAd
 			ReplicaID: "r2", DataAddr: "10.0.0.2:19103", ISCSIListenPort: 3260,
 		}},
 	}}, WorkloadPlanPromotionProbeConfig{
+		Attested:       attestEvery(testStoreID),
 		AckProfile:     "sync-quorum",
 		ExternalStatus: true,
 		HTTPClient:     rewriteHTTPClient(server.URL, "10.0.0.2:23260"),
@@ -220,6 +225,7 @@ func TestNodeLoss_WorkloadPlanPromotionEvidenceProvider_ExternalStatusRejectsLoo
 			ReplicaID: "r2", DataAddr: "127.0.0.1:19103", ISCSIListenPort: 3260,
 		}},
 	}}, WorkloadPlanPromotionProbeConfig{
+		Attested:       attestEvery(testStoreID),
 		AckProfile:     "sync-quorum",
 		ExternalStatus: true,
 	})

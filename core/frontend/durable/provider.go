@@ -353,6 +353,7 @@ type VolumeStatus struct {
 	Path                  string                               // its store path under --durable-root
 	Impl                  string                               // the durable implementation (walstore, smartwal, walstore-chunk, ...)
 	ReplicaID             string                               // the replica this store holds
+	StoreID               string                               `json:",omitempty"` // the store's superblock UUID (hex); empty when it carries none
 	Epoch                 uint64                               // the epoch the store is latched to; 0 before an assignment
 	EndpointVersion       uint64                               // the endpoint version it is latched to
 	Latched               bool                                 // an assignment latched the store (epoch and endpoint version set)
