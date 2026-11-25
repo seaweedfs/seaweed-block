@@ -1,7 +1,7 @@
-// Package invcheck checks docs/design/invariants.md against the code: the
-// row count it states is the count its tables hold, every Go test a row
-// names exists, an ACTIVE row names at least one test, and a statement is
-// short (one property per row).
+// Package invcheck checks docs/design/invariants.md against the code: every
+// Go test a row names exists, an ACTIVE row names at least one test, a
+// statement is short (one property per row), and the file keeps no hand-written
+// row count (the test prints it).
 package invcheck
 
 import (
