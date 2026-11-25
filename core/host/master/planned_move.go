@@ -60,16 +60,21 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 	if ap, ok := prober.(ackProfiled); ok {
 		profile = ap.AckProfile()
 	}
-	h.probeSlots.mu.Lock()
-	slots := len(h.probeSlots.m[volumeID])
-	h.probeSlots.mu.Unlock()
-	if slots == 0 {
-		return adapter.PrimaryEvidence{}, fmt.Errorf("planned move: volume %s's replicas are not known to the gate yet", volumeID)
+	// The volume's replicas and the target's node, from its placement.
+	placement, ok := h.lifecycle.Placements.GetPlacement(volumeID)
+	if !ok || len(placement.Slots) == 0 {
+		return adapter.PrimaryEvidence{}, fmt.Errorf("planned move: volume %s has no placement", volumeID)
 	}
-	if err := plannedMoveAllowed(profile, slots); err != nil {
+	targetServer := ""
+	for _, s := range placement.Slots {
+		if s.ReplicaID == target {
+			targetServer = s.ServerID
+		}
+	}
+	if err := plannedMoveAllowed(profile, len(placement.Slots)); err != nil {
 		return adapter.PrimaryEvidence{}, err
 	}
-	result, err := prober.ProbePromotionCandidates(volumeID, authority.AuthorityBasis{}, []authority.ReplicaCandidate{{ReplicaID: target, ServerID: h.slotServer(volumeID, target)}})
+	result, err := prober.ProbePromotionCandidates(volumeID, authority.AuthorityBasis{}, []authority.ReplicaCandidate{{ReplicaID: target, ServerID: targetServer}})
 	if err != nil {
 		return adapter.PrimaryEvidence{}, fmt.Errorf("planned move: probe round: %w", err)
 	}
