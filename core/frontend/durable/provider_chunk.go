@@ -8,9 +8,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -644,52 +641,6 @@ func (r *closeBoundRemote) ListIntents(ctx context.Context) ([]storage.ChunkInte
 	c, end := r.bind(ctx)
 	defer end()
 	return r.ChunkRemote.ListIntents(c)
-}
-
-// The fresh marker: <volume path>.chunkfresh.
-
-func chunkFreshMarker(path string) string { return path + ".chunkfresh" }
-
-func writeChunkFreshMarker(path string) error {
-	m := chunkFreshMarker(path)
-	f, err := os.OpenFile(m, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("durable: fresh marker: %w", err)
-	}
-	_, werr := f.WriteString("fresh\n")
-	serr := f.Sync()
-	cerr := f.Close()
-	if err := errors.Join(werr, serr, cerr); err != nil {
-		return fmt.Errorf("durable: fresh marker: %w", err)
-	}
-	return syncParentDir(m)
-}
-
-func removeChunkFreshMarker(path string) error {
-	m := chunkFreshMarker(path)
-	if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("durable: remove fresh marker: %w", err)
-	}
-	return syncParentDir(m)
-}
-
-// syncParentDir makes a create or remove in path's directory durable. A
-// directory cannot be fsynced on Windows; there it is a no-op (no Windows
-// crash-durability claim).
-func syncParentDir(path string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("durable: open directory: %w", err)
-	}
-	serr := d.Sync()
-	cerr := d.Close()
-	if err := errors.Join(serr, cerr); err != nil {
-		return fmt.Errorf("durable: fsync directory: %w", err)
-	}
-	return nil
 }
 
 // Cut scheduler constants (B9 W3 ruling).
@@ -1509,10 +1460,4 @@ func (w *cutWaitSlot) status(cutSeq uint64) CutScheduleStatus {
 		st.HostSlotWaitSinceNs = 0
 	}
 	return st
-}
-
-// INV-WS-STARTUP-RETRY-001: a displaced lower-epoch claim fences this
-// attempt, but cannot prove the assigned holder was superseded.
-func claimHeadSupersedes(head storage.ChunkHead, cfg storage.ChunkLayerConfig) bool {
-	return head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder && head.Epoch >= cfg.Epoch
 }
