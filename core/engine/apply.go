@@ -492,7 +492,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		return
 	}
 
-	// Divergent tail (OSS-SPEC section 8 rule 7): until the replica has
+	// Divergent tail: until the replica has
 	// accepted this epoch (a fence or a completed session raises
 	// FencedEpoch), everything it holds was written at an older epoch, and
 	// whatever lies above this primary's start position was never

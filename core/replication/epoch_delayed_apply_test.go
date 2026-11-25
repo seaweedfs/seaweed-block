@@ -78,7 +78,8 @@ func TestDelayedOldRecoveryApplyNeverLandsUnderANewValidTable(t *testing.T) {
 	go func() { time.Sleep(100 * time.Millisecond); close(h.release) }()
 	// B planned from the durable end its probe saw (5). Its start waits for
 	// A's apply; once A's entry 7 has landed the end is 7, so B's start is
-	// refused (rule 4) and nothing of B applies; any later write may fail.
+	// refused (its durable end is not the one it planned from) and nothing of
+	// B applies; any later write may fail.
 	_ = transport.WriteMsg(b, transport.MsgRecoveryLaneStart, transport.EncodeRecoveryLaneStart(lb, 5))
 	_ = transport.WriteMsg(b, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: lb, LBA: 6, LSN: 6, Data: makeData(66)}))
 	rows := []transport.EpochRow{{Epoch: 1, FirstLSN: 1}, {Epoch: 3, FirstLSN: 6}}
