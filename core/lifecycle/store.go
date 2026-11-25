@@ -43,6 +43,7 @@ type VolumeSpec struct {
 	// A restore request is bound to one source snapshot before the target's
 	// layout is created. These fields never change on a replay.
 	SourceVolume      string `json:"source_volume,omitempty"`
+	SourceLayoutID    string `json:"source_layout_id,omitempty"`
 	SourceSnapshot    string `json:"source_snapshot,omitempty"`
 	CreateRequestID   string `json:"create_request_id,omitempty"`
 	ReplicationFactor int    `json:"replication_factor"`
@@ -232,6 +233,7 @@ func volumeSpecsCompatible(a, b VolumeSpec) bool {
 		a.BlockSize == b.BlockSize &&
 		a.ChunkBytes == b.ChunkBytes &&
 		a.SourceVolume == b.SourceVolume &&
+		a.SourceLayoutID == b.SourceLayoutID &&
 		a.SourceSnapshot == b.SourceSnapshot &&
 		a.CreateRequestID == b.CreateRequestID &&
 		a.ReplicationFactor == b.ReplicationFactor &&
@@ -394,9 +396,12 @@ func validateSpec(spec VolumeSpec) error {
 	if err := validateVolumeID(spec.VolumeID); err != nil {
 		return err
 	}
-	if spec.SourceVolume != "" || spec.SourceSnapshot != "" || spec.CreateRequestID != "" {
+	if spec.SourceVolume != "" || spec.SourceLayoutID != "" || spec.SourceSnapshot != "" || spec.CreateRequestID != "" {
 		if err := validateVolumeID(spec.SourceVolume); err != nil || spec.SourceSnapshot == "" || spec.CreateRequestID == "" || spec.SourceVolume == spec.VolumeID {
 			return fmt.Errorf("%w: restore needs a distinct source volume, snapshot and request id", ErrInvalidVolumeSpec)
+		}
+		if _, err := layout.ParseVolumeID(spec.SourceLayoutID); err != nil {
+			return fmt.Errorf("%w: restore needs the source layout id: %v", ErrInvalidVolumeSpec, err)
 		}
 		if err := layout.CheckSnapshot(spec.SourceSnapshot, layout.SnapshotMeta{}); err != nil {
 			return fmt.Errorf("%w: restore snapshot: %v", ErrInvalidVolumeSpec, err)

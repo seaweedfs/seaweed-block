@@ -15,7 +15,7 @@ func TestRestoreRequestBindsTargetName(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := VolumeSpec{VolumeID: "target", SizeBytes: 1 << 20, ReplicationFactor: 1,
-		SourceVolume: "source", SourceSnapshot: "daily", CreateRequestID: "restore-1"}
+		SourceVolume: "source", SourceLayoutID: "11111111111111111111111111111111", SourceSnapshot: "daily", CreateRequestID: "restore-1"}
 	first, err := s.CreateVolume(spec)
 	if err != nil {
 		t.Fatal(err)
@@ -33,6 +33,7 @@ func TestRestoreRequestBindsTargetName(t *testing.T) {
 	}
 	for _, mutation := range []func(*VolumeSpec){
 		func(v *VolumeSpec) { v.SourceVolume = "another" },
+		func(v *VolumeSpec) { v.SourceLayoutID = "22222222222222222222222222222222" },
 		func(v *VolumeSpec) { v.SourceSnapshot = "weekly" },
 		func(v *VolumeSpec) { v.CreateRequestID = "restore-2" },
 		func(v *VolumeSpec) { v.SourceVolume, v.SourceSnapshot, v.CreateRequestID = "", "", "" },

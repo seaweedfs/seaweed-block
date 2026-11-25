@@ -78,7 +78,10 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		if !ok || !source.StoreReady {
 			return nil, status.Errorf(codes.FailedPrecondition, "restore source %q is not store-ready", spec.SourceVolume)
 		}
-		if s.host.cfg.LayoutReadVolume == nil || s.host.cfg.LayoutCreateTarget == nil {
+		if source.Spec.ReplicationFactor != 1 || spec.ReplicationFactor > 1 {
+			return nil, status.Error(codes.FailedPrecondition, "restore of an RF>1 volume is not supported")
+		}
+		if s.host.cfg.LayoutReadVolume == nil || s.host.cfg.LayoutReadHead == nil || s.host.cfg.LayoutCreateTarget == nil {
 			return nil, status.Error(codes.FailedPrecondition, "master has no restore store")
 		}
 		v, err := s.host.cfg.LayoutReadVolume(ctx, source.Spec)
@@ -89,6 +92,20 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		if err != nil || v.ID != id || v.Name != source.Spec.VolumeID || v.CheckIdentity() != nil || v.Geometry.Check() != nil {
 			return nil, status.Error(codes.FailedPrecondition, "restore source VOLUME identity or geometry is invalid")
 		}
+		head, err := s.host.cfg.LayoutReadHead(ctx, source.Spec)
+		if err != nil {
+			if errors.Is(err, layout.ErrHeadAbsent) || errors.Is(err, layout.ErrVolumeDeleting) {
+				return nil, status.Errorf(codes.FailedPrecondition, "restore source HEAD is unavailable: %v", err)
+			}
+			return nil, status.Errorf(codes.Unavailable, "read restore source HEAD: %v", err)
+		}
+		if head.VolumeID != id || head.State != layout.StateLive && head.State != layout.StateDetached {
+			return nil, status.Error(codes.FailedPrecondition, "restore source HEAD is absent, foreign or not live/detached")
+		}
+		if _, ok := head.Snapshots[spec.SourceSnapshot]; !ok {
+			return nil, status.Errorf(codes.NotFound, "restore source snapshot %q is absent", spec.SourceSnapshot)
+		}
+		spec.SourceLayoutID = source.Spec.LayoutID
 		if (spec.SizeBytes != 0 && spec.SizeBytes != v.Geometry.SizeBytes) || (spec.BlockSize != 0 && spec.BlockSize != v.Geometry.BlockSize) || (spec.ChunkBytes != 0 && spec.ChunkBytes != v.Geometry.ChunkBytes) {
 			return nil, status.Error(codes.InvalidArgument, "restore target geometry must match source VOLUME")
 		}
@@ -148,7 +165,7 @@ func (h *Host) createLifecycleVolume(ctx context.Context, spec lifecycle.VolumeS
 	var createErr error
 	if rec.Spec.SourceVolume != "" {
 		source, ok := h.lifecycle.Volumes.GetVolume(rec.Spec.SourceVolume)
-		if !ok || h.cfg.LayoutCreateTarget == nil {
+		if !ok || source.Spec.LayoutID != rec.Spec.SourceLayoutID || h.cfg.LayoutCreateTarget == nil {
 			return lifecycle.VolumeRecord{}, fmt.Errorf("%w: restore source or target creator is unavailable", errLayoutStoreNotReady)
 		}
 		createErr = h.cfg.LayoutCreateTarget(ctx, source.Spec, rec.Spec, rec.Spec.SourceSnapshot)
