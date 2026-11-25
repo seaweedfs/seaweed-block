@@ -38,7 +38,9 @@ func readFixture(t *testing.T) (*objStore, RootName, map[uint64]Ref) {
 	foreign := NameChunk(10002, []byte("src data"))
 	put("t", own.Path(), []byte("own"))
 	put("src", foreign.Path(), []byte("src data"))
-	m := map[uint64]Ref{3: {Owner: "t", Chunk: own}, 10002: {Owner: "src", Chunk: foreign}}
+	m := map[uint64]Ref{3: {Owner: "t", OwnerID: idFor("t"), Chunk: own}, 10002: {Owner: "src", OwnerID: idFor("src"), Chunk: foreign}}
+	putVolume(t, put, "t")
+	putVolume(t, put, "src")
 	root, segs, err := Build(m)
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +214,7 @@ func TestRead_FetchFailureAndCorruption(t *testing.T) {
 func TestRead_SegmentOfAnotherShardRefused(t *testing.T) {
 	ctx := context.Background()
 	s := &objStore{obj: map[string][]byte{}}
-	seg := Segment{Shard: 2, Chunks: map[uint64]Ref{20000: {Owner: "t", Chunk: NameChunk(20000, []byte("z"))}}}
+	seg := Segment{Shard: 2, Chunks: map[uint64]Ref{20000: {Owner: "t", OwnerID: idFor("t"), Chunk: NameChunk(20000, []byte("z"))}}}
 	sn, sb, err := NameSegment(seg)
 	if err != nil {
 		t.Fatal(err)
@@ -241,5 +243,50 @@ func TestNewReader_RefusesBadInput(t *testing.T) {
 	}
 	if _, err := NewReader(base, "t", nil); err == nil {
 		t.Error("nil fetch accepted")
+	}
+}
+
+// putVolume writes vol's VOLUME record with its test id.
+func putVolume(t *testing.T, put func(vol, rel string, b []byte), vol string) {
+	t.Helper()
+	b, err := Volume{ID: idFor(vol), Name: vol, Format: VolumeFormat}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(vol, VolumeName, b)
+}
+
+// A foreign chunk is read only if its owner's VOLUME carries the id the
+// reference names: a source deleted and created again under its name has
+// another id (ErrIdentity); a source without VOLUME is ErrMissing. The
+// chunk's bytes are never fetched in either case.
+func TestRead_ForeignChunkNeedsTheOwnersVolumeID(t *testing.T) {
+	ctx := context.Background()
+	s, rn, m := readFixture(t)
+	b, err := Volume{ID: idFor("src again"), Name: "src", Format: VolumeFormat}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.obj[path.Join(base, "src", VolumeName)] = b
+	img, err := newReader(t, s).Open(ctx, rn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.asked = nil
+	if _, err := img.Chunk(ctx, 10002); !errors.Is(err, ErrIdentity) {
+		t.Fatalf("chunk of a re-created source: %v; want ErrIdentity", err)
+	}
+	for _, p := range s.asked {
+		if p == path.Join(base, "src", m[10002].Chunk.Path()) {
+			t.Fatal("the chunk was fetched from a source whose id does not match")
+		}
+	}
+	delete(s.obj, path.Join(base, "src", VolumeName))
+	img, _ = newReader(t, s).Open(ctx, rn)
+	if _, err := img.Chunk(ctx, 10002); !errors.Is(err, ErrMissing) {
+		t.Fatalf("chunk of a source without VOLUME: %v; want ErrMissing", err)
+	}
+	if c, err := img.Chunk(ctx, 3); err != nil || c.Zero {
+		t.Fatalf("own chunk beside it: %+v %v", c, err)
 	}
 }

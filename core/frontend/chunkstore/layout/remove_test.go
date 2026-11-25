@@ -28,11 +28,16 @@ func removeFixture(t *testing.T) (*memObjects, *Head, []ChunkName, []ChunkName) 
 		data[path.Join(volRoot, c.Path())] = []byte(d)
 		orphans = append(orphans, c)
 	}
+	vb, err := Volume{ID: idFor("v1"), Name: "v1", Format: VolumeFormat}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[path.Join(volRoot, VolumeName)] = vb
 	o := newMemObjects(volRoot)
 	for p, b := range data {
 		o.objs[p] = &memObject{data: b, meta: ObjectMeta{Session: "s0"}}
 	}
-	h := &Head{Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActClean, Session: "c1"}, Current: &curRoot,
+	h := &Head{Gen: 7, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActClean, Session: "c1"}, Current: &curRoot,
 		Snapshots: map[string]Snapshot{"daily": {Root: oldRoot}}}
 	live := []ChunkName{cur[0].Chunk, cur[3].Chunk, old[2].Chunk}
 	return o, h, live, orphans
@@ -180,13 +185,15 @@ func TestRemoveUnreachable_ASuccessorAfterTheHeadViewDefeatsTheMark(t *testing.T
 		}
 	}
 	st := &memHead{h: h}
+	var hookErr error
 	st.afterRead = func() {
 		if err := EnsureObject(context.Background(), o, target.Path(), []byte("e"), "successor"); err != nil {
-			t.Fatal(err)
+			hookErr = err
+			return
 		}
 		// The successor's commit names the reused chunk; the old holder's
 		// HEAD view (already taken) still shows its own cleaning.
-		next := manifest(Ref{Owner: "v1", Chunk: target})
+		next := manifest(Ref{Owner: "v1", OwnerID: idFor("v1"), Chunk: target})
 		rn := writeImage(t, map[string][]byte{}, next, map[uint64][]byte{5: []byte("e")})
 		root, segs, _ := Build(next)
 		_ = root
@@ -199,6 +206,9 @@ func TestRemoveUnreachable_ASuccessorAfterTheHeadViewDefeatsTheMark(t *testing.T
 	}
 	if _, err := removeShard0(t, st, o, "c1", orphans); err != nil {
 		t.Fatal(err)
+	}
+	if hookErr != nil {
+		t.Fatal(hookErr)
 	}
 	if !inPool(o, target) {
 		t.Fatalf("chunk %s, reused and committed by the successor after the remover's HEAD view, was removed", target)
@@ -365,5 +375,15 @@ func TestCleaningPass_InterruptAtEveryStep(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The remover tells its own chunks by its VOLUME id: without a readable
+// VOLUME it removes nothing.
+func TestRemoveUnreachable_NeedsItsOwnVolumeID(t *testing.T) {
+	o, h, _, orphans := removeFixture(t)
+	delete(o.objs, path.Join(volRoot, VolumeName))
+	if _, err := removeShard0(t, &memHead{h: h}, o, "c1", orphans); !errors.Is(err, ErrMissing) || len(o.writes) != 0 {
+		t.Fatalf("removal without VOLUME: %v, %d writes; want ErrMissing and none", err, len(o.writes))
 	}
 }

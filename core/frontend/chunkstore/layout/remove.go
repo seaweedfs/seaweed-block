@@ -100,6 +100,10 @@ func reachable(ctx context.Context, r *Reader, h Head, shard uint64) (map[ChunkN
 	for _, s := range h.Snapshots {
 		roots[s.Root] = true
 	}
+	own, err := r.VolumeID(ctx, r.vol)
+	if err != nil {
+		return nil, err
+	}
 	live := map[ChunkName]bool{}
 	for rn := range roots {
 		img, err := r.Open(ctx, rn)
@@ -114,7 +118,7 @@ func reachable(ctx context.Context, r *Reader, h Head, shard uint64) (map[ChunkN
 			continue
 		}
 		for _, ref := range seg.Chunks {
-			if ref.Owner == r.vol {
+			if ref.OwnerID == own {
 				live[ref.Chunk] = true
 			}
 		}

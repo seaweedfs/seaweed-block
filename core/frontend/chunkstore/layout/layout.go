@@ -125,9 +125,12 @@ func (c ChunkName) Verify(data []byte) error {
 
 // Ref is one entry of a manifest: the chunk at an index, held in the pool
 // of Owner (the volume itself, or the source volume of a restore).
+// OwnerID is that volume's id: a volume created again under Owner's name
+// has another id and satisfies no reference to the old one.
 type Ref struct {
-	Owner string
-	Chunk ChunkName
+	Owner   string
+	OwnerID VolumeID
+	Chunk   ChunkName
 }
 
 // checkOwner enforces a plain path element, as volume ids are.
@@ -145,7 +148,7 @@ type Segment struct {
 	Chunks map[uint64]Ref // by chunk index
 }
 
-var segMagic = []byte("SWBSEG\x01")
+var segMagic = []byte("SWBSEG\x02")
 var rootMagic = []byte("SWBROOT\x01")
 
 // Encode returns the canonical bytes of s: entries in index order. It
@@ -166,6 +169,9 @@ func (s Segment) Encode() ([]byte, error) {
 		if err := checkOwner(r.Owner); err != nil {
 			return nil, err
 		}
+		if r.OwnerID.IsZero() {
+			return nil, fmt.Errorf("%w: chunk %d names owner %q without its volume id", ErrMalformed, i, r.Owner)
+		}
 		idx = append(idx, i)
 	}
 	sort.Slice(idx, func(a, b int) bool { return idx[a] < idx[b] })
@@ -178,6 +184,7 @@ func (s Segment) Encode() ([]byte, error) {
 		b.Write(binary.AppendUvarint(nil, i))
 		b.Write(binary.AppendUvarint(nil, uint64(len(r.Owner))))
 		b.WriteString(r.Owner)
+		b.Write(r.OwnerID[:])
 		b.Write(r.Chunk.Hash[:])
 	}
 	return b.Bytes(), nil
@@ -232,13 +239,15 @@ func DecodeSegment(b []byte) (Segment, error) {
 	for k := uint64(0); k < n && r.err == nil; k++ {
 		i := r.uvarint()
 		owner := string(r.bytes(r.uvarint()))
+		var oid VolumeID
+		copy(oid[:], r.bytes(uint64(len(oid))))
 		var h Hash
 		copy(h[:], r.bytes(uint64(len(h))))
 		if r.err == nil {
 			if _, dup := s.Chunks[i]; dup {
 				return Segment{}, fmt.Errorf("%w: chunk %d twice", ErrMalformed, i)
 			}
-			s.Chunks[i] = Ref{Owner: owner, Chunk: ChunkName{Index: i, Hash: h}}
+			s.Chunks[i] = Ref{Owner: owner, OwnerID: oid, Chunk: ChunkName{Index: i, Hash: h}}
 		}
 	}
 	if r.err != nil {

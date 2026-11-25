@@ -28,8 +28,9 @@ func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 		"Claim":      func(h Head, c HolderID) error { _, _, err := h.Claim(c); return err },
 	}
 	callers := map[string]HolderID{
-		"older epoch, same server":   {Epoch: 2, Holder: "srv-a"},
-		"same epoch, another server": {Epoch: 3, Holder: "srv-b"},
+		"older epoch, same server":                {Epoch: 2, Holder: "srv-a"},
+		"same epoch, another server":              {Epoch: 3, Holder: "srv-b"},
+		"same epoch and server, another claim id": {Epoch: 3, Holder: "srv-a", ClaimID: "k-other"},
 	}
 	for name, step := range steps {
 		for who, c := range callers {
@@ -64,8 +65,9 @@ func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 // above) must be listed here, so a new one fails until it is covered.
 func TestHolderFunctions_RefuseAStaleHolder(t *testing.T) {
 	callers := map[string]HolderID{
-		"older epoch, same server":   {Epoch: me.Epoch - 1, Holder: me.Holder},
-		"same epoch, another server": {Epoch: me.Epoch, Holder: "srv-b"},
+		"older epoch, same server":                {Epoch: me.Epoch - 1, Holder: me.Holder, ClaimID: me.ClaimID},
+		"same epoch, another server":              {Epoch: me.Epoch, Holder: "srv-b", ClaimID: me.ClaimID},
+		"same epoch and server, another claim id": {Epoch: me.Epoch, Holder: me.Holder, ClaimID: "k-other"},
 	}
 	for who, c := range callers {
 		o, h, _, orphans := removeFixture(t)

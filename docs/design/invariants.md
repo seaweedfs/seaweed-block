@@ -525,9 +525,9 @@ stateDiagram-v2
   idle --> snap: Begin(s)
   snap --> idle: Abort(s)
   snap --> idle: Commit(s, root)
-  idle --> idle: Claim(e)
-  snap --> idle: Claim(e), s void
-  clean --> idle: Claim(e), c void
+  idle --> idle: Claim(e, claim id)
+  snap --> idle: Claim(e, claim id), s void
+  clean --> idle: Claim(e, claim id), c void
   idle --> clean: BeginClean(c)
   clean --> idle: EndClean(c)
   clean --> clean: RemoveUnreachable(shard)
@@ -535,17 +535,17 @@ stateDiagram-v2
 
 | From | To | Guard | Enforced in | Protects |
 |---|---|---|---|---|
-| idle | snap(s) | caller is the holder at HEAD's epoch (epoch and server); HEAD present; snap(s) again is a replay, any other activity is refused | head.go `Head.Begin`, `runTransition` | `INV-SNAPK-HEAD-WRITE-001`, `INV-SNAPK-BEGIN-001` |
-| snap(s) | idle | holder at HEAD's epoch; activity is snap(s); over idle it succeeds without a write and means only that no activity remains | head.go `Head.Abort` | `INV-SNAPK-ABORT-001` |
-| snap(s) | idle, current = root | holder at HEAD's epoch; activity is snap(s); the previous manifest builds to HEAD's current root; the new own chunks, every segment and the root are present | commit.go `Head.Commit`, `RunCommit` | `INV-SNAPK-COMMIT-REACH-001`, `INV-SNAPK-TXN-INTERRUPT-001` |
-| any | idle at epoch e | e above HEAD's epoch (the same epoch and server is a replay); every older holder's lease has ended, checked after the read and before the update | claim.go `Head.Claim`, `RunClaim` (`LeaseWait.OldLeaseEnded`) | `INV-SNAPK-CLAIM-LEASE-001` |
-| idle | clean(c) | holder at HEAD's epoch; activity idle (clean(c) again is a replay) | clean.go `Head.BeginClean` | `INV-SNAPK-CLEAN-EXCL-001` |
-| clean(c) | idle | holder at HEAD's epoch; activity clean(c); over idle it succeeds without a write | clean.go `Head.EndClean` | `INV-SNAPK-CLEAN-EXCL-001` |
-| clean(c) | clean(c), names removed | holder at HEAD's epoch with clean(c) open (HEAD read once, after BeginClean); a name is deleted only if no root in HEAD (current or snapshot) names it in this volume's pool; each removal is a mark conditional on the plan's metadata, then a delete conditional on that mark | remove.go `RemoveUnreachable` | `INV-SNAPK-REMOVE-MARK-001` |
+| idle | snap(s) | caller is the holder at HEAD's epoch (epoch, server and claim id); HEAD present; snap(s) again is a replay, any other activity is refused | head.go `Head.Begin`, `runTransition` | `INV-SNAPK-HEAD-WRITE-001`, `INV-SNAPK-BEGIN-001` |
+| snap(s) | idle | holder at HEAD's epoch (epoch, server and claim id); activity is snap(s); over idle it succeeds without a write and means only that no activity remains | head.go `Head.Abort` | `INV-SNAPK-ABORT-001` |
+| snap(s) | idle, current = root | holder at HEAD's epoch (epoch, server and claim id); activity is snap(s); the previous manifest builds to HEAD's current root; the new own chunks, every segment and the root are present | commit.go `Head.Commit`, `RunCommit` | `INV-SNAPK-COMMIT-REACH-001`, `INV-SNAPK-TXN-INTERRUPT-001` |
+| any | idle at epoch e, claim id k | e above HEAD's epoch (the same epoch, server and claim id is a replay; the same epoch and server with another claim id is refused); every older holder's lease has ended, checked after the read and before the update | claim.go `Head.Claim`, `RunClaim` (`LeaseWait.OldLeaseEnded`) | `INV-SNAPK-CLAIM-LEASE-001`, `INV-SNAPK-CLAIM-ID-001` |
+| idle | clean(c) | holder at HEAD's epoch (epoch, server and claim id); activity idle (clean(c) again is a replay) | clean.go `Head.BeginClean` | `INV-SNAPK-CLEAN-EXCL-001` |
+| clean(c) | idle | holder at HEAD's epoch (epoch, server and claim id); activity clean(c); over idle it succeeds without a write | clean.go `Head.EndClean` | `INV-SNAPK-CLEAN-EXCL-001` |
+| clean(c) | clean(c), names removed | holder at HEAD's epoch (epoch, server and claim id) with clean(c) open (HEAD read once, after BeginClean); a name is deleted only if no root in HEAD (current or snapshot) names it in this volume's pool; each removal is a mark conditional on the plan's metadata, then a delete conditional on that mark | remove.go `RemoveUnreachable` | `INV-SNAPK-REMOVE-MARK-001` |
 
 ## Part B. Invariant ledger
 
-345 rows: 274 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 330 new.
+350 rows: 279 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 335 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -1101,6 +1101,11 @@ Notes:
 | `INV-SNAPK-REMOVE-CONVERGE-001` | A name a cleaning marked and did not delete (the remover died in between) is planned again by the next cleaning: the re-mark replaces the old mark, so the dead remover's late delete fails, and every unreachable name goes once a cleaning completes. | M9 clean → clean | `core/frontend/chunkstore/layout` `remove.go` `RemoveUnreachable` | `TestRemoveUnreachable_ReclaimsAnAbandonedMark`, `TestCleaningPass_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-REMOVE-GUARD-001` | A source scan requires DeleteMarked as RemoveUnreachable's only removal, each immediately after an if on its Mark's error that leaves: an unconditional delete, an ignored mark, a reused mark or another method fails. | M9 clean → clean (RemoveUnreachable) | `core/frontend/chunkstore/layout` (source scan of `remove.go`) | `TestGuard_WritersTransitionsAndRemovers`, `TestGuard_Controls` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-REUSE-001` | Writing an object for a session creates it, or reuses an existing one by a conditional update that sets the session and clears any mark; a commit names only objects its session wrote or reused, unmarked. | M9 snap → idle (Upload, Commit) | `core/frontend/chunkstore/layout` `objects.go` `EnsureObject`; `commit.go` `RunCommit` | `TestEnsureObject`, `TestRunCommit_NeedsObjectsOfItsOwnSession`, `TestSnapshotSession_InterruptAtEveryStep` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-IDENTITY-001` | A volume is identified by the random id in its VOLUME record, never by its name alone; HEAD carries the volume id and refuses to encode without it. | Content-named layout; M9 every transition | `core/frontend/chunkstore/layout` `volume.go` `Volume`, `VolumeID`; `head.go` `Head.check` | `TestVolumeID_RandomAndParsed`, `TestVolume_GoldenEncodingRoundTrip`, `TestHead_GoldenEncodingRoundTrip`, `TestHead_Refusals` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-HEAD-ID-001` | HEAD is decoded only for the volume whose VOLUME carries its volume id; a HEAD of another id, left by an interrupted delete or an old restore under a reused name, is ErrIdentity; a holder without a claim id is malformed. | M9 every transition | `core/frontend/chunkstore/layout` `head.go` `DecodeHead`, `Head.check` | `TestDecodeHead_RefusesAnotherVolumesHead`, `TestHead_HolderNeedsAClaimID` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-REF-ID-001` | Every chunk reference in a segment carries its owner's volume id; a read checks it against the owner's VOLUME before fetching (another id is ErrIdentity), and the remover tells its own chunks by its VOLUME id. | Content-named layout | `core/frontend/chunkstore/layout` `layout.go` `Segment.Encode`; `read.go` `Image.Chunk`; `remove.go` | `TestSegment_EncodeRefusals`, `TestRead_ForeignChunkNeedsTheOwnersVolumeID`, `TestRemoveUnreachable_NeedsItsOwnVolumeID` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-DEP-ID-001` | Every dependent records the target's volume id and the root of the snapshot it depends on; a dependent without the id, or of another root, is refused. | M9 snapshots and dependents | `core/frontend/chunkstore/layout` `head.go` `Head.check` | `TestHead_Refusals`, `TestHead_GoldenEncodingRoundTrip` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-CLAIM-ID-001` | A holder is its epoch, its server and the claim id its claim wrote into HEAD; every transition refuses the same server at the same epoch with another claim id. | M9 every transition | `core/frontend/chunkstore/layout` `head.go` `heldBy`; `claim.go` `Head.Claim` | `TestClaim_WritesItsClaimID`, `TestTransitions_RefuseAStaleHolder`, `TestHolderFunctions_RefuseAStaleHolder` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-STALE-HOLDER-001` | Every transition refuses an older epoch of the same server, the same epoch held by another server, and the same epoch and server with another claim id, in idle, snap and clean; a new transition must be added to the table. | M9 every transition | `core/frontend/chunkstore/layout` `Head.heldBy` and each transition | `TestTransitions_RefuseAStaleHolder` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 
 Notes:

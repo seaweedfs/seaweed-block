@@ -1,38 +1,57 @@
 package layout
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 )
 
-var me = HolderID{Epoch: 3, Holder: "srv-a"}
+var me = HolderID{Epoch: 3, Holder: "srv-a", ClaimID: "k-a"}
 
 func idleHead() Head {
-	return Head{Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActIdle}}
+	return Head{Gen: 7, Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}}
+}
+
+// deps returns dependents of root for the named targets, in the order HEAD
+// stores them (by target id).
+func deps(root RootName, targets ...string) []Dependent {
+	var out []Dependent
+	for _, t := range targets {
+		out = append(out, Dependent{Target: t, TargetID: idFor(t), Root: root})
+	}
+	sort.Slice(out, func(a, b int) bool { return bytes.Compare(out[a].TargetID[:], out[b].TargetID[:]) < 0 })
+	return out
 }
 
 func TestHead_GoldenEncodingRoundTrip(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("r"))}
-	h := Head{Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActSnap, Session: "s1"}, Current: &rn, Position: 42,
-		Snapshots: map[string]Snapshot{"daily": {Root: rn, Dependents: []string{"t1", "t2"}}}}
+	ds := deps(rn, "t1", "t2")
+	h := Head{VolumeID: idFor("v1"), Epoch: 3, Holder: "srv-a", ClaimID: "k-a", Activity: Activity{Kind: ActSnap, Session: "s1"}, Current: &rn, Position: 42,
+		Snapshots: map[string]Snapshot{"daily": {Root: rn, Dependents: ds}}}
 	b, err := h.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"epoch":3,"holder":"srv-a","activity":{"kind":"snap","session":"s1"},"current":"` + rn.String() +
-		`","position":42,"snapshots":{"daily":{"root":"` + rn.String() + `","dependents":["t1","t2"]}}}`
+	dep := func(d Dependent) string {
+		return `{"target":"` + d.Target + `","target_id":"` + d.TargetID.String() + `","root":"` + rn.String() + `"}`
+	}
+	want := `{"volume_id":"` + idFor("v1").String() + `","epoch":3,"holder":"srv-a","claim_id":"k-a","activity":{"kind":"snap","session":"s1"},"current":"` + rn.String() +
+		`","position":42,"snapshots":{"daily":{"root":"` + rn.String() + `","dependents":[` + dep(ds[0]) + `,` + dep(ds[1]) + `]}}}`
 	if string(b) != want {
 		t.Fatalf("encoding\n got %s\nwant %s", b, want)
 	}
-	back, err := DecodeHead(b, 9)
+	back, err := DecodeHead(b, 9, idFor("v1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back.Gen != 9 || back.Current == nil || *back.Current != rn || back.Snapshots["daily"].Root != rn {
+	if back.Gen != 9 || back.VolumeID != idFor("v1") || back.ClaimID != "k-a" || back.Current == nil || *back.Current != rn ||
+		!reflect.DeepEqual(back.Snapshots["daily"].Dependents, ds) {
 		t.Fatalf("decoded %+v", back)
 	}
 	if b2, _ := back.Encode(); string(b2) != want {
@@ -42,20 +61,27 @@ func TestHead_GoldenEncodingRoundTrip(t *testing.T) {
 
 func TestHead_Refusals(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("r"))}
+	other := RootName{Hash: Sum([]byte("other"))}
 	many := map[string]Snapshot{}
 	for i := 0; i <= MaxSnapshots; i++ {
 		many[fmt.Sprintf("s%03d", i)] = Snapshot{Root: rn}
 	}
+	v := idFor("v1")
+	snap := func(ds []Dependent) map[string]Snapshot { return map[string]Snapshot{"n": {Root: rn, Dependents: ds}} }
+	ab := deps(rn, "a", "b")
 	for name, h := range map[string]Head{
-		"idle with a session":    {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle, Session: "s"}},
-		"snap without a session": {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActSnap}},
-		"unknown activity":       {Epoch: 1, Holder: "a", Activity: Activity{Kind: "open"}},
-		"epoch zero":             {Holder: "a", Activity: Activity{Kind: ActIdle}},
-		"no holder":              {Epoch: 1, Activity: Activity{Kind: ActIdle}},
-		"dependents unsorted":    {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{"n": {Root: rn, Dependents: []string{"b", "a"}}}},
-		"dependent twice":        {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{"n": {Root: rn, Dependents: []string{"a", "a"}}}},
-		"bad dependent":          {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{"n": {Root: rn, Dependents: []string{"a/b"}}}},
-		"too many snapshots":     {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle}, Snapshots: many},
+		"no volume id":              {Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle}},
+		"idle with a session":       {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle, Session: "s"}},
+		"snap without a session":    {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActSnap}},
+		"unknown activity":          {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: "open"}},
+		"epoch zero":                {VolumeID: v, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle}},
+		"no holder":                 {VolumeID: v, Epoch: 1, Activity: Activity{Kind: ActIdle}},
+		"dependents unordered":      {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle}, Snapshots: snap([]Dependent{ab[1], ab[0]})},
+		"dependent twice":           {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle}, Snapshots: snap([]Dependent{ab[0], ab[0]})},
+		"bad dependent name":        {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle}, Snapshots: snap([]Dependent{{Target: "a/b", TargetID: idFor("x"), Root: rn}})},
+		"dependent without id":      {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle}, Snapshots: snap([]Dependent{{Target: "a", Root: rn}})},
+		"dependent of another root": {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle}, Snapshots: snap([]Dependent{{Target: "a", TargetID: idFor("a"), Root: other}})},
+		"too many snapshots":        {VolumeID: v, Epoch: 1, Holder: "a", ClaimID: "k", Activity: Activity{Kind: ActIdle}, Snapshots: many},
 	} {
 		if _, err := h.Encode(); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v; want ErrMalformed", name, err)
@@ -63,12 +89,14 @@ func TestHead_Refusals(t *testing.T) {
 	}
 	good, _ := idleHead().Encode()
 	for name, b := range map[string]string{
-		"unknown field": strings.Replace(string(good), `"position"`, `"extra":1,"position"`, 1),
-		"whitespace":    strings.Replace(string(good), `,`, `, `, 1),
-		"bad root":      strings.Replace(string(good), `"position"`, `"current":"xyz","position"`, 1),
-		"not json":      "HEAD",
+		"unknown field":   strings.Replace(string(good), `"position"`, `"extra":1,"position"`, 1),
+		"whitespace":      strings.Replace(string(good), `,`, `, `, 1),
+		"bad root":        strings.Replace(string(good), `"position"`, `"current":"xyz","position"`, 1),
+		"zero volume id":  strings.Replace(string(good), idFor("v1").String(), strings.Repeat("0", 32), 1),
+		"short volume id": strings.Replace(string(good), idFor("v1").String(), "abc", 1),
+		"not json":        "HEAD",
 	} {
-		if _, err := DecodeHead([]byte(b), 1); !errors.Is(err, ErrMalformed) {
+		if _, err := DecodeHead([]byte(b), 1, idFor("v1")); !errors.Is(err, ErrMalformed) {
 			t.Errorf("decode %s: %v; want ErrMalformed", name, err)
 		}
 	}
@@ -95,7 +123,7 @@ func TestBegin_Closure(t *testing.T) {
 		want error
 	}{
 		"other session open": {next, me, ErrBusy},
-		"cleaning":           {Head{Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActClean, Session: "c1"}}, me, ErrBusy},
+		"cleaning":           {Head{Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActClean, Session: "c1"}}, me, ErrBusy},
 		"older caller epoch": {h, HolderID{Epoch: 2, Holder: "srv-a"}, ErrNotHolder},
 		"newer caller epoch": {h, HolderID{Epoch: 4, Holder: "srv-a"}, ErrNotHolder},
 		"other holder":       {h, HolderID{Epoch: 3, Holder: "srv-b"}, ErrNotHolder},
@@ -137,7 +165,7 @@ func (m *memHead) ReadHead(context.Context) (Head, bool, error) {
 		return Head{}, false, nil
 	}
 	b, _ := m.h.Encode()
-	h, err := DecodeHead(b, m.h.Gen)
+	h, err := DecodeHead(b, m.h.Gen, m.h.VolumeID)
 	if m.afterRead != nil {
 		f := m.afterRead
 		m.afterRead = nil
@@ -265,7 +293,7 @@ func snapHead(session string) Head {
 	h.Activity = Activity{Kind: ActSnap, Session: session}
 	h.Current = &rn
 	h.Position = 40
-	h.Snapshots = map[string]Snapshot{"daily": {Root: rn, Dependents: []string{"t1"}}}
+	h.Snapshots = map[string]Snapshot{"daily": {Root: rn, Dependents: []Dependent{{Target: "t1", TargetID: idFor("t1"), Root: rn}}}}
 	return h
 }
 
@@ -275,7 +303,7 @@ func TestAbort_Closure(t *testing.T) {
 	if err != nil || !changed || next.Activity != (Activity{Kind: ActIdle}) {
 		t.Fatalf("Abort of the open session: %+v %t %v", next, changed, err)
 	}
-	if *next.Current != *h.Current || next.Position != h.Position || len(next.Snapshots) != 1 || next.Snapshots["daily"].Dependents[0] != "t1" {
+	if *next.Current != *h.Current || next.Position != h.Position || len(next.Snapshots) != 1 || next.Snapshots["daily"].Dependents[0].Target != "t1" {
 		t.Fatalf("Abort changed more than activity: %+v", next)
 	}
 	if h.Activity.Kind != ActSnap {
@@ -290,7 +318,7 @@ func TestAbort_Closure(t *testing.T) {
 		want error
 	}{
 		"other session open": {snapHead("s2"), me, ErrNoSession},
-		"cleaning":           {Head{Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActClean, Session: "s1"}}, me, ErrNoSession},
+		"cleaning":           {Head{Epoch: 3, Holder: "srv-a", ClaimID: "k-a", VolumeID: idFor("v1"), Activity: Activity{Kind: ActClean, Session: "s1"}}, me, ErrNoSession},
 		"other epoch":        {h, HolderID{Epoch: 4, Holder: "srv-a"}, ErrNotHolder},
 		"other holder":       {h, HolderID{Epoch: 3, Holder: "srv-b"}, ErrNotHolder},
 	} {
@@ -364,18 +392,48 @@ func TestHead_RefusesInvalidUTF8(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("r"))}
 	bad := "a\xff"
 	for name, h := range map[string]Head{
-		"holder":    {Epoch: 1, Holder: bad, Activity: Activity{Kind: ActIdle}},
-		"session":   {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActSnap, Session: bad}},
-		"snapshot":  {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{bad: {Root: rn}}},
-		"dependent": {Epoch: 1, Holder: "a", Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{"n": {Root: rn, Dependents: []string{bad}}}},
+		"holder":    {Epoch: 1, Holder: bad, ClaimID: "k", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}},
+		"session":   {Epoch: 1, Holder: "a", ClaimID: "k", VolumeID: idFor("v1"), Activity: Activity{Kind: ActSnap, Session: bad}},
+		"snapshot":  {Epoch: 1, Holder: "a", ClaimID: "k", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{bad: {Root: rn}}},
+		"dependent": {Epoch: 1, Holder: "a", ClaimID: "k", VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}, Snapshots: map[string]Snapshot{"n": {Root: rn, Dependents: []Dependent{{Target: bad, TargetID: idFor("x"), Root: rn}}}}},
+		"claim id":  {Epoch: 1, Holder: "a", ClaimID: bad, VolumeID: idFor("v1"), Activity: Activity{Kind: ActIdle}},
 	} {
-		if _, err := h.Encode(); !errors.Is(err, ErrMalformed) {
-			t.Errorf("%s %q: %v; want ErrMalformed", name, bad, err)
+		if _, err := h.Encode(); !errors.Is(err, ErrMalformed) || !strings.Contains(err.Error(), "not valid UTF-8") {
+			t.Errorf("%s %q: %v; want the UTF-8 refusal", name, bad, err)
 		}
 	}
 	h := idleHead()
 	st := &memHead{h: &h}
 	if _, err := RunBegin(context.Background(), st, me, bad); err == nil || st.h.Activity.Kind != ActIdle {
 		t.Fatalf("Begin with an invalid UTF-8 session: %v, HEAD %+v; want refused, nothing written", err, st.h.Activity)
+	}
+}
+
+// A HEAD is read only for the volume whose VOLUME carries its volume id: a
+// HEAD left by an interrupted delete, or created late by an old restore,
+// under a name since given to another volume, is refused (ErrIdentity).
+func TestDecodeHead_RefusesAnotherVolumesHead(t *testing.T) {
+	b, err := idleHead().Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeHead(b, 1, idFor("v1")); err != nil {
+		t.Fatalf("HEAD of this volume: %v", err)
+	}
+	if _, err := DecodeHead(b, 1, idFor("v1 again")); !errors.Is(err, ErrIdentity) {
+		t.Fatalf("HEAD under a name now holding another volume: %v; want ErrIdentity", err)
+	}
+	if _, err := DecodeHead(b, 1, VolumeID{}); err == nil {
+		t.Fatal("DecodeHead without the volume's id accepted")
+	}
+}
+
+// A HEAD naming a holder names its claim id too: a holder without one
+// would fail closed only at its next claim.
+func TestHead_HolderNeedsAClaimID(t *testing.T) {
+	h := idleHead()
+	h.ClaimID = ""
+	if _, err := h.Encode(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("HEAD with a holder and no claim id: %v; want ErrMalformed", err)
 	}
 }
