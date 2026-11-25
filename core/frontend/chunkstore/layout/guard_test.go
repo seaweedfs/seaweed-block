@@ -179,27 +179,28 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 	return bad
 }
 
-// removerOrderFindings checks the removal half of the time premise in the
-// sources: in RemoveUnreachable, every statement that calls a method named
-// Delete* or Remove* is IMMEDIATELY preceded, in the same block, by a lease
-// gate: an if statement whose init calls StillHeld and whose body returns
-// on its error. A check whose result is ignored, one check reused for a
-// second removal, and a removal method the scan does not list each fail.
+// removerOrderFindings checks the removal rule (7') in the sources: in
+// RemoveUnreachable the only removal call is DeleteMarked (a delete
+// conditional on the remover's own mark), and each is IMMEDIATELY
+// preceded, in the same block, by a mark gate: an if statement whose init
+// calls Mark and whose body leaves on its error (return or continue). An
+// unconditional delete, an ignored mark, one mark reused for a second
+// delete and an unlisted removal method each fail.
 func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
 	t.Helper()
-	removes := func(n ast.Node) bool {
-		found := false
+	removals := func(n ast.Node) []string {
+		var names []string
 		ast.Inspect(n, func(n ast.Node) bool {
 			if c, ok := n.(*ast.CallExpr); ok {
 				if sel, ok := c.Fun.(*ast.SelectorExpr); ok && (strings.HasPrefix(sel.Sel.Name, "Delete") || strings.HasPrefix(sel.Sel.Name, "Remove")) {
-					found = true
+					names = append(names, sel.Sel.Name)
 				}
 			}
-			return !found
+			return true
 		})
-		return found
+		return names
 	}
-	leaseGate := func(st ast.Stmt) bool {
+	markGate := func(st ast.Stmt) bool {
 		is, ok := st.(*ast.IfStmt)
 		if !ok || is.Init == nil {
 			return false
@@ -213,7 +214,7 @@ func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
 			return false
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "StillHeld" {
+		if !ok || sel.Sel.Name != "Mark" {
 			return false
 		}
 		errName, ok := as.Lhs[0].(*ast.Ident)
@@ -224,12 +225,19 @@ func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
 		if x, ok := cond.X.(*ast.Ident); !ok || x.Name != errName.Name {
 			return false
 		}
-		for _, b := range is.Body.List {
-			if _, ok := b.(*ast.ReturnStmt); ok {
-				return true
+		leaves := false
+		ast.Inspect(is.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.ReturnStmt:
+				leaves = true
+			case *ast.BranchStmt:
+				if x.Tok == token.CONTINUE {
+					leaves = true
+				}
 			}
-		}
-		return false
+			return !leaves
+		})
+		return leaves
 	}
 	var bad []string
 	for fname, src := range srcs {
@@ -253,12 +261,18 @@ func removerOrderFindings(t *testing.T, srcs map[string]string) []string {
 					case *ast.BlockStmt, *ast.RangeStmt, *ast.ForStmt:
 						continue // their bodies are checked as their own blocks
 					}
-					if !removes(st) {
+					names := removals(st)
+					if len(names) == 0 {
 						continue
 					}
 					deletes++
-					if i == 0 || !leaseGate(blk.List[i-1]) {
-						bad = append(bad, "RemoveUnreachable removes without a lease gate immediately before it (an if on StillHeld's error that returns)")
+					for _, name := range names {
+						if name != "DeleteMarked" {
+							bad = append(bad, "RemoveUnreachable calls "+name+": its only removal is DeleteMarked, conditional on its own mark")
+						}
+					}
+					if i == 0 || !markGate(blk.List[i-1]) {
+						bad = append(bad, "RemoveUnreachable removes without a mark gate immediately before it (an if on Mark's error that leaves)")
 					}
 				}
 				return true
@@ -328,49 +342,14 @@ func TestGuard_Controls(t *testing.T) {
 		"lease wait outside claim": {src: `func w(ctx context.Context, l LeaseWait) error { return l.OldLeaseEnded(ctx, 1) }`, want: "only RunClaim claims"},
 		"remover outside RemoveUnreachable": {src: `type p interface{ DeleteObject(context.Context, string) error }
 func w(ctx context.Context, x p) error { return x.DeleteObject(ctx, "o") }`, want: "only RemoveUnreachable removes"},
-		"removal without lease check": {file: "remove.go", src: `type p interface{ DeleteObject(context.Context, string) error }
-type l interface{ StillHeld(context.Context) error }
-func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
-	for _, n := range names {
-		if err := x.DeleteObject(ctx, n); err != nil {
-			return err
-		}
-	}
-	return nil
-}`, want: "without a lease gate immediately before it"},
-		"lease check after the delete": {file: "remove.go", src: `type p interface{ DeleteObject(context.Context, string) error }
-type l interface{ StillHeld(context.Context) error }
-func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
-	for _, n := range names {
-		if err := x.DeleteObject(ctx, n); err != nil {
-			return err
-		}
-		if err := h.StillHeld(ctx); err != nil {
-			return err
-		}
-	}
-	return nil
-}`, want: "without a lease gate immediately before it"},
-		"lease check once before the loop": {file: "remove.go", src: `type p interface{ DeleteObject(context.Context, string) error }
-type l interface{ StillHeld(context.Context) error }
-func RemoveUnreachable(ctx context.Context, x p, h l, names []string) error {
-	if err := h.StillHeld(ctx); err != nil {
-		return err
-	}
-	for _, n := range names {
-		if err := x.DeleteObject(ctx, n); err != nil {
-			return err
-		}
-	}
-	return nil
-}`, want: "without a lease gate immediately before it"},
 		"claim without lease wait": {src: `func RunClaim(ctx context.Context, st HeadStore, lease LeaseWait, me HolderID) (Head, error) {
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) { return h, false, nil })
 }`, want: "does not wait for the old lease", file: "claim.go"},
 		"transition not through runTransition": {src: `func RunZz(ctx context.Context, st HeadStore) (Head, error) { h, _, err := st.ReadHead(ctx); return h, err }`, want: "does not go through runTransition"},
-		"ignored lease check":                  {file: "remove.go", src: removeVariant(t, "ignored"), want: "without a lease gate immediately before it"},
-		"one check, two deletes":               {file: "remove.go", src: removeVariant(t, "second"), want: "without a lease gate immediately before it"},
-		"unlisted removal method":              {file: "remove.go", src: removeVariant(t, "other"), want: "without a lease gate immediately before it"},
+		"unconditional delete":                 {file: "remove.go", src: removeVariant(t, "unconditional"), want: "its only removal is DeleteMarked"},
+		"ignored mark":                         {file: "remove.go", src: removeVariant(t, "ignored"), want: "without a mark gate immediately before it"},
+		"one mark, two deletes":                {file: "remove.go", src: removeVariant(t, "second"), want: "without a mark gate immediately before it"},
+		"unlisted removal method":              {file: "remove.go", src: removeVariant(t, "other"), want: "without a mark gate immediately before it"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
 func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable removes"},
 	} {
@@ -396,17 +375,21 @@ func removeVariant(t *testing.T, mode string) string {
 		t.Fatal(err)
 	}
 	src := strings.ReplaceAll(string(b), "\r\n", "\n")
-	gate := "if err := lease.StillHeld(ctx); err != nil {\n\t\t\treturn removed, fmt.Errorf(\"%w: %v\", ErrLeaseLost, err)\n\t\t}"
+	gate := "if err := os.Mark(ctx, c.Path(), plan, session); err != nil {"
+	if !strings.Contains(src, gate) {
+		t.Fatal("remove.go mark gate not found")
+	}
 	switch mode {
 	case "ignored":
-		if !strings.Contains(src, gate) {
-			t.Fatal("remove.go lease gate not found")
-		}
-		src = strings.Replace(src, gate, "_ = lease.StillHeld(ctx)", 1)
+		i := strings.Index(src, gate)
+		j := strings.Index(src[i:], "\n\t\t}\n") + i + len("\n\t\t}\n")
+		src = src[:i] + "_ = os.Mark(ctx, c.Path(), plan, session)\n" + src[j:]
 	case "second":
-		src = strings.Replace(src, "removed = append(removed, c)", "_ = pool.DeleteObject(ctx, c.Path())\n\t\tremoved = append(removed, c)", 1)
+		src = strings.Replace(src, "removed = append(removed, c)", "_ = os.DeleteMarked(ctx, c.Path(), session)\n\t\tremoved = append(removed, c)", 1)
 	case "other":
-		src = strings.Replace(src, "removed = append(removed, c)", "_ = pool.RemoveOther(ctx, c.Path())\n\t\tremoved = append(removed, c)", 1)
+		src = strings.Replace(src, "removed = append(removed, c)", "_ = os.RemoveOther(ctx, c.Path())\n\t\tremoved = append(removed, c)", 1)
+	case "unconditional":
+		src = strings.Replace(src, "if err := os.DeleteMarked(ctx, c.Path(), session); err != nil {", "if err := os.DeleteObject(ctx, c.Path()); err != nil {", 1)
 	}
 	i := strings.Index(src, ")\n")
 	return src[i+2:]

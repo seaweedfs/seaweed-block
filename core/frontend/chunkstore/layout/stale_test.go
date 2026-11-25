@@ -73,9 +73,9 @@ func TestHolderFunctions_RefuseAStaleHolder(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = RemoveUnreachable(context.Background(), &memHead{h: h}, r, o, &fakeHeld{}, c, "c1", 0, orphans)
-		if !errors.Is(err, ErrNotHolder) || len(o.deletes) != 0 {
-			t.Errorf("RemoveUnreachable by %s: %v, %d deletes; want ErrNotHolder and none", who, err, len(o.deletes))
+		_, err = RemoveUnreachable(context.Background(), &memHead{h: h}, r, o, c, "c1", 0, orphans)
+		if !errors.Is(err, ErrNotHolder) || len(o.writes) != 0 {
+			t.Errorf("RemoveUnreachable by %s: %v, %d writes; want ErrNotHolder and none", who, err, len(o.writes))
 		}
 	}
 	covered := map[string]bool{"RemoveUnreachable": true}

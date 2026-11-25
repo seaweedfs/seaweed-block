@@ -11,9 +11,9 @@ import (
 
 const volRoot = "/swblock/chunks/v1"
 
-// prepared writes (in the fake store) every object a commit of next needs:
-// next's own chunks, its segments and its root.
-func prepared(t *testing.T, f *fakeStore, next map[uint64]Ref) RootName {
+// prepared writes (in the object store, as session) every object a commit
+// of next needs: next's own chunks, its segments and its root.
+func prepared(t *testing.T, f *memObjects, next map[uint64]Ref, session string) RootName {
 	t.Helper()
 	root, segs, err := Build(next)
 	if err != nil {
@@ -21,17 +21,17 @@ func prepared(t *testing.T, f *fakeStore, next map[uint64]Ref) RootName {
 	}
 	for i, r := range next {
 		if r.Owner == "v1" {
-			f.have[path.Join(volRoot, next[i].Chunk.Path())] = true
+			f.put(next[i].Chunk.Path(), []byte("c"), session)
 		}
 	}
 	for n := range segs {
-		f.have[path.Join(volRoot, n.Path())] = true
+		f.put(n.Path(), []byte("s"), session)
 	}
 	rn, _, err := NameRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.have[path.Join(volRoot, rn.Path())] = true
+	f.put(rn.Path(), []byte("r"), session)
 	return rn
 }
 
@@ -89,19 +89,19 @@ func TestCommit_Closure(t *testing.T) {
 // commitFixture: HEAD is snap(s1) at current root = prev's root; prev and
 // next share chunk 0 (unchanged), next changes chunk 3, adds chunk 10004
 // and names chunk 7 of volume "src".
-func commitFixture(t *testing.T) (*fakeStore, Head, CommitRequest) {
+func commitFixture(t *testing.T) (*memObjects, Head, CommitRequest) {
 	t.Helper()
-	f := &fakeStore{have: map[string]bool{}}
+	f := newMemObjects(volRoot)
 	prev := manifest(ref("v1", 0, "a"), ref("v1", 3, "b"))
-	prevRoot := prepared(t, f, prev)
+	prevRoot := prepared(t, f, prev, "s0")
 	next := manifest(ref("v1", 0, "a"), ref("v1", 3, "b2"), ref("v1", 10004, "c"), ref("src", 7, "d"))
-	prepared(t, f, next)
+	prepared(t, f, next, "s1")
 	h := Head{Gen: 7, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActSnap, Session: "s1"}, Current: &prevRoot, Position: 40}
 	return f, h, CommitRequest{Session: "s1", Prev: prev, Next: next, Position: 50, Snapshot: "hourly"}
 }
 
-func runCommit(st HeadStore, f *fakeStore, req CommitRequest) (Head, error) {
-	return RunCommit(context.Background(), st, f.look, volRoot, "v1", me, req)
+func runCommit(st HeadStore, f *memObjects, req CommitRequest) (Head, error) {
+	return RunCommit(context.Background(), st, f, "v1", me, req)
 }
 
 func TestRunCommit_LooksUpOnlyWhatIsNew(t *testing.T) {
@@ -146,7 +146,7 @@ func TestRunCommit_RefusesUnwrittenObjects(t *testing.T) {
 			case "root":
 				p = root.Path()
 			}
-			delete(f.have, path.Join(volRoot, p))
+			delete(f.objs, path.Join(volRoot, p))
 			st := &memHead{h: &h}
 			if _, err := runCommit(st, f, req); !errors.Is(err, ErrNotPrepared) {
 				t.Fatalf("commit with its %s missing: %v; want ErrNotPrepared", what, err)
@@ -179,9 +179,9 @@ func TestRunCommit_StaleBaseAndLookupFailure(t *testing.T) {
 		t.Fatal("HEAD written by a refused commit")
 	}
 	// The first commit of a volume: no current root, no previous manifest.
-	f2 := &fakeStore{have: map[string]bool{}}
+	f2 := newMemObjects(volRoot)
 	next := manifest(ref("v1", 1, "x"))
-	prepared(t, f2, next)
+	prepared(t, f2, next, "s1")
 	h2 := Head{Gen: 1, Epoch: 3, Holder: "srv-a", Activity: Activity{Kind: ActSnap, Session: "s1"}}
 	if got, err := runCommit(&memHead{h: &h2}, f2, CommitRequest{Session: "s1", Next: next, Position: 5}); err != nil || got.Current == nil {
 		t.Fatalf("first commit: %+v %v", got, err)
@@ -207,8 +207,8 @@ func TestRunCommit_InterruptAtEveryStep(t *testing.T) {
 // refused.
 func TestRunCommit_AfterAnEmptyPublishedRoot(t *testing.T) {
 	ctx := context.Background()
-	f := &fakeStore{have: map[string]bool{}}
-	prepared(t, f, nil)
+	f := newMemObjects(volRoot)
+	prepared(t, f, nil, "s0")
 	h := idleHead()
 	st := &memHead{h: &h}
 	if _, err := RunBegin(ctx, st, me, "s0"); err != nil {
@@ -223,11 +223,12 @@ func TestRunCommit_AfterAnEmptyPublishedRoot(t *testing.T) {
 	if _, err := RunBegin(ctx, st, me, "s1"); err != nil {
 		t.Fatal(err)
 	}
+	prepared(t, f, nil, "s1") // each session writes (reuses) what it commits
 	if _, err := runCommit(st, f, CommitRequest{Session: "s1", Prev: map[uint64]Ref{}, Position: 1}); err != nil {
 		t.Fatalf("empty -> empty: %v", err)
 	}
 	next := manifest(ref("v1", 1, "x"))
-	prepared(t, f, next)
+	prepared(t, f, next, "s2")
 	if _, err := RunBegin(ctx, st, me, "s2"); err != nil {
 		t.Fatal(err)
 	}
@@ -264,5 +265,26 @@ func TestAbort_AfterCommitLeavesTheCommit(t *testing.T) {
 	}
 	if st.updates != before || *st.h.Current != committed || st.h.Snapshots["hourly"].Root != committed {
 		t.Fatalf("Abort after the commit wrote or changed HEAD: %+v", st.h)
+	}
+}
+
+// A commit names only objects its own session wrote or reused, unmarked:
+// one written by another session, or marked by a cleaning, is not
+// prepared until EnsureObject reuses it.
+func TestRunCommit_NeedsObjectsOfItsOwnSession(t *testing.T) {
+	for _, meta := range []ObjectMeta{{Session: "s0"}, {Session: "s1", Mark: "c9"}} {
+		f, h, req := commitFixture(t)
+		rel := req.Next[10004].Chunk.Path()
+		f.objs[path.Join(volRoot, rel)].meta = meta
+		st := &memHead{h: &h}
+		if _, err := runCommit(st, f, req); !errors.Is(err, ErrNotPrepared) || st.updates != 0 {
+			t.Fatalf("object %+v: %v (%d writes); want ErrNotPrepared, nothing written", meta, err, st.updates)
+		}
+		if err := EnsureObject(context.Background(), f, rel, []byte("c"), "s1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runCommit(st, f, req); err != nil {
+			t.Fatalf("after EnsureObject reused it: %v", err)
+		}
 	}
 }

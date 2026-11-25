@@ -7,34 +7,22 @@ import (
 	"sort"
 )
 
-// ErrLeaseLost: the remover's own lease is no longer valid; nothing more
-// is removed.
-var ErrLeaseLost = errors.New("layout: remover's lease is not valid")
-
-// LeaseHeld is the remover's half of the time premise: it returns nil only
-// while the caller's own lease is valid. Remove calls it immediately before
-// every delete.
-type LeaseHeld interface {
-	StillHeld(ctx context.Context) error
-}
-
-// Pool deletes one object of the volume by its path relative to the volume
-// root; deleting an absent object succeeds.
-type Pool interface {
-	DeleteObject(ctx context.Context, rel string) error
-}
-
-// RemoveUnreachable is transition 7 for one pool shard: for the holder
-// with clean(session) open at HEAD's epoch, every candidate chunk of shard
-// that no root in HEAD (current and every snapshot) names in this
-// volume's pool is deleted, each delete preceded by a check of the
-// remover's own lease. HEAD is read once, after BeginClean: while clean is
-// open no commit can add a root, and a claim that voids the cleaning waits
-// for this lease to end, which the check before every delete sees. It
-// returns the names it deleted, in index order.
-func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, pool Pool, lease LeaseHeld, me HolderID, session string, shard uint64, candidates []ChunkName) ([]ChunkName, error) {
-	if lease == nil || pool == nil || r == nil {
-		return nil, errors.New("layout: removal needs a reader, a pool and a lease check")
+// RemoveUnreachable is the cleaning's removal (transition 7') for one pool
+// shard: for the holder with its own clean(session) open at HEAD's epoch,
+// each candidate chunk that no root in HEAD (current or any snapshot)
+// names in this volume's pool is removed in two conditional writes on its
+// own entry: MARK, expected the metadata read when the plan was made and
+// unmarked, sets the mark to this session; DELETE, expected that mark,
+// deletes it. A writer that reuses the object in between (EnsureObject:
+// new session, mark cleared) makes the mark or the delete fail its own
+// condition, however late it lands; no lease reasoning is needed. A
+// candidate already marked by another session, or moved, is left alone.
+// Chunks a restore target names stay live here: the source's snapshot
+// root names them, and that snapshot stays in HEAD while it has dependents.
+// It returns the names it deleted, in index order.
+func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectStore, me HolderID, session string, shard uint64, candidates []ChunkName) ([]ChunkName, error) {
+	if os == nil || r == nil {
+		return nil, errors.New("layout: removal needs a reader and an object store")
 	}
 	h, found, err := st.ReadHead(ctx)
 	if err != nil {
@@ -60,10 +48,23 @@ func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, pool Pool, 
 		if Shard(c.Index) != shard || live[c] {
 			continue
 		}
-		if err := lease.StillHeld(ctx); err != nil {
-			return removed, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+		plan, found, err := os.Stat(ctx, c.Path())
+		if err != nil {
+			return removed, err
 		}
-		if err := pool.DeleteObject(ctx, c.Path()); err != nil {
+		if !found || plan.Mark != "" {
+			continue
+		}
+		if err := os.Mark(ctx, c.Path(), plan, session); err != nil {
+			if errors.Is(err, ErrPrecondition) {
+				continue // reused or marked since the plan
+			}
+			return removed, fmt.Errorf("layout: mark %s: %w", c, err)
+		}
+		if err := os.DeleteMarked(ctx, c.Path(), session); err != nil {
+			if errors.Is(err, ErrPrecondition) {
+				continue // reused since the mark
+			}
 			return removed, fmt.Errorf("layout: delete %s: %w", c, err)
 		}
 		removed = append(removed, c)
