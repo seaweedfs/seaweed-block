@@ -124,3 +124,24 @@ func TestPublisher_ReassignWithoutAKindIsRefused(t *testing.T) {
 		t.Fatalf("a reassign with a kind: %v", err)
 	}
 }
+
+// A decision made on a fencing round at e+1 is minted only while the line
+// is still at e: once the line moved, it is refused and nothing changes.
+func TestPublisher_AFencedDecisionIsMintedOnlyAtItsFencedEpoch(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil))
+	if err := pub.apply(bindAsk("v1", "r1")); err != nil {
+		t.Fatal(err)
+	}
+	ask := reassignAsk("v1", "r2")
+	ask.Evidence.FencedEpoch = 3 // fenced for a line at 2; the line is at 1
+	if err := pub.apply(ask); !errors.Is(err, ErrFenceSuperseded) {
+		t.Fatalf("a decision fenced at 3 on a line at 1: %v; want ErrFenceSuperseded", err)
+	}
+	if line, _ := pub.VolumeAuthorityLine("v1"); line.ReplicaID != "r1" || line.Epoch != 1 {
+		t.Fatalf("the line moved: %+v", line)
+	}
+	ask.Evidence.FencedEpoch = 2
+	if err := pub.apply(ask); err != nil {
+		t.Fatalf("a decision fenced at the next epoch: %v", err)
+	}
+}
