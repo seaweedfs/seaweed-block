@@ -71,8 +71,8 @@ const (
 	ImplWALStoreChunk ImplName = "walstore-chunk"
 )
 
-// defaultChunkBlocks is 4 MiB chunks of 4 KiB blocks.
-const defaultChunkBlocks = 1024
+// DefaultChunkBlocks is 4 MiB chunks of 4 KiB blocks.
+const DefaultChunkBlocks = 1024
 
 // ErrImplKindMismatch is returned by Open when the configured
 // selector does not match the on-disk superblock magic. Named so
@@ -158,7 +158,7 @@ type ProviderConfig struct {
 	ChunkRemoteFor func(volumeID string) (storage.ChunkRemote, error)
 	// ChunkLayoutHeadFor and ChunkLayoutRemoteFor select the content-named layout.
 	// The remote is constructed once, with the identity confirmed by Start.
-	ChunkLayoutHeadFor   func(string) (layout.HeadStore, error)
+	ChunkLayoutHeadFor   func(string) (layout.StartStore, error)
 	ChunkLayoutRemoteFor func(string, layout.HolderID) (storage.ChunkRemote, error)
 	// ChunkBlocks is the number of blocks per chunk. Zero: 1024.
 	ChunkBlocks uint32
@@ -434,7 +434,7 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 		}
 	}
 	if cfg.ChunkBlocks == 0 {
-		cfg.ChunkBlocks = defaultChunkBlocks
+		cfg.ChunkBlocks = DefaultChunkBlocks
 	}
 	if cfg.BlockSize == 0 {
 		cfg.BlockSize = 4096

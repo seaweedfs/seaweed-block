@@ -117,10 +117,10 @@ func TestStart_ClaimsAnUnclaimedHeadFromAFreshRoot(t *testing.T) {
 	h := Unclaimed(idFor("v1"), nil)
 	h.Gen = 1
 	st := &memHead{h: &h}
-	if _, err := Start(ctx, st, &fakeLease{ended: true}, line, LocalRoot{ClaimID: "k1"}); !errors.Is(err, ErrStaleLocalRoot) || st.updates != 0 {
+	if _, err := Start(ctx, st, &fakeLease{ended: true}, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k1"}); !errors.Is(err, ErrStaleLocalRoot) || st.updates != 0 {
 		t.Fatalf("non-fresh root on an unclaimed HEAD: %v (%d writes); want ErrStaleLocalRoot", err, st.updates)
 	}
-	got, err := Start(ctx, st, &fakeLease{ended: true}, line, LocalRoot{ClaimID: "k1", Fresh: true})
+	got, err := Start(ctx, st, &fakeLease{ended: true}, line, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k1", Fresh: true})
 	if err != nil || got.Epoch != 1 || got.Holder != "s1/r1" || got.ClaimID != "k1" {
 		t.Fatalf("fresh root on an unclaimed HEAD: %+v %v", got, err)
 	}
@@ -128,7 +128,7 @@ func TestStart_ClaimsAnUnclaimedHeadFromAFreshRoot(t *testing.T) {
 
 func TestCreateVolume(t *testing.T) {
 	ctx := context.Background()
-	v := Volume{ID: idFor("v1"), Name: "v1", Format: VolumeFormat}
+	v := Volume{ID: idFor("v1"), Name: "v1", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}
 	st := newMemNewVolume()
 	h, err := CreateVolume(ctx, st, v)
 	if err != nil || h.VolumeID != v.ID || h.Holder != "" || h.Epoch != 0 || h.Current != nil || st.vol == nil {
@@ -138,7 +138,7 @@ func TestCreateVolume(t *testing.T) {
 		t.Fatalf("CreateVolume again: %v, %d creates; want a replay", err, st.creates)
 	}
 	other := newMemNewVolume()
-	other.vol = &Volume{ID: idFor("x"), Name: "v1", Format: VolumeFormat}
+	other.vol = &Volume{ID: idFor("x"), Name: "v1", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}
 	if _, err := CreateVolume(ctx, other, v); !errors.Is(err, ErrIdentity) || other.memHead.h != nil {
 		t.Fatalf("CreateVolume over another id's VOLUME: %v; want ErrIdentity, no HEAD", err)
 	}
@@ -148,7 +148,7 @@ func TestCreateVolume(t *testing.T) {
 // a re-run completes with VOLUME and the unclaimed HEAD.
 func TestCreateVolume_InterruptAtEveryStep(t *testing.T) {
 	ctx := context.Background()
-	v := Volume{ID: idFor("v1"), Name: "v1", Format: VolumeFormat}
+	v := Volume{ID: idFor("v1"), Name: "v1", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}
 	for k := 1; k <= 2; k++ {
 		for _, after := range []bool{false, true} {
 			t.Run(fmt.Sprintf("create%d/after=%t", k, after), func(t *testing.T) {
@@ -179,7 +179,7 @@ func TestCreateTarget(t *testing.T) {
 	}
 	h.Activity = Activity{Kind: ActIdle}
 	src := &memHead{h: h}
-	v := Volume{ID: idFor("t"), Name: "t", Format: VolumeFormat}
+	v := Volume{ID: idFor("t"), Name: "t", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}
 	st := newMemNewVolume()
 	var copied *RootName
 	copyRoot := func(_ context.Context, rn RootName) error {

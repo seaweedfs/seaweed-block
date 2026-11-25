@@ -40,7 +40,7 @@ func verifyFixtureVolume(t *testing.T) (filerBlobs, layout.VolumeID) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vb, err := layout.Volume{ID: id, Name: "v", Format: layout.VolumeFormat}.Encode()
+	vb, err := layout.Volume{ID: id, Name: "v", Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: layout.VolumeFormat}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}

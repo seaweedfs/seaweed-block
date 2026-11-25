@@ -29,12 +29,12 @@ func TestLayoutProviderSnapshotVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := chunkstore.VolumeRef{Name: "v1", ID: id}
-	if _, err = cat.CreateVolume(ctx, v); err != nil {
+	if _, err = cat.CreateVolume(ctx, v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}))
 	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r1",
-		ChunkLayoutHeadFor: func(string) (layout.HeadStore, error) { return cat.Store(v) },
+		ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return cat.Store(v) },
 		ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
 			return chunkstore.NewLayoutRemote(cat, v, me)
 		},

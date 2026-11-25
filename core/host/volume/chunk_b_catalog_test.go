@@ -21,7 +21,7 @@ func TestChunkControlUsesTheBoundLayoutIdentity(t *testing.T) {
 	}
 	id, _ := layout.ParseVolumeID("00112233445566778899aabbccddeeff")
 	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
-	h, err := cat.CreateVolume(ctx, ref)
+	h, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096})
 	if err != nil {
 		t.Fatal(err)
 	}

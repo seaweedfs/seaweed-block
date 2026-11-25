@@ -79,7 +79,7 @@ func adapterFixture(t *testing.T) (*fakeChunkProvider, ChunkControl) {
 	}
 	id, _ := layout.ParseVolumeID("00112233445566778899aabbccddeeff")
 	v := chunkstore.VolumeRef{Name: "v1", ID: id}
-	if _, err := cat.CreateVolume(context.Background(), v); err != nil {
+	if _, err := cat.CreateVolume(context.Background(), v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	return fp, NewChunkControl(fp, cat, v)
@@ -94,35 +94,6 @@ func (f *fakeChunkProvider) SnapshotVolume(ctx context.Context, volumeID string,
 	}
 	return layout.Head{Gen: r.Head.Gen, Epoch: r.Head.Epoch, Position: r.H, Snapshots: map[string]layout.Snapshot{name: {Meta: meta}}}, nil
 }
-
-// adapterCatalog is a catalog holding volume v1 and a provider whose cut
-// installs a published HEAD of v1.
-func adapterCatalog(t *testing.T) (*fakeChunkProvider, *chunkstore.Catalog) {
-	t.Helper()
-	head := storage.ChunkHead{Gen: 3, Epoch: 2, Holder: "r1", RemoteLSN: 9, State: storage.ChunkHeadActive,
-		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e2/c0/k1"}, 5: {Key: "chunks/e2/c5/k2"}}}
-	f := &adapterManifestFiler{Filer: chunkstore.NewMemFiler(), blobs: map[string][]byte{}}
-	r, err := chunkstore.NewChunkRemote(f, f, "/swblock/chunks/v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	head, _, err = r.PrepareManifest(context.Background(), storage.ChunkHead{}, head, 8*4096)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fp := &fakeChunkProvider{cut: storage.ChunkCutResult{H: 9, Head: head}}
-	cat, err := chunkstore.NewCatalog(f, "/swblock/chunks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cat.EnsureVolume(context.Background(), "v1", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
-		t.Fatal(err)
-	}
-	return fp, cat
-}
-
-// Snapshot validates before it cuts, then stores the HEAD its cut
-// installed (§3.2); list and delete go to the catalog.
 
 // The cut body carries the statistics the chunk layer measured for that
 // cut (§3.1), so a caller can see what one cut cost: the barrier pause,

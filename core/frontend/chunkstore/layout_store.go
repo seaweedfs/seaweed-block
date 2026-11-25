@@ -45,7 +45,7 @@ var _ layout.HeadStore = (*LayoutStore)(nil)
 var _ layout.ObjectStore = (*LayoutStore)(nil)
 
 func (s *LayoutStore) ReadHead(ctx context.Context) (layout.Head, bool, error) {
-	e, err := s.f.LookupEntry(ctx, s.root, headName)
+	e, err := s.f.LookupEntry(ctx, s.root, layout.HeadName)
 	if errors.Is(err, ErrNotFound) {
 		return layout.Head{}, false, nil
 	}
@@ -90,7 +90,7 @@ func (s *LayoutStore) UpdateHead(ctx context.Context, expectedGen uint64, next l
 	if err != nil {
 		return err
 	}
-	e := layoutEntry(headName, raw)
+	e := layoutEntry(layout.HeadName, raw)
 	e.Extended = map[string][]byte{layoutKind: []byte("head"), layoutGen: []byte(strconv.FormatUint(expectedGen+1, 10)), layoutVolume: []byte(s.id.String())}
 	if expectedGen == 0 {
 		err = s.f.CreateEntry(ctx, s.root, e, true)

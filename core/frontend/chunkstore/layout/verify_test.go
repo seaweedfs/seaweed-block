@@ -77,7 +77,7 @@ func vid(vol string, n byte) VolumeID {
 
 func vputVolume(t *testing.T, m *memStore, vol string, id VolumeID) {
 	t.Helper()
-	b, err := Volume{ID: id, Name: vol, Format: VolumeFormat}.Encode()
+	b, err := Volume{ID: id, Name: vol, Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}

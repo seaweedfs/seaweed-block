@@ -343,6 +343,10 @@ var (
 	_ Blobs = (*SWFS)(nil)
 )
 
+// ErrBlobDeleteRejected identifies a definite per-object refusal (HTTP 400).
+// It never proves the needle absent.
+var ErrBlobDeleteRejected = errors.New("chunkstore: blob DELETE rejected")
+
 // DeleteBlob removes an immutable needle from every resolved replica. A
 // partial/unknown result is an error, so GC retains its binding tombstone
 // and retries later; no response body is used to infer success.

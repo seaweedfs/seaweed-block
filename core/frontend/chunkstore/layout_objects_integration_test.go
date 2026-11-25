@@ -97,7 +97,7 @@ func TestIntegration_CatalogRestoreAndDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	src, tgt := newRef(t, "src"), newRef(t, "t")
-	if _, err := cat.CreateVolume(ctx, src); err != nil {
+	if _, err := cat.CreateVolume(ctx, src, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	data := []byte("real source chunk")

@@ -117,6 +117,55 @@ func (img *Image) Shards() []uint64 {
 	return out
 }
 
+// AllShards selects every shard in EachRef.
+const AllShards = ^uint64(0)
+
+// HeadRoots is every root h names: its current image and each snapshot's,
+// once each.
+func HeadRoots(h Head) []RootName {
+	seen := map[RootName]bool{}
+	var out []RootName
+	add := func(rn RootName) {
+		if !seen[rn] {
+			seen[rn] = true
+			out = append(out, rn)
+		}
+	}
+	if h.Current != nil {
+		add(*h.Current)
+	}
+	for _, s := range h.Snapshots {
+		add(s.Root)
+	}
+	return out
+}
+
+// EachRef calls fn for every chunk reference root rn names in shard (or in
+// every shard, AllShards), until fn returns false. A root or segment that
+// cannot be read is an error, never a partial walk.
+func (r *Reader) EachRef(ctx context.Context, rn RootName, shard uint64, fn func(index uint64, ref Ref) bool) error {
+	img, err := r.Open(ctx, rn)
+	if err != nil {
+		return err
+	}
+	shards := img.Shards()
+	if shard != AllShards {
+		shards = []uint64{shard}
+	}
+	for _, sh := range shards {
+		seg, _, err := img.Segment(ctx, sh)
+		if err != nil {
+			return err
+		}
+		for idx, ref := range seg.Chunks {
+			if !fn(idx, ref) {
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
 // Open reads and checks the root rn.
 func (r *Reader) Open(ctx context.Context, rn RootName) (*Image, error) {
 	b, err := r.get(ctx, r.vol, rn.Path(), rn.Hash)

@@ -437,7 +437,7 @@ func snapshotRefusal(err error) bool {
 // to the store not answering.
 var kernelRefusals = []error{layout.ErrPrecondition, layout.ErrNotHolder, layout.ErrNoSession, layout.ErrBusy, layout.ErrDetached,
 	layout.ErrVolumeDeleting, layout.ErrStaleEpoch, layout.ErrNotPrepared, layout.ErrStaleBase, layout.ErrHeadAbsent,
-	layout.ErrMalformed, layout.ErrTooManySnapshots, layout.ErrSnapshotExists}
+	layout.ErrMalformed, layout.ErrGeometryMismatch, layout.ErrTooManySnapshots, layout.ErrSnapshotExists}
 
 func isKernelRefusal(err error) bool {
 	for _, k := range kernelRefusals {

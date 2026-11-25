@@ -349,7 +349,7 @@ func parseFlags(args []string) (flags, error) {
 		if f.durableRoot == "" {
 			return flags{}, fmt.Errorf("--layout-id requires --durable-root")
 		}
-		if _, err := (layout.Volume{ID: id, Name: f.volumeID, Format: layout.VolumeFormat}).Encode(); err != nil {
+		if err := (layout.Volume{ID: id, Name: f.volumeID, Format: layout.VolumeFormat}).CheckIdentity(); err != nil {
 			return flags{}, err
 		}
 		f.durableRoot = filepath.Join(f.durableRoot, layout.VolumeDir(f.volumeID, id))
@@ -711,6 +711,7 @@ func runVolume(f flags, exits *processExit) int {
 			StorageRoot:                   f.durableRoot,
 			BlockSize:                     blockSize,
 			NumBlocks:                     blocks,
+			ChunkBlocks:                   durable.DefaultChunkBlocks,
 			WALRetentionLSNs:              f.walRetentionLSNs,
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
@@ -786,7 +787,7 @@ func runVolume(f flags, exits *processExit) int {
 				layoutID, _ := layout.ParseVolumeID(f.layoutID) // parseFlags validates a supplied id
 				ref := chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}
 				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.bCatalog, ref)
-				cfg.ChunkLayoutHeadFor = func(name string) (layout.HeadStore, error) {
+				cfg.ChunkLayoutHeadFor = func(name string) (layout.StartStore, error) {
 					if name != ref.Name {
 						return nil, layout.ErrIdentity
 					}
@@ -813,9 +814,10 @@ func runVolume(f flags, exits *processExit) int {
 		// Only a store about to be created takes its geometry from the flags;
 		// an existing store opens with its own (blocks == 0), and a mismatch
 		// between it and the record is the attach check's.
-		if chunkErr == nil && geometryErr == nil && blocks != 0 && chunk.catalog != nil {
+		if chunkErr == nil && geometryErr == nil && blocks != 0 && chunk.bCatalog != nil {
 			readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			refusal, code := geometryFlagsRefusal(readCtx, chunk.catalog, f.volumeID, uint64(blocks), uint32(blockSize))
+			layoutID, _ := layout.ParseVolumeID(f.layoutID)
+			refusal, code := geometryFlagsRefusal(readCtx, chunk.bCatalog, chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}, uint64(blocks), uint32(blockSize), cfg.ChunkBlocks)
 			readCancel()
 			if refusal != "" {
 				fmt.Fprintln(os.Stderr, refusal)

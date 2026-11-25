@@ -261,28 +261,10 @@ func OperatorReleaseDependent(ctx context.Context, source HeadStore, target Targ
 // Every shard of every root is read; an unreadable one is an error, never
 // "names nothing".
 func namesVolume(ctx context.Context, r *Reader, h Head, owner VolumeID) (bool, error) {
-	roots := map[RootName]bool{}
-	if h.Current != nil {
-		roots[*h.Current] = true
-	}
-	for _, s := range h.Snapshots {
-		roots[s.Root] = true
-	}
-	for rn := range roots {
-		img, err := r.Open(ctx, rn)
-		if err != nil {
-			return false, err
-		}
-		for shard := range img.root.Segments {
-			seg, _, err := img.Segment(ctx, shard)
-			if err != nil {
-				return false, err
-			}
-			for _, ref := range seg.Chunks {
-				if ref.OwnerID == owner {
-					return true, nil
-				}
-			}
+	found := false
+	for _, rn := range HeadRoots(h) {
+		if err := r.EachRef(ctx, rn, AllShards, func(_ uint64, ref Ref) bool { found = ref.OwnerID == owner; return !found }); err != nil || found {
+			return found, err
 		}
 	}
 	return false, nil

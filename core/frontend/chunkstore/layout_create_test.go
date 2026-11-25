@@ -14,7 +14,7 @@ import (
 func TestLayoutStoreCreateVolumeThenStart(t *testing.T) {
 	s, _, _ := layoutStoreFixture(t)
 	ctx := context.Background()
-	v := layout.Volume{ID: s.id, Name: "v", Format: layout.VolumeFormat}
+	v := layout.Volume{ID: s.id, Name: "v", Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: layout.VolumeFormat}
 	if _, err := layout.CreateVolume(ctx, s, v); err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +24,7 @@ func TestLayoutStoreCreateVolumeThenStart(t *testing.T) {
 	if _, err := layout.CreateVolume(ctx, s, v); err != nil {
 		t.Fatalf("re-create: %v", err)
 	}
-	h, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{ClaimID: "root", Fresh: true})
+	h, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "root", Fresh: true})
 	if err != nil || h.Epoch != 1 || h.ClaimID != "root" || h.Gen != 2 {
 		t.Fatalf("first Start: %+v %v", h, err)
 	}
@@ -46,7 +46,7 @@ func TestLayoutStoreCreatesOnlyKernelShapes(t *testing.T) {
 		"claimed HEAD":             s.CreateHead(ctx, claimed),
 		"live HEAD as a tombstone": s.CreateDeletedHead(ctx, layout.Unclaimed(s.id, nil)),
 		"another volume's HEAD":    s.CreateHead(ctx, layout.Unclaimed(other, nil)),
-		"another volume's VOLUME":  s.CreateVolumeRecord(ctx, layout.Volume{ID: other, Name: "v", Format: layout.VolumeFormat}),
+		"another volume's VOLUME":  s.CreateVolumeRecord(ctx, layout.Volume{ID: other, Name: "v", Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: layout.VolumeFormat}),
 	} {
 		if err == nil {
 			t.Errorf("%s created", name)
@@ -60,7 +60,7 @@ func TestLayoutStoreCreatesOnlyKernelShapes(t *testing.T) {
 	if err := s.CreateDeletedHead(ctx, tomb); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := layout.CreateVolume(ctx, s, layout.Volume{ID: s.id, Name: "v", Format: layout.VolumeFormat}); !errors.Is(err, layout.ErrVolumeDeleting) {
+	if _, err := layout.CreateVolume(ctx, s, layout.Volume{ID: s.id, Name: "v", Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: layout.VolumeFormat}); !errors.Is(err, layout.ErrVolumeDeleting) {
 		t.Fatalf("create after the tombstone: %v; want ErrVolumeDeleting", err)
 	}
 }

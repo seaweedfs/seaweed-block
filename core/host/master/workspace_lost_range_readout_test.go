@@ -4,8 +4,6 @@ import (
 	"context"
 	"io/fs"
 	"log"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,38 +216,5 @@ func TestWorkspaceForcedMoveLostRangeOverRPC(t *testing.T) {
 	}
 	if _, err := c2.QueryWorkspaceLostRange(ctx, &control.WorkspaceLostRangeQuery{VolumeId: "vol-f"}); status.Code(err) != codes.DataLoss {
 		t.Fatalf("lost range query with a damaged record: %v; want DataLoss", err)
-	}
-}
-
-// The HEAD reader takes the HEAD entry's mtime from the filer's
-// Last-Modified header of the same response; without a usable header the
-// time is unknown (0), never invented.
-func TestWorkspaceHEADReadsFilerMtime(t *testing.T) {
-	mtime := time.Date(2026, 11, 21, 1, 2, 3, 0, time.UTC)
-	for _, tc := range []struct {
-		name, header string
-		want         int64
-	}{
-		{"last-modified", mtime.Format(http.TimeFormat), mtime.UnixNano()},
-		{"absent", "", 0},
-		{"unparseable", "yesterday", 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				if tc.header != "" {
-					w.Header().Set("Last-Modified", tc.header)
-				}
-				_, _ = w.Write([]byte(`{"format":1,"gen":9,"epoch":3,"holder":"old","remote_lsn":42}`))
-			}))
-			defer s.Close()
-			read, err := NewWorkspaceHEADReader(s.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			h, err := read(context.Background(), "v")
-			if err != nil || h.FilerMtimeNS != tc.want || h.Gen != 9 || h.RemoteLSN != 42 {
-				t.Fatalf("HEAD %+v %v; want filer mtime %d", h, err, tc.want)
-			}
-		})
 	}
 }

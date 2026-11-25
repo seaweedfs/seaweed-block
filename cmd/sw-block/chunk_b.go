@@ -302,6 +302,7 @@ func layoutCode(err error) string {
 		{chunkstore.ErrNotAdmitted, "not_admitted"},
 		{layout.ErrTargetLive, "target_live"},
 		{layout.ErrIdentity, "identity_mismatch"},
+		{layout.ErrGeometryMismatch, "geometry_mismatch"},
 		{layout.ErrPrecondition, "conflict"},
 		{retain.ErrInvalidPolicy, "invalid_policy"},
 	} {

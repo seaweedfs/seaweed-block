@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	master "github.com/seaweedfs/seaweed-block/core/host/master"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -69,11 +71,14 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("workspace-rpc-%v", enabled), func(t *testing.T) {
 			base := fmt.Sprintf("/workspace-lease-%d", time.Now().UnixNano())
-			reader, err := master.NewWorkspaceHEADReader("http://" + cluster.filerHTTP + base)
+			var h *master.Host
+			reader, err := master.NewLayoutWorkspaceHEADReader("http://"+cluster.filerHTTP+base, func(ctx context.Context, name string) (chunkstore.VolumeRef, error) {
+				return h.WorkspaceLayoutVolume(ctx, name)
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			h, err := master.New(master.Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: enabled, WorkspaceHeadReader: reader})
+			h, err = master.New(master.Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: enabled, WorkspaceHeadReader: reader})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,8 +89,13 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 				_ = h.Close(ctx)
 			})
 			dataAddr, ctrlAddr, statusAddr, nvmeAddr := leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t)
-			if _, err = h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 64 * 4096, ReplicationFactor: 1}); err != nil {
+			rec, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 64 * 4096, ReplicationFactor: 1})
+			if err != nil {
 				t.Fatal(err)
+			}
+			layoutID, err := layout.ParseVolumeID(rec.Spec.LayoutID)
+			if err != nil {
+				t.Fatalf("master-minted layout id %q: %v", rec.Spec.LayoutID, err)
 			}
 			if _, err = h.Lifecycle().Nodes.RegisterNode(lifecycle.NodeRegistration{ServerID: "node-a", DataAddr: dataAddr, CtrlAddr: ctrlAddr}); err != nil {
 				t.Fatal(err)
@@ -106,7 +116,7 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command(exe, "--master", h.Addr(), "--server-id", "node-a", "--volume-id", "vol-a", "--replica-id", "r1", "--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--t1-readiness", "--status-addr", statusAddr, "--durable-root", t.TempDir(), "--volume-lock-dir-test-only", t.TempDir(), "--durable-impl", "walstore-chunk", "--durable-blocks", "64", "--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease", "--nvme-listen", nvmeAddr, "--nvme-subsysnqn", "nqn.2026-11.test:workspace-lease")
+			cmd := exec.Command(exe, "--master", h.Addr(), "--server-id", "node-a", "--volume-id", "vol-a", "--replica-id", "r1", "--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--t1-readiness", "--status-addr", statusAddr, "--durable-root", t.TempDir(), "--layout-id", layoutID.String(), "--volume-lock-dir-test-only", t.TempDir(), "--durable-impl", "walstore-chunk", "--durable-blocks", "64", "--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease", "--nvme-listen", nvmeAddr, "--nvme-subsysnqn", "nqn.2026-11.test:workspace-lease")
 			stripSystemdForTestLockDir(cmd)
 			cmd.Stdout, cmd.Stderr = log, log
 			if err = cmd.Start(); err != nil {
@@ -144,7 +154,7 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 				e = json.NewDecoder(resp.Body).Decode(&p)
 				return p, e == nil
 			}
-			remote := cluster.remote(t, base+"/vol-a")
+			remote := cluster.remote(t, base, chunkstore.VolumeRef{Name: "vol-a", ID: layoutID})
 			if !enabled {
 				leaseBinaryPoll(t, "unleased host did not adopt assignment", func() bool { p, ok := projection(); return ok && p.Epoch == line.Epoch })
 				// Exercise an actual cut request, not just the status presentation.

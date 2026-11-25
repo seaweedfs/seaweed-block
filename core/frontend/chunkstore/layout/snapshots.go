@@ -110,22 +110,9 @@ func RunAddDependent(ctx context.Context, st HeadStore, r *Reader, name string, 
 // namesOtherThan reports whether root names a chunk owned by a volume
 // other than own; an unreadable segment is an error.
 func namesOtherThan(ctx context.Context, r *Reader, rn RootName, own VolumeID) (bool, error) {
-	img, err := r.Open(ctx, rn)
-	if err != nil {
-		return false, err
-	}
-	for shard := range img.root.Segments {
-		seg, _, err := img.Segment(ctx, shard)
-		if err != nil {
-			return false, err
-		}
-		for _, ref := range seg.Chunks {
-			if ref.OwnerID != own {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+	other := false
+	err := r.EachRef(ctx, rn, AllShards, func(_ uint64, ref Ref) bool { other = ref.OwnerID != own; return !other })
+	return other, err
 }
 
 // ErrPinned: an automatic delete of a snapshot pinned at its time.

@@ -50,7 +50,7 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := chunkstore.VolumeRef{Name: "v1", ID: id}
-	if _, err = cat.CreateVolume(ctx, v); err != nil {
+	if _, err = cat.CreateVolume(ctx, v, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
 	view := newStubView(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}))
@@ -60,12 +60,12 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 	makeProvider := func(root string) (*durable.DurableProvider, *storage.WALStore) {
 		t.Helper()
 		p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r1",
-			ChunkLayoutHeadFor: func(string) (layout.HeadStore, error) {
+			ChunkLayoutHeadFor: func(string) (layout.StartStore, error) {
 				st, err := cat.Store(v)
 				if err != nil {
 					return nil, err
 				}
-				return &layoutLostClaimReply{HeadStore: st, lose: &lostReply}, nil
+				return &layoutLostClaimReply{StartStore: st, lose: &lostReply}, nil
 			},
 			ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
 				remoteCalls++
@@ -171,12 +171,12 @@ func TestLayoutProviderRefusesEmptyOwnEpochAndRemountedOldRoot(t *testing.T) {
 }
 
 type layoutLostClaimReply struct {
-	layout.HeadStore
+	layout.StartStore
 	lose *bool
 }
 
 func (s *layoutLostClaimReply) UpdateHead(ctx context.Context, expected uint64, next layout.Head) error {
-	if err := s.HeadStore.UpdateHead(ctx, expected, next); err != nil {
+	if err := s.StartStore.UpdateHead(ctx, expected, next); err != nil {
 		return err
 	}
 	if *s.lose {

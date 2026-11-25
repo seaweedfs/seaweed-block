@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
 // The retention classes and the schedule label.
@@ -63,11 +65,6 @@ type Snapshot struct {
 	Labels    map[string]string
 }
 
-// Pinned reports whether the snapshot is an explicit keep.
-func (s Snapshot) Pinned() bool {
-	return s.Class == ClassPinned || s.ExpiresNs > 0
-}
-
 // Decision is one snapshot's fate under a policy.
 type Decision struct {
 	Name      string   `json:"name"`
@@ -107,7 +104,8 @@ func Plan(p Policy, snaps []Snapshot, now time.Time) []Decision {
 	scheduleKeep := -1 // read from the newest scheduled snapshot
 	windows := map[string]bool{}
 	for i, s := range ordered {
-		pinned := s.Pinned() && (s.ExpiresNs == 0 || nowNs < s.ExpiresNs)
+		// pinned at now exactly as the kernel judges it (the delete refuses the same snapshots)
+		pinned := layout.SnapshotMeta{Class: s.Class, ExpiresNs: s.ExpiresNs}.PinnedAt(nowNs)
 		d := Decision{Name: s.Name, CreatedNs: s.CreatedNs, Class: s.Class, Pinned: pinned}
 		if s.Class == ClassScheduled {
 			// Every scheduled snapshot, pinned or not, is planned here and

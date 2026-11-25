@@ -52,12 +52,12 @@ func (c *BCatalog) open(v VolumeRef) (*LayoutStore, *layout.Reader, error) {
 }
 
 // CreateVolume creates the volume with its unclaimed HEAD.
-func (c *BCatalog) CreateVolume(ctx context.Context, v VolumeRef) (layout.Head, error) {
+func (c *BCatalog) CreateVolume(ctx context.Context, v VolumeRef, geometry layout.Geometry) (layout.Head, error) {
 	s, err := c.Store(v)
 	if err != nil {
 		return layout.Head{}, err
 	}
-	return layout.CreateVolume(ctx, s, layout.Volume{ID: v.ID, Name: v.Name, Format: layout.VolumeFormat})
+	return layout.CreateVolume(ctx, s, layout.Volume{ID: v.ID, Name: v.Name, Format: layout.VolumeFormat, Geometry: geometry})
 }
 
 // ReadHead reads the volume's HEAD.
@@ -101,25 +101,26 @@ func (c *BCatalog) Restore(ctx context.Context, src VolumeRef, snapshot string, 
 		if err != nil {
 			return err
 		}
-		shards := make([]uint64, 0, len(root.Segments))
-		for sh := range root.Segments {
-			shards = append(shards, sh)
-		}
-		sort.Slice(shards, func(a, b int) bool { return shards[a] < shards[b] })
-		session := "restore-" + target.ID.String()
-		for _, sh := range shards {
-			n := root.Segments[sh]
-			seg, err := c.fetchVerified(ctx, ss, src, n.Path(), n.Hash)
-			if err != nil {
-				return err
-			}
-			if err := layout.EnsureObject(ctx, ts, n.Path(), seg, session); err != nil {
+		segs := map[layout.SegName][]byte{}
+		for _, n := range root.Segments {
+			if segs[n], err = c.fetchVerified(ctx, ss, src, n.Path(), n.Hash); err != nil {
 				return err
 			}
 		}
-		return layout.EnsureObject(ctx, ts, rn.Path(), raw, session)
+		got, err := layout.PrepareRoot(ctx, ts, root, segs, "restore-"+target.ID.String())
+		if err == nil && got != rn {
+			err = fmt.Errorf("%w: root %s re-encodes as %s", layout.ErrCorrupt, rn, got)
+		}
+		return err
 	}
-	return layout.CreateTarget(ctx, ss, sr, snapshot, ts, layout.Volume{ID: target.ID, Name: target.Name, Format: layout.VolumeFormat}, copyRoot)
+	source, found, err := ss.ReadVolumeRecord(ctx)
+	if err != nil {
+		return layout.Head{}, err
+	}
+	if !found {
+		return layout.Head{}, layout.ErrMissing
+	}
+	return layout.CreateTarget(ctx, ss, sr, snapshot, ts, layout.Volume{ID: target.ID, Name: target.Name, Format: layout.VolumeFormat, Geometry: source.Geometry}, copyRoot)
 }
 
 func (c *BCatalog) fetchVerified(ctx context.Context, s *LayoutStore, v VolumeRef, rel string, want layout.Hash) ([]byte, error) {
@@ -217,21 +218,9 @@ func foreignOwners(ctx context.Context, r *layout.Reader, h layout.Head) ([]Volu
 
 // rootRefs returns every chunk reference the root names.
 func rootRefs(ctx context.Context, r *layout.Reader, rn layout.RootName) ([]layout.Ref, error) {
-	img, err := r.Open(ctx, rn)
-	if err != nil {
-		return nil, err
-	}
 	var out []layout.Ref
-	for _, sh := range img.Shards() {
-		seg, _, err := img.Segment(ctx, sh)
-		if err != nil {
-			return nil, err
-		}
-		for _, ref := range seg.Chunks {
-			out = append(out, ref)
-		}
-	}
-	return out, nil
+	err := r.EachRef(ctx, rn, layout.AllShards, func(_ uint64, ref layout.Ref) bool { out = append(out, ref); return true })
+	return out, err
 }
 
 // listObjects lists the volume's pool, segment and root entries.
