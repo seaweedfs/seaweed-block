@@ -38,7 +38,7 @@ func (s *LayoutStore) createHead(ctx context.Context, h layout.Head) error {
 	if err != nil {
 		return err
 	}
-	e := layoutEntry(headName, raw)
+	e := layoutEntry(layout.HeadName, raw)
 	e.Extended = map[string][]byte{layoutKind: []byte("head"), layoutGen: []byte(strconv.FormatUint(1, 10)), layoutVolume: []byte(s.id.String())}
 	err = s.f.CreateEntry(ctx, s.root, e, true)
 	if errors.Is(err, ErrExists) {

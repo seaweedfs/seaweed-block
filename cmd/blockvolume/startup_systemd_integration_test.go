@@ -19,9 +19,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -90,7 +93,17 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	ws := control.NewWorkspaceServiceClient(conn)
-	args := []string{"--master", masterAddr, "--server-id", "s1", "--volume-id", volume, "--replica-id", "r1",
+	// The master mints the volume's layout identity; the holder and every
+	// HEAD read name it.
+	var layoutID layout.VolumeID
+	waitGAP1(t, "master never resolved the volume's layout identity", 20*time.Second, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		id, e := lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), volume)
+		layoutID = id
+		return e == nil
+	})
+	args := []string{"--master", masterAddr, "--server-id", "s1", "--volume-id", volume, "--replica-id", "r1", "--layout-id", layoutID.String(),
 		"--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--heartbeat-interval", "200ms", "--t1-readiness", "--status-addr", statusAddr,
 		"--durable-root", filepath.Join(root, "store"), "--durable-impl", "walstore-chunk", "--durable-blocks", "64",
 		"--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease",
@@ -132,7 +145,7 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	t.Logf("acknowledged NVMe record: lba=8 bytes=%d sha256=%x", len(want), sha256.Sum256(want))
 	client.readExact(t, 8, want)
 	client.close()
-	remote := cluster.remote(t, base+"/"+volume)
+	remote := cluster.remote(t, base, chunkstore.VolumeRef{Name: volume, ID: layoutID})
 	before, err := gap1ReadHead(t, remote)
 	if err != nil || before.Gen == 0 {
 		t.Fatalf("bootstrap HEAD: %+v %v", before, err)

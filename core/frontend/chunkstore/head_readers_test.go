@@ -30,56 +30,34 @@ var headReaders = map[string]string{
 	"core/host/master/workspace_layout_head.go NewLayoutWorkspaceHEADReader -> DecodeLayoutHeadEntry": "any missing/failed metadata refuses; identity comes from master intent (TestWorkspaceLayoutHEADRefusalsAndStates)",
 	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":                                     "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",
 	"core/frontend/chunkstore/layout_store.go ReadHead -> LookupEntry":                                "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
-	// chunkstore: the two raw reads every other reader goes through
-	"core/frontend/chunkstore/catalog.go ReadHead -> LookupEntry":                    "ok=false, no error (probe ReadHead)",
-	"core/frontend/chunkstore/chunk_remote.go getHeadRoot -> LookupEntry":            "zero HEAD, no error (probe GetHead)",
-	"core/frontend/chunkstore/catalog.go headExists -> LookupEntry":                  "false (probe EnsureVolume)",
-	"core/frontend/chunkstore/chunk_remote.go GetHead -> getHeadRoot":                "zero HEAD, no error (probe GetHead)",
-	"core/frontend/chunkstore/chunk_remote.go GetHeadRoot -> getHeadRoot":            "zero HEAD, no error (probe GetHeadRoot)",
-	"core/frontend/chunkstore/chunk_remote.go CASHead -> getHeadRoot":                "GAP: expected gen 0 creates a HEAD over existing keys (probe CASHead)",
-	"core/frontend/chunkstore/catalog.go ensureInitialHead -> headExists":            "GAP: creates an empty gen-1 HEAD over existing keys (probe EnsureVolume)",
-	"core/frontend/chunkstore/catalog.go EnsureVolume -> ReadHead":                   "GAP: attaches the recreated empty HEAD (probe EnsureVolume)",
-	"core/frontend/chunkstore/catalog.go fork -> ReadHead":                           "replay falls through and publishes the fork-time HEAD (probe ForkReplay)",
-	"core/frontend/chunkstore/catalog.go AbortFork -> ReadHead":                      "GAP: exclusive-creates an aborted HEAD (probe AbortFork)",
-	"core/frontend/chunkstore/gc.go run -> GetHead":                                  "GAP: zero HEAD roots nothing; the volume's keys become candidates (probe GCMark)",
-	"core/frontend/chunkstore/gc_copy.go SweepCopies -> ReadHead":                    "after AbortFork: settles from the HEAD it created (probe AbortFork)",
-	"core/frontend/chunkstore/restore.go MarkIndependent -> ReadHead":                "refuses (not a restore / no HEAD) (probe MarkIndependent)",
-	"core/frontend/chunkstore/share_guard.go beginShare -> ReadHead":                 "refuses outcome_unknown: the HEAD to share is no longer current",
-	"core/frontend/chunkstore/usage.go Usage -> ReadHead":                            "GAP: reports an empty image, no error (probe Usage)",
-	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead": "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
-	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
-	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
-	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":       "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
-	"core/frontend/chunkstore/catalog_b.go DeleteVolume -> ReadHead":                 "refuses ErrHeadAbsent before any write (probe BCatalog)",
-	"core/frontend/chunkstore/catalog_b.go ReadHead -> ReadHead":                     "found=false to the caller, which reports no HEAD (probe BCatalog)",
-	"core/frontend/chunkstore/retain_b.go Retain -> ReadHead":                        "refuses ErrHeadAbsent, deletes nothing (probe BCatalog)",
-	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                  "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
-	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
-	"core/frontend/chunkstore/layout_remote.go AbortOpenSession -> ReadHead":         "refuses ErrHeadAbsent, aborts nothing (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                  "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                 "refuses ErrHeadAbsent (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":           "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":             "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
-	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
-	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":             "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go markHeadDeleting -> ReadHead":         "zero HEAD: creates the deleting HEAD (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go commitHeadPurging -> ReadHead":        "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go finishHeadDeleted -> ReadHead":        "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go revertHeadDeleting -> ReadHead":       "reads the HEAD markHeadDeleting wrote (probe DeleteVolume)",
-	"core/frontend/chunkstore/volume_delete.go volumeGone -> ReadHead":               "absent HEAD = not gone (probe DeleteVolume)",
-	// above the chunk store: they read through storage.ChunkRemote GetHead /
-	// GetHeadRoot, so an absent HEAD reaches them as the zero HEAD (probe GetHead)
+	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead":                  "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
+	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                                      "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
+	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":                         "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
+	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":                        "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
+	"core/frontend/chunkstore/catalog_b.go DeleteVolume -> ReadHead":                                  "refuses ErrHeadAbsent before any write (probe BCatalog)",
+	"core/frontend/chunkstore/catalog_b.go ReadHead -> ReadHead":                                      "found=false to the caller, which reports no HEAD (probe BCatalog)",
+	"core/frontend/chunkstore/retain_b.go Retain -> ReadHead":                                         "refuses ErrHeadAbsent, deletes nothing (probe BCatalog)",
+	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                                   "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
+	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                                         "refuses ErrHeadAbsent (probe BCatalog)",
+	"core/frontend/chunkstore/layout_remote.go AbortOpenSession -> ReadHead":                          "refuses ErrHeadAbsent, aborts nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                                   "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                                  "refuses ErrHeadAbsent (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":                            "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":                              "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
+	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":                               "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
+	// above the chunk store: they read through the layout remote's GetHead, so an
+	// absent HEAD reaches them as ErrHeadAbsent, never as a zero HEAD (probe LayoutRemote)
 	"cmd/sw-block/chunk_b.go chunkShow -> ReadHead":                      "found=false: prints a null head (probe TestOpsChunk_AbsentVolume)",
 	"cmd/sw-block/chunk_b.go chunkSnapshots -> ReadHead":                 "refuses volume_not_found (probe TestOpsChunk_AbsentVolume)",
-	"core/frontend/durable/provider_chunk.go GetHead -> GetHead":         "zero HEAD (probe GetHead)",
-	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHead":     "zero HEAD (probe GetHead)",
-	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHeadRoot": "zero HEAD (probe GetHeadRoot)",
-	"core/frontend/durable/provider_chunk.go newChunkLayer -> GetHead":   "zero HEAD: a fresh lineage (probe GetHead)",
-	"core/storage/chunk_head_belt.go confirmChunkHead -> GetHead":        "gen mismatch: fenced, HEAD publication displaced (reads the zero HEAD, probe GetHead)",
-	"core/storage/chunk_head_belt.go confirmChunkHead -> GetHeadRoot":    "gen mismatch: fenced, HEAD publication displaced (probe GetHeadRoot)",
-	"core/storage/chunk_head_belt.go readChunkHead -> GetHead":           "zero HEAD (probe GetHead)",
-	"core/storage/chunk_layer.go attachChunkLayerImpl -> GetHead":        "zero HEAD: attaches as a new lineage (probe GetHead)",
-	"core/storage/chunk_restore.go ClaimChunkHead -> GetHead":            "GAP: the zero HEAD passes the fence check (gen 0), the claim then CASes from gen 0 (probe CASHead)",
+	"core/frontend/durable/provider_chunk.go GetHead -> GetHead":         "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
+	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHead":     "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
+	"core/frontend/durable/provider_chunk.go GetHeadRoot -> GetHeadRoot": "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
+	"core/frontend/durable/provider_chunk.go newChunkLayer -> GetHead":   "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
+	"core/storage/chunk_head_belt.go confirmChunkHead -> GetHead":        "ErrHeadAbsent from the layout remote: not confirmed (probe LayoutRemote)",
+	"core/storage/chunk_head_belt.go confirmChunkHead -> GetHeadRoot":    "ErrHeadAbsent from the layout remote: not confirmed (probe LayoutRemote)",
+	"core/storage/chunk_head_belt.go readChunkHead -> GetHead":           "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
+	"core/storage/chunk_layer.go attachChunkLayerImpl -> GetHead":        "ErrHeadAbsent from the layout remote (probe LayoutRemote)",
+	"core/storage/chunk_restore.go ClaimChunkHead -> GetHead":            "ErrHeadAbsent from the layout remote: no claim (probe LayoutRemote)",
 }
 
 // TestHeadReaders_Enumeration lists every HEAD reader in core/ and cmd/ from
@@ -126,6 +104,9 @@ func TestHeadReaders_Enumeration(t *testing.T) {
 							if id, ok := a.(*ast.Ident); ok && id.Name == "headName" {
 								hit = true
 							}
+							if sel, ok := a.(*ast.SelectorExpr); ok && sel.Sel.Name == "HeadName" {
+								hit = true // layout.HeadName
+							}
 						}
 					}
 					if hit {
@@ -158,116 +139,10 @@ func TestHeadReaders_Enumeration(t *testing.T) {
 	}
 }
 
-// absentHeadFixture: volume v1 is live (VOLUME), holds a bound key, and its
-// HEAD entry was removed (pruned by a stock tool, or by hand).
-func absentHeadFixture(t *testing.T) (*fakeFiler, gcBlobs, *Catalog, *Collector, *time.Time, *ChunkRemote) {
-	t.Helper()
-	f, b, c, g, now := gcFixture(t)
-	ctx := context.Background()
-	r, err := NewChunkRemote(f, b, catBase+"/v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Put(ctx, "chunks/e1/c0/k", []byte("published data")); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.DeleteEntry(ctx, catBase+"/v1", headName, nil); err != nil {
-		t.Fatal(err)
-	}
-	return f, b, c, g, now, r
-}
-
-// headReaderForkFixture: v1 holds a snapshot s1; v2 is a directory a fork
-// can target.
-func headReaderForkFixture(t *testing.T) (*fakeFiler, *fakeBlobs) {
-	t.Helper()
-	f, b, c, h := catalogFixture(t)
-	ctx := context.Background()
-	if _, err := c.CreateSnapshot(ctx, "v1", SnapshotRequest{Name: "s1", RequestID: "s"}, h); err != nil {
-		t.Fatal(err)
-	}
-	return f, b
-}
-
 // TestHeadReaders_AbsentHeadProbes pins, per reader, what today's code does
 // when HEAD is absent (see headReaders).
 func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 	ctx := context.Background()
-	t.Run("ReadHead", func(t *testing.T) {
-		_, _, c, _, _, _ := absentHeadFixture(t)
-		if h, ok, err := c.ReadHead(ctx, "v1"); err != nil || ok || h.Gen != 0 {
-			t.Fatalf("ReadHead: %+v %t %v; want absent, no error", h, ok, err)
-		}
-	})
-	t.Run("GetHead", func(t *testing.T) {
-		_, _, _, _, _, r := absentHeadFixture(t)
-		if h, err := r.GetHead(ctx); err != nil || h.Gen != 0 {
-			t.Fatalf("GetHead: %+v %v; want the zero HEAD", h, err)
-		}
-	})
-	t.Run("GetHeadRoot", func(t *testing.T) {
-		_, _, _, _, _, r := absentHeadFixture(t)
-		if h, err := r.GetHeadRoot(ctx); err != nil || h.Gen != 0 {
-			t.Fatalf("GetHeadRoot: %+v %v; want the zero HEAD", h, err)
-		}
-	})
-	t.Run("CASHead", func(t *testing.T) { // GAP
-		_, _, _, _, _, r := absentHeadFixture(t)
-		gen, err := r.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "h", Chunks: map[uint64]storage.ChunkRef{}})
-		if err != nil || gen != 1 {
-			t.Fatalf("CASHead from gen 0 over keys: %d %v; today it creates gen 1", gen, err)
-		}
-	})
-	t.Run("EnsureVolume", func(t *testing.T) { // GAP
-		_, _, c, _, _, _ := absentHeadFixture(t)
-		if _, err := c.EnsureVolume(ctx, "v1", catGeo); err != nil {
-			t.Fatalf("attach over keys without HEAD: %v; today it attaches", err)
-		}
-		if h, ok, _ := c.ReadHead(ctx, "v1"); !ok || h.Gen != 1 || len(h.Chunks) != 0 {
-			t.Fatalf("HEAD after attach: %+v %t; today an empty gen-1 HEAD", h, ok)
-		}
-	})
-	t.Run("Usage", func(t *testing.T) { // GAP
-		_, _, c, _, _, _ := absentHeadFixture(t)
-		u, err := c.Usage(ctx, "v1")
-		if err != nil || u.LiveChunks != 0 {
-			t.Fatalf("Usage: %+v %v; today an empty image", u, err)
-		}
-	})
-	t.Run("GCMark", func(t *testing.T) { // GAP
-		_, _, _, g, now, _ := absentHeadFixture(t)
-		if _, err := g.Run(ctx); err != nil {
-			t.Fatal(err)
-		}
-		*now = now.Add(2*time.Hour + g.cfg.ClockSkew)
-		res, err := g.Run(ctx)
-		if err != nil || res.Candidates == 0 {
-			t.Fatalf("GC over an absent HEAD: %+v %v; today the volume's keys are candidates", res, err)
-		}
-	})
-	t.Run("MarkIndependent", func(t *testing.T) {
-		_, _, c, _, _, _ := absentHeadFixture(t)
-		if _, err := c.MarkIndependent(ctx, "v1"); err == nil {
-			t.Fatal("MarkIndependent of a volume without HEAD succeeded")
-		}
-	})
-	t.Run("DeleteVolume", func(t *testing.T) {
-		_, _, c, _, _, _ := absentHeadFixture(t)
-		res, err := c.DeleteVolume(ctx, "v1", nil)
-		if err != nil || !res.Completed {
-			t.Fatalf("operator delete over an absent HEAD: %+v %v; today it completes", res, err)
-		}
-		if h, ok, _ := c.ReadHead(ctx, "v1"); !ok || h.State != storage.ChunkHeadDeleted {
-			t.Fatalf("HEAD after the delete: %+v %t; want deleted", h, ok)
-		}
-	})
-	t.Run("AbortFork", func(t *testing.T) { // GAP
-		_, _, c, _, _, _ := absentHeadFixture(t)
-		claimed, err := c.AbortFork(ctx, "v1")
-		if err != nil || !claimed {
-			t.Fatalf("AbortFork over an absent HEAD: %t %v; today it creates an aborted HEAD", claimed, err)
-		}
-	})
 	t.Run("LayoutTransition", func(t *testing.T) {
 		st := &absentLayoutHead{}
 		if _, err := layout.RunBegin(ctx, st, layout.HolderID{Epoch: 1, Holder: "h"}, "s"); !errors.Is(err, layout.ErrHeadAbsent) {
@@ -385,26 +260,6 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		st := &absentLayoutHead{}
 		if _, err := layout.Start(ctx, st, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "h"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
 			t.Fatalf("start over an absent HEAD: %v, %d writes; want ErrHeadAbsent and none", err, st.updates)
-		}
-	})
-	t.Run("ForkReplay", func(t *testing.T) {
-		f, b := headReaderForkFixture(t)
-		c, err := NewCatalog(manifestFilerBlobs{f, gcBlobs{b}}, catBase)
-		if err != nil {
-			t.Fatal(err)
-		}
-		req := ForkRequest{Source: "v1", Snapshot: "s1", Target: "v2", RequestID: "f1"}
-		if _, err := c.Fork(ctx, req); err != nil {
-			t.Fatal(err)
-		}
-		if err := f.DeleteEntry(ctx, catBase+"/v2", headName, nil); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := c.Fork(ctx, req); err != nil {
-			t.Fatalf("fork replay over an absent target HEAD: %v; today it republishes", err)
-		}
-		if h, ok, _ := c.ReadHead(ctx, "v2"); !ok || h.Gen != 1 {
-			t.Fatalf("target HEAD after the replay: %+v %t; today the fork-time HEAD again", h, ok)
 		}
 	})
 }

@@ -5,9 +5,20 @@ package chunkstore
 import (
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+// DefaultOpDeadline bounds a snapshot or fork from reading its source to
+// its final write (spec §2.3).
+const DefaultOpDeadline = 5 * time.Minute
+
+// ErrNotAdmitted marks a delete admission error that is a definite refusal
+// (nothing was recorded). Any other admission error leaves the outcome
+// unknown.
+var ErrNotAdmitted = errors.New("chunkstore: volume delete not admitted")
 
 const (
 	// SnapActive and SnapDeleting are a snapshot's states.

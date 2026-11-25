@@ -45,7 +45,7 @@ func TestWorkspaceLayoutHEADReaderWiring(t *testing.T) {
 						name = x.Sel.Name
 					}
 					switch name {
-					case "NewLayoutWorkspaceHEADReader", "NewWorkspaceHEADReader", "WorkspaceLayoutVolume":
+					case "NewLayoutWorkspaceHEADReader", "WorkspaceLayoutVolume":
 						found[filepath.ToSlash(rel)+" "+fn.Name.Name+" -> "+name]++
 					}
 					return true

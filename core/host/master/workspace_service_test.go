@@ -3,13 +3,12 @@ package master
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
@@ -37,24 +36,14 @@ func (c lostAckReply) AckWorkspaceRevoked(ctx context.Context, q *control.Worksp
 }
 
 func TestWorkspaceRPCCleanMovePreservesReplicaIdentity(t *testing.T) {
+	// The HEAD the master reads for vol-a: held by node-a/r2 at epoch 1,
+	// detached once the holder's final cut is in.
 	var detached atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/vol-a/HEAD" {
-			http.NotFound(w, r)
-			return
+	reader := func(_ context.Context, vol string) (authority.WorkspaceHead, error) {
+		if vol != "vol-a" {
+			return authority.WorkspaceHead{}, fmt.Errorf("no HEAD for %s", vol)
 		}
-		state := "active"
-		proof := ""
-		if detached.Load() {
-			state = "detached"
-			proof = `,"detachedBy":{"holder":"node-a/r2","epoch":1,"gen":9}`
-		}
-		fmt.Fprintf(w, `{"format":1,"gen":9,"epoch":1,"holder":"node-a/r2","remote_lsn":42,"state":%q%s}`, state, proof)
-	}))
-	defer server.Close()
-	reader, err := NewWorkspaceHEADReader(server.URL)
-	if err != nil {
-		t.Fatal(err)
+		return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r2", RemoteLSN: 42, Detached: detached.Load()}, nil
 	}
 	authDir, lifeDir := t.TempDir(), t.TempDir()
 	cfg := Config{AuthorityStoreDir: authDir, LifecycleStoreDir: lifeDir, Listen: "127.0.0.1:0", WorkspaceRPC: true, WorkspaceHeadReader: reader}
