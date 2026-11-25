@@ -30,6 +30,8 @@ import (
 // removed by the next completed cleaning. Chunks a restore target names stay live: the source's snapshot
 // root names them while it has dependents. It returns the names it
 // deleted, in index order.
+// model: SnapshotRemoval.Stat
+// model: SnapshotRemoval.Issue
 func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectStore, me HolderID, session string, shard uint64, candidates []ChunkName) ([]ChunkName, error) {
 	if os == nil || r == nil {
 		return nil, errors.New("layout: removal needs a reader and an object store")
@@ -92,6 +94,7 @@ func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectSt
 // reachable returns this volume's chunk names in shard that any root in h
 // names. A root or segment that cannot be read is an error: nothing is
 // removed on a partial view.
+// model: SnapshotRemoval.Validate
 func reachable(ctx context.Context, r *Reader, h Head, shard uint64) (map[ChunkName]bool, error) {
 	own, err := r.VolumeID(ctx, r.vol)
 	if err != nil {

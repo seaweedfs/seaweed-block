@@ -139,6 +139,7 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 // reply finds a live commit applied and writes nothing. For a stop, the caller
 // reads HEAD after an unknown outcome: detached at its claim means stopped;
 // it never resumes serving without that read.
+// model: SnapshotRemoval.Commit
 func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me HolderID, req CommitRequest) (Head, error) {
 	root, segs, err := rootOf(req.Next)
 	if err != nil {
