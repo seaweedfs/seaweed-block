@@ -18,6 +18,7 @@ type memObject struct {
 // point counted over its writes (Create, Reuse, Mark, DeleteMarked).
 type memObjects struct {
 	root   string
+	volume VolumeID // stamped on every entry the store creates
 	objs   map[string]*memObject
 	fail   string
 	asked  []string
@@ -84,7 +85,7 @@ func (m *memObjects) Create(_ context.Context, rel string, data []byte, session 
 		if _, ok := m.objs[m.full(rel)]; ok {
 			return ErrExists
 		}
-		m.objs[m.full(rel)] = &memObject{data: append([]byte(nil), data...), meta: ObjectMeta{Session: session}}
+		m.objs[m.full(rel)] = &memObject{data: append([]byte(nil), data...), meta: ObjectMeta{Session: session, Volume: m.volume}}
 		return nil
 	})
 }
@@ -95,7 +96,7 @@ func (m *memObjects) Reuse(_ context.Context, rel string, expect ObjectMeta, ses
 		if !ok || o.meta != expect {
 			return ErrPrecondition
 		}
-		o.meta = ObjectMeta{Session: session}
+		o.meta = ObjectMeta{Session: session, Volume: o.meta.Volume}
 		return nil
 	})
 }
@@ -125,9 +126,23 @@ func (m *memObjects) DeleteMarked(_ context.Context, rel string, mark string) er
 	})
 }
 
+func (m *memObjects) DeleteOfVolume(_ context.Context, rel string, volume VolumeID) error {
+	return m.write("delete-of-volume", rel, func() error {
+		o, ok := m.objs[m.full(rel)]
+		if !ok {
+			return nil
+		}
+		if o.meta.Volume != volume {
+			return ErrPrecondition
+		}
+		delete(m.objs, m.full(rel))
+		return nil
+	})
+}
+
 // put stores an object directly (fixture setup, no kill point).
 func (m *memObjects) put(rel string, data []byte, session string) {
-	m.objs[m.full(rel)] = &memObject{data: append([]byte(nil), data...), meta: ObjectMeta{Session: session}}
+	m.objs[m.full(rel)] = &memObject{data: append([]byte(nil), data...), meta: ObjectMeta{Session: session, Volume: m.volume}}
 }
 
 func (m *memObjects) has(rel string) bool { _, ok := m.objs[m.full(rel)]; return ok }

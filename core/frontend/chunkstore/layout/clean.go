@@ -14,8 +14,8 @@ func (h Head) BeginClean(me HolderID, session string) (next Head, changed bool, 
 	if session == "" {
 		return Head{}, false, errors.New("layout: BeginClean needs a session id")
 	}
-	if !h.heldBy(me) {
-		return Head{}, false, fmt.Errorf("%w: HEAD epoch %d holder %q, caller epoch %d holder %q", ErrNotHolder, h.Epoch, h.Holder, me.Epoch, me.Holder)
+	if err := h.holderErr(me); err != nil {
+		return Head{}, false, err
 	}
 	switch {
 	case h.Activity == Activity{Kind: ActClean, Session: session}:
@@ -36,8 +36,8 @@ func (h Head) EndClean(me HolderID, session string) (next Head, changed bool, er
 	if session == "" {
 		return Head{}, false, errors.New("layout: EndClean needs a session id")
 	}
-	if !h.heldBy(me) {
-		return Head{}, false, fmt.Errorf("%w: HEAD epoch %d holder %q, caller epoch %d holder %q", ErrNotHolder, h.Epoch, h.Holder, me.Epoch, me.Holder)
+	if err := h.holderErr(me); err != nil {
+		return Head{}, false, err
 	}
 	switch {
 	case h.Activity.Kind == ActIdle:

@@ -28,6 +28,9 @@ func (h Head) Claim(me HolderID) (next Head, changed bool, err error) {
 	if me.Epoch == 0 || me.Holder == "" || me.ClaimID == "" {
 		return Head{}, false, errors.New("layout: Claim needs an epoch, a holder and a claim id")
 	}
+	if h.State != StateLive {
+		return Head{}, false, fmt.Errorf("%w: HEAD is %s", ErrVolumeDeleting, h.State)
+	}
 	switch {
 	case me.Epoch < h.Epoch:
 		return Head{}, false, fmt.Errorf("%w: HEAD epoch %d, caller %d", ErrStaleEpoch, h.Epoch, me.Epoch)

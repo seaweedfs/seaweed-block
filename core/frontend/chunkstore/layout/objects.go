@@ -7,11 +7,14 @@ import (
 )
 
 // ObjectMeta is what an object entry (chunk, segment, root) carries besides
-// its bytes: the session of its last writer and a removal mark (the
-// session of a cleaning that planned to remove it; empty when unmarked).
+// its bytes: the session of its last writer, a removal mark (the session
+// of a cleaning that planned to remove it; empty when unmarked) and the id
+// of the volume it belongs to (content names repeat across volumes and
+// across a volume's re-creation under its name).
 type ObjectMeta struct {
 	Session string
 	Mark    string
+	Volume  VolumeID // the volume the entry belongs to, stamped by the store at Create
 }
 
 // ErrExists is returned by ObjectStore.Create when the entry exists.
@@ -24,7 +27,8 @@ type ObjectStore interface {
 	// Stat returns an entry's metadata; a missing entry is found=false.
 	Stat(ctx context.Context, rel string) (meta ObjectMeta, found bool, err error)
 	// Create writes a new entry exclusively (data first, entry after),
-	// with session as its writer; ErrExists if the entry exists.
+	// with session as its writer and the store's volume id; ErrExists if
+	// the entry exists.
 	Create(ctx context.Context, rel string, data []byte, session string) error
 	// Reuse sets session as the writer and clears the mark, only if the
 	// entry's metadata is still expect (ErrPrecondition otherwise).
@@ -35,6 +39,9 @@ type ObjectStore interface {
 	// DeleteMarked deletes the entry only if it carries mark
 	// (ErrPrecondition otherwise); a missing entry succeeds.
 	DeleteMarked(ctx context.Context, rel string, mark string) error
+	// DeleteOfVolume deletes the entry only if it belongs to volume
+	// (ErrPrecondition otherwise); a missing entry succeeds.
+	DeleteOfVolume(ctx context.Context, rel string, volume VolumeID) error
 }
 
 // maxEnsureRounds bounds EnsureObject's retries when another writer moves
