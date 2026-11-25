@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
 )
 
 // ErrMissing reports an object a root reaches that is not in the store: a
@@ -85,6 +86,16 @@ func (r *Reader) get(ctx context.Context, vol, rel string, want Hash) ([]byte, e
 type Image struct {
 	r    *Reader
 	root Root
+}
+
+// Shards returns the shards the image's root names, in order.
+func (img *Image) Shards() []uint64 {
+	out := make([]uint64, 0, len(img.root.Segments))
+	for sh := range img.root.Segments {
+		out = append(out, sh)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
+	return out
 }
 
 // Open reads and checks the root rn.

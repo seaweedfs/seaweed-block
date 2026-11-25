@@ -45,6 +45,9 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                     "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
 	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":        "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
 	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":       "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
+	"core/frontend/chunkstore/catalog_b.go DeleteVolume -> ReadHead":                 "refuses ErrHeadAbsent before any write (probe BCatalog)",
+	"core/frontend/chunkstore/catalog_b.go ReadHead -> ReadHead":                     "found=false to the caller, which reports no HEAD (probe BCatalog)",
+	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
 	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":             "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/verify.go run -> LookupEntry":                          "finding ROOT_INVALID (probe Verify)",
@@ -278,6 +281,23 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		st := &absentLayoutHead{}
 		if _, err := layout.RunAddDependent(ctx, st, r, "daily", layout.Dependent{Target: "t", TargetID: layout.VolumeID{1}}); !errors.Is(err, layout.ErrHeadAbsent) || st.updates != 0 {
 			t.Fatalf("add dependent over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, st.updates)
+		}
+	})
+	t.Run("BCatalog", func(t *testing.T) {
+		f := newFakeFiler()
+		c, err := NewBCatalog(f, newFakeBlobs(), "/blocks")
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := VolumeRef{Name: "v", ID: layout.VolumeID{1}}
+		if _, found, err := c.ReadHead(ctx, v); found || err != nil {
+			t.Fatalf("catalog read of an absent HEAD: found %t, %v", found, err)
+		}
+		if _, err := c.Usage(ctx, v); !errors.Is(err, layout.ErrHeadAbsent) {
+			t.Fatalf("usage of an absent HEAD: %v; want ErrHeadAbsent", err)
+		}
+		if err := c.DeleteVolume(ctx, v, okDeleteAuthority{}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
+			t.Fatalf("delete of an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
 		}
 	})
 	t.Run("LayoutCreate", func(t *testing.T) {
