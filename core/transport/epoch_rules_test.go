@@ -113,3 +113,53 @@ func TestLiveEntryOfANewEpochOnlyAtTheNextLSN(t *testing.T) {
 		t.Fatalf("a live epoch-2 entry at the next LSN 7: rows %v; want [(1,1) (2,7)]", rows)
 	}
 }
+
+// Rule 4 is not optional: a recovery lane start without the LSN it starts
+// after is refused, and the table is unchanged.
+func TestRecoveryLaneStartWithoutItsFromLSNIsRefused(t *testing.T) {
+	_, _, listener := setupPrimaryReplica(t)
+	tb, _ := LoadEpochTable("", "v1")
+	_ = tb.Replace([]EpochRow{{Epoch: 1, FirstLSN: 1}})
+	listener.SetEpochTable(tb)
+	conn, err := net.Dial("tcp", listener.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeLineage(RecoveryLineage{SessionID: 3, Epoch: 2, EndpointVersion: 1, TargetLSN: 9})); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, _ = ReadMsg(conn)
+	if tb.Invalid() || len(tb.Rows()) != 1 {
+		t.Fatalf("a lane start without its from-LSN took the mark: invalid %t rows %v", tb.Invalid(), tb.Rows())
+	}
+}
+
+// The live apply is fenced too: a recovery's Invalidate waits for an
+// in-flight live apply, and while a recovery owns the store no live entry
+// lands.
+func TestEpochTable_LiveAppliesAreFenced(t *testing.T) {
+	tb, _ := LoadEpochTable("", "v1")
+	_ = tb.Replace([]EpochRow{{Epoch: 1, FirstLSN: 1}})
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- tb.ApplyLiveUnder(func() error { close(entered); <-release; return nil }) }()
+	<-entered
+	took := make(chan struct{})
+	go func() { _, _ = tb.Invalidate(); close(took) }()
+	select {
+	case <-took:
+		t.Fatal("a recovery took the mark while a live apply was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	<-took
+	ran := false
+	if err := tb.ApplyLiveUnder(func() error { ran = true; return nil }); !errors.Is(err, ErrNotRecoveryOwner) || ran {
+		t.Fatalf("a live apply while a recovery owns the store: err %v ran %t; want refused", err, ran)
+	}
+}

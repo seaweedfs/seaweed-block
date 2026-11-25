@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -110,9 +109,7 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	}
 	// The lane start states the LSN the catch-up starts after: the replica
 	// takes its epoch-table mark only if its durable end is that LSN.
-	var from [8]byte
-	binary.BigEndian.PutUint64(from[:], fromLSN)
-	if err := WriteMsg(conn, MsgRecoveryLaneStart, append(EncodeLineage(session.lineage), from[:]...)); err != nil {
+	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeRecoveryLaneStart(session.lineage, fromLSN)); err != nil {
 		return 0, fmt.Errorf("catch-up recovery lane start: %w", err)
 	}
 

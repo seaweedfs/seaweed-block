@@ -39,7 +39,8 @@ func TestReplicationIngressSharesApplyVersionsAcrossSessions(t *testing.T) {
 			}
 		}
 		if recovery {
-			send(transport.MsgRecoveryLaneStart, transport.EncodeLineage(lineage))
+			end, _ := store.Sync() // the catch-up starts after the replica's durable end
+			send(transport.MsgRecoveryLaneStart, transport.EncodeRecoveryLaneStart(lineage, end))
 		}
 		send(transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: lineage, LBA: 5, Data: data, LSN: lsn}))
 		send(transport.MsgBarrierReq, transport.EncodeLineage(lineage))

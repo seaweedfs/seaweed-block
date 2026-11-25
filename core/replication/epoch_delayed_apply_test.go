@@ -67,7 +67,7 @@ func TestDelayedOldRecoveryApplyNeverLandsUnderANewValidTable(t *testing.T) {
 	a, b := dial(), dial()
 	la := transport.RecoveryLineage{SessionID: 1, Epoch: 2, EndpointVersion: 1, TargetLSN: 7}
 	lb := transport.RecoveryLineage{SessionID: 2, Epoch: 3, EndpointVersion: 1, TargetLSN: 6}
-	send(a, transport.MsgRecoveryLaneStart, transport.EncodeLineage(la))
+	send(a, transport.MsgRecoveryLaneStart, transport.EncodeRecoveryLaneStart(la, 5))
 	send(a, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: la, LBA: 7, LSN: 7, Data: makeData(77)}))
 	select {
 	case <-h.entered:
@@ -76,11 +76,16 @@ func TestDelayedOldRecoveryApplyNeverLandsUnderANewValidTable(t *testing.T) {
 	}
 	// B's start waits for A's in-flight apply: release A shortly after.
 	go func() { time.Sleep(100 * time.Millisecond); close(h.release) }()
-	send(b, transport.MsgRecoveryLaneStart, transport.EncodeLineage(lb))
-	send(b, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: lb, LBA: 6, LSN: 6, Data: makeData(66)}))
+	// B planned from the durable end its probe saw (5). Its start waits for
+	// A's apply; once A's entry 7 has landed the end is 7, so B's start is
+	// refused (rule 4) and nothing of B applies; any later write may fail.
+	_ = transport.WriteMsg(b, transport.MsgRecoveryLaneStart, transport.EncodeRecoveryLaneStart(lb, 5))
+	_ = transport.WriteMsg(b, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: lb, LBA: 6, LSN: 6, Data: makeData(66)}))
 	rows := []transport.EpochRow{{Epoch: 1, FirstLSN: 1}, {Epoch: 3, FirstLSN: 6}}
-	send(b, transport.MsgBarrierReq, append(transport.EncodeLineage(lb), transport.EncodeEpochRows(rows)...))
-	_, _, _ = transport.ReadMsg(b) // B's completion is refused: the connection closes
+	_ = transport.WriteMsg(b, transport.MsgBarrierReq, append(transport.EncodeLineage(lb), transport.EncodeEpochRows(rows)...))
+	if typ, _, err := transport.ReadMsg(b); err == nil && typ == transport.MsgBarrierResp {
+		t.Fatal("recovery B's completion was acknowledged")
+	}
 	select {
 	case <-h.done:
 	case <-time.After(2 * time.Second):

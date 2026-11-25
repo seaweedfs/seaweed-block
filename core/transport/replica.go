@@ -431,19 +431,20 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// the lineage): under the exclusive fence the replica takes
 				// the mark only if its durable end is exactly that LSN, so
 				// the start is conditional on what the primary's probe saw.
-				var check func() error
-				if len(payload) >= 40 {
-					from := binary.BigEndian.Uint64(payload[32:40])
-					check = func() error {
-						end, err := r.store.Sync()
-						if err != nil {
-							return err
-						}
-						if end != from {
-							return fmt.Errorf("catch-up starts after %d, the durable end is %d", from, end)
-						}
-						return nil
+				if len(payload) < 40 {
+					log.Printf("replica: recovery lane start without the LSN it starts after: refused")
+					return true
+				}
+				from := binary.BigEndian.Uint64(payload[32:40])
+				check := func() error {
+					end, err := r.store.Sync()
+					if err != nil {
+						return err
 					}
+					if end != from {
+						return fmt.Errorf("catch-up starts after %d, the durable end is %d", from, end)
+					}
+					return nil
 				}
 				tok, err := r.epochs.InvalidateIf(check)
 				if err != nil {
@@ -470,6 +471,16 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// recovery lane ships history: the session's epoch is not
 				// its entries' epoch, so nothing is noted here; the
 				// session's final barrier carries the primary's rows.
+				// Both lanes apply under the epoch table's fence: a recovery
+				// apply while its token owns the mark, a live one while the
+				// table is valid (so a recovery's Invalidate drains it and
+				// nothing live lands while a recovery owns the store).
+				apply := func(fn func() error) error {
+					if lane == mutationLaneRecovery {
+						return r.epochs.ApplyUnder(recoveryToken, fn)
+					}
+					return r.epochs.ApplyLiveUnder(fn)
+				}
 				if lane != mutationLaneRecovery {
 					// A new epoch starts exactly at this store's next LSN: a
 					// live entry of a new epoch below it would sit over an
@@ -489,15 +500,6 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// Caller (this handler) decides lane; gate is lane-pure.
 				// Live-lane stale entries return error here → log +
 				// close conn (INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
-				// A recovery-lane apply runs under the epoch table's apply
-				// fence and only while this connection's recovery owns the
-				// mark: once a newer recovery took it, this one's data stops.
-				apply := func(fn func() error) error {
-					if lane == mutationLaneRecovery {
-						return r.epochs.ApplyUnder(recoveryToken, fn)
-					}
-					return fn()
-				}
 				if r.applyHook != nil {
 					err := apply(func() error {
 						if lane == mutationLaneRecovery {

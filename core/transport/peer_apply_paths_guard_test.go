@@ -18,7 +18,7 @@ import (
 // table is made invalid before its first byte and only the recovery's final
 // replace makes it valid. A new apply path fails here until it is classified.
 var peerApplyPaths = map[string]string{
-	"core/transport/replica.go: func handleConn .ApplyEntry":           "row first (live lane) / invalid first (recovery lane, MsgRecoveryLaneStart)",
+	"core/transport/replica.go: func handleConn .ApplyEntry":           "row first, under the live fence (live lane) / invalid first, under the token's fence (recovery lane, MsgRecoveryLaneStart)",
 	"core/transport/replica.go: func handleConn .WriteBase":            "invalid first (beginInstall invalidates before the first base byte)",
 	"core/transport/replica.go: func handleConn .BeginInstall":         "invalid first (beginInstall invalidates before BeginInstall)",
 	"core/replication/apply_gate.go: func applyRecovery .ApplyEntry":   "invalid first (reached only from handleConn's recovery lane)",

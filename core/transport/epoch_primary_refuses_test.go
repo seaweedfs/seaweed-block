@@ -24,7 +24,7 @@ func TestPrimaryRefusesInboundRecoveryFramesOverItsTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeLineage(RecoveryLineage{SessionID: 9, Epoch: 3, EndpointVersion: 1, TargetLSN: 20})); err != nil {
+	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeRecoveryLaneStart(RecoveryLineage{SessionID: 9, Epoch: 3, EndpointVersion: 1, TargetLSN: 20}, 0)); err != nil {
 		t.Fatal(err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))

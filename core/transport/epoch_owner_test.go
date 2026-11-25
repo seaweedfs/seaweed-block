@@ -76,7 +76,7 @@ func TestOverlappingRecoveriesAStaleCompletionLeavesTheTableInvalid(t *testing.T
 		t.Fatal(err)
 	}
 	defer connA.Close()
-	if err := WriteMsg(connA, MsgRecoveryLaneStart, EncodeLineage(a)); err != nil {
+	if err := WriteMsg(connA, MsgRecoveryLaneStart, EncodeRecoveryLaneStart(a, 0)); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return theirs.Invalid() })
@@ -86,7 +86,7 @@ func TestOverlappingRecoveriesAStaleCompletionLeavesTheTableInvalid(t *testing.T
 		t.Fatal(err)
 	}
 	defer connB.Close()
-	if err := WriteMsg(connB, MsgRecoveryLaneStart, EncodeLineage(b)); err != nil {
+	if err := WriteMsg(connB, MsgRecoveryLaneStart, EncodeRecoveryLaneStart(b, 0)); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return owner() != tokenA })

@@ -296,6 +296,33 @@ func (t *EpochTable) ApplyUnder(token uint64, fn func() error) error {
 	return fn()
 }
 
+// ApplyLiveUnder runs fn, one live entry's apply, holding the apply fence
+// shared and only while the table is valid: a recovery's Invalidate waits for
+// it, and while a recovery owns the store no live entry lands
+// (ErrNotRecoveryOwner; fn does not run). With no table it just runs fn.
+func (t *EpochTable) ApplyLiveUnder(fn func() error) error {
+	if t == nil {
+		return fn()
+	}
+	t.applyMu.RLock()
+	defer t.applyMu.RUnlock()
+	t.mu.Lock()
+	invalid := t.invalid
+	t.mu.Unlock()
+	if invalid {
+		return fmt.Errorf("%w (a live entry while a recovery owns the store)", ErrNotRecoveryOwner)
+	}
+	return fn()
+}
+
+// EncodeRecoveryLaneStart is the recovery lane start: the lineage, then the
+// LSN the catch-up starts after (the replica's durable end it planned from).
+func EncodeRecoveryLaneStart(l RecoveryLineage, from uint64) []byte {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], from)
+	return append(EncodeLineage(l), b[:]...)
+}
+
 // TrimAbove drops the rows whose first LSN is above next, the store's next
 // LSN after its recovery, durably. Such a row names entries the store does
 // not hold (a tail lost before it was synced); kept, it would attribute the

@@ -122,7 +122,7 @@ func TestRecoveryLaneCrashBeforeTheFinalBarrierLeavesTheTableInvalid(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeLineage(lineage)); err != nil {
+	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeRecoveryLaneStart(lineage, 5)); err != nil {
 		t.Fatal(err)
 	}
 	for lsn := uint64(6); lsn <= 8; lsn++ {

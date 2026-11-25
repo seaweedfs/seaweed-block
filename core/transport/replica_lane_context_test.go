@@ -57,7 +57,7 @@ func TestReplicaListener_RecoveryLaneStart_TargetLSN1_RoutesRecovery(t *testing.
 	conn := runReplicaHandlerPipe(t, hook)
 	lineage := RecoveryLineage{SessionID: 7, Epoch: 1, EndpointVersion: 1, TargetLSN: 1}
 
-	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeLineage(lineage)); err != nil {
+	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeRecoveryLaneStart(lineage, 0)); err != nil {
 		t.Fatalf("write recovery lane start: %v", err)
 	}
 	if err := WriteMsg(conn, MsgShipEntry, EncodeShipEntry(ShipEntry{
