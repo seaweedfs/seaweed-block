@@ -26,12 +26,15 @@ var (
 // the manifest of HEAD's current root that the session computed what is
 // new against: empty when HEAD has no current root, and empty also when
 // the current root is that of an empty image.
+// StateDetached commits the final image of a stop: Position must be the local
+// synced position taken after the caller closed its guest-write barrier.
 type CommitRequest struct {
 	Session  string
 	Prev     map[uint64]Ref
 	Next     map[uint64]Ref
 	Position uint64
 	Snapshot string // "" = no named snapshot
+	State    string // StateLive, or StateDetached for the final synced image
 }
 
 // rootOf names the root of a manifest.
@@ -59,17 +62,22 @@ func newOwn(vol string, prev, next map[uint64]Ref) map[uint64]Ref {
 
 // Commit is transition 4 as a pure step on HEAD: for the holder at HEAD's
 // epoch with snap(session) open, current = root, position, the optional
-// snapshot added, activity idle. A HEAD that already shows this commit
+// snapshot added, activity idle, and state live or detached. Detached is the
+// clean-stop proof and refuses every later holder operation at this epoch.
+// A live HEAD that already shows this commit
 // applied (idle, current = root, position, the snapshot) is a replay:
 // unchanged, changed=false.
-func (h Head) Commit(me HolderID, session string, root RootName, position uint64, snapshot string) (next Head, changed bool, err error) {
+func (h Head) Commit(me HolderID, session string, root RootName, position uint64, snapshot, state string) (next Head, changed bool, err error) {
 	if session == "" {
 		return Head{}, false, errors.New("layout: Commit needs a session id")
 	}
 	if err := h.holderErr(me); err != nil {
 		return Head{}, false, err
 	}
-	if h.Activity.Kind == ActIdle && h.Current != nil && *h.Current == root && h.Position == position {
+	if state != StateLive && state != StateDetached {
+		return Head{}, false, fmt.Errorf("%w: invalid commit state %q", ErrMalformed, state)
+	}
+	if h.State == state && h.Activity.Kind == ActIdle && h.Current != nil && *h.Current == root && h.Position == position {
 		if s, ok := h.Snapshots[snapshot]; snapshot == "" || ok && s.Root == root {
 			return h, false, nil
 		}
@@ -97,6 +105,7 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 	next.Current = &rn
 	next.Position = position
 	next.Activity = Activity{Kind: ActIdle}
+	next.State = state
 	return next, true, nil
 }
 
@@ -106,14 +115,16 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 // by one conditional update. An object present but written by another
 // session, or marked for removal, is not prepared: EnsureObject reuses it
 // first. Prev must build to HEAD's current root; a re-run after a lost
-// reply finds the commit applied and writes nothing.
+// reply finds a live commit applied and writes nothing. For a stop, the caller
+// reads HEAD after an unknown outcome: detached at its claim means stopped;
+// it never resumes serving without that read.
 func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me HolderID, req CommitRequest) (Head, error) {
 	root, segs, err := rootOf(req.Next)
 	if err != nil {
 		return Head{}, err
 	}
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) {
-		if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot); err != nil || !changed {
+		if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.State); err != nil || !changed {
 			return next, changed, err // refused, or already applied: no lookups
 		}
 		// The base is HEAD's current root. Before any commit there is none
@@ -161,6 +172,6 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 				return Head{}, false, fmt.Errorf("%w: %s (absent, written by another session, or marked)", ErrNotPrepared, rel)
 			}
 		}
-		return h.Commit(me, req.Session, root, req.Position, req.Snapshot)
+		return h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.State)
 	})
 }
