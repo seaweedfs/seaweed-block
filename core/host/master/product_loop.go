@@ -126,9 +126,10 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 			result.SkippedUnverified++
 			continue
 		}
-		// A reassign moves the line to a new epoch even for the same replica
-		// and endpoints (the heal of a failed fencing round): never current.
-		if ask.Intent != authority.IntentReassign && h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
+		// A fenced reassign is minted only at its fenced epoch (a second
+		// application is refused there), so it is never "already current":
+		// the heal of a failed fencing round names the current replica.
+		if ask.Evidence.FencedEpoch == 0 && h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
 			result.SkippedCurrent++
 			continue
 		}
