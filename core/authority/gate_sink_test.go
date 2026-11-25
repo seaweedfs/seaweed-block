@@ -2,6 +2,10 @@ package authority
 
 import "github.com/seaweedfs/seaweed-block/core/adapter"
 
+// testPromotion is a reassign's kind in tests of the publisher's epoch
+// mechanics: a promotion decided by the gate.
+var testPromotion = adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}
+
 // gatedSink stands in, in these tests, for the master's promotion gate: it
 // gives every slot the gate would allow (ready, reachable, eligible, not
 // withdrawn) the gate's evidence before the controller sees the snapshot. A

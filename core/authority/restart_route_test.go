@@ -583,7 +583,7 @@ func TestS7_Restart_OldSlotNotRevivedFromDurable(t *testing.T) {
 		Topology: threeSlotTopology("vr"),
 		Directive: NewStaticDirective([]AssignmentAsk{
 			{VolumeID: "vr", ReplicaID: "r1", DataAddr: "d1", CtrlAddr: "c1", Intent: IntentBind},
-			{VolumeID: "vr", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign},
+			{VolumeID: "vr", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign, Evidence: testPromotion},
 		}),
 	})
 	// Wait until publisher line advances to r2@2.
@@ -661,7 +661,7 @@ func TestS7_LiveRoute_OldSlotDeliveryRejectedByAdapter(t *testing.T) {
 	// state that legitimately holds both per-replica keys.
 	dir := NewStaticDirective([]AssignmentAsk{
 		{VolumeID: "vr", ReplicaID: "r1", DataAddr: "d1", CtrlAddr: "c1", Intent: IntentBind},
-		{VolumeID: "vr", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign},
+		{VolumeID: "vr", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign, Evidence: testPromotion},
 	})
 	pub := NewPublisher(dir)
 	ctx, cancel := context.WithCancel(context.Background())

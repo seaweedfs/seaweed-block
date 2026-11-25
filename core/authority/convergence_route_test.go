@@ -575,7 +575,7 @@ func TestConvergenceRoute_Supersede_PublisherMovedElsewhere_DropsStaleDesired(t 
 	// supersede-relevant shape).
 	if err := pub.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r3", DataAddr: "data-r3", CtrlAddr: "ctrl-r3",
-		Intent: IntentReassign,
+		Intent: IntentReassign, Evidence: testPromotion,
 	}); err != nil {
 		t.Fatalf("pub.apply r3 Reassign: %v", err)
 	}

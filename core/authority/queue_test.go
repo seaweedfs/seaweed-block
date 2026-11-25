@@ -13,7 +13,7 @@ func TestAssignmentQueue_ReplacesLatestPerVolume(t *testing.T) {
 		VolumeID: "v1", ReplicaID: "r1", DataAddr: "d1", CtrlAddr: "c1", Intent: IntentBind,
 	})
 	q.enqueue(AssignmentAsk{
-		VolumeID: "v1", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign,
+		VolumeID: "v1", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign, Evidence: testPromotion,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)

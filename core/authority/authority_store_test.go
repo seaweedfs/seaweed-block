@@ -496,12 +496,12 @@ func TestEncodeVolumeIDForFilename_Injective(t *testing.T) {
 	pairs := []struct {
 		a, b string
 	}{
-		{"/", "_002f"},              // the architect's exact case
-		{"_", "5f"},                 // literal underscore vs hex-looking string
+		{"/", "_002f"}, // the architect's exact case
+		{"_", "5f"},    // literal underscore vs hex-looking string
 		{"hello_world", "hello/world"},
 		{"a_b_c", "a/b/c"},
-		{"", "_"},                   // empty vs single underscore
-		{"\x5f", "_"},               // same? these ARE the same byte, skip
+		{"", "_"},     // empty vs single underscore
+		{"\x5f", "_"}, // same? these ARE the same byte, skip
 	}
 	for _, p := range pairs {
 		if p.a == p.b {
@@ -522,14 +522,14 @@ func TestEncodeVolumeIDForFilename_Injective(t *testing.T) {
 
 	// Spot-check the new encoding's literal output.
 	cases := map[string]string{
-		"v1":          "v1",
-		"vol-1":       "vol-1",
-		"/":           "_2f",
-		"_":           "_5f",
-		"_002f":       "_5f002f",
-		"a/b":         "a_2fb",
-		"abc123":      "abc123",
-		"_X_":         "_5fX_5f",
+		"v1":     "v1",
+		"vol-1":  "vol-1",
+		"/":      "_2f",
+		"_":      "_5f",
+		"_002f":  "_5f002f",
+		"a/b":    "a_2fb",
+		"abc123": "abc123",
+		"_X_":    "_5fX_5f",
 	}
 	for in, want := range cases {
 		if got := encodeVolumeIDForFilename(in); got != want {

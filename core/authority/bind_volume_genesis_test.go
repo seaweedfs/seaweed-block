@@ -16,6 +16,7 @@ func bindAsk(volumeID, replicaID string) AssignmentAsk {
 func reassignAsk(volumeID, replicaID string) AssignmentAsk {
 	ask := bindAsk(volumeID, replicaID)
 	ask.Intent = IntentReassign
+	ask.Evidence = testPromotion
 	return ask
 }
 
