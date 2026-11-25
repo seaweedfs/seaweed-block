@@ -110,6 +110,7 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 	// A remote probe may have overlapped a placement/move/delete. Never use
 	// its captured intent after that local intent has changed.
 	if !reflect.DeepEqual(placements, stores.Placements.ListPlacements()) {
+		h.log.Printf("DEBUG placements changed; %d direct asks dropped", len(directAsks))
 		return result, nil
 	}
 	verified = h.verifyPlacements(placements, stores.Nodes.ListNodes())
@@ -119,7 +120,9 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 		result.PublishedAsks++
 	}
 	for _, ask := range directAsks {
+		h.log.Printf("DEBUG direct ask %+v", ask)
 		if err := stores.WorkspaceBindings.CheckAvailable(lifecycle.WorkspaceBinding{VolumeID: ask.VolumeID, DataAddr: ask.DataAddr, CtrlAddr: ask.CtrlAddr}); err != nil {
+			h.log.Printf("DEBUG direct ask unavailable: %v", err)
 			result.SkippedUnverified++
 			continue
 		}
