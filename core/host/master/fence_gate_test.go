@@ -149,6 +149,9 @@ func TestPromotionGate_EmptyVolumePrimaryLost(t *testing.T) {
 	}{
 		"both fenced at end 0": {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, Floor: 2, TableValid: true}), 2},
 		"one fenced":           {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2, TableValid: true}), 0},
+		// Empty means evidence read on a present, valid table at end 0: an
+		// answer whose read failed (no table reported) proves nothing.
+		"both at end 0, one read failed": {fencedAs(PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, Floor: 2, TableValid: true}, PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, Floor: 2}), 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
