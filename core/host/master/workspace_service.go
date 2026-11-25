@@ -26,6 +26,9 @@ func (s *services) workspaceVolume(volume string) error {
 	if !ok || r.Spec.ReplicationFactor != 1 {
 		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
 	}
+	if !s.host.layoutStoreReady(volume) {
+		return status.Error(codes.FailedPrecondition, "workspace: created, store not ready; retry CreateVolume")
+	}
 	if s.host.lifecycle.Deletions.Reserved(volume) {
 		return status.Error(codes.FailedPrecondition, "workspace: volume is being deleted")
 	}
@@ -48,6 +51,9 @@ func (s *services) workspaceVolumeForRenewal(volume string) error {
 	r, ok := s.host.lifecycle.Volumes.GetVolumeSnapshot(volume)
 	if !ok || r.Spec.ReplicationFactor != 1 {
 		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
+	}
+	if !s.host.layoutStoreReady(volume) {
+		return status.Error(codes.FailedPrecondition, "workspace: created, store not ready; retry CreateVolume")
 	}
 	if s.host.lifecycle.Deletions.ReservedSnapshot(volume) {
 		if s.host.lifecycle.Deletions.CommittedSnapshot(volume) {

@@ -129,10 +129,10 @@ func (h *Host) colocatedTargetRefused(server string) bool {
 // volume), and no new placement chooses a co-located node.
 func (h *Host) reconcilePlacements(stores *LifecycleStores, nodes []lifecycle.NodeRegistration) []lifecycle.ReconcileResult {
 	if !h.cfg.StrictJournalIsolation {
-		return lifecycle.ReconcilePlacement(stores.liveVolumes(), nodes, stores.Placements)
+		return lifecycle.ReconcilePlacement(h.readyVolumeRecords(stores.liveVolumes()), nodes, stores.Placements)
 	}
 	var out []lifecycle.ReconcileResult
-	for _, v := range stores.liveVolumes() {
+	for _, v := range h.readyVolumeRecords(stores.liveVolumes()) {
 		placed := map[string]bool{}
 		if p, ok := stores.Placements.GetPlacement(v.Spec.VolumeID); ok {
 			for _, slot := range p.Slots {
