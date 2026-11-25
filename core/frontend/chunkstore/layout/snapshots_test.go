@@ -237,8 +237,8 @@ func TestHead_SizeAtTheSnapshotCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("HEAD at %d snapshots with the largest names and labels and %d dependents: %d bytes", MaxSnapshots, MaxDependentsPerHead, len(b))
-	if len(b) > 56<<10 {
-		t.Fatalf("HEAD at the cap is %d bytes; want at most 56 KiB (8 KiB under the inline limit)", len(b))
+	if len(b) > 16<<10 {
+		t.Fatalf("HEAD at the cap is %d bytes; want at most 16 KiB", len(b))
 	}
 }
 
@@ -290,6 +290,15 @@ func TestHead_BoundsRefused(t *testing.T) {
 	last := fmt.Sprintf("s%d", MaxDependentsPerHead/MaxDependents)
 	if _, _, err := spread.AddDependent(last, Dependent{Target: "tx", TargetID: idFor("tx")}, rn); !errors.Is(err, ErrTooManyDependents) {
 		t.Fatalf("restore target %d of the volume: %v; want ErrTooManyDependents", MaxDependentsPerHead+1, err)
+	}
+	full := idleHead()
+	full.Activity = Activity{Kind: ActSnap, Session: "s1"}
+	full.Snapshots = map[string]Snapshot{}
+	for i := 0; i < MaxSnapshots; i++ {
+		full.Snapshots[fmt.Sprintf("s%d", i)] = Snapshot{Root: rn}
+	}
+	if _, _, err := full.Commit(me, "s1", rn, 1, "one-more", SnapshotMeta{}, StateLive); !errors.Is(err, ErrTooManySnapshots) || !strings.Contains(err.Error(), "let retention prune") {
+		t.Fatalf("snapshot %d of the volume: %v; want ErrTooManySnapshots naming the cure", MaxSnapshots+1, err)
 	}
 	big := idleHead()
 	big.Snapshots = map[string]Snapshot{}
