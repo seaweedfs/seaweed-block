@@ -53,6 +53,8 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/retain_b.go Retain -> ReadHead":                        "refuses ErrHeadAbsent, deletes nothing (probe BCatalog)",
 	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                  "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
 	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
+	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                  "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":           "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":             "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
 	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":              "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	"core/frontend/chunkstore/volume_delete.go DeleteVolume -> ReadHead":             "operator delete writes a deleting HEAD from nothing and completes (probe DeleteVolume)",
@@ -302,6 +304,23 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		}
 		if err := c.DeleteVolume(ctx, v, okDeleteAuthority{}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
 			t.Fatalf("delete of an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
+		}
+	})
+	t.Run("LayoutRemote", func(t *testing.T) {
+		f := newFakeFiler()
+		c, err := NewBCatalog(f, newFakeBlobs(), "/blocks")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := NewLayoutRemote(c, VolumeRef{Name: "v", ID: layout.VolumeID{1}}, layout.HolderID{Epoch: 1, Holder: "a", ClaimID: "k"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.GetHead(ctx); !errors.Is(err, layout.ErrHeadAbsent) {
+			t.Fatalf("engine HEAD read of an absent HEAD: %v; want ErrHeadAbsent", err)
+		}
+		if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: 0, Epoch: 1}, storage.ChunkHead{Epoch: 1}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
+			t.Fatalf("engine commit over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
 		}
 	})
 	t.Run("LayoutCreate", func(t *testing.T) {

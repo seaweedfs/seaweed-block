@@ -62,7 +62,7 @@ func (l *chunkLayerImpl) streamCutPayloads(ctx context.Context, batch []uint64, 
 		}
 		ref, had := head.Chunks[c.idx]
 		if !c.zero && !(had && ref.SHA256 == c.sum && !l.owning(c.idx)) {
-			c.key, c.size = keys[i], len(c.data)
+			c.key, c.size = l.keyFor(c.idx, c.sum, keys[i]), len(c.data)
 			once.Do(func() {
 				intent, intentErr = l.remote.PutIntent(ctx, chunkIntent{Gen: head.Gen, Epoch: l.cfg.Epoch, Holder: l.cfg.Holder, Keys: keys})
 				if intentErr == nil {

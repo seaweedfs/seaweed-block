@@ -1006,7 +1006,7 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 			}
 			continue
 		}
-		uploads = append(uploads, upload{c: c, key: l.newKey(c.idx)})
+		uploads = append(uploads, upload{c: c, key: l.keyFor(c.idx, c.sum, l.newKey(c.idx))})
 	}
 	// The intent names every key this cut uploads and is durable before
 	// the first upload: GC treats it as a root until the cut is settled.
@@ -1679,6 +1679,22 @@ func (l *chunkLayerImpl) finishCut(head chunkHead, h uint64, changed []uint64, n
 	l.inflight = map[uint64]bool{}
 	l.hdr = chunkBitmapHeader{BaseLSN: h, HeadGen: head.Gen, Epoch: head.Epoch, Base: chunkBaseNone}
 	l.dirtyVer++
+}
+
+// ChunkKeyer is implemented by a content-named remote: it names a chunk's
+// key from its index and its bytes' hash, and the engine uses that key in
+// place of a fresh one, so every key the engine holds resolves by name.
+type ChunkKeyer interface {
+	ChunkKey(idx uint64, sum [32]byte) string
+}
+
+// keyFor is the key a chunk with bytes hashing to sum is uploaded under:
+// the remote's name when it is content-named, else fresh.
+func (l *chunkLayerImpl) keyFor(idx uint64, sum [32]byte, fresh string) string {
+	if k, ok := l.remote.(ChunkKeyer); ok {
+		return k.ChunkKey(idx, sum)
+	}
+	return fresh
 }
 
 func (l *chunkLayerImpl) newKey(idx uint64) string {
