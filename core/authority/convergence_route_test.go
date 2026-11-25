@@ -55,10 +55,10 @@ import (
 type snapshottingReader struct {
 	underlying AuthorityBasisReader
 
-	mu         sync.Mutex
-	frozen     bool
-	perVol     map[string]AuthorityBasis
-	perSlot    map[string]AuthorityBasis
+	mu      sync.Mutex
+	frozen  bool
+	perVol  map[string]AuthorityBasis
+	perSlot map[string]AuthorityBasis
 }
 
 func newSnapshottingReader(u AuthorityBasisReader) *snapshottingReader {
@@ -211,7 +211,7 @@ func TestConvergenceRoute_ObservationFedFailover_ConfirmsAndClearsDesired(t *tes
 	host := NewObservationHost(ObservationHostConfig{
 		Freshness: FreshnessConfig{FreshnessWindow: 30 * time.Second, PendingGrace: 10 * time.Millisecond},
 		Topology:  AcceptedTopology{Volumes: []VolumeExpected{threeSlotVolume("v1")}},
-		Sink:      ctrl,
+		Sink:      gatedSink{ctrl}, // the promotion gate decides, as on the master
 		Reader:    holder,
 		Now:       clk.Now,
 	})
@@ -303,7 +303,7 @@ func TestConvergenceRoute_PublishNotObserved_StuckWithoutChurn(t *testing.T) {
 	host := NewObservationHost(ObservationHostConfig{
 		Freshness: FreshnessConfig{FreshnessWindow: 30 * time.Second, PendingGrace: 10 * time.Millisecond},
 		Topology:  AcceptedTopology{Volumes: []VolumeExpected{threeSlotVolume("v1")}},
-		Sink:      ctrl,
+		Sink:      gatedSink{ctrl}, // the promotion gate decides, as on the master
 		Reader:    hostReader,
 		Now:       clk.Now,
 	})
@@ -430,7 +430,7 @@ func TestConvergenceRoute_RefreshEndpoint_ConfirmsAndClearsDesired(t *testing.T)
 	host := NewObservationHost(ObservationHostConfig{
 		Freshness: FreshnessConfig{FreshnessWindow: 30 * time.Second, PendingGrace: 10 * time.Millisecond},
 		Topology:  AcceptedTopology{Volumes: []VolumeExpected{threeSlotVolume("v1")}},
-		Sink:      ctrl,
+		Sink:      gatedSink{ctrl}, // the promotion gate decides, as on the master
 		Reader:    holder,
 		Now:       clk.Now,
 	})
@@ -520,7 +520,7 @@ func TestConvergenceRoute_Supersede_PublisherMovedElsewhere_DropsStaleDesired(t 
 	host := NewObservationHost(ObservationHostConfig{
 		Freshness: FreshnessConfig{FreshnessWindow: 30 * time.Second, PendingGrace: 10 * time.Millisecond},
 		Topology:  AcceptedTopology{Volumes: []VolumeExpected{threeSlotVolume("v1")}},
-		Sink:      ctrl,
+		Sink:      gatedSink{ctrl}, // the promotion gate decides, as on the master
 		Reader:    hostReader,
 		Now:       clk.Now,
 	})

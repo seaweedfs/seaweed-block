@@ -49,9 +49,9 @@ import (
 type restartExecutor struct {
 	mu sync.Mutex
 
-	onStart   adapter.OnSessionStart
-	onClose   adapter.OnSessionClose
-	onFence   adapter.OnFenceComplete
+	onStart adapter.OnSessionStart
+	onClose adapter.OnSessionClose
+	onFence adapter.OnFenceComplete
 
 	// fenceMode drives what Fence() does with incoming calls.
 	//   "autoSuccess" (default): fire OnFenceComplete{Success:true} inline
@@ -223,7 +223,7 @@ func newRestartRoute(t *testing.T, dir string, clk *fakeClock, cfg restartRouteC
 	host := NewObservationHost(ObservationHostConfig{
 		Freshness: FreshnessConfig{FreshnessWindow: 30 * time.Second, PendingGrace: 10 * time.Millisecond},
 		Topology:  cfg.Topology,
-		Sink:      ctrl,
+		Sink:      gatedSink{ctrl}, // the promotion gate decides, as on the master
 		Reader:    hostRdr,
 		Now:       now,
 	})
@@ -483,8 +483,8 @@ func TestS7_Restart_StaleObservationCannotMoveBackward(t *testing.T) {
 	// assertions simple. All four expect: no ask reaches the
 	// adapter beyond the single reloaded line.
 	sub := []struct {
-		name        string
-		freeze      AuthorityBasis // fake stale line to feed through the host reader
+		name   string
+		freeze AuthorityBasis // fake stale line to feed through the host reader
 	}{
 		{"stale-epoch", AuthorityBasis{Assigned: true, ReplicaID: "r1", Epoch: 0, EndpointVersion: 1, DataAddr: "d1", CtrlAddr: "c1"}},
 		{"stale-replica", AuthorityBasis{Assigned: true, ReplicaID: "r-old", Epoch: 1, EndpointVersion: 1, DataAddr: "d1", CtrlAddr: "c1"}},

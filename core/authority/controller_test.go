@@ -492,3 +492,29 @@ func TestTopologyController_StalePreConfirmSnapshotDoesNotDuplicateQueuedMove(t 
 	}
 	expectNoNext(t, ctrl)
 }
+
+// One decider: a snapshot whose ready replicas carry no promotion-gate
+// evidence (heartbeats alone) makes the controller publish no primary change,
+// neither failover nor rebalance.
+func TestTopologyController_NoPrimaryChangeWithoutTheGatesEvidence(t *testing.T) {
+	bare := func(c ReplicaCandidate) ReplicaCandidate { c.PromotionEvidence = adapter.PrimaryEvidence{}; return c }
+	reader := newFakeBasisReader()
+	reader.Set("v1", "r1", AuthorityBasis{Assigned: true, ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d1", CtrlAddr: "c1"})
+	c := NewTopologyController(TopologyControllerConfig{}, reader)
+	snap := ClusterSnapshot{
+		CollectedRevision: 1,
+		Volumes: []VolumeTopologySnapshot{clusterVolume("v1", AuthorityBasis{Assigned: true, ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d1", CtrlAddr: "c1"},
+			ReplicaCandidate{ReplicaID: "r1", ServerID: "s1", DataAddr: "d1", CtrlAddr: "c1", Reachable: false, Eligible: true},
+			bare(candidate("r2", "s2", "d2", "c2", 10)),
+			bare(candidate("r3", "s3", "d3", "c3", 20)))},
+		Servers: []ServerObservation{{ServerID: "s1", Reachable: true, Eligible: true}, {ServerID: "s2", Reachable: true, Eligible: true}, {ServerID: "s3", Reachable: true, Eligible: true}},
+	}
+	if err := c.SubmitClusterSnapshot(snap); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if ask, err := c.Next(ctx); err == nil && ask.Intent == IntentReassign {
+		t.Fatalf("a primary change without the gate's evidence: %+v", ask)
+	}
+}
