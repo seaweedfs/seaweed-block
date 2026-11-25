@@ -702,8 +702,10 @@ func runVolume(f flags, exits *processExit) int {
 	var provider frontend.Provider
 	var durableProv *durable.DurableProvider
 	var workspaceRemoteFor func(string) (storage.ChunkRemote, error)
+	var workspaceLayoutHead layout.HeadStore
 	if f.durableRoot != "" {
 		blocks, blockSize, geometryErr := durableCreateGeometry(f)
+		var dp *durable.DurableProvider
 		cfg := durable.ProviderConfig{
 			Impl:                          durable.ImplName(f.durableImpl),
 			StorageRoot:                   f.durableRoot,
@@ -768,14 +770,31 @@ func runVolume(f flags, exits *processExit) int {
 			cfg.OnChunkDetach = h.WorkspaceStopPending
 			cfg.OnChunkDetachResumed = h.WorkspaceStopResumed
 			if chunkErr == nil {
-				cfg.ChunkRemoteFor = chunk.remoteFor
-				workspaceRemoteFor = chunk.remoteFor
+
 				layoutID, _ := layout.ParseVolumeID(f.layoutID) // parseFlags validates a supplied id
 				ref := chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}
 				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.bCatalog, ref)
+				cfg.ChunkLayoutHeadFor = func(name string) (layout.HeadStore, error) {
+					if name != ref.Name {
+						return nil, layout.ErrIdentity
+					}
+					return chunk.bCatalog.Store(ref)
+				}
+				cfg.ChunkLayoutRemoteFor = func(name string, me layout.HolderID) (storage.ChunkRemote, error) {
+					if name != ref.Name {
+						return nil, layout.ErrIdentity
+					}
+					return chunkstore.NewLayoutRemote(chunk.bCatalog, ref, me)
+				}
+				workspaceLayoutHead, chunkErr = chunk.bCatalog.Store(ref)
 				// The holder identity comes from Start (until it is wired, the
 				// pass retains and does not clean).
-				cfg.ChunkMaintenance = newChunkMaintenance(chunk.bCatalog, ref, func(context.Context) (layout.HolderID, error) { return layout.HolderID{}, errNoLayoutHolder }, f.chunk.automaticGC, time.Now)
+				cfg.ChunkMaintenance = newChunkMaintenance(chunk.bCatalog, ref, func(ctx context.Context) (layout.HolderID, error) {
+					if dp == nil {
+						return layout.HolderID{}, errNoLayoutHolder
+					}
+					return dp.LayoutHolder(ctx, f.volumeID)
+				}, f.chunk.automaticGC, time.Now)
 				defer chunk.close()
 			}
 		}
@@ -797,7 +816,6 @@ func runVolume(f flags, exits *processExit) int {
 				return code
 			}
 		}
-		var dp *durable.DurableProvider
 		err := geometryErr
 		if err == nil {
 			dp, err = durable.NewDurableProvider(cfg, h.ProjectionView())
@@ -1418,6 +1436,16 @@ func runVolume(f flags, exits *processExit) int {
 	if replVolume != nil {
 		drainErr = errors.Join(drainErr, replVolume.Close())
 	}
+	// A detached HEAD is stable until a higher grant. Read it while the
+	// attachment identity is still available, then ACK only after Close succeeds.
+	var detachedGen uint64
+	if leaseStop != nil && drainErr == nil && workspaceLayoutHead != nil {
+		var me layout.HolderID
+		me, drainErr = durableProv.LayoutHolder(leaseStop.ctx, leaseStop.id.VolumeId)
+		if drainErr == nil {
+			detachedGen, drainErr = workspaceLayoutDetachedGeneration(leaseStop.ctx, workspaceLayoutHead, leaseStop.id, me)
+		}
+	}
 	// T3b: close DurableProvider in correct order — Provider.Close
 	// closes backends first (flags them closed) then storage files
 	// (releases fd + final fsync).
@@ -1430,8 +1458,8 @@ func runVolume(f flags, exits *processExit) int {
 		shutCancel()
 	}
 	if leaseStop != nil {
-		gen := uint64(0)
-		if drainErr == nil {
+		gen := detachedGen
+		if drainErr == nil && workspaceLayoutHead == nil {
 			gen, drainErr = workspaceDetachedGeneration(leaseStop.ctx, workspaceRemoteFor, leaseStop.id, chunkHolder(f))
 		}
 		leaseStop.reply <- workspaceStopResult{gen: gen, err: drainErr}
