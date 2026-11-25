@@ -521,6 +521,8 @@ func TestMountedFailover_ProductLoopRF3ProbeCanAuthorizeStaleHeartbeatReadiness(
 			SyncAckLSN: 52,
 			Candidates: []PromotionCandidateEvidence{
 				{ReplicaID: "r2", Ready: true, DurableLSN: 52},
+				// r3 answers but lags: the fencing round counts it.
+				{ReplicaID: "r3", DurableLSN: 40},
 			},
 		},
 	})
