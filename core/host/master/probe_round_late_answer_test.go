@@ -32,13 +32,16 @@ func TestProbeRound_AnOldRoundsLateAnswerIsRefusedByTheNewRound(t *testing.T) {
 			return nil
 		}
 		// round B: only round A's answer arrives now; B's own never does.
-		// Round B must be open (registered) at that moment and distinct
-		// from A, so the refusal is the new round's, not a closed hub's.
+		// Round B must be open at the refusal and distinct from A, so the
+		// refusal is the new round's, not a closed hub's. Checked AFTER the
+		// delivery: a round is never reopened, so B still registered then
+		// proves it was open when A's answer was refused.
+		d := delivery{roundA: held.RoundId, roundB: r.RoundId}
+		d.accepted = hub.deliver(held)
 		hub.mu.Lock()
 		_, open := hub.rounds[r.RoundId]
 		hub.mu.Unlock()
-		d := delivery{roundA: held.RoundId, roundB: r.RoundId, newerOpen: open && r.RoundId != held.RoundId}
-		d.accepted = hub.deliver(held)
+		d.newerOpen = open && r.RoundId != held.RoundId
 		delivered <- d
 		return nil
 	})
