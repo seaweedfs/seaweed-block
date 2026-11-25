@@ -113,3 +113,50 @@ func TestStoreLearnerDoesNotRaceTheFirstWrites(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// The learner's barrier connects but its read fails (the replica's process
+// accepts and drops the connection, then restarts). The broken connection
+// must not be reused: the next attempt re-dials and learns the store.
+func TestStoreLearnerRedialsAfterABrokenConnection(t *testing.T) {
+	drop, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := drop.Addr().String()
+	go func() {
+		for {
+			c, err := drop.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close() // connected, then the read fails
+		}
+	}()
+	v := NewReplicationVolume("v", storage.NewBlockStore(64, 4096))
+	defer v.Close()
+	v.RequireAttestedStores()
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{{ReplicaID: "r2", DataAddr: addr, ControlAddr: addr, Epoch: 1, EndpointVersion: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(400 * time.Millisecond) // a few connected, failed attempts
+	_ = drop.Close()
+
+	s, err := storage.CreateWALStore(filepath.Join(t.TempDir(), "r2.wal"), 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	l, err := transport.NewReplicaListener(addr, s)
+	if err != nil {
+		t.Skipf("could not re-bind %s: %v", addr, err)
+	}
+	l.Serve()
+	t.Cleanup(func() { l.Stop() })
+	deadline := time.Now().Add(10 * time.Second)
+	for v.AttestedStores()["r2"] != s.StoreID() {
+		if time.Now().After(deadline) {
+			t.Fatalf("the replica restarted, but the learner kept a broken connection (attested %v)", v.AttestedStores())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

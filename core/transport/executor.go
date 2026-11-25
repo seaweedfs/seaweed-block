@@ -553,11 +553,19 @@ func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, front
 
 	// Send request + receive response with deadlines on both sides
 	// (sendBarrierReq / recvBarrierResp already set conn deadline).
+	// A send or receive failure leaves the connection unusable: detach and
+	// close it so the next barrier on this session re-dials (a caller that
+	// does not invalidate the session, such as the store learner, would
+	// otherwise reuse the dead socket forever).
 	if err := sendBarrierReq(conn, lineage, recoveryConnTimeout); err != nil {
+		e.detachConn(session, conn)
+		_ = conn.Close()
 		return BarrierAck{}, fmt.Errorf("transport: barrier: send replica=%s: %w", replicaID, err)
 	}
 	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
 	if err != nil {
+		e.detachConn(session, conn)
+		_ = conn.Close()
 		return BarrierAck{}, fmt.Errorf("transport: barrier: recv replica=%s: %w", replicaID, err)
 	}
 
