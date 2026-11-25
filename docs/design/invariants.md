@@ -549,7 +549,7 @@ stateDiagram-v2
 
 ## Part B. Invariant ledger
 
-353 rows: 282 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 338 new.
+355 rows: 284 ACTIVE, 67 STUB, 4 ARCHIVED; 15 kept from the internal ledger, 340 new.
 
 The "Machine / transition" column refers to Part A. Notes under a table record what a row does not cover and, for kept rows, what was narrowed from the internal ledger.
 
@@ -1113,6 +1113,8 @@ Notes:
 | `INV-SNAPK-RELEASE-CALLERS-001` | Only the target's own delete (its HEAD already deleting) and the operator's command release a dependent; a source scan restricts the callers and requires the operator's read of the target. | M9 source HEAD, dependents | `core/frontend/chunkstore/layout` (source scan of `delete.go`) | `TestGuard_Controls` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-RELEASE-OPERATOR-001` | The operator's command releases only a target that exists and is deleted (HEAD deleting or deleted, or its name holding another volume id) or whose live roots name no chunk of the source. | M9 source HEAD, dependents | `core/frontend/chunkstore/layout` `delete.go` `OperatorReleaseDependent` | `TestOperatorReleaseDependent` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-RELEASE-REFUSE-001` | The operator's command refuses a live target still naming the source, a target being created and a target never created, and then writes nothing to the source. | M9 source HEAD, dependents | `core/frontend/chunkstore/layout` `delete.go` `OperatorReleaseDependent` | `TestOperatorReleaseDependent` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-START-ROOT-001` | At its own epoch a holder continues only on the local root whose claim id HEAD holds; a fresh root with another id is refused as a missing local root naming the cure, an older one as stale and fenced; neither writes HEAD. | M9 start (before any transition) | `core/frontend/chunkstore/layout` `start.go` `Start` | `TestStart_OwnEpochFreshRootRefusedBeforeClaim`, `TestStart_OwnEpochSameRootContinues`, `TestStart_LostClaimReplyContinues`, `TestStart_SameHostForcedSuccessorRefusesTheRemountedOldRoot` | — (the snapshot kernel model is not in this repository) | ACTIVE |
+| `INV-SNAPK-START-CLAIM-001` | A claim is made only by Start, at an epoch above HEAD's, with the local root's claim id; a source scan refuses any other caller of RunClaim. | M9 any → idle (Claim) | `core/frontend/chunkstore/layout` `start.go` `Start`; (source scan) | `TestStart_FreshRootAtHigherEpochClaims`, `TestStart_Refusals`, `TestGuard_Controls` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 | `INV-SNAPK-STALE-HOLDER-001` | Every transition refuses an older epoch of the same server, the same epoch held by another server, and the same epoch and server with another claim id, in idle, snap and clean; a new transition must be added to the table. | M9 every transition | `core/frontend/chunkstore/layout` `Head.heldBy` and each transition | `TestTransitions_RefuseAStaleHolder` | — (the snapshot kernel model is not in this repository) | ACTIVE |
 
 Notes:
