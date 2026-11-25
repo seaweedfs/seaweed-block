@@ -297,19 +297,42 @@ func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
 
 // The real provider must carry the claim's filer proof to the process owner,
 // even when the master stream has never reported another replica.
-type claimExitView struct{ assigned atomic.Bool }
+type claimExitView struct {
+	assigned atomic.Bool
+	epoch    uint64
+}
 
 func (v *claimExitView) Projection() frontend.Projection {
 	if !v.assigned.Load() {
 		return frontend.Projection{VolumeID: "v"}
 	}
-	return frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: 1, Healthy: true}
+	epoch := v.epoch
+	if epoch == 0 {
+		epoch = 1
+	}
+	return frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: epoch, Healthy: true}
 }
 
 // A layout HEAD held by another server at the granted epoch is a final
 // refusal. The master has not delivered a newer foreign assignment, so the
 // process must derive its exit from the provider's observed HEAD.
 func TestWorkspaceLayoutForeignClaimChoosesFinalExit(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		grantEpoch uint64
+		wantExit   bool
+	}{
+		{"foreign holder at granted epoch", 1, true},
+		{"foreign holder below granted epoch", 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testWorkspaceLayoutForeignClaimExit(t, tc.grantEpoch, tc.wantExit)
+		})
+	}
+}
+
+func testWorkspaceLayoutForeignClaimExit(t *testing.T, grantEpoch uint64, wantExit bool) {
+	t.Helper()
 	ctx := context.Background()
 	id, err := layout.NewVolumeID()
 	if err != nil {
@@ -339,7 +362,7 @@ func TestWorkspaceLayoutForeignClaimChoosesFinalExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view := &claimExitView{}
+	view := &claimExitView{epoch: grantEpoch}
 	view.assigned.Store(true)
 	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: "s/r",
 		ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return st, nil },
@@ -355,7 +378,21 @@ func TestWorkspaceLayoutForeignClaimChoosesFinalExit(t *testing.T) {
 	if _, err := p.EnsureStorage("v"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.RecoverVolume(ctx, "v"); !errors.Is(err, layout.ErrNotHolder) {
+	_, err = p.RecoverVolume(ctx, "v")
+	if !wantExit {
+		if err != nil {
+			t.Fatalf("newer grant did not claim: %v", err)
+		}
+		if _, ended := p.ChunkStartupOutcome("v"); ended {
+			t.Fatal("newer grant ended startup")
+		}
+		claimed, _, err := st.ReadHead(ctx)
+		if err != nil || claimed.Epoch != grantEpoch || claimed.Holder != "s/r" || claimed.Gen <= foreign.Gen {
+			t.Fatalf("newer grant did not claim HEAD: %+v err=%v", claimed, err)
+		}
+		return
+	}
+	if !errors.Is(err, layout.ErrNotHolder) {
 		t.Fatalf("layout Start refusal: %v; want not holder", err)
 	}
 	if _, ended := p.ChunkStartupOutcome("v"); !ended {
