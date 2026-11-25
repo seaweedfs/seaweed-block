@@ -36,8 +36,13 @@ func checkPrimaryEvidence(fact *control.AssignmentFact, st replication.EpochTabl
 	if len(fact.Peers) == 0 {
 		return ""
 	}
+	// A replay of an epoch this node already holds rows at is idempotent,
+	// except a PROMOTION, whose evidence is checked on every delivery: the
+	// row this node noted at the epoch starts past the probed LSN, so a
+	// genuine replay still matches, and a line naming another store or an
+	// end this store does not hold is refused.
 	for _, r := range st.Rows {
-		if r.Epoch == fact.Epoch {
+		if r.Epoch == fact.Epoch && fact.PrimaryKind != control.PrimaryKind_PRIMARY_KIND_PROMOTION {
 			if st.Invalid {
 				return fmt.Sprintf("epoch %d replayed over an epoch table a recovery left invalid", fact.Epoch)
 			}
