@@ -22,10 +22,9 @@ concurrency:
 jobs:
   trace:
     name: spec trace
-    # Same-repository PRs use the project's self-hosted runners, as the test
-    # workflow does; fork PRs stay on a GitHub-hosted runner, whose shared queue
-    # can wait for hours. No PR code runs here either way.
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'tp04-seaweed-block' || 'ubuntu-latest' }}
+    # A GitHub-hosted runner: this check runs no PR code and needs no project
+    # host, so it does not queue behind the self-hosted test jobs.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout base
@@ -36,6 +35,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
 
       - name: Check spec trace
         env:
