@@ -16,6 +16,17 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
+// readyGate is a promotion gate whose candidates all answered ready.
+type readyGate struct{}
+
+func (readyGate) ProbePromotionCandidates(_ string, _ authority.AuthorityBasis, cs []authority.ReplicaCandidate) (master.PromotionProbeResult, error) {
+	res := master.PromotionProbeResult{AckProfile: "sync_all", SyncAckKnown: true}
+	for _, c := range cs {
+		res.Candidates = append(res.Candidates, master.PromotionCandidateEvidence{ReplicaID: c.ReplicaID, Ready: true})
+	}
+	return res, nil
+}
+
 func reopenWait(t *testing.T, what string, fn func() bool) {
 	t.Helper()
 	end := time.Now().Add(5 * time.Second)
@@ -37,6 +48,10 @@ func TestProviderBackendReopensAfterRealMasterFailover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The promotion gate: every candidate the controller asks about answers a
+	// probe round ready (this test is about the frontend reopening, not the
+	// gate).
+	m.SetPromotionEvidenceProvider(readyGate{})
 	m.Start()
 	t.Cleanup(func() {
 		ctx, c := context.WithTimeout(context.Background(), 3*time.Second)
