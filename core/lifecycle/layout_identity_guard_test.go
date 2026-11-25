@@ -92,6 +92,7 @@ func TestLayoutIdentityWriterAndReaders(t *testing.T) {
 // Adding a new reader or writer requires a binding probe at that site.
 func TestRestoreSourceIdentitySites(t *testing.T) {
 	want := map[string]bool{
+		"core/lifecycle/store.go CreateVolume":               true,
 		"core/lifecycle/store.go volumeSpecsCompatible":      true,
 		"core/lifecycle/store.go validateSpec":               true,
 		"core/host/master/services.go CreateVolume":          true,

@@ -135,12 +135,15 @@ func OpenFileStore(dir string) (*FileStore, error) {
 // idempotent; changing a previously-created spec is rejected.
 func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	spec = normalizeVolumeSpec(spec)
-	if err := validateSpec(spec); err != nil {
-		return VolumeRecord{}, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.records[spec.VolumeID]; ok {
+		if existing.Spec.SourceVolume != spec.SourceVolume || existing.Spec.SourceLayoutID != spec.SourceLayoutID || existing.Spec.SourceSnapshot != spec.SourceSnapshot || existing.Spec.CreateRequestID != spec.CreateRequestID {
+			return VolumeRecord{}, ErrVolumeConflict
+		}
+		if err := validateSpec(spec); err != nil {
+			return VolumeRecord{}, err
+		}
 		if !volumeSpecsCompatible(existing.Spec, spec) {
 			return VolumeRecord{}, ErrVolumeConflict
 		}
@@ -158,6 +161,9 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	}
 	if err := geometry.ValidateVolumeSize(spec.SizeBytes); err != nil {
 		return VolumeRecord{}, fmt.Errorf("%w: %w", ErrInvalidVolumeSpec, err)
+	}
+	if err := validateSpec(spec); err != nil {
+		return VolumeRecord{}, err
 	}
 	// A previous create may have renamed its complete record but lost the
 	// directory-sync result. Settle that identity instead of minting another.

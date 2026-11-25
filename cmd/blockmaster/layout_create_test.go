@@ -108,3 +108,18 @@ func TestMasterLayoutCreatorHealsCrashBetweenVolumeAndHead(t *testing.T) {
 		t.Fatalf("healed HEAD=%+v found=%t err=%v", h, found, err)
 	}
 }
+
+func TestMasterLayoutHeadReaderRefusesAbsentHead(t *testing.T) {
+	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), noCreateBlobs{}, "/blocks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := lifecycle.VolumeSpec{VolumeID: "source", LayoutID: id.String()}
+	if _, err := layoutHeadReader(cat)(context.Background(), spec); !errors.Is(err, layout.ErrHeadAbsent) {
+		t.Fatalf("absent source HEAD: %v; want ErrHeadAbsent", err)
+	}
+}

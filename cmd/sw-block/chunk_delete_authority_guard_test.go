@@ -14,7 +14,9 @@ func TestChunkVolumeDeleteAuthorityRPCSites(t *testing.T) {
 		want map[string]int
 	}{
 		{"chunk_volume_delete.go", map[string]int{"ReserveVolumeDeletion": 1, "CheckVolumeNoLiveLease": 1, "DialMasterFromEnv": 1}},
-		{"chunk_b.go", map[string]int{"DialMasterFromEnv": 1}},
+		// resolveVolumeID reads the name binding; restoreCreateRPC makes the
+		// restore's one master CreateVolume call (TestOpsChunkRestoreUsesOnlyMasterCreate).
+		{"chunk_b.go", map[string]int{"DialMasterFromEnv": 2}},
 		{"../../core/host/master/volume_delete_authority.go", map[string]int{"VolumeDeleteAuthority": 2, "Reserve": 1, "NoLiveLease": 1}},
 	} {
 		f, err := parser.ParseFile(token.NewFileSet(), tc.file, nil, 0)
