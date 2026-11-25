@@ -53,23 +53,7 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 	}
 	h.chunkDetach = true
 	p.stopChunkLoop(h)
-	var head storage.ChunkHead
-	var err error
-	if p.cfg.ChunkLayoutHeadFor != nil {
-		head, err = p.readLayoutSeal(ctx, volumeID, h, proj)
-	} else if p.cfg.ChunkRemoteFor == nil {
-		err = errors.New("durable: no remote configured for detached proof")
-	} else {
-		var inner storage.ChunkRemote
-		inner, err = p.cfg.ChunkRemoteFor(volumeID)
-		if err == nil && inner == nil {
-			err = errors.New("durable: nil remote returned for detached proof")
-		}
-		if err == nil {
-			remote := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
-			head, err = storage.ReadDetachedChunkHead(ctx, remote, proj.Epoch, p.chunkHolder(proj))
-		}
-	}
+	head, err := p.readLayoutSeal(ctx, volumeID, h, proj)
 	if err != nil {
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w", ErrDetachOutcomeUnknown, err)
 	}

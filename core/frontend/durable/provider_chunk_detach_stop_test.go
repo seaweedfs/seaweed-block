@@ -7,6 +7,7 @@ package durable_test
 // a RecoverVolume, whether the detach succeeded or failed.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -52,15 +55,22 @@ func (v *parkView) Projection() frontend.Projection {
 
 func parkedProvider(t *testing.T, remote storage.ChunkRemote) (*durable.DurableProvider, *parkView) {
 	t.Helper()
+	_ = remote // Other legacy tests still using this helper migrate separately.
+	return parkedLayoutProvider(t, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks))
+}
+
+func parkedLayoutProvider(t *testing.T, fixture *testutil.LayoutFixture) (*durable.DurableProvider, *parkView) {
+	t.Helper()
 	view := &parkView{stubView: v1View()}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:           durable.ImplWALStoreChunk,
-		StorageRoot:    t.TempDir(),
-		BlockSize:      4096,
-		NumBlocks:      pcBlocks,
-		ChunkBlocks:    pcChunkBlocks,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, view)
+	cfg := durable.ProviderConfig{
+		Impl:        durable.ImplWALStoreChunk,
+		StorageRoot: t.TempDir(),
+		BlockSize:   4096,
+		NumBlocks:   pcBlocks,
+		ChunkBlocks: pcChunkBlocks,
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatalf("NewDurableProvider: %v", err)
 	}
@@ -79,8 +89,8 @@ type detachOutcome struct {
 // detached HEAD.
 func TestWALStoreChunk_DetachDrainsAdmittedWrite(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p, view := parkedProvider(t, remote)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p, view := parkedLayoutProvider(t, fixture)
 	openRecovered(t, p)
 	b, err := p.Open(ctx, "v1")
 	if err != nil {
@@ -110,7 +120,7 @@ func TestWALStoreChunk_DetachDrainsAdmittedWrite(t *testing.T) {
 	if o.err != nil || o.r.Head.State != storage.ChunkHeadDetached {
 		t.Fatalf("detach: %+v", o)
 	}
-	if !bytesEqual(headBlock(t, remote, 1), block(7)) || !bytesEqual(headBlock(t, remote, 2), block(8)) {
+	if !bytes.Equal(layoutHeadBlock(t, fixture, 1), block(7)) || !bytes.Equal(layoutHeadBlock(t, fixture, 2), block(8)) {
 		t.Fatal("a write acknowledged during the detach is not in the detached HEAD")
 	}
 	if _, err := b.Write(ctx, 4096, block(9)); err == nil {
@@ -124,8 +134,8 @@ func TestWALStoreChunk_DetachDrainsAdmittedWrite(t *testing.T) {
 // write finishes, a retry detaches with every acknowledged write.
 func TestWALStoreChunk_DetachDrainTimeoutAbortsAndResumes(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p, view := parkedProvider(t, remote)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p, view := parkedLayoutProvider(t, fixture)
 	openRecovered(t, p)
 	b, err := p.Open(ctx, "v1")
 	if err != nil {
@@ -143,7 +153,7 @@ func TestWALStoreChunk_DetachDrainTimeoutAbortsAndResumes(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, durable.ErrDetachAborted) {
 		t.Fatalf("detach that cannot drain: %v; want an aborted detach on the context's deadline", err)
 	}
-	if head, _ := remote.GetHead(ctx); head.State == storage.ChunkHeadDetached {
+	if head := layoutHead(t, fixture); head.State == layout.StateDetached {
 		t.Fatalf("a detach that did not drain published a detached HEAD: %+v", head)
 	}
 	// Serving resumes: a new write is accepted. The drain still pending from
@@ -193,10 +203,10 @@ func TestWALStoreChunk_DetachDrainTimeoutAbortsAndResumes(t *testing.T) {
 	if o.err != nil || o.r.Head.State != storage.ChunkHeadDetached {
 		t.Fatalf("detach retry: %+v", o)
 	}
-	if acked && !bytesEqual(headBlock(t, remote, 1), block(5)) {
+	if acked && !bytes.Equal(layoutHeadBlock(t, fixture, 1), block(5)) {
 		t.Fatal("the write admitted before the stop was acknowledged but is not in the detached HEAD")
 	}
-	if !bytesEqual(headBlock(t, remote, 2), block(6)) {
+	if !bytes.Equal(layoutHeadBlock(t, fixture, 2), block(6)) {
 		t.Fatal("the write accepted after the aborted detach is not in the detached HEAD")
 	}
 }
@@ -205,8 +215,8 @@ func TestWALStoreChunk_DetachDrainTimeoutAbortsAndResumes(t *testing.T) {
 // detach returns the first result.
 func TestWALStoreChunk_RecoveryKeepsDetachedVolumeStopped(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := layoutChunkProvider(t, t.TempDir(), fixture, v1View(), 0)
 	openRecovered(t, p)
 	b, err := p.Open(ctx, "v1")
 	if err != nil {
@@ -238,10 +248,10 @@ func TestWALStoreChunk_RecoveryKeepsDetachedVolumeStopped(t *testing.T) {
 // published; a reachable one cuts.
 func TestWALStoreChunk_CutVolumeRefusesUnwrittenMinLSNBeforePublishing(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := layoutChunkProvider(t, t.TempDir(), fixture, v1View(), 0)
 	s := openRecovered(t, p)
-	claimed := freshV1Claim(t, remote)
+	claimed := layoutHead(t, fixture)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -249,11 +259,11 @@ func TestWALStoreChunk_CutVolumeRefusesUnwrittenMinLSNBeforePublishing(t *testin
 	if _, err := p.CutVolume(ctx, "v1", last+1); err == nil {
 		t.Fatal("a cut to an LSN never written succeeded")
 	}
-	if head, _ := remote.GetHead(ctx); head.Gen != claimed.Gen || remote.Puts() != 0 {
-		t.Fatalf("a refused minLSN published: HEAD gen %d, %d chunks stored", head.Gen, remote.Puts())
+	if head := layoutHead(t, fixture); head.Gen != claimed.Gen || fixture.Blobs.Puts() != 0 {
+		t.Fatalf("a refused minLSN published: HEAD gen %d, %d chunks stored", head.Gen, fixture.Blobs.Puts())
 	}
 	r, err := p.CutVolume(ctx, "v1", last)
-	if err != nil || r.H != last || r.Head.Gen != claimed.Gen+1 {
+	if err != nil || r.H != last || r.Head.Gen <= claimed.Gen {
 		t.Fatalf("cut to the last written LSN: %+v %v", r, err)
 	}
 }

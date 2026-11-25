@@ -39,11 +39,15 @@ func TestLayoutIdentityWriterAndReaders(t *testing.T) {
 			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 				return err
 			}
+			rel, _ := filepath.Rel(root, p)
+			// durable/testutil contains fixture identities, not product identity sites.
+			if strings.HasPrefix(filepath.ToSlash(rel), "core/frontend/durable/testutil/") {
+				return nil
+			}
 			f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
 			if err != nil {
 				return err
 			}
-			rel, _ := filepath.Rel(root, p)
 			for _, decl := range f.Decls {
 				name := "<package>"
 				if fn, ok := decl.(*ast.FuncDecl); ok {

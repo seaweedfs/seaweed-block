@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -17,16 +19,8 @@ import (
 func TestOfflineSealUsesCallerDeadline(t *testing.T) {
 	for _, closed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "idle", true: "closed"}[closed], func(t *testing.T) {
-			remote := storage.NewMemChunkRemote()
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{
-				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
-				NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, DetachFreezeTimeout: time.Second,
-				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-			}, v1View())
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = p.Close() })
+			c := newLayoutCase(t, pcBlocks, pcChunkBlocks)
+			p := c.provider(t, t.TempDir(), v1View(), "s/r1", func(cfg *durable.ProviderConfig) { cfg.DetachFreezeTimeout = time.Second })
 			openRecovered(t, p)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
@@ -64,7 +58,7 @@ func TestOfflineSealUsesCallerDeadline(t *testing.T) {
 			if !observed {
 				t.Error("offline seal did not drain")
 			}
-			if !bytes.Equal(headBlock(t, remote, 1), block(0x61)) {
+			if !bytes.Equal(c.block(t, 1), block(0x61)) {
 				t.Fatal("offline seal lost acknowledged bytes")
 			}
 		})
@@ -74,23 +68,42 @@ func TestOfflineSealUsesCallerDeadline(t *testing.T) {
 // Caller cancellation ends an offline upload; the closed backend stays closed,
 // and a new caller can retry the seal without losing acknowledged bytes.
 type cancelSealRemote struct {
-	*storage.MemChunkRemote
-	once   sync.Once
-	cancel context.CancelFunc
+	storage.ChunkRemote
+	keyer   storage.ChunkKeyer
+	aborter storage.ChunkRemote
+	once    sync.Once
+	cancel  context.CancelFunc
 }
+
+func (r *cancelSealRemote) ChunkKey(idx uint64, sum [32]byte) string {
+	return r.keyer.ChunkKey(idx, sum)
+}
+func (r *cancelSealRemote) Abort() { r.aborter.Abort() }
 
 func (r *cancelSealRemote) Put(ctx context.Context, key string, b []byte) error {
 	r.once.Do(r.cancel)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return r.MemChunkRemote.Put(ctx, key, b)
+	return r.ChunkRemote.Put(ctx, key, b)
 }
 func TestOfflineSealCallerCancelCanRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	remote := &cancelSealRemote{MemChunkRemote: storage.NewMemChunkRemote(), cancel: cancel}
-	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	c := newLayoutCase(t, pcBlocks, pcChunkBlocks)
+	remote := &cancelSealRemote{cancel: cancel}
+	p := c.provider(t, t.TempDir(), v1View(), "s/r1", func(cfg *durable.ProviderConfig) {
+		cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			r, err := chunkstore.NewLayoutRemote(c.cat, c.ref, me)
+			if err != nil {
+				return nil, err
+			}
+			remote.ChunkRemote = r
+			remote.keyer = r
+			remote.aborter = r
+			return remote, nil
+		}
+	})
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
@@ -111,7 +124,7 @@ func TestOfflineSealCallerCancelCanRetry(t *testing.T) {
 	retry, end := context.WithTimeout(context.Background(), time.Minute)
 	defer end()
 	r, _, err := p.DetachVolumePlain(retry, "v1")
-	if err != nil || r.Head.State != storage.ChunkHeadDetached || !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x72)) {
+	if err != nil || r.Head.State != storage.ChunkHeadDetached || !bytes.Equal(c.block(t, 1), block(0x72)) {
 		t.Fatalf("offline retry failed: %+v %v", r, err)
 	}
 }

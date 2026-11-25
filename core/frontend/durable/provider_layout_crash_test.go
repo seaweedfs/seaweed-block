@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -40,6 +41,55 @@ type layoutCrashView struct{ epoch uint64 }
 
 func (v layoutCrashView) Projection() frontend.Projection {
 	return frontend.Projection{VolumeID: "v", ReplicaID: "r", Epoch: v.epoch, EndpointVersion: 1, Healthy: true}
+}
+
+// A fresh B root cannot legitimately contain an acknowledged guest write:
+// the marker gates guest writes until Start has claimed and seeded the root.
+// If a dirty root is nevertheless presented as fresh, seed's local-write
+// precondition refuses it before the unclaimed HEAD can be changed.
+func TestLayoutStartUnclaimedHeadRefusesFreshRootWithLocalWrites(t *testing.T) {
+	ctx := context.Background()
+	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), &layoutCrashBlobs{b: map[string][]byte{}}, "/dirty-fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := chunkstore.VolumeRef{Name: "v", ID: id}
+	if _, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := cat.Store(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, found, err := st.ReadHead(ctx)
+	if err != nil || !found || before.Epoch != 0 || before.Position != 0 {
+		t.Fatalf("unclaimed HEAD at zero: %+v found=%t err=%v", before, found, err)
+	}
+	ws, err := storage.CreateWALStoreWithOptions(filepath.Join(t.TempDir(), "store"), 64, 4096, storage.WALStoreOptions{ChunkBlocks: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ws.Close() })
+	if _, err := ws.Write(0, make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.SetLayoutIdentity("fresh-but-dirty", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Write(1, make([]byte, 4096)); !errors.Is(err, storage.ErrLayoutFresh) {
+		t.Fatalf("guest write before claim: %v; want ErrLayoutFresh", err)
+	}
+	if _, err := startLayoutRoot(ctx, ws, st, layout.HolderID{Epoch: 1, Holder: "s/r"}); !errors.Is(err, layout.ErrCannotStartFrom) {
+		t.Fatalf("dirty fresh root: %v; want ErrCannotStartFrom", err)
+	}
+	after, found, err := st.ReadHead(ctx)
+	if err != nil || !found || after.Gen != before.Gen || after.Epoch != 0 || after.ClaimID != "" || after.Position != 0 {
+		t.Fatalf("refused Start changed HEAD: before=%+v after=%+v found=%t err=%v", before, after, found, err)
+	}
 }
 
 func TestLayoutStartCrashAtEachDurableArrow(t *testing.T) {

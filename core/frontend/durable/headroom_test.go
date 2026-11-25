@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -22,8 +23,14 @@ func TestCreateRefusesWithoutLocalHeadroom(t *testing.T) {
 			root := t.TempDir()
 			cfg := durable.ProviderConfig{Impl: impl, StorageRoot: root, BlockSize: 4096, NumBlocks: 65536}
 			if impl == durable.ImplWALStoreChunk {
-				remote := storage.NewMemChunkRemote()
-				cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return remote, nil }
+				cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) {
+					t.Fatal("headroom check must precede layout access")
+					return nil, nil
+				}
+				cfg.ChunkLayoutRemoteFor = func(string, layout.HolderID) (storage.ChunkRemote, error) {
+					t.Fatal("headroom check must precede layout access")
+					return nil, nil
+				}
 			}
 			p, err := durable.NewDurableProvider(cfg, v1View())
 			if err != nil {

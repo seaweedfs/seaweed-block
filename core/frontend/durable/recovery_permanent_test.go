@@ -9,6 +9,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -17,12 +18,13 @@ import (
 // as a permanent cause. Ordinary awaiting-recovery readiness stays retryable.
 func TestRecoveryStoreFaultRemainsPermanentAtGuestIO(t *testing.T) {
 	root := t.TempDir()
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, v1View())
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}

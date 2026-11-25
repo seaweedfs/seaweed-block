@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"os"
 	"runtime"
 	"sync"
@@ -22,8 +22,7 @@ func BenchmarkConcurrentBackendSync(b *testing.B) {
 				id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
 				cfg := durable.ProviderConfig{Impl: impl, StorageRoot: b.TempDir(), NumBlocks: 32768, BlockSize: 4096, ChunkBlocks: 1024}
 				if impl == durable.ImplWALStoreChunk {
-					r := storage.NewMemChunkRemote()
-					cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return r, nil }
+					testutil.NewLayoutFixture(b, "v1", 32768, 1024).Configure(&cfg)
 				}
 				p, err := durable.NewDurableProvider(cfg, newStubView(healthyProj(id)))
 				if err != nil {

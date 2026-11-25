@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func TestWALStoreChunk_ProductionStartupPublishesUnderAssignedEpoch(t *testing.T) {
@@ -39,16 +39,18 @@ func TestWALStoreChunk_ProductionStartupPublishesUnderAssignedEpoch(t *testing.T
 		t.Fatalf("assignment applied while readiness was blocked: %+v", p)
 	}
 
-	remote := storage.NewMemChunkRemote()
-	dp, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", 256, 16)
+	cfg := durable.ProviderConfig{
 		Impl:                 durable.ImplWALStoreChunk,
 		StorageRoot:          t.TempDir(),
 		BlockSize:            4096,
 		NumBlocks:            256,
 		ChunkBlocks:          16,
 		ChunkCaptureInterval: 20 * time.Millisecond,
-		ChunkRemoteFor:       func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, h.ProjectionView())
+		ChunkHolder:          "s1/r1",
+	}
+	fixture.Configure(&cfg)
+	dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,9 +99,9 @@ func TestWALStoreChunk_ProductionStartupPublishesUnderAssignedEpoch(t *testing.T
 	if err != nil {
 		t.Fatalf("on-demand capture after startup: %v", err)
 	}
-	head, _ := remote.GetHead(context.Background())
-	if head.Epoch != 5 || head.Holder != "r1" || head.RemoteLSN != lsn {
-		t.Fatalf("HEAD after on-demand capture: epoch %d holder %q remote_lsn %d (want 5, r1, %d)", head.Epoch, head.Holder, head.RemoteLSN, lsn)
+	head, found, err := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
+	if err != nil || !found || head.Epoch != 5 || head.Holder != "s1/r1" || head.Position != lsn || head.Current == nil {
+		t.Fatalf("HEAD after on-demand capture: %+v found=%v err=%v (want epoch 5, s1/r1, position %d)", head, found, err, lsn)
 	}
 
 	// Periodic capture under the same lineage.
@@ -111,12 +113,15 @@ func TestWALStoreChunk_ProductionStartupPublishesUnderAssignedEpoch(t *testing.T
 	}
 	deadline = time.Now().Add(10 * time.Second)
 	for {
-		head, _ = remote.GetHead(context.Background())
-		if _, ok := head.Chunks[200/16]; ok && head.RemoteLSN > lsn {
+		head, found, err = fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found && head.Current != nil && head.Position > lsn {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("periodic capture never published the second write (HEAD gen %d remote_lsn %d)", head.Gen, head.RemoteLSN)
+			t.Fatalf("periodic capture never published the second write (HEAD gen %d position %d)", head.Gen, head.Position)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

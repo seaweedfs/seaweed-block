@@ -269,14 +269,13 @@ func TestWorkspacePlannedDrainOwnsStartupExpiryUntilAck(t *testing.T) {
 				t.Fatalf("startup overrode the pending real drain: %+v", out)
 			default:
 			}
-			remote := storage.NewMemChunkRemote()
-			_, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 1, Holder: "s/r", State: storage.ChunkHeadDetached, DetachedBy: &storage.ChunkDetachedBy{Epoch: 1, Holder: "s/r", Gen: 1}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			gen, err := workspaceDetachedGeneration(ctx, func(string) (storage.ChunkRemote, error) { return remote, nil }, request.id, "s/r")
-			if err != nil {
-				t.Fatal(err)
+			// The real proof reader supplies the generation to the real lease
+			// worker; a constant here would not join the two safety checks.
+			me := layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
+			st := layoutProofStore{h: layout.Head{Gen: 1, Epoch: 1, Holder: "s/r", ClaimID: "k", State: layout.StateDetached, Activity: layout.Activity{Kind: layout.ActIdle}}, found: true}
+			gen, proofErr := workspaceLayoutDetachedGeneration(request.ctx, st, request.id, me)
+			if proofErr != nil {
+				t.Fatal(proofErr)
 			}
 			request.reply <- workspaceStopResult{gen: gen}
 			finishWorkspaceLease(e, f, h, leaseDone)

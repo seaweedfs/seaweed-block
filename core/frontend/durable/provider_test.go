@@ -234,6 +234,11 @@ func TestT3b_DurableProvider_Open_SelectsImpl_Matrix(t *testing.T) {
 			if backend.Identity().VolumeID != "v1" {
 				t.Errorf("Identity().VolumeID=%q want v1", backend.Identity().VolumeID)
 			}
+			// Close the WAL descriptor before inspecting its bytes. Windows
+			// denies a second read handle while the provider holds its lock.
+			if err := p.Close(); err != nil {
+				t.Fatal(err)
+			}
 			// Verify on-disk magic matches selector.
 			magic, err := readFirstMagic(filepath.Join(root, "v1.bin"))
 			if err != nil {

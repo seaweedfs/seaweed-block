@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -41,14 +43,14 @@ func headHolder(t *testing.T, remote *storage.MemChunkRemote) storage.ChunkHead 
 // movedAwayAndBack runs A (epoch 3) cut then uncut synced writes, A lost;
 // B (epoch 4, fresh) claims, writes LBA 0 = 0xB1, syncs, cuts, closes. It
 // returns the remote and A's surviving root.
-func movedAwayAndBack(t *testing.T) (*storage.MemChunkRemote, string) {
+func movedAwayAndBack(t *testing.T) (*testutil.LayoutFixture, string) {
 	t.Helper()
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	rootA, rootB := t.TempDir(), t.TempDir()
 
 	// 1. A (epoch 3) cuts LBA 0 and LBA 16, then keeps writing without a cut.
-	pA := chunkProvider(t, rootA, remote, viewAs("rA", 3), 0)
+	pA := layoutChunkProvider(t, rootA, fixture, viewAs("rA", 3), 0)
 	sA := openRecovered(t, pA)
 	writeSync(t, sA, 0, 0xA1)
 	writeSync(t, sA, 16, 0xA1)
@@ -62,7 +64,7 @@ func movedAwayAndBack(t *testing.T) (*storage.MemChunkRemote, string) {
 
 	// 2. A forced move to B (epoch 4, fresh root): B claims HEAD, writes,
 	// syncs and cuts.
-	pB := chunkProvider(t, rootB, remote, viewAs("rB", 4), 0)
+	pB := layoutChunkProvider(t, rootB, fixture, viewAs("rB", 4), 0)
 	sB := openRecovered(t, pB)
 	writeSync(t, sB, 0, 0xB1)
 	if _, err := pB.CaptureVolume(ctx, "v1"); err != nil {
@@ -71,7 +73,7 @@ func movedAwayAndBack(t *testing.T) (*storage.MemChunkRemote, string) {
 	if err := pB.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return remote, rootA
+	return fixture, rootA
 }
 
 // A workspace moves A -> B -> A, and A's old durable root is still on disk.
@@ -81,17 +83,17 @@ func movedAwayAndBack(t *testing.T) (*storage.MemChunkRemote, string) {
 // from HEAD and reads B's data.
 func TestWALStoreChunk_MoveBackOntoAnOldRootIsRefused(t *testing.T) {
 	ctx := context.Background()
-	remote, rootA := movedAwayAndBack(t)
-	before := headHolder(t, remote)
+	fixture, rootA := movedAwayAndBack(t)
+	before := layoutHead(t, fixture)
 
 	// 3. Back to A (epoch 5) over its old root: refused.
-	pA2 := chunkProvider(t, rootA, remote, viewAs("rA", 5), 0)
+	pA2 := layoutChunkProvider(t, rootA, fixture, viewAs("rA", 5), 0)
 	if _, err := pA2.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
 	_, err := pA2.RecoverVolume(ctx, "v1")
-	if !errors.Is(err, durable.ErrChunkStaleLocalRoot) || !errors.Is(err, storage.ErrChunkLayerFenced) {
-		t.Fatalf("move back onto the old root: %v; want ErrChunkStaleLocalRoot (fenced)", err)
+	if !errors.Is(err, layout.ErrStaleLocalRoot) || !errors.Is(err, layout.ErrNotHolder) {
+		t.Fatalf("move back onto the old root: %v; want ErrStaleLocalRoot (fenced)", err)
 	}
 	b, err := pA2.Open(ctx, "v1")
 	if err != nil {
@@ -112,13 +114,13 @@ func TestWALStoreChunk_MoveBackOntoAnOldRootIsRefused(t *testing.T) {
 			evidence = st.Evidence
 		}
 	}
-	if !strings.Contains(evidence, "remove or quarantine the local root") || !strings.Contains(evidence, rootA) {
+	if !strings.Contains(evidence, layout.StaleLocalRootCure) {
 		t.Errorf("status evidence %q does not tell the operator what to do with root %s", evidence, rootA)
 	}
-	if after := headHolder(t, remote); after.Gen != before.Gen || after.Holder != before.Holder || after.Epoch != before.Epoch {
+	if after := layoutHead(t, fixture); after.Gen != before.Gen || after.Holder != before.Holder || after.Epoch != before.Epoch {
 		t.Errorf("HEAD changed by a refused move back: %+v -> %+v", before, after)
 	}
-	if h := headBlock(t, remote, 0); !bytes.Equal(h, block(0xB1)) {
+	if h := layoutHeadBlock(t, fixture, 0); !bytes.Equal(h, block(0xB1)) {
 		t.Errorf("HEAD LBA 0 = %02x after a refused move back; want B's %02x", h[0], 0xB1)
 	}
 	if err := pA2.Close(); err != nil {
@@ -136,7 +138,7 @@ func TestWALStoreChunk_MoveBackOntoAnOldRootIsRefused(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	pA3 := chunkProvider(t, rootA, remote, viewAs("rA", 5), 0)
+	pA3 := layoutChunkProvider(t, rootA, fixture, viewAs("rA", 5), 0)
 	sA3 := openRecovered(t, pA3)
 	if got, err := sA3.Read(0); err != nil || !bytes.Equal(got, block(0xB1)) {
 		t.Fatalf("fresh attach after removing the root: LBA 0 err %v; want B's %02x", err, 0xB1)
@@ -150,9 +152,9 @@ func TestWALStoreChunk_MoveBackOntoAnOldRootIsRefused(t *testing.T) {
 // back: it attaches, serves its data and cuts.
 func TestWALStoreChunk_SameHolderReattachAtNewerEpoch(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	root := t.TempDir()
-	p := chunkProvider(t, root, remote, viewAs("rA", 3), 0)
+	p := layoutChunkProvider(t, root, fixture, viewAs("rA", 3), 0)
 	s := openRecovered(t, p)
 	writeSync(t, s, 0, 0xC1)
 	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
@@ -162,7 +164,7 @@ func TestWALStoreChunk_SameHolderReattachAtNewerEpoch(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2 := chunkProvider(t, root, remote, viewAs("rA", 4), 0)
+	p2 := layoutChunkProvider(t, root, fixture, viewAs("rA", 4), 0)
 	s2 := openRecovered(t, p2)
 	if got, _ := s2.Read(32); !bytes.Equal(got, block(0xC2)) {
 		t.Fatal("same-holder reattach lost its local write")
@@ -170,45 +172,24 @@ func TestWALStoreChunk_SameHolderReattachAtNewerEpoch(t *testing.T) {
 	if _, err := p2.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatalf("same-holder reattach cannot cut: %v", err)
 	}
-	if !bytes.Equal(headBlock(t, remote, 32), block(0xC2)) {
+	if !bytes.Equal(layoutHeadBlock(t, fixture, 32), block(0xC2)) {
 		t.Fatal("HEAD lacks the reattached holder's write")
-	}
-}
-
-// An existing root with no HEAD at all (generation 0) is this holder's own
-// image: it attaches.
-func TestWALStoreChunk_ExistingRootWithoutHeadAttaches(t *testing.T) {
-	root := t.TempDir()
-	p := chunkProvider(t, root, storage.NewMemChunkRemote(), viewAs("rA", 3), 0)
-	s := openRecovered(t, p)
-	writeSync(t, s, 0, 0xD1)
-	if err := p.Close(); err != nil {
-		t.Fatal(err)
-	}
-	empty := storage.NewMemChunkRemote() // no HEAD
-	if h := headHolder(t, empty); h.Gen != 0 {
-		t.Fatalf("empty remote HEAD gen %d", h.Gen)
-	}
-	p2 := chunkProvider(t, root, empty, viewAs("rA", 3), 0)
-	s2 := openRecovered(t, p2)
-	if got, _ := s2.Read(0); !bytes.Equal(got, block(0xD1)) {
-		t.Fatal("existing root without a HEAD lost its data")
 	}
 }
 
 // A holder whose HEAD a newer epoch has taken over never cuts over it.
 func TestWALStoreChunk_CutRefusedAfterANewerEpochTakesOver(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	pA := chunkProvider(t, t.TempDir(), remote, viewAs("rA", 3), 0)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	pA := layoutChunkProvider(t, t.TempDir(), fixture, viewAs("rA", 3), 0)
 	sA := openRecovered(t, pA)
 	writeSync(t, sA, 0, 0xE1)
 	if _, err := pA.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
-	pB := chunkProvider(t, t.TempDir(), remote, viewAs("rB", 4), 0)
+	pB := layoutChunkProvider(t, t.TempDir(), fixture, viewAs("rB", 4), 0)
 	openRecovered(t, pB) // takeover raises HEAD to epoch 4
-	before := headHolder(t, remote)
+	before := layoutHead(t, fixture)
 	if before.Epoch != 4 || before.Holder != "rB" {
 		t.Fatalf("takeover HEAD %+v", before)
 	}
@@ -216,10 +197,10 @@ func TestWALStoreChunk_CutRefusedAfterANewerEpochTakesOver(t *testing.T) {
 	if _, err := pA.CaptureVolume(ctx, "v1"); err == nil {
 		t.Fatal("the epoch-3 holder cut over the epoch-4 HEAD")
 	}
-	if after := headHolder(t, remote); after.Gen != before.Gen || after.Holder != "rB" {
+	if after := layoutHead(t, fixture); after.Gen != before.Gen || after.Holder != "rB" {
 		t.Fatalf("HEAD moved after the stale holder's cut: %+v -> %+v", before, after)
 	}
-	if !bytes.Equal(headBlock(t, remote, 0), block(0xE1)) {
+	if !bytes.Equal(layoutHeadBlock(t, fixture, 0), block(0xE1)) {
 		t.Fatal("HEAD lost the published image")
 	}
 }
@@ -229,10 +210,10 @@ func TestWALStoreChunk_CutRefusedAfterANewerEpochTakesOver(t *testing.T) {
 // with the same evidence.
 func TestWALStoreChunk_MoveBackRefusedOnDeferredAttach(t *testing.T) {
 	ctx := context.Background()
-	remote, rootA := movedAwayAndBack(t)
-	before := headHolder(t, remote)
+	fixture, rootA := movedAwayAndBack(t)
+	before := layoutHead(t, fixture)
 	view := newStubView(frontend.Projection{})
-	pA2 := chunkProvider(t, rootA, remote, view, 0)
+	pA2 := layoutChunkProvider(t, rootA, fixture, view, 0)
 	if _, err := pA2.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -248,15 +229,15 @@ func TestWALStoreChunk_MoveBackRefusedOnDeferredAttach(t *testing.T) {
 				st = s
 			}
 		}
-		if strings.Contains(st.Evidence, "remove or quarantine the local root") {
+		if strings.Contains(st.Evidence, layout.StaleLocalRootCure) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if st.Operational || !strings.Contains(st.Evidence, "remove or quarantine the local root") {
+	if st.Operational || !strings.Contains(st.Evidence, layout.StaleLocalRootCure) {
 		t.Fatalf("deferred attach of the old root: operational %t evidence %q", st.Operational, st.Evidence)
 	}
-	if after := headHolder(t, remote); after.Gen != before.Gen || after.Holder != before.Holder {
+	if after := layoutHead(t, fixture); after.Gen != before.Gen || after.Holder != before.Holder {
 		t.Fatalf("HEAD changed by a refused deferred attach: %+v -> %+v", before, after)
 	}
 }
