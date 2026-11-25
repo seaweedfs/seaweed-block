@@ -1,6 +1,7 @@
 package replication
 
 import (
+	"context"
 	"net"
 	"path/filepath"
 	"testing"
@@ -53,6 +54,61 @@ func TestStoreLearnedOnceAReplicaListensAfterTheAssignment(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the replica listens, but its store was never learned (attested %v)", v.AttestedStores())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The store learner and the first writes share the peer's connection. Run
+// with -race: a write racing a learner must not touch the connection from
+// two goroutines (the learner runs on the peer's queue worker, the single
+// writer).
+func TestStoreLearnerDoesNotRaceTheFirstWrites(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+
+	local, err := storage.CreateWALStore(filepath.Join(t.TempDir(), "p.wal"), 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	v := NewReplicationVolume("v", local)
+	defer v.Close()
+	v.RequireAttestedStores()
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{{ReplicaID: "r2", DataAddr: addr, ControlAddr: addr, Epoch: 1, EndpointVersion: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := storage.CreateWALStore(filepath.Join(t.TempDir(), "r2.wal"), 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	l, err := transport.NewReplicaListener(addr, s)
+	if err != nil {
+		t.Skipf("could not re-bind %s: %v", addr, err)
+	}
+	l.Serve()
+	t.Cleanup(func() { l.Stop() })
+
+	// Writes start the moment the replica listens, while the learner retries.
+	data := make([]byte, 4096)
+	for i := uint32(0); i < 40; i++ {
+		lsn, err := local.Write(i%64, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = v.OnLocalWrite(ctx, LocalWrite{LBA: i % 64, Data: data, LSN: lsn})
+		cancel()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for v.AttestedStores()["r2"] != s.StoreID() {
+		if time.Now().After(deadline) {
+			t.Fatalf("store never learned while writes ran (attested %v)", v.AttestedStores())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

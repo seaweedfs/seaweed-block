@@ -24,6 +24,10 @@ type peerWorkKind uint8
 const (
 	peerWorkWrite peerWorkKind = iota + 1
 	peerWorkBarrier
+	// peerWorkLearnStore asks the peer for its store (a barrier at LSN 0
+	// that never degrades it). It runs on the queue's one worker, so it
+	// never overlaps a ship or a data barrier on the peer's connection.
+	peerWorkLearnStore
 )
 
 type peerWorkResult struct {
@@ -43,6 +47,7 @@ type peerWork struct {
 type peerWorkQueueOps struct {
 	ship       func(context.Context, LocalWrite) (bool, error)
 	barrier    func(context.Context, uint64) (uint64, error)
+	learnStore func() bool
 	invalidate func(string)
 }
 
@@ -91,6 +96,7 @@ func newPeerWorkQueue(peer *ReplicaPeer, depth int) *peerWorkQueue {
 			}
 			return ack.AchievedLSN, nil
 		},
+		learnStore: peer.learnStore,
 		invalidate: peer.Invalidate,
 	})
 }
@@ -118,6 +124,23 @@ func (q *peerWorkQueue) enqueueWrite(write LocalWrite, result chan<- peerWorkRes
 
 func (q *peerWorkQueue) enqueueBarrier(targetLSN uint64, result chan<- peerWorkResult) (int, error) {
 	return q.enqueue(peerWork{kind: peerWorkBarrier, targetLSN: targetLSN, result: result})
+}
+
+// tryLearnStore queues a store-learning job when there is room, and reports
+// whether it did. Unlike a write it never saturates the queue (that would
+// degrade the peer): when the queue is full the caller tries again later.
+func (q *peerWorkQueue) tryLearnStore(result chan<- peerWorkResult) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return false
+	}
+	select {
+	case q.jobs <- peerWork{kind: peerWorkLearnStore, result: result}:
+		return true
+	default:
+		return false
+	}
 }
 
 func (q *peerWorkQueue) enqueue(work peerWork) (int, error) {
@@ -186,6 +209,10 @@ func (q *peerWorkQueue) run() {
 				result.eligible, result.err = q.ops.ship(q.ctx, work.write)
 			case peerWorkBarrier:
 				result.ackLSN, result.err = q.ops.barrier(q.ctx, work.targetLSN)
+			case peerWorkLearnStore:
+				if q.ops.learnStore != nil {
+					result.eligible = q.ops.learnStore() // eligible: the store is now known
+				}
 			default:
 				result.err = fmt.Errorf("replication: peer %s unknown queue work kind %d", q.peerID, work.kind)
 			}

@@ -562,10 +562,14 @@ func (v *ReplicationVolume) learnPeerStores(peers []*ReplicaPeer) {
 func (v *ReplicationVolume) learnPeerStore(peer *ReplicaPeer) {
 	pause := storeLearnFirstPause
 	for attempt := 1; ; attempt++ {
-		if !peer.learningStore() || !v.holdsPeer(peer) {
+		if !peer.learningStore() {
 			return
 		}
-		if peer.learnStore() {
+		q, ok := v.peerQueueFor(peer)
+		if !ok {
+			return
+		}
+		if v.learnThroughQueue(q) {
 			return
 		}
 		if attempt == 1 || attempt%20 == 0 {
@@ -578,11 +582,28 @@ func (v *ReplicationVolume) learnPeerStore(peer *ReplicaPeer) {
 	}
 }
 
-// holdsPeer reports whether peer is still this open volume's peer.
-func (v *ReplicationVolume) holdsPeer(peer *ReplicaPeer) bool {
+// peerQueueFor returns peer's work queue while peer is still this open
+// volume's peer.
+func (v *ReplicationVolume) peerQueueFor(peer *ReplicaPeer) (*peerWorkQueue, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return !v.closed && v.peers[peer.Target().ReplicaID] == peer
+	id := peer.Target().ReplicaID
+	if v.closed || v.peers[id] != peer || v.peerQueues[id] == nil {
+		return nil, false
+	}
+	return v.peerQueues[id], true
+}
+
+// learnThroughQueue runs one store-learning attempt on the peer's queue
+// worker (the connection's single writer) and reports whether the store is
+// now known. A full or closed queue is an attempt that did not run.
+func (v *ReplicationVolume) learnThroughQueue(q *peerWorkQueue) bool {
+	result := make(chan peerWorkResult, 1)
+	if !q.tryLearnStore(result) {
+		return false
+	}
+	r := <-result
+	return r.err == nil && r.eligible
 }
 
 // The store-learning retry pauses: short first (a replica that starts a
