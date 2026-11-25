@@ -32,6 +32,7 @@ func (readyGate) FencePromotionCandidates(_ string, current authority.AuthorityB
 	res := master.PromotionProbeResult{FencedEpoch: current.Epoch + 1}
 	for _, s := range survivors {
 		s.Floor = current.Epoch + 1
+		s.TableValid = true // a replica that obeys reads its evidence
 		res.Candidates = append(res.Candidates, s)
 	}
 	return res, nil
