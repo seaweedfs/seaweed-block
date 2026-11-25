@@ -271,8 +271,7 @@ Every command on the pages above, and the test that runs it.
 | `sw-block ops workspace force-move [--dry-run]`, `lost-range` | `TestProcedureForcedMoveWithTheOldHostReturning`, `TestProcedureRevokeWithoutACKThenForcedMove` | binary |
 | `sw-block ops volume-unheld --path` | `cmd/sw-block/volume_unheld_test.go` | CLI |
 | `sw-block ops chunk snapshot`, `snapshots`, `snapshot-delete` | `cmd/sw-block/chunk_test.go` | CLI |
-| `sw-block ops chunk gc --chunk-filer --master --apply [--grace]` | `cmd/sw-block/chunk_gc_test.go`; `chunk_gc_integration_test.go` (real SeaweedFS) | CLI |
-| `sw-block ops chunk verify --all-snapshots --depth data` | `cmd/sw-block/chunk_verify_test.go` | CLI |
+| `sw-block ops chunk verify --depth data [--orphans]` | `cmd/sw-block/chunk_verify_test.go` | CLI |
 | `sw-block ops chunk restore --source --snapshot --target`, `--volume ... [--status]` | `cmd/sw-block/chunk_restore_test.go` | CLI |
 | `curl STATUS/status?volume=v1` | the status checks in the binary tests above | binary |
 | `nvme connect`, `nvme list`, `nvme disconnect` | not run here: the binary tests use an NVMe/TCP host inside the test | not run |
