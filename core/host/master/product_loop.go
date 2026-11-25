@@ -275,7 +275,7 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 					DataAddr:  target.DataAddr,
 					CtrlAddr:  target.CtrlAddr,
 					Intent:    authority.IntentReassign,
-					Primary:   promotionEvidenceFor(result, target.ReplicaID),
+					Evidence:  promotionEvidenceFor(result, target.ReplicaID),
 				})
 			}
 		}
@@ -371,7 +371,7 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 					DataAddr:  target.DataAddr,
 					CtrlAddr:  target.CtrlAddr,
 					Intent:    authority.IntentReassign,
-					Primary:   promotionEvidenceFor(result, target.ReplicaID),
+					Evidence:  promotionEvidenceFor(result, target.ReplicaID),
 				})
 			}
 			continue
@@ -684,7 +684,7 @@ func promotionAllowedReplicas(result PromotionProbeResult, ok bool, peerCount in
 func promotionEvidenceFor(result PromotionProbeResult, replicaID string) adapter.PrimaryEvidence {
 	for _, c := range result.Candidates {
 		if c.ReplicaID == replicaID {
-			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, Epoch: c.LastDataEpoch, FirstLSN: c.LastDataFirstLSN}
+			return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: c.DurableLSN, DataEpoch: c.LastDataEpoch, DataFirstLSN: c.LastDataFirstLSN}
 		}
 	}
 	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion}

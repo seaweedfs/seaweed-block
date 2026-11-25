@@ -15,7 +15,6 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
-	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
 type WorkloadPlanPromotionProbeConfig struct {
@@ -133,20 +132,9 @@ func (p *workloadPlanPromotionEvidenceProvider) probeCandidate(volumeID, replica
 		ProbeAddr:  statusAddr,
 		DurableLSN: best.DurableLSN,
 	}
-	// The candidate's epoch-table row at its durable LSN; an invalid table is
-	// never a survivor.
-	if et := local.EpochTable; et != nil && et.Present {
-		ev.TableInvalid = et.Invalid
-		if !et.Invalid {
-			row := transport.EpochRow{}
-			for _, r := range et.Rows {
-				if r.FirstLSN <= best.DurableLSN {
-					row = r
-				}
-			}
-			ev.LastDataEpoch, ev.LastDataFirstLSN = row.Epoch, row.FirstLSN
-		}
-	}
+	// The candidate's epoch-table row and table validity come from the
+	// authenticated probe round, not from /status (loopback-only under
+	// mutual TLS); until then the evidence carries none.
 	ev.Ready = local.VolumeID == volumeID &&
 		local.ReplicaID == replicaID &&
 		strings.EqualFold(local.ReplicationRole, "replica_ready") &&

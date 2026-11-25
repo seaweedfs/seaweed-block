@@ -53,10 +53,10 @@ const (
 // PrimaryEvidence is a line's kind and, for a promotion, what the master
 // probed on the target: its durable LSN and its epoch-table row at that LSN.
 type PrimaryEvidence struct {
-	Kind       PrimaryKind
-	DurableLSN uint64
-	Epoch      uint64
-	FirstLSN   uint64
+	Kind         PrimaryKind
+	DurableLSN   uint64
+	DataEpoch    uint64 // the target's epoch-table row at DurableLSN
+	DataFirstLSN uint64
 }
 
 // ProbeResult is the outcome of a transport probe.

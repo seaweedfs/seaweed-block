@@ -69,9 +69,10 @@ type AssignmentAsk struct {
 	DataAddr  string
 	CtrlAddr  string
 	Intent    AskIntent
-	// Primary is the kind and evidence a reassign carries to its target
-	// (a bind is always a bootstrap); see adapter.PrimaryEvidence.
-	Primary adapter.PrimaryEvidence
+	// Evidence is the kind and probed evidence a reassign carries to its
+	// target (a bind is always a bootstrap); see adapter.PrimaryEvidence. It
+	// is a probe fact about the target, never an authority fact.
+	Evidence adapter.PrimaryEvidence
 }
 
 // Directive is the input side of the authority route. A Directive

@@ -1047,9 +1047,6 @@ func runVolume(f flags, exits *processExit) int {
 		// replica slots. The role gate starts/fences both lanes before admission.
 		replListen = newReplicationIngress(f, store)
 		replVolume.SetEpochTable(replListen.EpochTable())
-		if status != nil {
-			status.SetEpochTableStatusSource(replVolume)
-		}
 		if err := h.SetSelfFence(replListen); err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: replica listener role:", err)
 			replListen.Stop()

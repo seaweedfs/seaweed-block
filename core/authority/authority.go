@@ -576,7 +576,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			EndpointVersion: 1,
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
-			Primary:         ask.Primary,
+			Primary:         ask.Evidence,
 		}
 		if reservedEpoch != 0 {
 			next.Epoch = reservedEpoch

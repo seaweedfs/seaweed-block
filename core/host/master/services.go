@@ -1004,8 +1004,8 @@ func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.Assignme
 		CtrlAddr:           info.CtrlAddr,
 		PrimaryKind:        control.PrimaryKind(info.Primary.Kind),
 		EvidenceDurableLsn: info.Primary.DurableLSN,
-		EvidenceEpoch:      info.Primary.Epoch,
-		EvidenceFirstLsn:   info.Primary.FirstLSN,
+		EvidenceEpoch:      info.Primary.DataEpoch,
+		EvidenceFirstLsn:   info.Primary.DataFirstLSN,
 	}
 	// Populate the peer set from publisher LastPublished
 	// queries for every non-self replica slot in this volume's

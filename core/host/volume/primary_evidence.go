@@ -26,9 +26,14 @@ type primaryEvidenceSource interface {
 //     a tail beyond it is this node's own log and becomes the new history;
 //   - FORCED: adopted without evidence (the operator's lost range);
 //   - a line without a kind to a node holding data: refused.
+//
+// The rule is for a replicated volume's lines (a non-empty peer set). A
+// single-replica workspace move starts from the published image and is
+// governed by the layout's own start check and claim id instead. A store
+// without an epoch table has no rows: a probed row cannot match it.
 func checkPrimaryEvidence(fact *control.AssignmentFact, st replication.EpochTableStatus, end uint64) string {
-	if !st.Present {
-		return "" // no epoch table: not a replicated store
+	if len(fact.Peers) == 0 {
+		return ""
 	}
 	for _, r := range st.Rows {
 		if r.Epoch == fact.Epoch {
