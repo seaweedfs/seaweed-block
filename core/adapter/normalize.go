@@ -33,6 +33,7 @@ type AssignmentInfo struct {
 	EndpointVersion uint64
 	DataAddr        string
 	CtrlAddr        string
+	PrimaryStartLSN uint64 // see engine.AssignmentObserved.PrimaryStartLSN; 0 = not known
 }
 
 // ProbeResult is the outcome of a transport probe.
@@ -110,6 +111,7 @@ func NormalizeAssignment(a AssignmentInfo) engine.Event {
 		EndpointVersion: a.EndpointVersion,
 		DataAddr:        a.DataAddr,
 		CtrlAddr:        a.CtrlAddr,
+		PrimaryStartLSN: a.PrimaryStartLSN,
 	}
 }
 

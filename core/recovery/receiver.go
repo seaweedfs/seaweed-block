@@ -32,6 +32,8 @@ const (
 // it in its own goroutine; Run blocks until barrier ack is sent or
 // the connection errors.
 type Receiver struct {
+	epochToken uint64 // this session's hold on the epoch table's invalid mark (0 = none)
+
 	store storage.LogicalStorage
 	conn  io.ReadWriter
 
@@ -63,6 +65,26 @@ type Receiver struct {
 // for a frame already admitted.
 type DualLaneGate interface {
 	EnterDualLane(epoch uint64) (release func(), err error)
+}
+
+// EpochRecoveryGate is the replica's epoch table seen from a dual-lane
+// session (optional on the gate): the session takes the table's invalid
+// mark under a fresh token before its first data frame, and makes it valid
+// with the primary's rows (wire form) cut at its durable end only under that
+// token, after the data is synced and before the barrier is answered.
+type EpochRecoveryGate interface {
+	BeginEpochRecovery() (token uint64, err error)
+	ApplyUnderEpochToken(token uint64, fn func() error) error
+	CompleteEpochRecovery(token uint64, rows []byte, end uint64) error
+}
+
+// applyUnder runs one apply of this session's data under the epoch table's
+// fence (only while the session owns the mark), or directly without one.
+func (r *Receiver) applyUnder(fn func() error) error {
+	if eg, ok := r.gate.(EpochRecoveryGate); ok {
+		return eg.ApplyUnderEpochToken(r.epochToken, fn)
+	}
+	return fn()
 }
 
 func (r *Receiver) enterFrame() (func(), error) {
@@ -172,6 +194,15 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if gateErr != nil {
 				return 0, gateErr
 			}
+			// The epoch table is invalid from before the first data frame.
+			if eg, ok := r.gate.(EpochRecoveryGate); ok {
+				tok, err := eg.BeginEpochRecovery()
+				if err != nil {
+					release()
+					return 0, newFailure(FailureSubstrate, PhaseRecvApply, fmt.Errorf("epoch table: %w", err))
+				}
+				r.epochToken = tok
+			}
 			// The BASE install begins here, before any BASE block or WAL
 			// entry, at the session's BASE frontier under a fresh random ID
 			// (DESIGN r17.3.1 section 8.7). The begin is a mutation, so it
@@ -213,7 +244,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if gateErr != nil {
 				return 0, gateErr
 			}
-			_, applyErr := r.session.ApplyBaseBlock(lba, data)
+			applyErr := r.applyUnder(func() error { _, e := r.session.ApplyBaseBlock(lba, data); return e })
 			release()
 			if applyErr != nil {
 				log.Printf("g7-debug: Receiver.Run ApplyBaseBlock err lba=%d err=%v", lba, applyErr)
@@ -252,7 +283,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if gateErr != nil {
 				return 0, gateErr
 			}
-			applyErr := r.session.ApplyWALEntry(kind, lba, data, lsn)
+			applyErr := r.applyUnder(func() error { return r.session.ApplyWALEntry(kind, lba, data, lsn) })
 			release()
 			if applyErr != nil {
 				log.Printf("g7-debug: Receiver.Run ApplyWALEntry err lsn=%d err=%v", lsn, applyErr)
@@ -280,7 +311,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			// The completion (and the frontier advance) is a mutation too: it
 			// stays inside the counted section, so a fence cannot return while
 			// it is pending. Its error propagates (DESIGN 8.2 step 4).
-			doneErr := r.session.MarkBaseComplete()
+			doneErr := r.applyUnder(r.session.MarkBaseComplete)
 			release()
 			if doneErr != nil {
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply, doneErr)
@@ -334,6 +365,14 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			durableAchieved := achieved
 			if frontier < durableAchieved {
 				durableAchieved = frontier
+			}
+			// The data is synced: the primary's rows cut at the durable end
+			// make the table valid, only under this session's token; any
+			// failure leaves it invalid and the barrier unanswered.
+			if eg, ok := r.gate.(EpochRecoveryGate); ok && r.epochToken != 0 && len(payload) > 0 {
+				if err := eg.CompleteEpochRecovery(r.epochToken, payload, durableAchieved); err != nil {
+					return 0, newFailure(FailureSubstrate, PhaseRecvSync, fmt.Errorf("epoch table: %w", err))
+				}
 			}
 			log.Printf("g7-debug: Receiver.Run TryComplete=true achieved=%d frontier=%d durableAchieved=%d", achieved, frontier, durableAchieved)
 			if writeErr := writeFrame(r.conn, frameBarrierResp, encodeBarrierResp(durableAchieved)); writeErr != nil {

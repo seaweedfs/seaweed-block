@@ -29,6 +29,7 @@ type IdentityTruth struct {
 	DataAddr        string
 	CtrlAddr        string
 	MemberPresent   bool
+	PrimaryStartLSN uint64 // see AssignmentObserved.PrimaryStartLSN
 }
 
 // ProbeStatus represents the current reachability state.

@@ -25,9 +25,13 @@ type replicationIngress struct {
 	// (walstore-chunk). The host latches the error: no role is adopted, not Healthy.
 	rf1Only  string
 	listener *transport.ReplicaListener
-	dual     net.Listener
-	cancel   context.CancelFunc
-	closed   bool
+	// epochs is the volume's epoch table, kept across roles; epochsErr a load
+	// failure, which refuses every role.
+	epochs    *transport.EpochTable
+	epochsErr error
+	dual      net.Listener
+	cancel    context.CancelFunc
+	closed    bool
 }
 
 // newReplicationIngress is the volume's ingress from its flags; an RF1-only
@@ -36,7 +40,39 @@ func newReplicationIngress(f flags, store storage.LogicalStorage) *replicationIn
 	r := &replicationIngress{addr: f.dataAddr, store: store, volumeID: f.volumeID,
 		floorPath: replicaFloorPath(f), dualLane: f.recoveryMode == "dual-lane"}
 	r.rf1Only = rf1Only(f)
+	r.epochs, r.epochsErr = transport.LoadEpochTable(epochTablePath(f), f.volumeID)
+	if r.epochsErr == nil {
+		// Rows above the recovered store's next LSN name a lost tail.
+		r.epochsErr = r.epochs.TrimAbove(store.NextLSN())
+	}
 	return r
+}
+
+// EpochTable is the volume's epoch table (nil when it failed to load).
+func (r *replicationIngress) EpochTable() *transport.EpochTable { return r.epochs }
+
+// notePrimaryEpoch makes the primary's row (epoch, the store's next LSN)
+// durable before the role is adopted: the frontend is still gated, so the
+// first write at this epoch takes exactly that LSN and no entry of the epoch
+// can be durable before its row. NextLSN does not sync, so adoption never
+// waits on an in-flight store effect.
+func (r *replicationIngress) notePrimaryEpoch(epoch uint64) error {
+	if r.epochsErr != nil {
+		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
+	}
+	if r.epochs.Invalid() {
+		// Promoted (forced) over a store whose history is unknown: the table
+		// becomes exactly this epoch from the next LSN, so every survivor
+		// that rejoins holds an epoch this table never had and is rebuilt.
+		if err := r.epochs.Replace([]transport.EpochRow{{Epoch: epoch, FirstLSN: r.store.NextLSN()}}); err != nil {
+			return fmt.Errorf("volume %s epoch table: %w", r.volumeID, err)
+		}
+		return nil
+	}
+	if err := r.epochs.Note(epoch, r.store.NextLSN()); err != nil {
+		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, err)
+	}
+	return nil
 }
 
 // rf1Only is the single-replica rule of this volume, "" when replication is
@@ -59,6 +95,12 @@ func (r *replicationIngress) FenceAsPrimaryWithPeers(epoch uint64, hasPeers bool
 	if r.closed {
 		return fmt.Errorf("replication ingress closed")
 	}
+	if r.epochsErr != nil {
+		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
+	}
+	// The primary's row is noted after the fence has drained every inbound
+	// apply (so the local sync cannot wait on one) and before the role call
+	// returns: no write at this epoch is accepted before the row is durable.
 	if !hasPeers {
 		if r.listener != nil {
 			if err := r.listener.FenceAsPrimary(epoch); err != nil {
@@ -66,12 +108,15 @@ func (r *replicationIngress) FenceAsPrimaryWithPeers(epoch uint64, hasPeers bool
 			}
 		}
 		r.stopLocked(true)
-		return nil
+		return r.notePrimaryEpoch(epoch)
 	}
 	if r.rf1Only != "" {
 		return fmt.Errorf("volume %s refuses a primary role with replica peers at epoch %d: %s", r.volumeID, epoch, r.rf1Only)
 	}
-	return r.roleLocked(epoch, true)
+	if err := r.roleLocked(epoch, true); err != nil {
+		return err
+	}
+	return r.notePrimaryEpoch(epoch)
 }
 func (r *replicationIngress) AdmitAsReplica(epoch uint64) error {
 	r.mu.Lock()
@@ -81,6 +126,9 @@ func (r *replicationIngress) AdmitAsReplica(epoch uint64) error {
 	}
 	if r.rf1Only != "" {
 		return fmt.Errorf("volume %s refuses a replica role at epoch %d: %s", r.volumeID, epoch, r.rf1Only)
+	}
+	if r.epochsErr != nil {
+		return fmt.Errorf("volume %s epoch table: %w", r.volumeID, r.epochsErr)
 	}
 	return r.roleLocked(epoch, false)
 }
@@ -97,6 +145,7 @@ func (r *replicationIngress) roleLocked(epoch uint64, primary bool) error {
 		if err != nil {
 			return err
 		}
+		listener.SetEpochTable(r.epochs)
 	}
 	var err error
 	if primary {

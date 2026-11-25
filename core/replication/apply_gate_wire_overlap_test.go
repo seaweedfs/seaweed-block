@@ -74,7 +74,7 @@ func TestApplyGate_AlreadyAdmittedWireSessionNeverRegressesBytes(t *testing.T) {
 	}
 	old, newer := recoveryLineage(1, 120), recoveryLineage(2, 120)
 	c1, c2 := dial(), dial()
-	send(c1, transport.MsgRecoveryLaneStart, transport.EncodeLineage(old))
+	send(c1, transport.MsgRecoveryLaneStart, transport.EncodeRecoveryLaneStart(old, 0))
 	send(c1, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: old, LBA: 0, Data: makeData(1), LSN: 1}))
 	barrier(c1, old) // initialize the old session before the competing apply
 	send(c1, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: old, LBA: 5, Data: makeData(0xAA), LSN: 95}))
@@ -83,7 +83,7 @@ func TestApplyGate_AlreadyAdmittedWireSessionNeverRegressesBytes(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("old frame never reached post-admission hook")
 	}
-	send(c2, transport.MsgRecoveryLaneStart, transport.EncodeLineage(newer))
+	send(c2, transport.MsgRecoveryLaneStart, transport.EncodeRecoveryLaneStart(newer, 0))
 	want := bytes.Repeat([]byte{0xBB}, blockSize)
 	send(c2, transport.MsgShipEntry, transport.EncodeShipEntry(transport.ShipEntry{Lineage: newer, LBA: 5, Data: want, LSN: 120}))
 	barrier(c2, newer)
