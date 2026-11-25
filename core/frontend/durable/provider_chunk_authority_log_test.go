@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 type lockedLog struct {
@@ -67,14 +68,22 @@ next:
 }
 
 // The deferred attach logs its wait (with the projection fields that
-// fail), the first attach attempt, the HEAD claim and how the wait ended.
-func TestChunkAuthorityWaitLogsTheWaitTheClaimAndTheEnd(t *testing.T) {
+// fail), the first attach attempt and how the wait ended. B Start's HEAD
+// claim is observed from the catalog rather than a legacy claim log line.
+func TestChunkAuthorityWaitLogsTheWaitTheAttachAndTheEnd(t *testing.T) {
 	logs := &lockedLog{}
 	captureWriteLogs(t, logs)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
-	p := chunkProviderForAssignment(t, v)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4}
+	fixture := testutil.NewLayoutFixture(t, "v1", 64, 4)
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -88,11 +97,12 @@ func TestChunkAuthorityWaitLogsTheWaitTheClaimAndTheEnd(t *testing.T) {
 	inOrder(t, got,
 		[]string{"volume=v1 waits for master authority (up to 30s): projection lacks healthy=false epoch=0"},
 		[]string{"volume=v1: master authority after", `replica="r1" epoch=3 endpoint=1`, "first attach attempt"},
-		[]string{`HEAD claim for volume=v1 starting: target epoch=3 holder="r1"`},
-		[]string{`HEAD claim for volume=v1 observed HEAD gen=0 epoch=0 holder=""`, "; preparing"},
-		[]string{"HEAD claim for volume=v1 done in ", `gen=1 epoch=3 holder="r1"`},
 		[]string{"chunk authority wait for volume=v1 ended after", ": attached after 1 attempt(s)"},
 	)
+	head, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found || head.Epoch != 3 || head.Holder != "r1" || head.ClaimID == "" {
+		t.Fatalf("B Start did not claim after the wait: %+v found=%v err=%v", head, found, err)
+	}
 	if strings.Count(got, "first attach attempt") != 1 {
 		t.Fatalf("first attach attempt logged more than once:\n%s", got)
 	}
@@ -110,11 +120,12 @@ func TestChunkAuthorityWaitLogsDeadlineAndClose(t *testing.T) {
 			if mode == "close" {
 				limit = time.Minute
 			}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			cfg := durable.ProviderConfig{
 				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 				ChunkAssignmentTimeout: limit,
-				ChunkRemoteFor:         func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
-			}, v)
+			}
+			testutil.NewLayoutFixture(t, "v1", 64, 4).Configure(&cfg)
+			p, err := durable.NewDurableProvider(cfg, v)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,22 +160,22 @@ func TestChunkAuthorityWaitLogsDeadlineAndClose(t *testing.T) {
 	}
 }
 
-// headFailRemote fails GetHead while fails > 0 (forever when < 0).
-type headFailRemote struct {
-	*storage.MemChunkRemote
+// headFailStartStore fails the layout HEAD read while fails > 0 (forever when < 0).
+type headFailStartStore struct {
+	layout.StartStore
 	fails atomic.Int32
 }
 
 var errHeadRead = errors.New("injected HEAD read failure")
 
-func (r *headFailRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
+func (r *headFailStartStore) ReadHead(ctx context.Context) (layout.Head, bool, error) {
 	if n := r.fails.Load(); n != 0 {
 		if n > 0 {
 			r.fails.Add(-1)
 		}
-		return storage.ChunkHead{}, errHeadRead
+		return layout.Head{}, false, errHeadRead
 	}
-	return r.MemChunkRemote.GetHead(ctx)
+	return r.StartStore.ReadHead(ctx)
 }
 
 // A claim whose first HEAD read fails logs its start and its failure with
@@ -175,16 +186,23 @@ func TestChunkAuthorityWaitLogsAFailedClaim(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			logs := &lockedLog{}
 			captureWriteLogs(t, logs)
-			remote := &headFailRemote{MemChunkRemote: storage.NewMemChunkRemote()}
-			remote.fails.Store(1)
+			fixture := testutil.NewLayoutFixture(t, "v1", 64, 4)
+			st, err := fixture.Catalog.Store(fixture.Ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &headFailStartStore{StartStore: st}
+			store.fails.Store(1)
 			if mode != "retried" {
-				remote.fails.Store(-1)
+				store.fails.Store(-1)
 			}
 			v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			cfg := durable.ProviderConfig{
 				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
-				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-			}, v)
+			}
+			fixture.Configure(&cfg)
+			cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return store, nil }
+			p, err := durable.NewDurableProvider(cfg, v)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -201,14 +219,13 @@ func TestChunkAuthorityWaitLogsAFailedClaim(t *testing.T) {
 			if mode == "retried" {
 				got := waitLog(t, logs, "chunk authority wait for volume=v1 ended after")
 				inOrder(t, got,
-					[]string{`HEAD claim for volume=v1 starting: target epoch=3 holder="r1"`},
-					[]string{"HEAD claim for volume=v1 failed after ", errHeadRead.Error()},
-					[]string{"chunk layer attach for volume=v1:", "(retrying)"},
-					[]string{`HEAD claim for volume=v1 starting: target epoch=3 holder="r1"`},
-					[]string{"HEAD claim for volume=v1 observed HEAD gen=0"},
-					[]string{"HEAD claim for volume=v1 done in "},
+					[]string{"chunk layer attach for volume=v1:", errHeadRead.Error(), "(retrying)"},
 					[]string{"chunk authority wait for volume=v1 ended after", ": attached after 2 attempt(s)"},
 				)
+				head, found, err := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
+				if err != nil || !found || head.Epoch != 3 || head.Holder != "r1" {
+					t.Fatalf("retry did not claim B HEAD: %+v found=%v err=%v", head, found, err)
+				}
 				return
 			}
 			waitLog(t, logs, "(retrying)")
@@ -217,7 +234,7 @@ func TestChunkAuthorityWaitLogsAFailedClaim(t *testing.T) {
 			}
 			got := waitLog(t, logs, "chunk authority wait for volume=v1 ended after")
 			inOrder(t, got,
-				[]string{"HEAD claim for volume=v1 failed after ", errHeadRead.Error()},
+				[]string{"chunk layer attach for volume=v1:", errHeadRead.Error(), "(retrying)"},
 				[]string{"chunk authority wait for volume=v1 ended after", ": provider closed during the retry backoff"},
 			)
 		})
