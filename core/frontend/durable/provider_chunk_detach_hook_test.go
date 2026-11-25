@@ -8,7 +8,10 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -44,18 +47,28 @@ func (k *detachHooks) calls() (started, resumed []string) {
 // block) with both detach hooks wired.
 func hookedProvider(t *testing.T) (*faultRemote, *durable.DurableProvider, frontend.Backend, *detachHooks) {
 	t.Helper()
-	remote := &faultRemote{MemChunkRemote: storage.NewMemChunkRemote()}
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	remote := &faultRemote{fixture: fixture}
 	k := &detachHooks{}
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl:                 durable.ImplWALStoreChunk,
 		StorageRoot:          t.TempDir(),
 		BlockSize:            4096,
 		NumBlocks:            pcBlocks,
 		ChunkBlocks:          pcChunkBlocks,
-		ChunkRemoteFor:       func(string) (storage.ChunkRemote, error) { return remote, nil },
 		OnChunkDetach:        k.detach,
 		OnChunkDetachResumed: k.resume,
-	}, v1View())
+	}
+	fixture.Configure(&cfg)
+	cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+		inner, err := chunkstore.NewLayoutRemote(fixture.Catalog, fixture.Ref, me)
+		if err != nil {
+			return nil, err
+		}
+		remote.LayoutRemote = inner
+		return remote, nil
+	}
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatalf("NewDurableProvider: %v", err)
 	}
@@ -179,13 +192,14 @@ func TestWALStoreChunk_DetachResumeHookOnlyOnProvenAbort(t *testing.T) {
 	})
 	t.Run("fenced", func(t *testing.T) {
 		remote, p, _, k := hookedProvider(t)
-		cur, err := remote.MemChunkRemote.GetHead(ctx)
+		cur := layoutHead(t, remote.fixture)
+		newer := cur
+		newer.Epoch, newer.Holder, newer.ClaimID = cur.Epoch+1, "another-holder", "foreign-claim"
+		st, err := remote.fixture.Catalog.Store(remote.fixture.Ref)
 		if err != nil {
 			t.Fatal(err)
 		}
-		newer := cur
-		newer.Epoch, newer.Holder = cur.Epoch+1, "another-holder"
-		if _, err := remote.MemChunkRemote.CASHead(ctx, storage.ChunkHeadVersion{Gen: cur.Gen, Epoch: cur.Epoch}, newer); err != nil {
+		if err := st.UpdateHead(ctx, cur.Gen, newer); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, err := p.DetachVolume(ctx, "v1"); !errors.Is(err, storage.ErrChunkLayerFenced) {

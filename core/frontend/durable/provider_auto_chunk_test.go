@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -18,11 +19,11 @@ import (
 // serve the local, absent extent). It refuses, and the explicit
 // walstore-chunk selector with the remote still reads the exact bytes.
 func TestDurableProvider_AutoRefusesLazyChunkRoot(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	view := v1View()
 
 	// Host A publishes a nonzero block.
-	hostA := chunkProvider(t, t.TempDir(), remote, view, 0)
+	hostA := layoutChunkProvider(t, t.TempDir(), fixture, view, 0)
 	sA := openRecovered(t, hostA)
 	if _, err := sA.Write(33, block(0x33)); err != nil {
 		t.Fatal(err)
@@ -33,7 +34,7 @@ func TestDurableProvider_AutoRefusesLazyChunkRoot(t *testing.T) {
 
 	// Host B attaches lazily from HEAD and closes before LBA 33 is fetched.
 	rootB := t.TempDir()
-	hostB := chunkProvider(t, rootB, remote, view, 0)
+	hostB := layoutChunkProvider(t, rootB, fixture, viewAs("rB", 4), 0)
 	openRecovered(t, hostB)
 	if err := hostB.Close(); err != nil {
 		t.Fatalf("close host B: %v", err)
@@ -55,7 +56,7 @@ func TestDurableProvider_AutoRefusesLazyChunkRoot(t *testing.T) {
 	_ = auto.Close()
 
 	// The explicit selector with the remote reopens and reads HEAD's bytes.
-	explicit := chunkProvider(t, rootB, remote, view, 0)
+	explicit := layoutChunkProvider(t, rootB, fixture, viewAs("rB", 4), 0)
 	s := openRecovered(t, explicit)
 	if got, err := s.Read(33); err != nil || !bytes.Equal(got, block(0x33)) {
 		t.Fatalf("explicit walstore-chunk reopen read: %v", err)

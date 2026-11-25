@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -42,15 +44,16 @@ func (c *snapCalls) count() int {
 	return len(c.heads)
 }
 
-func snapScheduleProvider(t *testing.T, remote storage.ChunkRemote, period time.Duration, calls *snapCalls) *durable.DurableProvider {
+func snapScheduleProvider(t *testing.T, fixture *testutil.LayoutFixture, period time.Duration, calls *snapCalls) *durable.DurableProvider {
 	t.Helper()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkSnapshotPeriod:    period,
 		ChunkScheduledSnapshot: calls.take,
-		ChunkRemoteFor:         func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, v1View())
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,9 +88,9 @@ func waitFor(t *testing.T, d time.Duration, what string, ok func() bool) {
 // is visible in the status with its code.
 func TestWALStoreChunk_ScheduledSnapshotCutsAndReports(t *testing.T) {
 	const period = 2 * time.Second
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	calls := &snapCalls{}
-	p := snapScheduleProvider(t, remote, period, calls)
+	p := snapScheduleProvider(t, fixture, period, calls)
 	s := openRecovered(t, p)
 	if _, err := s.Write(1, block(0x5A)); err != nil {
 		t.Fatal(err)
@@ -96,7 +99,7 @@ func TestWALStoreChunk_ScheduledSnapshotCutsAndReports(t *testing.T) {
 	calls.mu.Lock()
 	h := calls.heads[0]
 	calls.mu.Unlock()
-	if remoteHead := headGen(t, remote); h.Gen == 0 || h.Gen > remoteHead.Gen || len(h.Chunks) == 0 {
+	if remoteHead := layoutHead(t, fixture); h.Gen == 0 || h.Gen > remoteHead.Gen || len(layoutHeadRefs(t, fixture)) == 0 {
 		t.Fatalf("snapshot HEAD gen %d with %d chunks (remote gen %d); want the cut that published the write", h.Gen, len(h.Chunks), remoteHead.Gen)
 	}
 	waitFor(t, time.Second, "the success in the status", func() bool {
@@ -123,9 +126,9 @@ func TestWALStoreChunk_ScheduledSnapshotCutsAndReports(t *testing.T) {
 // With the schedule off (period zero), no snapshot is attempted and the
 // status has no scheduled-snapshot section.
 func TestWALStoreChunk_ScheduledSnapshotOffTakesNone(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	calls := &snapCalls{}
-	p := snapScheduleProvider(t, remote, 0, calls)
+	p := snapScheduleProvider(t, fixture, 0, calls)
 	s := openRecovered(t, p)
 	if _, err := s.Write(1, block(0x01)); err != nil {
 		t.Fatal(err)
@@ -140,11 +143,12 @@ func TestWALStoreChunk_ScheduledSnapshotOffTakesNone(t *testing.T) {
 
 // A snapshot period without its callback is refused.
 func TestWALStoreChunk_ScheduledSnapshotNeedsItsCallback(t *testing.T) {
-	_, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks, ChunkSnapshotPeriod: time.Hour,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
-	}, v1View())
+	}
+	testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks).Configure(&cfg)
+	_, err := durable.NewDurableProvider(cfg, v1View())
 	if err == nil {
 		t.Fatal("a snapshot period without its callback was accepted")
 	}
@@ -155,9 +159,9 @@ func TestWALStoreChunk_ScheduledSnapshotNeedsItsCallback(t *testing.T) {
 // counted by reason, and no snapshot is taken.
 func TestWALStoreChunk_ScheduledSnapshotSkipsARestoringVolume(t *testing.T) {
 	const period = 2 * time.Second
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
 	view := v1View()
-	first := chunkProvider(t, t.TempDir(), remote, view, 0)
+	first := layoutChunkProvider(t, t.TempDir(), fixture, view, 0)
 	s := openRecovered(t, first)
 	if _, err := s.Write(33, block(0x33)); err != nil {
 		t.Fatal(err)
@@ -167,12 +171,14 @@ func TestWALStoreChunk_ScheduledSnapshotSkipsARestoringVolume(t *testing.T) {
 	}
 	_ = first.Close()
 	calls := &snapCalls{}
-	fresh, err := durable.NewDurableProvider(durable.ProviderConfig{
+	view.set(healthyProj(frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 4, EndpointVersion: 2}))
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
 		ChunkSnapshotPeriod: period, ChunkScheduledSnapshot: calls.take,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, view)
+	}
+	fixture.Configure(&cfg)
+	fresh, err := durable.NewDurableProvider(cfg, view)
 	if err != nil {
 		t.Fatal(err)
 	}

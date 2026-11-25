@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"testing"
@@ -28,14 +29,19 @@ func TestHostCutLimitDoesNotGateGuestIO(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer lim.Close()
-	r := storage.NewMemChunkRemote()
-	p, e := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return r, nil }}, v1View())
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, ChunkBudget: lim}
+	fixture.Configure(&cfg)
+	p, e := durable.NewDurableProvider(cfg, v1View())
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer p.Close()
 	s := openRecovered(t, p)
-	claimed := freshV1Claim(t, r)
+	claimed, found, e := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
+	if e != nil || !found {
+		t.Fatalf("initial layout HEAD: found=%v err=%v", found, e)
+	}
 	if _, e = s.Write(0, block(0x72)); e != nil {
 		t.Fatal(e)
 	}
@@ -54,7 +60,7 @@ func TestHostCutLimitDoesNotGateGuestIO(t *testing.T) {
 	if b, e := s.Read(0); e != nil || b[0] != 0x72 {
 		t.Fatal("limiter blocked read", e)
 	}
-	h, _ := r.GetHead(context.Background())
+	h, _, _ := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
 	if h.Gen != claimed.Gen {
 		t.Fatal("refused cut published")
 	}
@@ -67,8 +73,10 @@ func TestHostUnusablePoolExplicitDurabilityUsesUrgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lim.Close()
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, ChunkBudget: lim, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, v1View())
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: pcBlocks, BlockSize: 4096, ChunkBlocks: pcChunkBlocks, ChunkBudget: lim}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,8 +94,8 @@ func TestHostUnusablePoolExplicitDurabilityUsesUrgent(t *testing.T) {
 	if err = p.MakeVolumeRemoteDurable(context.Background(), "v1", 1); err != nil {
 		t.Fatalf("explicit durability was not urgent: %v", err)
 	}
-	head, err := remote.GetHead(context.Background())
-	if err != nil || head.RemoteLSN < 1 {
+	head, found, err := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
+	if err != nil || !found || head.Position < 1 {
 		t.Fatalf("explicit durability did not publish: %+v %v", head, err)
 	}
 	if st := lim.Snapshot().(hostlimit.Stats); st.Fallback != 1 || st.SkippedByClass[hostlimit.Normal] != 1 {

@@ -40,6 +40,7 @@ func TestCanStartFrom_LocalRootStateByHeadPosition(t *testing.T) {
 		"fresh, no base":             {fakeRoot{seedErr: seedsUnlessMax}, true},
 		"fresh, completed base at 5": {fakeRoot{base: 5, complete: true, seedErr: seedsUnlessMax}, true},
 		"fresh, base in progress":    {fakeRoot{seedErr: func(uint64) error { return errors.New("install in progress") }}, true},
+		"fresh, local writes":        {fakeRoot{seedErr: func(uint64) error { return errors.New("local writes beyond checkpoint") }}, true},
 		"not fresh":                  {fakeRoot{seedErr: func(uint64) error { return errors.New("must not be asked") }}, false},
 	}
 	heads := map[string]uint64{"position 0": 0, "position 3": 3, "position 9": 9, "position MaxUint64": ^uint64(0)}
@@ -48,6 +49,7 @@ func TestCanStartFrom_LocalRootStateByHeadPosition(t *testing.T) {
 		"fresh, no base":             {"position 0": "seed ok", "position 3": "seed ok", "position 9": "seed ok", "position MaxUint64": "seed refused"},
 		"fresh, completed base at 5": {"position 0": "base ok", "position 3": "base ok", "position 9": "base refused", "position MaxUint64": "base refused"},
 		"fresh, base in progress":    {"position 0": "seed refused", "position 3": "seed refused", "position 9": "seed refused", "position MaxUint64": "seed refused"},
+		"fresh, local writes":        {"position 0": "seed refused", "position 3": "seed refused", "position 9": "seed refused", "position MaxUint64": "seed refused"},
 		"not fresh":                  {"position 0": "continue ok", "position 3": "continue ok", "position 9": "continue ok", "position MaxUint64": "continue ok"},
 	}
 	name := map[startPath]string{startContinue: "continue", startSeed: "seed", startAttachBase: "base"}

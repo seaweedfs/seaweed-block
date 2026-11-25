@@ -10,6 +10,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -86,22 +87,23 @@ func TestWorkspacePausedGranteeRefusedAtAttach(t *testing.T) {
 	}
 	oldBarrier := time.Unix(0, p.WorkspaceState("v").Lease.ExpiresAtNS)
 
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v", 64, 4)
 	readHead := func() authority.WorkspaceHead {
 		t.Helper()
-		h, err := remote.GetHead(ctx)
-		if err != nil {
-			t.Fatal(err)
+		h, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+		if err != nil || !found {
+			t.Fatalf("layout HEAD: found=%v err=%v", found, err)
 		}
-		return authority.WorkspaceHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN, Detached: h.State == storage.ChunkHeadDetached}
+		return layoutWorkspaceHead(h)
 	}
 	open := func(holder string, view frontend.ProjectionView) *durable.DurableProvider {
 		t.Helper()
-		prov, err := durable.NewDurableProvider(durable.ProviderConfig{
+		cfg := durable.ProviderConfig{
 			Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 			ChunkHolder: holder, ChunkAssignmentTimeout: 2 * time.Second,
-			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-		}, view)
+		}
+		fixture.Configure(&cfg)
+		prov, err := durable.NewDurableProvider(cfg, view)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -202,11 +204,11 @@ func TestWorkspacePausedGranteeRefusedAtAttach(t *testing.T) {
 	// projection records the HEAD current at that instant. Close then
 	// settles the deferred attempts, so none can land afterwards.
 	witness := &attachWitness{base: guard, head: func() authority.WorkspaceHead {
-		h, err := remote.GetHead(context.Background()) // also read off the test goroutine: no t.Fatal
-		if err != nil {
+		h, found, err := fixture.Catalog.ReadHead(context.Background(), fixture.Ref) // also read off the test goroutine: no t.Fatal
+		if err != nil || !found {
 			return authority.WorkspaceHead{}
 		}
-		return authority.WorkspaceHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN, Detached: h.State == storage.ChunkHeadDetached}
+		return layoutWorkspaceHead(h)
 	}}
 	granteeProv := open("new-node/r", witness)
 	refusedAt, refusals := witness.first()

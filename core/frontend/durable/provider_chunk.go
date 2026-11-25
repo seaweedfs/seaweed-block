@@ -8,9 +8,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -368,15 +365,7 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 	}
 	// The owner commit is serialized with a later BASE begin. The callback
 	// does marker I/O only: no store/layer reentry while installMu is held.
-	commit := func() error {
-		if p.cfg.ChunkLayoutHeadFor != nil {
-			return nil
-		}
-		if h.fresh {
-			return removeChunkFreshMarker(h.path)
-		}
-		return nil
-	}
+	commit := func() error { return nil }
 	if h.fresh {
 		if hook := p.testBeforeChunkFreshRetire; hook != nil {
 			if err := hook(); err != nil {
@@ -391,12 +380,10 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 	} else if err := commit(); err != nil {
 		return err
 	}
-	if p.cfg.ChunkLayoutHeadFor != nil {
-		ws := h.storage.(*storage.WALStore)
-		id, _, _ := ws.LayoutIdentity()
-		if err := ws.SetLayoutIdentity(id, false); err != nil {
-			return err
-		}
+	ws := h.storage.(*storage.WALStore)
+	id, _, _ := ws.LayoutIdentity()
+	if err := ws.SetLayoutIdentity(id, false); err != nil {
+		return err
 	}
 	// RULE-FRESH-KNOWN-ZERO order: the marker is retired (above), THEN the
 	// marking is made durable, THEN the volume serves (after this attach).
@@ -486,31 +473,27 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	var inner storage.ChunkRemote
 	var layoutHead layout.Head
 	var err error
-	if p.cfg.ChunkLayoutHeadFor != nil {
-		st, e := p.cfg.ChunkLayoutHeadFor(volumeID)
-		if e != nil {
-			return nil, e
-		}
-		layoutHead, err = startLayoutRoot(ctx, ws, st, layout.HolderID{Epoch: proj.Epoch, Holder: holder})
-		if err != nil {
-			return nil, err
-		}
-		me := layout.HolderID{Epoch: layoutHead.Epoch, Holder: layoutHead.Holder, ClaimID: layoutHead.ClaimID}
+	st, e := p.cfg.ChunkLayoutHeadFor(volumeID)
+	if e != nil {
+		return nil, e
+	}
+	layoutHead, err = startLayoutRoot(ctx, ws, st, layout.HolderID{Epoch: proj.Epoch, Holder: holder})
+	if err != nil {
+		return nil, err
+	}
+	me := layout.HolderID{Epoch: layoutHead.Epoch, Holder: layoutHead.Holder, ClaimID: layoutHead.ClaimID}
+	p.mu.Lock()
+	if h.layoutHolder == me {
+		inner = h.layoutRemote
+	}
+	p.mu.Unlock()
+	if inner == nil {
+		inner, err = p.cfg.ChunkLayoutRemoteFor(volumeID, me)
+	}
+	if err == nil {
 		p.mu.Lock()
-		if h.layoutHolder == me {
-			inner = h.layoutRemote
-		}
+		h.layoutHolder, h.layoutHead, h.layoutRemote = me, st, inner
 		p.mu.Unlock()
-		if inner == nil {
-			inner, err = p.cfg.ChunkLayoutRemoteFor(volumeID, me)
-		}
-		if err == nil {
-			p.mu.Lock()
-			h.layoutHolder, h.layoutHead, h.layoutRemote = me, st, inner
-			p.mu.Unlock()
-		}
-	} else {
-		inner, err = p.cfg.ChunkRemoteFor(volumeID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("durable: chunk remote for %s: %w", volumeID, err)
@@ -523,17 +506,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	}
 	bound.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer bound.setAttach(nil)
-	var remote storage.ChunkRemote = bound
-	if builder, ok := inner.(storage.ChunkManifestBuilder); ok {
-		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
+	keyer, ok := inner.(storage.ChunkKeyer)
+	if !ok {
+		return nil, errors.New("durable: layout remote lacks content keys")
 	}
-	if p.cfg.ChunkLayoutHeadFor != nil {
-		keyer, ok := inner.(storage.ChunkKeyer)
-		if !ok {
-			return nil, errors.New("durable: layout remote lacks content keys")
-		}
-		remote = &layoutBoundRemote{closeBoundRemote: bound, keyer: keyer}
-	}
+	var remote storage.ChunkRemote = &layoutBoundRemote{closeBoundRemote: bound, keyer: keyer}
 	cfg := storage.ChunkLayerConfig{
 		OnPublishSettled:    p.publishSettledHook(volumeID),
 		ChunkBlocks:         p.cfg.ChunkBlocks,
@@ -578,111 +555,12 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 				return nil, err
 			}
 		}
-		layer, err := storage.AttachChunkLayer(ws, remote, cfg)
-		if err == nil {
-			h.chunkLineage = lin
-		}
-		return layer, err
 	}
-	if !h.fresh {
-		// An existing local volume is this holder's image only while HEAD is
-		// still this holder's publication (INV-WS-STALE-LOCAL-ROOT-001).
-		// Check again on the exact claim image before its CAS. Another holder means the
-		// workspace moved away and back: refuse rather than serve, or cut
-		// over, the newer image with the stale one.
-		head, err := remote.GetHead(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("durable: read HEAD before attaching existing volume %s: %w", volumeID, err)
-		}
-		cfg.PrepareRestore = func(head storage.ChunkHead) error {
-			if head.Gen != 0 && head.Holder != holder {
-				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
-				// INV-WS-STARTUP-RETRY-001: at or above this assignment,
-				// the foreign holder is a supersede proof. A lower epoch is
-				// the existing move-back/stale-root diagnostic, never 78.
-				if claimHeadSupersedes(head, cfg) {
-					err = fmt.Errorf("%w: %w", err, errChunkForeignClaim)
-				}
-				log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
-					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
-				return err
-			}
-			// The durable-reopen rule: HEAD names this holder, but a root whose local
-			// durable LSN is below HEAD's remote_lsn is a rolled-back copy
-			// (a backup taken before a later cut). Restarting cannot cure it.
-			// A crash cannot cause it: a cut syncs its LSN locally before the
-			// HEAD CAS publishes it (storage chunkLayer capture: the barrier
-			// syncWithPhases result is next.RemoteLSN).
-			if durableLSN, _, _ := ws.Boundaries(); head.Gen != 0 && durableLSN < head.RemoteLSN {
-				log.Printf("durable: refusing to attach volume=%s root=%s: local durable LSN %d is below HEAD gen=%d remote_lsn=%d (remove or quarantine the local root)",
-					volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
-				return fmt.Errorf("%w: %w: %w: volume %s local root %s, local durable LSN %d below HEAD gen %d remote_lsn %d; remove or quarantine the local root to attach fresh from HEAD",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkForeignClaim, volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
-			}
-			return nil
-		}
-		if err := cfg.PrepareRestore(head); err != nil {
-			return nil, err
-		}
-	}
-	if h.fresh {
-		// Attach preparation is gated. Seed the exact observed HEAD before
-		// its takeover CAS; only then finalize lazy attachment and expose I/O.
-		cfg.PrepareRestore = func(head storage.ChunkHead) error {
-			log.Printf("durable: HEAD claim for volume=%s observed HEAD gen=%d epoch=%d holder=%q state=%v remote_lsn=%d; preparing",
-				volumeID, head.Gen, head.Epoch, head.Holder, head.State, head.RemoteLSN)
-			if baseLSN, complete := ws.InstalledBaseLSN(); complete {
-				// The fresh marker can outlive a full local BASE. It is not
-				// permission to seed backwards or to fill from an older HEAD.
-				if head.RemoteLSN > baseLSN {
-					return fmt.Errorf("durable: completed BASE frontier %d is behind HEAD %d", baseLSN, head.RemoteLSN)
-				}
-				cfg.FreshFromHead = false
-				return nil
-			}
-			// No HEAD is a new lineage; preserve any pre-assignment local
-			// writes instead of replacing their frontier with zero.
-			if head.Gen == 0 {
-				return nil
-			}
-			// EnsureVolume's initial ZERO HEAD is not a remote data image.
-			// A local frontier already advanced before assignment belongs to
-			// this bootstrap: retain its extent bytes and unknown dirty set,
-			// rather than seeding backwards or installing lazy absence.
-			if head.RemoteLSN == 0 && len(head.Chunks) == 0 && head.State != storage.ChunkHeadDetached && head.DetachedBy == nil && ws.NextLSN() > 1 {
-				cfg.FreshFromHead = false
-				return nil
-			}
-			// Every component that cached the next LSN learns the seeded
-			// one before the takeover CAS and before the volume serves I/O,
-			// serialized with observer installs. A refused rebase fails the
-			// restore here, so HEAD is never claimed for a mis-ordered ship.
-			return h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) })
-		}
-	}
-	// INV-WS-REOPEN-FENCE-001: local-root reopens claim too, without
-	// reseeding their acknowledged WAL or replacing it with remote absence.
-	claimStart := time.Now()
-	log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
-	head, err := storage.ClaimChunkHead(ctx, remote, cfg)
-	if err != nil {
-		// INV-WS-STARTUP-RETRY-001: only the claim's exact foreign-holder
-		// proof permits no-retry; a higher epoch of our own holder retries.
-		if errors.Is(err, storage.ErrChunkLayerFenced) && claimHeadSupersedes(head, cfg) {
-			err = errors.Join(err, errChunkForeignClaim)
-		}
-		log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
-		return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
-	}
-	log.Printf("durable: HEAD claim for volume=%s done in %s: gen=%d epoch=%d holder=%q", volumeID, time.Since(claimStart), head.Gen, head.Epoch, head.Holder)
-	cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
-
-	layer, attachErr := storage.AttachChunkLayer(ws, remote, cfg)
-	if attachErr == nil {
+	layer, err := storage.AttachChunkLayer(ws, remote, cfg)
+	if err == nil {
 		h.chunkLineage = lin
 	}
-	return layer, attachErr
+	return layer, err
 }
 
 // closeBoundRemote ends every remote call when the provider closes, so a
@@ -778,52 +656,6 @@ func (r *closeBoundRemote) Begin(ctx context.Context) (string, error) {
 // Abort never blocks; it is passed through even after Close (a cut left
 // open is rolled back at the next HEAD read).
 func (r *closeBoundRemote) Abort() { r.ChunkRemote.Abort() }
-
-// The fresh marker: <volume path>.chunkfresh.
-
-func chunkFreshMarker(path string) string { return path + ".chunkfresh" }
-
-func writeChunkFreshMarker(path string) error {
-	m := chunkFreshMarker(path)
-	f, err := os.OpenFile(m, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("durable: fresh marker: %w", err)
-	}
-	_, werr := f.WriteString("fresh\n")
-	serr := f.Sync()
-	cerr := f.Close()
-	if err := errors.Join(werr, serr, cerr); err != nil {
-		return fmt.Errorf("durable: fresh marker: %w", err)
-	}
-	return syncParentDir(m)
-}
-
-func removeChunkFreshMarker(path string) error {
-	m := chunkFreshMarker(path)
-	if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("durable: remove fresh marker: %w", err)
-	}
-	return syncParentDir(m)
-}
-
-// syncParentDir makes a create or remove in path's directory durable. A
-// directory cannot be fsynced on Windows; there it is a no-op (no Windows
-// crash-durability claim).
-func syncParentDir(path string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("durable: open directory: %w", err)
-	}
-	serr := d.Sync()
-	cerr := d.Close()
-	if err := errors.Join(serr, cerr); err != nil {
-		return fmt.Errorf("durable: fsync directory: %w", err)
-	}
-	return nil
-}
 
 // Cut scheduler constants (B9 W3 ruling).
 const (
@@ -1606,19 +1438,6 @@ func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer
 	return fmt.Errorf("%w: %w", ErrDetachAborted, cause)
 }
 
-// Preserve the optional manifest capability only when the inner remote has it;
-// legacy in-memory/flat remotes keep their existing no-op cut behavior.
-type manifestBoundRemote struct {
-	*closeBoundRemote
-	builder storage.ChunkManifestBuilder
-}
-
-func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, error) {
-	c, end := r.bind(ctx)
-	defer end()
-	return r.builder.PrepareManifest(c, base, next, chunkBytes)
-}
-
 // publishSettledHook adapts ChunkOnPublishSettled to one volume's layer.
 func (p *DurableProvider) publishSettledHook(volumeID string) func(context.Context, storage.ChunkHead, storage.ChunkHead) {
 	hook := p.cfg.ChunkOnPublishSettled
@@ -1660,10 +1479,4 @@ func (w *cutWaitSlot) status(cutSeq uint64) CutScheduleStatus {
 		st.HostSlotWaitSinceNs = 0
 	}
 	return st
-}
-
-// INV-WS-STARTUP-RETRY-001: a displaced lower-epoch claim fences this
-// attempt, but cannot prove the assigned holder was superseded.
-func claimHeadSupersedes(head storage.ChunkHead, cfg storage.ChunkLayerConfig) bool {
-	return head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder && head.Epoch >= cfg.Epoch
 }

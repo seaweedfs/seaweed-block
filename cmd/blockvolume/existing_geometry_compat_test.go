@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -109,9 +110,13 @@ func TestExistingDurableVolumeDisappearsDoesNotCreateFromIgnoredFlags(t *testing
 			if _, _, err = durableCreateGeometry(f); err == nil {
 				t.Fatal("fresh recheck accepted original overflowing count")
 			}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: impl, StorageRoot: root, NumBlocks: blocks, BlockSize: bs, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
-				return nil, errors.New("unexpected remote access for missing open-only volume")
-			}}, healthyView{})
+			cfg := durable.ProviderConfig{Impl: impl, StorageRoot: root, NumBlocks: blocks, BlockSize: bs}
+			if impl == durable.ImplWALStoreChunk {
+				unexpected := errors.New("unexpected layout access for missing open-only volume")
+				cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) { return nil, unexpected }
+				cfg.ChunkLayoutRemoteFor = func(string, layout.HolderID) (storage.ChunkRemote, error) { return nil, unexpected }
+			}
+			p, err := durable.NewDurableProvider(cfg, healthyView{})
 			if err != nil {
 				t.Fatal(err)
 			}

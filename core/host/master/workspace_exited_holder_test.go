@@ -9,7 +9,9 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -29,13 +31,16 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 	// this budget; the rest must cover the work after it under load and -race.
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "vol-a", 64, 4)
 	reader := func(ctx context.Context, _ string) (authority.WorkspaceHead, error) {
-		h, err := remote.GetHead(ctx)
+		h, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
 		if err != nil {
 			return authority.WorkspaceHead{}, err
 		}
-		return authority.WorkspaceHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.RemoteLSN, Detached: h.State == storage.ChunkHeadDetached}, nil
+		if !found {
+			return authority.WorkspaceHead{}, layout.ErrHeadAbsent
+		}
+		return layoutWorkspaceHead(h), nil
 	}
 	const skew = 100 * time.Millisecond
 	m, err := New(Config{WorkspaceMaxClockSkew: skew, Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume, WorkspaceHeadReader: reader})
@@ -85,11 +90,12 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 
 	open := func(host string, line authority.AuthorityBasis) (*durable.DurableProvider, frontend.Backend) {
 		t.Helper()
-		p, err := durable.NewDurableProvider(durable.ProviderConfig{
+		cfg := durable.ProviderConfig{
 			Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
-			ChunkHolder:    host + "/" + line.ReplicaID,
-			ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-		}, restoreProjection{frontend.Projection{VolumeID: "vol-a", ReplicaID: line.ReplicaID, Epoch: line.Epoch, EndpointVersion: line.EndpointVersion, Healthy: true}})
+			ChunkHolder: host + "/" + line.ReplicaID,
+		}
+		fixture.Configure(&cfg)
+		p, err := durable.NewDurableProvider(cfg, restoreProjection{frontend.Projection{VolumeID: "vol-a", ReplicaID: line.ReplicaID, Epoch: line.Epoch, EndpointVersion: line.EndpointVersion, Healthy: true}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -123,9 +129,9 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 	if err := oldProvider.Close(); err != nil {
 		t.Fatal(err)
 	}
-	head, err := remote.GetHead(ctx)
-	if err != nil || head.RemoteLSN != cut || head.State == storage.ChunkHeadDetached {
-		t.Fatalf("HEAD after the holder exited: %+v %v", head, err)
+	head, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found || head.Position != cut || head.State == layout.StateDetached {
+		t.Fatalf("HEAD after the holder exited: %+v found=%v err=%v", head, found, err)
 	}
 
 	// The exited holder's live authority blocks the delete and a clean move.
@@ -169,9 +175,9 @@ func TestWorkspaceExitedHolderForcedMoveThenCleanDelete(t *testing.T) {
 
 	// The new host claims HEAD, serves the last cut and continues past it.
 	newProvider, newBackend := open("node-b", newLine)
-	claimed, err := remote.GetHead(ctx)
-	if err != nil || claimed.Epoch != newLine.Epoch || claimed.Holder != "node-b/r1" || claimed.RemoteLSN != cut || claimed.State == storage.ChunkHeadDetached {
-		t.Fatalf("HEAD after the new host's recovery: %+v %v", claimed, err)
+	claimed, found, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
+	if err != nil || !found || claimed.Epoch != newLine.Epoch || claimed.Holder != "node-b/r1" || claimed.Position != cut || claimed.State == layout.StateDetached {
+		t.Fatalf("HEAD after the new host's recovery: %+v found=%v err=%v", claimed, found, err)
 	}
 	got := make([]byte, len(want))
 	if n, err := newBackend.Read(ctx, 8*4096, got); err != nil || n != len(got) || !bytes.Equal(got, want) {

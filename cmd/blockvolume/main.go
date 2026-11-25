@@ -698,7 +698,6 @@ func runVolume(f flags, exits *processExit) int {
 	// accept connections.
 	var provider frontend.Provider
 	var durableProv *durable.DurableProvider
-	var workspaceRemoteFor func(string) (storage.ChunkRemote, error)
 	var workspaceLayoutHead layout.HeadStore
 	if f.durableRoot != "" {
 		blocks, blockSize, geometryErr := durableCreateGeometry(f)
@@ -1473,7 +1472,7 @@ func runVolume(f flags, exits *processExit) int {
 	if leaseStop != nil {
 		gen := detachedGen
 		if drainErr == nil && workspaceLayoutHead == nil {
-			gen, drainErr = workspaceDetachedGeneration(leaseStop.ctx, workspaceRemoteFor, leaseStop.id, chunkHolder(f))
+			drainErr = errors.New("workspace layout HEAD unavailable for detached proof")
 		}
 		leaseStop.reply <- workspaceStopResult{gen: gen, err: drainErr}
 	}

@@ -6,9 +6,10 @@ import (
 	"errors"
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -42,8 +43,10 @@ func TestWorkspaceHostRequiresLeaseBeforeFrontendAndCut(t *testing.T) {
 	if h.ProjectionView().Projection().Healthy {
 		t.Fatal("workspace host reports healthy without ever acquiring a lease")
 	}
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8, ChunkHolder: "node-a/r1", ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, h.ProjectionView())
+	fixture := testutil.NewLayoutFixture(t, "v1", 64, 8)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8, ChunkHolder: "node-a/r1"}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, h.ProjectionView())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +64,8 @@ func TestWorkspaceHostRequiresLeaseBeforeFrontendAndCut(t *testing.T) {
 	if _, err = p.CaptureVolume(context.Background(), "v1"); err == nil {
 		t.Fatal("unleased cut succeeded")
 	}
-	if head, err := remote.GetHead(context.Background()); err != nil || head.Gen != 0 {
-		t.Fatal("unleased HEAD mutation", head, err)
+	if head := runtimeLayoutHead(t, fixture); head.Gen != 1 || head.Holder != "" {
+		t.Fatal("unleased HEAD mutation", head)
 	}
 	legacy := workspaceRuntimeHost(t, "127.0.0.1:1", false)
 	if !legacy.ProjectionView().Projection().Healthy {
@@ -139,10 +142,50 @@ func runtimeAwait(t *testing.T, what string, fn func() bool) {
 		}
 	}
 }
-func runtimeStore(t *testing.T, h *Host) (*durable.DurableProvider, *storage.MemChunkRemote) {
+func runtimeLayoutHead(t *testing.T, fixture *testutil.LayoutFixture) layout.Head {
 	t.Helper()
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8, ChunkHolder: "node-a/r1", ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, h.ProjectionView())
+	head, found, err := fixture.Catalog.ReadHead(context.Background(), fixture.Ref)
+	if err != nil || !found {
+		t.Fatalf("layout HEAD: found=%v err=%v", found, err)
+	}
+	return head
+}
+
+func runtimePublishedBlock(t *testing.T, fixture *testutil.LayoutFixture, block uint64) []byte {
+	t.Helper()
+	head := runtimeLayoutHead(t, fixture)
+	if head.Current == nil {
+		t.Fatal("published HEAD has no image")
+	}
+	st, err := fixture.Catalog.Store(fixture.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := layout.NewReader("/provider-test", fixture.Ref.Dir(), st.Fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := reader.Open(context.Background(), *head.Current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := image.Chunk(context.Background(), block/8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunk.Zero {
+		return make([]byte, 4096)
+	}
+	off := (block % 8) * 4096
+	return chunk.Data[off : off+4096]
+}
+
+func runtimeStore(t *testing.T, h *Host) (*durable.DurableProvider, *testutil.LayoutFixture) {
+	t.Helper()
+	fixture := testutil.NewLayoutFixture(t, "v1", 64, 8)
+	cfg := durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8, ChunkHolder: "node-a/r1"}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, h.ProjectionView())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +196,7 @@ func runtimeStore(t *testing.T, h *Host) (*durable.DurableProvider, *storage.Mem
 	if _, err = p.RecoverVolume(context.Background(), "v1"); err != nil {
 		t.Fatal(err)
 	}
-	return p, remote
+	return p, fixture
 }
 func runtimeDone(t *testing.T, ch <-chan error) error {
 	t.Helper()
@@ -175,7 +218,7 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 			// switches to 300 ms below.
 			wire := &runtimeLeaseServer{ttl: 3 * time.Second, stopped: &stopped}
 			h := workspaceRuntimeHost(t, runtimeWire(t, wire), true)
-			p, remote := runtimeStore(t, h)
+			p, fixture := runtimeStore(t, h)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
@@ -188,7 +231,10 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 						return 0, err
 					}
 					stopped.Store(true)
-					head, err := remote.GetHead(c)
+					head, found, err := fixture.Catalog.ReadHead(c, fixture.Ref)
+					if err == nil && !found {
+						err = errors.New("HEAD absent")
+					}
 					return head.Gen, err
 				})
 			}()
@@ -207,16 +253,16 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 			if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
 				t.Fatal(err)
 			}
-			before, err := remote.GetHead(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
+			before := runtimeLayoutHead(t, fixture)
 			if kind == "detach-then-revoke" {
 				cut, _, err := p.DetachVolume(ctx, "v1")
 				if err != nil {
 					t.Fatal(err)
 				}
-				before = cut.Head
+				before = runtimeLayoutHead(t, fixture)
+				if before.Gen != cut.Head.Gen {
+					t.Fatal("detach result did not name HEAD generation", cut.Head.Gen, before.Gen)
+				}
 				wire.mu.Lock()
 				wire.revoking = true
 				wire.mu.Unlock()
@@ -273,20 +319,18 @@ func TestWorkspaceHostLeaseExpiryAndRevokeCloseRealProvider(t *testing.T) {
 			if _, err := p.CaptureVolume(context.Background(), "v1"); err == nil {
 				t.Fatal("fenced cut succeeded")
 			}
-			after, err := remote.GetHead(context.Background())
-			if err != nil || after.Gen != before.Gen || after.RemoteLSN != before.RemoteLSN {
-				t.Fatal("shutdown published an extra cut", before, after, err)
+			after := runtimeLayoutHead(t, fixture)
+			if after.Gen != before.Gen || after.Position != before.Position {
+				t.Fatal("shutdown published an extra cut", before, after)
 			}
-			ref := after.Chunks[0]
-			data, err := remote.Get(context.Background(), ref.Key)
-			if err != nil || !bytes.Equal(data[4096:8192], want) {
-				t.Fatal("leased data changed", err)
+			if data := runtimePublishedBlock(t, fixture, 1); !bytes.Equal(data, want) {
+				t.Fatal("leased data changed")
 			}
 			wire.mu.Lock()
 			acks, gen := wire.acks, wire.ackGen
 			wire.mu.Unlock()
 			if kind == "detach-then-revoke" {
-				if acks != 1 || gen != before.Gen || before.State != storage.ChunkHeadDetached {
+				if acks != 1 || gen != before.Gen || before.State != layout.StateDetached {
 					t.Fatal("ACK not joined to real detach", acks, gen, before)
 				}
 			} else if acks != 0 {

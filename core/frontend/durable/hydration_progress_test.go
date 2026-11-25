@@ -5,8 +5,6 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func hydrationProgress(t *testing.T, p *DurableProvider) (absent int, hydrated uint64) {
@@ -29,7 +27,7 @@ func hydrationProgress(t *testing.T, p *DurableProvider) (absent int, hydrated u
 func TestHydrationProgressCountersFollowFirstReads(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mem := storage.NewMemChunkRemote()
+	mem := newKZLayout(t)
 	src := kzProvider(t, t.TempDir(), mem)
 	if _, err := src.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
@@ -53,7 +51,7 @@ func TestHydrationProgressCountersFollowFirstReads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := kzProvider(t, t.TempDir(), mem)
+	p := kzProviderAt(t, t.TempDir(), mem, "r2", 4)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}

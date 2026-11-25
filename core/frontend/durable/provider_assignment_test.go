@@ -8,8 +8,9 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 type arrivingAssignment struct {
@@ -51,7 +52,7 @@ func TestRestoreWaitsForFirstAssignment(t *testing.T) {
 	defer finishRecovery()
 	done := make(chan error, 1)
 	go func() { _, err := p.RecoverVolume(recoverCtx, "v1"); done <- err }()
-	<-v.seen // recovery inspected the assignment
+	<-v.seen                       // recovery inspected the assignment
 	if err := <-done; err != nil { // local recovery settles before assignment can be applied
 		t.Fatalf("first assignment did not converge: %v", err)
 	}
@@ -74,11 +75,12 @@ func TestRestoreWaitsForFirstAssignment(t *testing.T) {
 
 func chunkProviderForAssignment(t *testing.T, v frontend.ProjectionView) *durable.DurableProvider {
 	t.Helper()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64,
 		BlockSize: 4096, ChunkBlocks: 4,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return storage.NewMemChunkRemote(), nil },
-	}, v)
+	}
+	testutil.NewLayoutFixture(t, "v1", 64, 4).Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,14 +92,18 @@ func TestRestoreDeferredAssignmentWaitEndsOnDeadlineAndClose(t *testing.T) {
 	for _, mode := range []string{"limit", "close"} {
 		t.Run(mode, func(t *testing.T) {
 			v := &arrivingAssignment{seen: make(chan struct{}), assigned: make(chan struct{})}
-			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+			cfg := durable.ProviderConfig{
 				Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 				ChunkAssignmentTimeout: 40 * time.Millisecond,
-				ChunkRemoteFor: func(string) (storage.ChunkRemote, error) {
-					t.Error("remote reached without assignment")
-					return storage.NewMemChunkRemote(), nil
-				},
-			}, v)
+			}
+			fixture := testutil.NewLayoutFixture(t, "v1", 64, 4)
+			fixture.Configure(&cfg)
+			start := cfg.ChunkLayoutHeadFor
+			cfg.ChunkLayoutHeadFor = func(name string) (layout.StartStore, error) {
+				t.Error("layout reached without assignment")
+				return start(name)
+			}
+			p, err := durable.NewDurableProvider(cfg, v)
 			if err != nil {
 				t.Fatal(err)
 			}

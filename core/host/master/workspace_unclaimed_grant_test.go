@@ -2,7 +2,6 @@ package master
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -150,41 +149,5 @@ func TestWorkspaceUnclaimedGrantForcedReassignOverRPC(t *testing.T) {
 	}
 	if _, err := ws.RenewWorkspaceLease(ctx, &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "vol-a", ReplicaId: "r1", Epoch: grantee}); err == nil {
 		t.Fatal("the dead grantee's epoch renewed after the forced move")
-	}
-
-	// A late grantee claim. (b) Its CAS lands after the forced move's HEAD
-	// read but before the new owner claims: the new owner still takes HEAD
-	// at the higher epoch, and the grantee is fenced afterwards.
-	granteeCfg := storage.ChunkLayerConfig{Epoch: grantee, Holder: "node-b/r1"}
-	ownerCfg := storage.ChunkLayerConfig{Epoch: grant.NewEpoch, Holder: "node-c/r1"}
-	late, err := storage.ClaimChunkHead(ctx, remote, granteeCfg)
-	if err != nil {
-		t.Fatal("late grantee claim landing first:", err)
-	}
-	owned, err := storage.ClaimChunkHead(ctx, remote, ownerCfg)
-	if err != nil || owned.Epoch != grant.NewEpoch || owned.Holder != "node-c/r1" || owned.RemoteLSN != seed.RemoteLSN {
-		t.Fatalf("new owner's claim over the late grantee: %+v %v", owned, err)
-	}
-	if _, err := storage.ClaimChunkHead(ctx, remote, granteeCfg); !errors.Is(err, storage.ErrChunkLayerFenced) {
-		t.Fatalf("grantee re-claim after the new owner: %v; want fenced", err)
-	}
-	stale := late
-	stale.State = storage.ChunkHeadActive
-	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: late.Gen, Epoch: late.Epoch}, stale); !errors.Is(err, storage.ErrChunkHeadPrecondition) {
-		t.Fatalf("grantee HEAD write after the new owner: %v; want a CAS precondition failure", err)
-	}
-	// (a) The new owner claims first; the late grantee claim is fenced.
-	fresh := storage.NewMemChunkRemote()
-	seedDetachedHead(t, ctx, fresh, "node-a/"+oldLine.ReplicaID, oldLine.Epoch, 42)
-	if _, err := storage.ClaimChunkHead(ctx, fresh, ownerCfg); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := storage.ClaimChunkHead(ctx, fresh, granteeCfg); !errors.Is(err, storage.ErrChunkLayerFenced) {
-		t.Fatalf("late grantee claim after the new owner: %v; want fenced", err)
-	}
-	for _, r := range []*storage.MemChunkRemote{remote, fresh} {
-		if h, err := r.GetHead(ctx); err != nil || h.Epoch != grant.NewEpoch || h.Holder != "node-c/r1" {
-			t.Fatalf("HEAD after the late claim: %+v %v; want the new owner", h, err)
-		}
 	}
 }

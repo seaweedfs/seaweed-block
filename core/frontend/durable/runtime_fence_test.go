@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 // INV-FE-PRIMARY-READY-OPERATIONAL-001 (condition A): a HEAD fence after
@@ -26,8 +26,9 @@ func TestWALStoreChunk_RuntimeHeadFenceLatchesNotOperational(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			remote := storage.NewMemChunkRemote()
-			p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+			// Move the provider's own layout HEAD, which its publications read.
+			fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+			p := layoutChunkProvider(t, t.TempDir(), fixture, v1View(), 0)
 			s := openRecovered(t, p)
 			if _, err := s.Write(1, block(1)); err != nil {
 				t.Fatal(err)
@@ -43,13 +44,16 @@ func TestWALStoreChunk_RuntimeHeadFenceLatchesNotOperational(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			head, err := remote.GetHead(ctx)
+			store, err := fixture.Catalog.Store(fixture.Ref)
 			if err != nil {
 				t.Fatal(err)
 			}
+			head := layoutHead(t, fixture)
 			next := head
 			next.Epoch, next.Holder = tc.epoch(head.Epoch), tc.holder
-			if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}, next); err != nil {
+			next.ClaimID = "foreign-claim"
+			next.Gen++
+			if err := store.UpdateHead(ctx, head.Gen, next); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.Write(2, block(2)); err != nil {
@@ -57,6 +61,8 @@ func TestWALStoreChunk_RuntimeHeadFenceLatchesNotOperational(t *testing.T) {
 			}
 			if _, err := p.CaptureVolume(ctx, "v1"); err == nil {
 				t.Fatal("a capture over another holder's HEAD succeeded")
+			} else {
+				t.Logf("foreign HEAD capture refused: %v", err)
 			}
 			// From the fence on, no I/O is admitted (before the watcher runs).
 			if n, err := backend.Write(ctx, 3*4096, block(3)); err == nil || n != 0 {

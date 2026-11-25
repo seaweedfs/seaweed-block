@@ -67,7 +67,7 @@ const (
 	// ImplWALStoreChunk is a walstore volume with an attached chunk layer:
 	// an asynchronous remote copy of immutable chunks published by a HEAD
 	// compare-and-swap. On disk it is a walstore file. Requires
-	// ProviderConfig.ChunkRemoteFor. Opt-in proof of concept.
+	// ProviderConfig.ChunkLayoutHeadFor and ChunkLayoutRemoteFor.
 	ImplWALStoreChunk ImplName = "walstore-chunk"
 )
 
@@ -153,9 +153,6 @@ type ProviderConfig struct {
 	// restart and prove real replay. Default false.
 	WALRecoveryTestDisableFlusher bool
 
-	// ChunkRemoteFor returns the remote that holds volumeID's chunks and
-	// HEAD. Required for ImplWALStoreChunk, ignored otherwise.
-	ChunkRemoteFor func(volumeID string) (storage.ChunkRemote, error)
 	// ChunkLayoutHeadFor and ChunkLayoutRemoteFor select the content-named layout.
 	// The remote is constructed once, with the identity confirmed by Start.
 	ChunkLayoutHeadFor   func(string) (layout.StartStore, error)
@@ -410,11 +407,11 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 		return nil, fmt.Errorf("durable: unknown impl %q (want auto (empty), %q, %q, %q, or %q)",
 			cfg.Impl, ImplSmartWAL, ImplWALStore, ImplParallelWALStore, ImplWALStoreChunk)
 	}
-	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkRemoteFor == nil && cfg.ChunkLayoutRemoteFor == nil {
-		return nil, fmt.Errorf("durable: impl %q requires ProviderConfig.ChunkRemoteFor", ImplWALStoreChunk)
-	}
 	if (cfg.ChunkLayoutHeadFor == nil) != (cfg.ChunkLayoutRemoteFor == nil) {
 		return nil, errors.New("durable: both layout factories are required")
+	}
+	if cfg.Impl == ImplWALStoreChunk && cfg.ChunkLayoutHeadFor == nil {
+		return nil, fmt.Errorf("durable: impl %q requires the layout head and remote factories", ImplWALStoreChunk)
 	}
 	if cfg.ChunkCaptureInterval < 0 || cfg.ChunkCutTimeout < 0 || cfg.ChunkMaintenanceInterval < 0 || cfg.ChunkMaintenanceTimeout < 0 {
 		return nil, fmt.Errorf("durable: chunk schedule durations must not be negative")
@@ -858,20 +855,13 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 		if err != nil || p.cfg.Impl != ImplWALStoreChunk {
 			return h, err
 		}
-		if p.cfg.ChunkLayoutHeadFor != nil {
-			ws := h.storage.(*storage.WALStore)
-			_, fresh, ok := ws.LayoutIdentity()
-			if !ok {
-				_ = ws.Close()
-				return nil, errors.New("durable: legacy local root has no layout identity; recreate it")
-			}
-			h.fresh = fresh
-			return h, nil
+		ws := h.storage.(*storage.WALStore)
+		_, fresh, ok := ws.LayoutIdentity()
+		if !ok {
+			_ = ws.Close()
+			return nil, errors.New("durable: legacy local root has no layout identity; recreate it")
 		}
-		if h.fresh, err = fileExists(chunkFreshMarker(path)); err != nil {
-			_ = h.storage.Close()
-			return nil, fmt.Errorf("durable: stat fresh marker: %w", err)
-		}
+		h.fresh = fresh
 		return h, nil
 	}
 	// Existing storage ignores create geometry; admission precedes all fresh sidecars.
@@ -884,13 +874,6 @@ func (p *DurableProvider) openOrCreate(volumeID string) (*volHandle, error) {
 	// Headroom before any sidecar: a refused create leaves nothing behind.
 	if err := p.refuseCreateWithoutHeadroom(volumeID); err != nil {
 		return nil, err
-	}
-	if p.cfg.Impl == ImplWALStoreChunk && p.cfg.ChunkLayoutHeadFor == nil {
-		// Durable before the volume file exists: a crash anywhere between
-		// here and the first successful attach leaves a fresh volume.
-		if err := writeChunkFreshMarker(path); err != nil {
-			return nil, err
-		}
 	}
 	impl := p.cfg.Impl
 	if impl == ImplAuto {
@@ -983,7 +966,7 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 		// Zero (pre-G6 default) preserves strict checkpoint-driven
 		// recycle.
 		// Defer before Recover can publish a completed BASE away.
-		if impl == ImplWALStoreChunk && (p.cfg.ChunkRemoteFor != nil || p.cfg.ChunkLayoutHeadFor != nil) {
+		if impl == ImplWALStoreChunk {
 			ws.DeferBaseRetirementV3()
 		}
 		if p.cfg.WALRetentionLSNs > 0 {
@@ -1035,7 +1018,7 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 		if err != nil {
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)
 		}
-		if impl == ImplWALStoreChunk && p.cfg.ChunkLayoutHeadFor != nil {
+		if impl == ImplWALStoreChunk {
 			if err := initializeLayoutRoot(ws); err != nil {
 				_ = ws.Close()
 				return nil, err
@@ -1043,7 +1026,7 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 		}
 		// G6 §1.A α (see openExisting comment for semantics).
 		// Defer before Recover can publish a completed BASE away.
-		if impl == ImplWALStoreChunk && (p.cfg.ChunkRemoteFor != nil || p.cfg.ChunkLayoutHeadFor != nil) {
+		if impl == ImplWALStoreChunk {
 			ws.DeferBaseRetirementV3()
 		}
 		if p.cfg.WALRetentionLSNs > 0 {

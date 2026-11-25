@@ -14,41 +14,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-type freshCrashImage struct {
-	Head    storage.ChunkHead
-	Objects map[string][]byte
-}
-
-func freshCrashRemote(t *testing.T, path string) *storage.MemChunkRemote {
+func freshCrashFixture(t *testing.T, path string) *formatV3Fixture {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var img freshCrashImage
+	var img formatV3Image
 	if err = json.Unmarshal(raw, &img); err != nil {
 		t.Fatal(err)
 	}
-	remote := storage.NewMemChunkRemote()
-	ctx := context.Background()
-	for key, data := range img.Objects {
-		if err = remote.Put(ctx, key, data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for gen := uint64(0); gen < img.Head.Gen; gen++ {
-		current, e := remote.GetHead(ctx)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if _, e = remote.CASHead(ctx, storage.ChunkHeadVersion{Gen: current.Gen, Epoch: current.Epoch}, img.Head); e != nil {
-			t.Fatal(e)
-		}
-	}
-	return remote
+	return restoreFormatV3Image(t, img)
 }
 
 // The child exits after presence is durable but before the fresh marker is
@@ -70,8 +50,8 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if root := os.Getenv("SWBLOCK_V3_FRESH_CRASH_ROOT"); root != "" {
-		remote := freshCrashRemote(t, filepath.Join(root, "remote.json"))
-		p := mappedProviderV3(t, root, remote)
+		fixture := freshCrashFixture(t, filepath.Join(root, "layout.json"))
+		p := mappedProviderV3(t, root, fixture, formatV3TakeoverView{})
 		if os.Getenv("SWBLOCK_V3_FRESH_CRASH_MODE") == "capture" {
 			p.cfg.ChunkCaptureInterval = time.Hour
 		}
@@ -119,8 +99,8 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 			if mode == "complete" {
 				install()
 			}
-			if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); err != nil {
-				t.Fatal(err)
+			if id, fresh, ok := ws.LayoutIdentity(); !ok || !fresh || id == "" {
+				t.Fatalf("local layout identity was not durably fresh: id=%q fresh=%v ok=%v", id, fresh, ok)
 			}
 			if err := h.ApplyInstallEntry(5, bytes.Repeat([]byte{0x79}, 4096), 9); err != nil {
 				t.Fatal(err)
@@ -129,15 +109,10 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 				t.Fatal(err)
 			}
 			if mode == "capture" {
-				before, err := remote.GetHead(ctx)
+				beforeBytes, err := json.Marshal(fixture.image(t))
 				if err != nil {
 					t.Fatal(err)
 				}
-				beforeBytes, err := json.Marshal(before)
-				if err != nil {
-					t.Fatal(err)
-				}
-				puts := remote.Puts()
 				if _, err := p.CaptureVolume(ctx, "v1"); !errors.Is(err, ErrNotChunkVolume) {
 					t.Fatal("precommit CaptureVolume published before durable owner commit")
 				}
@@ -147,15 +122,11 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 				if err := p.MakeVolumeRemoteDurable(ctx, "v1", 9); !errors.Is(err, ErrNotChunkVolume) {
 					t.Fatal("precommit MakeVolumeRemoteDurable was admitted")
 				}
-				after, err := remote.GetHead(ctx)
+				afterBytes, err := json.Marshal(fixture.image(t))
 				if err != nil {
 					t.Fatal(err)
 				}
-				afterBytes, err := json.Marshal(after)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !bytes.Equal(beforeBytes, afterBytes) || remote.Puts() != puts || remote.OpenSession() != "" {
+				if !bytes.Equal(beforeBytes, afterBytes) || fixture.head(t).Activity != (layout.Activity{Kind: layout.ActIdle}) {
 					t.Fatal("refused precommit publication changed remote state")
 				}
 				p.mu.Lock()
@@ -167,7 +138,7 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 				}
 				fmt.Println("FRESH_CAPTURE_REFUSED no_remote_effect=true scheduler_hidden=true")
 			}
-			fmt.Println("FRESH_CRASH_READY presence_saved=true marker_present=true ack=9 no_Close=true")
+			fmt.Println("FRESH_CRASH_READY presence_saved=true descriptor_fresh=true ack=9 no_Close=true")
 			os.Exit(0)
 			return nil
 		}
@@ -177,8 +148,8 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 		t.Fatal("crash boundary not reached")
 	}
 	root := t.TempDir()
-	remote := storage.NewMemChunkRemote()
-	source := mappedProviderV3(t, t.TempDir(), remote)
+	fixture := newFormatV3Fixture(t)
+	source := mappedProviderV3(t, t.TempDir(), fixture, formatV3View{})
 	if _, err := source.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -199,23 +170,11 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 	if err := source.Close(); err != nil {
 		t.Fatal(err)
 	}
-	head, err := remote.GetHead(ctx)
+	raw, err := json.Marshal(fixture.image(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	img := freshCrashImage{Head: head, Objects: map[string][]byte{}}
-	for _, ref := range head.Chunks {
-		data, e := remote.Get(ctx, ref.Key)
-		if e != nil {
-			t.Fatal(e)
-		}
-		img.Objects[ref.Key] = data
-	}
-	raw, err := json.Marshal(img)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(root, "remote.json"), raw, 0600); err != nil {
+	if err = os.WriteFile(filepath.Join(root, "layout.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDurableProviderV3_FreshMarkerCrashKeepsCompletedBASE$", "-test.v")
@@ -226,15 +185,16 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(out, []byte("FRESH_CRASH_READY presence_saved=true marker_present=true ack=9 no_Close=true")) {
+	if !bytes.Contains(out, []byte("FRESH_CRASH_READY presence_saved=true descriptor_fresh=true ack=9 no_Close=true")) {
 		t.Fatal("child missed crash boundary")
 	}
-	p := mappedProviderV3(t, root, freshCrashRemote(t, filepath.Join(root, "remote.json")))
-	if _, err = os.Stat(chunkFreshMarker(p.volumePath("v1"))); err != nil {
-		t.Fatal("crash marker missing", err)
-	}
-	if _, err = p.EnsureStorage("v1"); err != nil {
+	p := mappedProviderV3(t, root, freshCrashFixture(t, filepath.Join(root, "layout.json")), formatV3TakeoverView{})
+	st, err := p.EnsureStorage("v1")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if id, fresh, ok := st.(*storage.WALStore).LayoutIdentity(); !ok || !fresh || id == "" {
+		t.Fatalf("crash lost fresh descriptor: id=%q fresh=%v ok=%v", id, fresh, ok)
 	}
 	if _, err = p.RecoverVolume(ctx, "v1"); err != nil {
 		t.Fatalf("post-presence/pre-marker crash lost completed BASE recovery: %v", err)
@@ -252,8 +212,7 @@ func freshMarkerCrashKeepsCompletedBASE(t *testing.T, mode string) {
 func TestDurableProviderV3_AttachCommitRetryKeepsLayerPrivate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	p := mappedProviderV3(t, t.TempDir(), remote)
+	p := mappedProviderV3(t, t.TempDir(), newFormatV3Fixture(t), formatV3View{})
 	p.cfg.ChunkCaptureInterval = time.Hour
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
@@ -274,8 +233,8 @@ func TestDurableProviderV3_AttachCommitRetryKeepsLayerPrivate(t *testing.T) {
 	if _, err := p.CaptureVolume(ctx, "v1"); !errors.Is(err, ErrNotChunkVolume) {
 		t.Fatal("failed commit capture", err)
 	}
-	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); err != nil {
-		t.Fatal(err)
+	if id, fresh, ok := p.volumes["v1"].storage.(*storage.WALStore).LayoutIdentity(); !ok || !fresh || id == "" {
+		t.Fatalf("failed owner commit lost fresh descriptor: id=%q fresh=%v ok=%v", id, fresh, ok)
 	}
 	p.testBeforeChunkFreshRetire = nil
 	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {
@@ -287,8 +246,8 @@ func TestDurableProviderV3_AttachCommitRetryKeepsLayerPrivate(t *testing.T) {
 	if !correct {
 		t.Fatal("commit did not publish the same pending layer and scheduler")
 	}
-	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); !os.IsNotExist(err) {
-		t.Fatal("committed marker remains", err)
+	if id, fresh, ok := p.volumes["v1"].storage.(*storage.WALStore).LayoutIdentity(); !ok || fresh || id == "" {
+		t.Fatalf("successful commit retained fresh descriptor: id=%q fresh=%v ok=%v", id, fresh, ok)
 	}
 	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatal("postcommit capture", err)

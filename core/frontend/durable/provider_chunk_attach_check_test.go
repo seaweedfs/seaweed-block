@@ -10,8 +10,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 // orderLog records the hook and the remote calls in the order they ran.
@@ -32,32 +33,40 @@ func (l *orderLog) snapshot() []string {
 	return append([]string(nil), l.ops...)
 }
 
-type loggedRemote struct {
-	storage.ChunkRemote
+type loggedStartStore struct {
+	layout.StartStore
 	log *orderLog
 }
 
-func (r loggedRemote) GetHead(ctx context.Context) (storage.ChunkHead, error) {
-	r.log.add("gethead")
-	return r.ChunkRemote.GetHead(ctx)
+func (s loggedStartStore) ReadHead(ctx context.Context) (layout.Head, bool, error) {
+	s.log.add("readhead")
+	return s.StartStore.ReadHead(ctx)
 }
 
-func (r loggedRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
-	r.log.add("cas")
-	return r.ChunkRemote.CASHead(ctx, expected, next)
+func (s loggedStartStore) UpdateHead(ctx context.Context, expected uint64, next layout.Head) error {
+	s.log.add("updatehead")
+	return s.StartStore.UpdateHead(ctx, expected, next)
 }
 
-func checkedProvider(t *testing.T, remote storage.ChunkRemote, check func(context.Context, string, durable.ChunkGeometry) error) *durable.DurableProvider {
+func checkedProvider(t *testing.T, fixture *testutil.LayoutFixture, log *orderLog, check func(context.Context, string, durable.ChunkGeometry) error) *durable.DurableProvider {
 	t.Helper()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	cfg := durable.ProviderConfig{
 		Impl:             durable.ImplWALStoreChunk,
 		StorageRoot:      t.TempDir(),
 		BlockSize:        4096,
 		NumBlocks:        pcBlocks,
 		ChunkBlocks:      pcChunkBlocks,
-		ChunkRemoteFor:   func(string) (storage.ChunkRemote, error) { return remote, nil },
 		ChunkAttachCheck: check,
-	}, v1View())
+	}
+	fixture.Configure(&cfg)
+	cfg.ChunkLayoutHeadFor = func(string) (layout.StartStore, error) {
+		st, err := fixture.Catalog.Store(fixture.Ref)
+		if err != nil {
+			return nil, err
+		}
+		return loggedStartStore{StartStore: st, log: log}, nil
+	}
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatalf("NewDurableProvider: %v", err)
 	}
@@ -68,7 +77,7 @@ func checkedProvider(t *testing.T, remote storage.ChunkRemote, check func(contex
 func TestWALStoreChunk_AttachCheckRunsFirstWithLocalGeometry(t *testing.T) {
 	log := &orderLog{}
 	var got durable.ChunkGeometry
-	p := checkedProvider(t, loggedRemote{ChunkRemote: storage.NewMemChunkRemote(), log: log},
+	p := checkedProvider(t, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), log,
 		func(_ context.Context, vol string, g durable.ChunkGeometry) error {
 			log.add("check:" + vol)
 			got = g
@@ -87,7 +96,7 @@ func TestWALStoreChunk_AttachCheckRunsFirstWithLocalGeometry(t *testing.T) {
 func TestWALStoreChunk_AttachCheckRefusalStopsAttach(t *testing.T) {
 	refused := errors.New("geometry_mismatch")
 	log := &orderLog{}
-	p := checkedProvider(t, loggedRemote{ChunkRemote: storage.NewMemChunkRemote(), log: log},
+	p := checkedProvider(t, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), log,
 		func(context.Context, string, durable.ChunkGeometry) error { return refused })
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
