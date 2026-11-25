@@ -568,6 +568,13 @@ func (h *Host) runRoleRetry(ctx context.Context) {
 	}
 }
 
+// supersedesPendingLocked reports whether a supporting fact at epoch may
+// clear or replace the pending assignment: only one at its epoch or below
+// (selfFenceMu held).
+func (h *Host) supersedesPendingLocked(epoch uint64) bool {
+	return h.pendingSupport == nil || h.pendingSupport.info.Epoch <= epoch
+}
+
 // completeSupportingIfCurrentLocked is the one completion of a supporting
 // assignment, for the fact's own successful role call and for the retry's:
 // it completes only while the desired role is still replica at info's epoch
@@ -1055,15 +1062,21 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 				h.log.Printf("blockvolume: volume %s could not admit its replica listener at epoch %d: %v — NOT admitting supporting replica (fail-closed)",
 					h.cfg.VolumeID, info.Epoch, err)
 				h.selfFenceMu.Lock()
-				h.pendingSupport = nil
-				if !errors.Is(err, ErrRoleRefused) && h.selfRole == selfRoleReplica && h.selfEpoch == info.Epoch {
-					h.pendingSupport = &pendingSupport{info: info, primary: fact.ReplicaId}
+				// An older fact (a late replay) never touches a newer
+				// pending assignment: it neither clears nor replaces it.
+				if h.supersedesPendingLocked(info.Epoch) {
+					h.pendingSupport = nil
+					if !errors.Is(err, ErrRoleRefused) && h.selfRole == selfRoleReplica && h.selfEpoch == info.Epoch {
+						h.pendingSupport = &pendingSupport{info: info, primary: fact.ReplicaId}
+					}
 				}
 				h.selfFenceMu.Unlock()
 				return
 			}
 			h.selfFenceMu.Lock()
-			h.pendingSupport = nil // this fact supersedes any skipped one
+			if h.supersedesPendingLocked(info.Epoch) {
+				h.pendingSupport = nil // this fact supersedes a skipped one at its epoch or below
+			}
 			h.completeSupportingIfCurrentLocked(info, fact.ReplicaId)
 			h.selfFenceMu.Unlock()
 			return

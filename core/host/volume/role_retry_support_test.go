@@ -96,3 +96,50 @@ func TestRoleRetryCompletesTheSkippedSupportingAssignment(t *testing.T) {
 		})
 	}
 }
+
+// A late older fact never clears a newer pending assignment: the fact at 3
+// fails its role call (pending at 3), a late replay at 2 arrives (its role
+// call is refused as stale), and the retry then completes epoch 3 (the
+// adapter takes 3, the supporting admission is at 3, its marker is sent).
+func TestALateOlderFactNeverClearsANewerPendingAssignment(t *testing.T) {
+	min, max := roleRetryMin, roleRetryMax
+	roleRetryMin, roleRetryMax = time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { roleRetryMin, roleRetryMax = min, max })
+
+	markers := make(chan adapter.AssignmentInfo, 8)
+	h, err := New(Config{MasterAddr: "127.0.0.1:1", ServerID: "sB", VolumeID: "vol1", ReplicaID: "rB", DataAddr: "127.0.0.1:5", CtrlAddr: "127.0.0.1:6", ReadyMarker: markers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adpt := &assignedEpochs{}
+	h.adpt = adpt
+	if err := h.SetSelfFence(&flakyListener{fails: 1, err: errors.New("replica floor record write: permission denied")}); err != nil {
+		t.Fatal(err)
+	}
+	h.applyFact(supportingFact(3)) // its role call fails: pending at 3
+	h.applyFact(supportingFact(2)) // a late replay of an older line
+
+	ctx, cancel := context.WithCancel(context.Background())
+	h.wg.Add(1)
+	go h.runRoleRetry(ctx)
+	defer func() { cancel(); h.wg.Wait() }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && supportingEpoch(h) != 3 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := supportingEpoch(h); got != 3 {
+		t.Fatalf("supporting admission at epoch %d after the retry; want 3 (the late fact at 2 cleared the pending assignment)", got)
+	}
+	if got := adpt.last(); got != 3 {
+		t.Fatalf("adapter at epoch %d; want 3", got)
+	}
+	select {
+	case m := <-markers:
+		if m.Epoch != 3 {
+			t.Fatalf("ready marker for epoch %d; want 3", m.Epoch)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no ready marker for epoch 3")
+	}
+}
