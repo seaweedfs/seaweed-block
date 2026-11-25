@@ -153,6 +153,12 @@ type Host struct {
 	selfRole     selfRole
 	selfEpoch    uint64
 	selfHasPeers bool
+	// shipPrepared: the replication ship order was moved to the store since
+	// this host last took a replica role (from which it may apply
+	// replicated entries that never pass its own ship order). Separate from
+	// selfRole, which a primary fence sets before the move succeeds (and
+	// which the excluded-replica path sets only to close ingress).
+	shipPrepared bool
 	// roleAdmissionFailed (G1) latches a failed role call on the listener
 	// (a floor that could not be persisted, or a fence that did not drain).
 	// While set, the frontend projection is not Healthy, so writes refuse
@@ -497,6 +503,9 @@ func (h *Host) fenceSelfWithPeers(role selfRole, epoch uint64, hasPeers bool) er
 		return fmt.Errorf("stale role call at epoch %d (current desired epoch %d)", epoch, h.selfEpoch)
 	}
 	h.selfRole, h.selfEpoch, h.selfHasPeers = role, epoch, hasPeers
+	if role == selfRoleReplica {
+		h.shipPrepared = false
+	}
 	if h.selfFence == nil {
 		return nil
 	}
@@ -933,9 +942,6 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// Step (2c): identity install only after replication is live.
 	// SOLE permitted decode path. See subscribe.go.
 	info := decodeAssignmentFact(fact)
-	h.selfFenceMu.Lock()
-	wasPrimary := h.selfRole == selfRolePrimary
-	h.selfFenceMu.Unlock()
 	// G2: fence our own replica listener at this epoch before the adapter
 	// can turn Healthy and the frontend serves IO, so a deposed primary that
 	// still reaches us cannot get its writes applied (or counted) here.
@@ -952,12 +958,18 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// write waits for an LSN that never comes. Its listener is fenced as
 	// primary now (no replicated entry lands any more) and the frontend is
 	// not serving yet (no local write is pending).
-	if r, ok := rv.(interface{ RebaseShipToStore() error }); ok && rv != nil && !wasPrimary {
+	h.selfFenceMu.Lock()
+	prepared := h.shipPrepared
+	h.selfFenceMu.Unlock()
+	if r, ok := rv.(interface{ RebaseShipToStore() error }); ok && rv != nil && !prepared {
 		if err := r.RebaseShipToStore(); err != nil {
 			h.log.Printf("blockvolume: volume %s could not move its ship order to the store at epoch %d: %v — NOT applying to adapter (fail-closed)",
 				h.cfg.VolumeID, info.Epoch, err)
 			return
 		}
+		h.selfFenceMu.Lock()
+		h.shipPrepared = true
+		h.selfFenceMu.Unlock()
 	}
 	if h.cfg.RF1Only != "" && !h.admitRF1(fact.Epoch) {
 		h.log.Printf("blockvolume: volume %s RF1 assignment at epoch %d overtaken by a newer refusal — NOT applying to adapter",
