@@ -18,7 +18,11 @@ func TestProbeRound_AnOldRoundsLateAnswerIsRefusedByTheNewRound(t *testing.T) {
 
 	var mu sync.Mutex
 	var held *control.ProbeAnswer // round A's answer, held back
-	delivered := make(chan bool, 1)
+	type delivery struct {
+		accepted, newerOpen bool
+		roundA, roundB      uint64
+	}
+	delivered := make(chan delivery, 1)
 	roundNode(t, hub, "s2", func(r *control.ProbeRound) *control.ProbeAnswer {
 		mu.Lock()
 		defer mu.Unlock()
@@ -28,7 +32,14 @@ func TestProbeRound_AnOldRoundsLateAnswerIsRefusedByTheNewRound(t *testing.T) {
 			return nil
 		}
 		// round B: only round A's answer arrives now; B's own never does.
-		delivered <- hub.deliver(held)
+		// Round B must be open (registered) at that moment and distinct
+		// from A, so the refusal is the new round's, not a closed hub's.
+		hub.mu.Lock()
+		_, open := hub.rounds[r.RoundId]
+		hub.mu.Unlock()
+		d := delivery{roundA: held.RoundId, roundB: r.RoundId, newerOpen: open && r.RoundId != held.RoundId}
+		d.accepted = hub.deliver(held)
+		delivered <- d
 		return nil
 	})
 
@@ -44,8 +55,20 @@ func TestProbeRound_AnOldRoundsLateAnswerIsRefusedByTheNewRound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok := <-delivered; ok {
-		t.Fatal("the hub accepted round A's answer while round B was open")
+	var d delivery
+	select {
+	case d = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("round A's answer was never delivered during round B")
+	}
+	mu.Lock()
+	captured := held != nil
+	mu.Unlock()
+	if !captured || !d.newerOpen {
+		t.Fatalf("no newer round open at the late delivery: captured=%v delivery=%+v", captured, d)
+	}
+	if d.accepted {
+		t.Fatalf("the hub accepted round A's answer (round %d) while round B (round %d) was open", d.roundA, d.roundB)
 	}
 	if len(b.Candidates) != 1 || b.Candidates[0].Ready || b.Candidates[0].DurableLSN != 0 {
 		t.Fatalf("round B counted round A's late answer: %+v", b.Candidates)
