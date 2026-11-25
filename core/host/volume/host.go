@@ -176,14 +176,17 @@ type Host struct {
 	// re-applies the current role until it succeeds or is refused for good.
 	// Under selfFenceMu.
 	roleRetry bool
-	// factMu serialises applyFact (the subscription stream, the readiness
-	// replay) with runRoleRetry's completion of a skipped supporting
-	// assignment. Lock order: factMu, then selfFenceMu.
-	factMu sync.Mutex
-	// pendingSupport (under factMu): the supporting assignment the last
-	// fact skipped because its replica role call failed with an error a
-	// retry may outlast. runRoleRetry completes it once the role call
-	// succeeds at its epoch; any later fact supersedes it.
+	// supportMu orders the completion of a supporting assignment: the fact
+	// path's (after its role call) and runRoleRetry's (after a retried role
+	// call), so an older epoch's completion never lands after a newer one's.
+	// Lock order: supportMu, then selfFenceMu; the fact path takes it only
+	// after fenceSelf released selfFenceMu. Nothing under it applies a fact.
+	supportMu sync.Mutex
+	// pendingSupport (under supportMu): the supporting assignment a fact
+	// skipped because its replica role call failed with an error a retry
+	// may outlast. runRoleRetry completes it once the role call succeeds
+	// while this host still wants the replica role at that epoch; a newer
+	// fact supersedes it (it moves selfEpoch or the role, or replaces it).
 	pendingSupport *pendingSupport
 	// RF1Only admission state, one unit under rf1Mu (field access only, no
 	// calls): the highest refused epoch with its reason ("" = cleared), and the
@@ -526,11 +529,11 @@ func (h *Host) runRoleRetry(ctx context.Context) {
 			return
 		case <-time.After(delay):
 		}
-		h.factMu.Lock()
+		h.supportMu.Lock()
 		h.selfFenceMu.Lock()
 		if !h.roleRetry || h.selfFence == nil || h.selfRole != selfRoleReplica {
 			h.selfFenceMu.Unlock()
-			h.factMu.Unlock()
+			h.supportMu.Unlock()
 			delay = roleRetryMin
 			continue
 		}
@@ -541,17 +544,17 @@ func (h *Host) runRoleRetry(ctx context.Context) {
 		if err == nil {
 			h.log.Printf("blockvolume: replica role at epoch %d admitted on retry", epoch)
 			// Finish what the fact skipped when its role call failed, as the
-			// assignment path would have after a successful one (factMu held:
-			// no fact can be applied in between).
+			// assignment path would have after a successful one. supportMu is
+			// held: a newer fact's completion waits for this one.
 			if p := h.pendingSupport; p != nil && p.info.Epoch == epoch {
 				h.pendingSupport = nil
 				h.completeSupporting(p.info, p.primary)
 			}
-			h.factMu.Unlock()
+			h.supportMu.Unlock()
 			delay = roleRetryMin
 			continue
 		}
-		h.factMu.Unlock()
+		h.supportMu.Unlock()
 		if delay *= 2; delay > roleRetryMax {
 			delay = roleRetryMax
 		}
@@ -991,15 +994,6 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // OnAssignment could flip the projection Healthy before peers were
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
-	h.factMu.Lock()
-	defer h.factMu.Unlock()
-	// A newer fact supersedes a supporting assignment still waiting for
-	// its role call.
-	h.pendingSupport = nil
-	h.applyFactLocked(fact)
-}
-
-func (h *Host) applyFactLocked(fact *control.AssignmentFact) {
 	// INV-AUTH-HOLDER-IDENTITY-001: matching r1 and loopback endpoints do not identify a host.
 	if h.refusePrimaryAssignment(fact) {
 		return
@@ -1027,12 +1021,18 @@ func (h *Host) applyFactLocked(fact *control.AssignmentFact) {
 				// once it succeeds; a later fact supersedes it.
 				h.log.Printf("blockvolume: volume %s could not admit its replica listener at epoch %d: %v — NOT admitting supporting replica (fail-closed)",
 					h.cfg.VolumeID, info.Epoch, err)
+				h.supportMu.Lock()
+				h.pendingSupport = nil
 				if !errors.Is(err, ErrRoleRefused) {
 					h.pendingSupport = &pendingSupport{info: info, primary: fact.ReplicaId}
 				}
+				h.supportMu.Unlock()
 				return
 			}
+			h.supportMu.Lock()
+			h.pendingSupport = nil // this fact supersedes any skipped one
 			h.completeSupporting(info, fact.ReplicaId)
+			h.supportMu.Unlock()
 			return
 		}
 		// The new authoritative set excludes us: close assignment-gated
