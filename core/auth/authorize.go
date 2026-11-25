@@ -144,7 +144,7 @@ func (a *Authenticator) UnaryInterceptor(rules map[string]Rule) grpc.UnaryServer
 			return nil, err
 		}
 		if rules[info.FullMethod].Strict {
-			if err := a.audit.attempt(info.FullMethod, p); err != nil {
+			if err := a.auditLog().attempt(info.FullMethod, p); err != nil {
 				return nil, status.Errorf(codes.Unavailable, "%v: %s was not run (an unwritable audit log stops operator changes, never the volumes)", err, info.FullMethod)
 			}
 		}

@@ -46,6 +46,9 @@ func (a authFlags) validate(insecureExternalBind bool) error {
 	if a.tlsCert == "" || a.tlsKey == "" || a.tlsClientCA == "" || a.roleFile == "" {
 		return fmt.Errorf("authentication needs --tls-cert, --tls-key, --tls-client-ca and --role-file together")
 	}
+	if a.auditLog == "" {
+		return fmt.Errorf("authentication needs --audit-log: every changing call is recorded before it runs, and is refused when it cannot be")
+	}
 	if insecureExternalBind {
 		return fmt.Errorf("--insecure-external-bind cannot be combined with mutual TLS: the authenticated listener may bind any address; drop the flag")
 	}

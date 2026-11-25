@@ -52,15 +52,17 @@ func bypassUses(f *ast.File, inAuth bool) []string {
 				}
 			}
 		}
+		sel := map[*ast.Ident]bool{} // a selector's field name is not a bare use
 		ast.Inspect(decl, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.SelectorExpr:
+				sel[x.Sel] = true
 				if id, ok := x.X.(*ast.Ident); ok && names[id.Name] && devBypass[x.Sel.Name] {
 					uses = append(uses, where+"."+x.Sel.Name)
 				}
-				return false // the selector's own identifiers are not bare uses
+				return true // the receiver may hold another use
 			case *ast.Ident:
-				if dot && devBypass[x.Name] && x != skip {
+				if dot && devBypass[x.Name] && x != skip && !sel[x] {
 					uses = append(uses, where+"."+x.Name)
 				}
 			}

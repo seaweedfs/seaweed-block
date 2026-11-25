@@ -64,6 +64,7 @@ type AuditLog struct {
 	pending  sync.WaitGroup
 	errs     atomic.Int64 // lines dropped (queue full) or not written
 	dropping atomic.Bool  // inside an overflow burst (logged once)
+	warn     chan struct{} // wakes the overflow warner; never blocks a caller
 }
 
 // NewAuditLog writes to w; now nil is time.Now.
@@ -71,8 +72,9 @@ func NewAuditLog(w io.Writer, now func() time.Time) *AuditLog {
 	if now == nil {
 		now = time.Now
 	}
-	l := &AuditLog{now: now, refused: map[string]time.Time{}, q: make(chan auditLine, auditQueue)}
+	l := &AuditLog{now: now, refused: map[string]time.Time{}, q: make(chan auditLine, auditQueue), warn: make(chan struct{}, 1)}
 	go l.run(w)
+	go l.warner()
 	return l
 }
 
@@ -113,19 +115,38 @@ func (l *AuditLog) enqueue(e AuditEvent) {
 	case l.q <- auditLine{b: append(raw, '\n')}:
 	default:
 		l.pending.Done()
-		l.errs.Add(1)
-		if !l.dropping.Swap(true) {
-			log.Printf("blockmaster: audit log queue full: best-effort audit lines are being dropped (counted in /status/audit)")
+		l.dropped()
+	}
+}
+
+// dropped counts a discarded line and, once per overflow burst, wakes the
+// warner without waiting: the caller never does logging I/O.
+func (l *AuditLog) dropped() {
+	l.errs.Add(1)
+	if !l.dropping.Swap(true) {
+		select {
+		case l.warn <- struct{}{}:
+		default:
 		}
 	}
 }
 
+// warner logs one line per overflow burst, off every caller's path.
+func (l *AuditLog) warner() {
+	for range l.warn {
+		log.Printf("blockmaster: audit log queue full: audit lines are being dropped (counted in /status/audit)")
+	}
+}
+
 // attempt writes a strict call's attempt line before its handler runs, and
-// waits for the writer within AuditAttemptBound. Any failure (queue full,
-// write error, timeout) is ErrAuditUnavailable: the caller refuses the call.
+// waits for the writer within AuditAttemptBound. Any failure (no audit log
+// configured, queue full, write error, timeout) is ErrAuditUnavailable: the
+// caller refuses the call. The wait does not observe the RPC's context: a
+// caller that cancels still gets the refusal or the run, never a promise that
+// a cancelled call did nothing.
 func (l *AuditLog) attempt(method string, p Principal) error {
 	if l == nil {
-		return nil // no audit log configured
+		return fmt.Errorf("%w: no audit log is configured (--audit-log)", ErrAuditUnavailable)
 	}
 	raw, err := json.Marshal(AuditEvent{Time: l.now(), Event: "attempt", Method: method, Role: p.Role, ID: p.ID, Fingerprint: p.Fingerprint, Result: "pending"})
 	if err != nil {
@@ -137,6 +158,7 @@ func (l *AuditLog) attempt(method string, p Principal) error {
 	case l.q <- auditLine{b: append(raw, '\n'), done: done}:
 	default:
 		l.pending.Done()
+		l.dropped()
 		return fmt.Errorf("%w: the audit queue is full", ErrAuditUnavailable)
 	}
 	timer := time.NewTimer(AuditAttemptBound)
@@ -155,8 +177,9 @@ func (l *AuditLog) attempt(method string, p Principal) error {
 // Flush waits until every queued line has been written (or failed).
 func (l *AuditLog) Flush() { l.pending.Wait() }
 
-// call records one call's outcome under the rules above. p is zero when
-// the caller could not be authenticated.
+// call records one call's outcome under the rules above: the authorization
+// outcome (admitted, or the refusal's code), not the operation's own result.
+// p is zero when the caller could not be authenticated.
 func (l *AuditLog) call(method string, p Principal, err error) {
 	if l == nil || (err == nil && p.Role == RoleNode) {
 		return // accepted node calls are not audited, and wait on nothing

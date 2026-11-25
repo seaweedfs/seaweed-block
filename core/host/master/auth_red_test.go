@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -47,11 +48,13 @@ func startAuthMaster(t *testing.T) authMaster {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authn := auth.NewAuthenticator(table, nil)
+	authn.SetAudit(auth.NewAuditLog(io.Discard, nil)) // strict calls need an audit log
 	h, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true,
 		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
 			return authority.WorkspaceHead{Gen: 2, Epoch: 1, Holder: "node-a/r1"}, nil
 		},
-		Auth: auth.NewAuthenticator(table, nil), ServerOptions: []grpc.ServerOption{creds}})
+		Auth: authn, ServerOptions: []grpc.ServerOption{creds}})
 	if err != nil {
 		t.Fatal(err)
 	}

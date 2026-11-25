@@ -108,7 +108,7 @@ func newProcedureTLS(t *testing.T, dir string, servers []string, notAfter map[st
 
 func (p *procedureTLS) masterArgs() []string {
 	return []string{"--tls-cert", p.path("master", ".crt"), "--tls-key", p.path("master", ".key"),
-		"--tls-client-ca", p.path("ca", ".crt"), "--role-file", p.roles}
+		"--tls-client-ca", p.path("ca", ".crt"), "--role-file", p.roles, "--audit-log", p.path("audit", ".log")}
 }
 
 // volumeArgs is the node identity of server for blockvolume.

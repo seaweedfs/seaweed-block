@@ -124,6 +124,9 @@ type Authenticator struct {
 // Set before serving.
 func (a *Authenticator) SetAudit(l *AuditLog) { a.audit = l }
 
+// auditLog is the configured audit log, nil when none is.
+func (a *Authenticator) auditLog() *AuditLog { return a.audit }
+
 // NewAuthenticator starts with t; now nil is time.Now.
 func NewAuthenticator(t *Table, now func() time.Time) *Authenticator {
 	if now == nil {

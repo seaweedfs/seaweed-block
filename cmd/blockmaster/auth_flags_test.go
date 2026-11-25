@@ -10,7 +10,7 @@ import (
 // without them the control listener stays loopback-only.
 func TestAuthFlags(t *testing.T) {
 	base := []string{"--authority-store", t.TempDir()}
-	all := []string{"--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem", "--role-file", "roles"}
+	all := []string{"--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem", "--role-file", "roles", "--audit-log", "audit.log"}
 	for _, c := range []struct {
 		name string
 		args []string
@@ -22,6 +22,7 @@ func TestAuthFlags(t *testing.T) {
 		{"partial: no role file", []string{"--listen", "10.0.0.5:9180", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem"}, "together"},
 		{"partial: role file only", []string{"--role-file", "roles"}, "together"},
 		{"audit log without authentication", []string{"--audit-log", "audit.log"}, "needs authentication"},
+		{"authentication without an audit log", []string{"--listen", "10.0.0.5:9180", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-client-ca", "ca.pem", "--role-file", "roles"}, "needs --audit-log"},
 		{"authenticated with --insecure-external-bind", append([]string{"--listen", "10.0.0.5:9180", "--insecure-external-bind"}, all...), "cannot be combined"},
 	} {
 		_, err := parseFlags(append(append([]string{}, base...), c.args...))
