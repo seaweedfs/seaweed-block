@@ -148,6 +148,9 @@ type memHead struct {
 	after   bool
 	dead    bool
 	hook    func() // runs between a read and the next update
+	// afterRead runs once after a ReadHead returned (another actor acting
+	// right after this reader's view of HEAD).
+	afterRead func()
 }
 
 var errKilled = errors.New("process killed")
@@ -163,6 +166,11 @@ func (m *memHead) ReadHead(context.Context) (Head, bool, error) {
 	}
 	b, _ := m.h.Encode()
 	h, err := DecodeHead(b, m.h.Gen, m.h.VolumeID)
+	if m.afterRead != nil {
+		f := m.afterRead
+		m.afterRead = nil
+		defer func() { m.mu.Unlock(); f(); m.mu.Lock() }()
+	}
 	return h, true, err
 }
 
@@ -196,6 +204,29 @@ func (m *memHead) UpdateHead(_ context.Context, gen uint64, next Head) error {
 		m.dead = true
 		return errKilled
 	}
+	return nil
+}
+
+// CreateDeletedHead writes a deleted HEAD exclusively (a tombstone).
+func (m *memHead) CreateDeletedHead(_ context.Context, h Head) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dead {
+		return errKilled
+	}
+	if m.h != nil {
+		return ErrExists
+	}
+	if h.State != StateDeleted {
+		return errors.New("only a deleted HEAD is created")
+	}
+	if _, err := h.Encode(); err != nil {
+		return err
+	}
+	n := h.clone()
+	n.Gen = 1
+	m.h = &n
+	m.updates++
 	return nil
 }
 

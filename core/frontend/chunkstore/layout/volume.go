@@ -47,6 +47,14 @@ func ParseVolumeID(s string) (VolumeID, error) {
 	return id, nil
 }
 
+// VolumeDir is the directory of a volume under the store's base:
+// <name>-<first 8 hex of the volume id>. It is created exclusively and
+// never reused, so a volume created again under a name gets another
+// directory; it is resolved only from the master's volume record.
+func VolumeDir(name string, id VolumeID) string {
+	return name + "-" + id.String()[:8]
+}
+
 // VolumeFormat is the layout format a VOLUME record declares.
 const VolumeFormat = 1
 
