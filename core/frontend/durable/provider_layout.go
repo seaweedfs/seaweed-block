@@ -43,6 +43,14 @@ func startLayoutRoot(ctx context.Context, ws *storage.WALStore, st layout.StartS
 	position, _, _ := ws.Boundaries()
 	h, err := layout.Start(ctx, st, grantedLayoutLine(line), line, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: uint64(ws.NumBlocks()) * uint64(ws.BlockSize()), BlockSize: uint32(ws.BlockSize()), ChunkBytes: uint64(ws.ChunkBlocks()) * uint64(ws.BlockSize())}, ClaimID: id, Fresh: fresh, Position: position})
 	if err != nil {
+		if errors.Is(err, layout.ErrNotHolder) {
+			// A different holder at or beyond our granted epoch is a final
+			// refusal. Below the grant, Start may still claim normally.
+			observed, found, readErr := st.ReadHead(ctx)
+			if readErr == nil && found && observed.Epoch >= line.Epoch {
+				err = errors.Join(err, storage.ErrChunkLayerFenced, errChunkForeignClaim)
+			}
+		}
 		return layout.Head{}, fmt.Errorf("durable: layout Start: %w", err)
 	}
 	return h, nil
