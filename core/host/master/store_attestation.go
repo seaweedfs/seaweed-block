@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -190,7 +189,6 @@ func (h *Host) ingestStoreAttestation(server string, att *control.StoreAttestati
 	}
 	vol := att.GetVolumeId()
 	line, published := h.Publisher().PublishedAuthorityLine(vol)
-	log.Printf("DEBUG attest from=%s att=%v published=%t line=%+v owner=%q", server, att, published, line, h.workspaceLineOwner(line, vol, line.ReplicaID, line.Epoch))
 	if !published || line.ReplicaID != att.GetReplicaId() || line.Epoch != att.GetEpoch() ||
 		h.workspaceLineOwner(line, vol, line.ReplicaID, line.Epoch) != server {
 		return nil

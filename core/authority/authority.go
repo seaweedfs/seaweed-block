@@ -432,7 +432,6 @@ func (p *Publisher) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		log.Printf("DEBUG publisher got %s %s %v", ask.VolumeID, ask.ReplicaID, ask.Intent)
 		if applyErr := p.apply(ask); applyErr != nil {
 			log.Printf("authority: rejected ask %+v: %v", ask, applyErr)
 			continue

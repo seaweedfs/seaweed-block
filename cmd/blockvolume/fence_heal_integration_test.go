@@ -57,17 +57,6 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 		"--cluster-spec", spec, "--expected-slots-per-volume", "3", "--lifecycle-product-loop-interval", "200ms",
 		"--freshness-window", "2s", "--launcher-replication-ack", "sync-quorum", "--listen", h.masterAddr)
 	master.waitLog(t, 30*time.Second, "blockmaster: lock acquired")
-	t.Cleanup(func() {
-		if !t.Failed() {
-			return
-		}
-		data, _ := os.ReadFile(master.log)
-		for _, l := range strings.Split(string(data), string(rune(10))) {
-			if strings.Contains(l, "rejected") || strings.Contains(l, "DEBUG queue") || strings.Contains(l, "DEBUG publisher") || strings.Contains(l, "DEBUG placements") || strings.Contains(l, "authority:") || strings.Contains(l, "published") {
-				t.Logf("DEBUGM %s", l)
-			}
-		}
-	})
 	for i, b := range hosts {
 		lockDir := b.root + ".locks"
 		if err := os.MkdirAll(lockDir, 0o700); err != nil {
@@ -98,26 +87,6 @@ func TestFencingRoundHealContinuesThePrimary(t *testing.T) {
 		t.Fatal("block A did not read back at epoch 1")
 	}
 	c.close()
-	for _, b := range []*host{r1, r2} {
-		resp, err := http.Get("http://" + b.status + "/status?volume=v1")
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			t.Logf("DEBUG %s status: %s", b.id, body)
-		}
-	}
-	time.Sleep(3 * time.Second)
-	if data, err := os.ReadFile(master.log); err == nil {
-		n, last := 0, ""
-		for _, l := range strings.Fields(strings.ReplaceAll(string(data), " ", "_")) {
-			if strings.Contains(l, "DEBUG_attest") {
-				n++
-				last = l
-			}
-		}
-		t.Logf("DEBUG attest count=%d last=%s", n, last)
-	}
-
 	// 2. r3 can no longer persist a floor; r1 stops: a fencing round at 2
 	// gets only r2, publishes nothing, and r1 cannot answer the heal.
 	if err := os.Chmod(r3.root, 0o555); err != nil {
