@@ -9,7 +9,7 @@ import (
 )
 
 // G5-5C Batch #7 PeerAdapterRegistry tests:
-//   - OnPeerAdded constructs adapter and primes identity
+//   - OnPeerAdded constructs the adapter; PrimePending primes its identity once
 //   - AdapterFor returns the right adapter (per-peer routing)
 //   - OnPeerRemoved drops the adapter
 //   - Self-replicaID guard refuses host-own-slot registration
@@ -48,6 +48,17 @@ func TestPeerAdapterRegistry_OnPeerAdded_RegistersAndPrimes(t *testing.T) {
 	adpt := reg.AdapterFor("r2")
 	if adpt == nil {
 		t.Fatal("AdapterFor(r2) returned nil after OnPeerAdded")
+	}
+	// The add does not prime: the new peer is healthy and owned by the
+	// volume's live session, so its adapter has issued nothing.
+	if log := adpt.CommandLog(); len(log) != 0 || adpt.Projection().Epoch != 0 {
+		t.Fatalf("the adapter acted at the add: commands %v, epoch %d", log, adpt.Projection().Epoch)
+	}
+	if !reg.PrimePending("r2") {
+		t.Fatal("PrimePending(r2) did not prime the added peer")
+	}
+	if reg.PrimePending("r2") {
+		t.Fatal("PrimePending(r2) primed twice")
 	}
 	// Adapter must have received OnAssignment to prime engine identity
 	// for r2 — projection's Epoch = 1 confirms the AssignmentObserved
@@ -123,12 +134,16 @@ func TestPeerAdapterRegistry_LineageBumpTeardown(t *testing.T) {
 	if oldAdpt == nil {
 		t.Fatal("setup: oldAdpt nil")
 	}
+	reg.PrimePending("r2")
 	if oldAdpt.Projection().Epoch != 1 {
 		t.Fatalf("old projection Epoch = %d, want 1", oldAdpt.Projection().Epoch)
 	}
 
 	// Lineage bump: teardown then add at epoch=2.
 	reg.OnPeerRemoved("r2")
+	if reg.PrimePending("r2") {
+		t.Fatal("a removed peer was still pending")
+	}
 	newPeer := newPeerForRegistryTest(t, "r2", 2, 1)
 	reg.OnPeerAdded(newPeer)
 
@@ -138,6 +153,9 @@ func TestPeerAdapterRegistry_LineageBumpTeardown(t *testing.T) {
 	}
 	if newAdpt == oldAdpt {
 		t.Fatal("lineage bump should produce a fresh adapter pointer")
+	}
+	if !reg.PrimePending("r2") {
+		t.Fatal("the re-added peer was not pending")
 	}
 	if newAdpt.Projection().Epoch != 2 {
 		t.Errorf("new projection Epoch = %d, want 2", newAdpt.Projection().Epoch)

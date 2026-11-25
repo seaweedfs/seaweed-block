@@ -76,6 +76,15 @@ type AdapterRouter func(replicaID string) *adapter.VolumeReplicaAdapter
 // Borrows: AdapterRouter — caller retains; lifetime must outlive
 // the probe loop's lifetime.
 func ProductionProbeFn(router AdapterRouter) replication.ProbeFn {
+	return ProductionProbeFnWithPrime(router, nil)
+}
+
+// ProductionProbeFnWithPrime is ProductionProbeFn with the registry's
+// deferred priming: on the first dispatch for a peer, prime(replicaID)
+// primes its adapter, whose own assignment-driven probe is this attempt
+// (no second wire probe with another session); later dispatches probe as
+// ProductionProbeFn does.
+func ProductionProbeFnWithPrime(router AdapterRouter, prime func(replicaID string) bool) replication.ProbeFn {
 	if router == nil {
 		// Fail-closed shim: if no router is wired, return a probeFn
 		// that ALWAYS reports failure (so cooldown progresses + log
@@ -128,6 +137,9 @@ func ProductionProbeFn(router AdapterRouter) replication.ProbeFn {
 		adpt := router(t.ReplicaID)
 		if adpt == nil {
 			return fmt.Errorf("ProductionProbeFn: no adapter registered for peer=%s (PeerAdapterRegistry not synced?)", t.ReplicaID)
+		}
+		if prime != nil && prime(t.ReplicaID) {
+			return nil
 		}
 
 		result := exec.Probe(t.ReplicaID, t.DataAddr, t.ControlAddr, sessionID, t.Epoch, t.EndpointVersion)

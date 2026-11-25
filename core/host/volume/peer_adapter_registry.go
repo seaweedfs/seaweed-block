@@ -38,7 +38,10 @@ type PeerAdapterRegistry struct {
 
 	mu       sync.Mutex
 	adapters map[string]*adapter.VolumeReplicaAdapter // keyed by ReplicaID
-	closed   bool
+	// pending: the identity each adapter is primed with on the probe
+	// loop's first dispatch for its peer (PrimePending), not at the add.
+	pending map[string]adapter.AssignmentInfo
+	closed  bool
 }
 
 // SetFrontier installs the local durable frontier read at each peer add
@@ -58,12 +61,21 @@ func NewPeerAdapterRegistry(volumeID, selfReplicaID string) *PeerAdapterRegistry
 		volumeID:      volumeID,
 		selfReplicaID: selfReplicaID,
 		adapters:      make(map[string]*adapter.VolumeReplicaAdapter),
+		pending:       make(map[string]adapter.AssignmentInfo),
 	}
 }
 
 // OnPeerAdded constructs a per-peer adapter wired to a
 // PeerCommandExecutor over the peer's transport.BlockExecutor, and
-// primes the engine with the peer's identity via OnAssignment.
+// records the peer's identity to prime it with later (PrimePending).
+//
+// It does not prime here: priming emits the engine's probe and fence,
+// which run on the replica with sessions of their own, while a new peer
+// is healthy and owned by the volume's live session (its seed barrier and
+// live ship). The replica keeps the newest session, so an adapter acting
+// on a healthy peer makes the replica refuse the volume's own barrier.
+// The adapter is primed only once the probe loop dispatches for the
+// peer, which it does only for a degraded peer (see PrimePending).
 //
 // Idempotent: repeated calls for the same peer (same ReplicaID + same
 // lineage) are a no-op. Lineage-bump recreate (the PeerRemoved →
@@ -113,7 +125,7 @@ func (r *PeerAdapterRegistry) OnPeerAdded(peer *replication.ReplicaPeer) {
 			log.Printf("PeerAdapterRegistry: peer=%s frontier unknown (%v): no divergent-tail check", target.ReplicaID, err)
 		}
 	}
-	adpt.OnAssignment(adapter.AssignmentInfo{
+	r.pending[target.ReplicaID] = adapter.AssignmentInfo{
 		VolumeID:        r.volumeID,
 		ReplicaID:       target.ReplicaID,
 		Epoch:           target.Epoch,
@@ -121,7 +133,7 @@ func (r *PeerAdapterRegistry) OnPeerAdded(peer *replication.ReplicaPeer) {
 		DataAddr:        target.DataAddr,
 		CtrlAddr:        target.ControlAddr,
 		PrimaryStartLSN: start,
-	})
+	}
 
 	r.adapters[target.ReplicaID] = adpt
 	log.Printf("PeerAdapterRegistry: registered peer=%s epoch=%d EV=%d", target.ReplicaID, target.Epoch, target.EndpointVersion)
@@ -141,7 +153,38 @@ func (r *PeerAdapterRegistry) OnPeerRemoved(replicaID string) {
 		return
 	}
 	delete(r.adapters, replicaID)
+	delete(r.pending, replicaID)
 	log.Printf("PeerAdapterRegistry: unregistered peer=%s", replicaID)
+}
+
+// PrimePending primes replicaID's adapter with the identity recorded at
+// its add (OnAssignment: the engine's own probe, then fence or recovery),
+// once: it reports whether this call primed it. The probe loop calls it
+// on its first dispatch for the peer.
+//
+// Lock graph: the pending entry is taken under r.mu, and OnAssignment runs
+// after r.mu is released (its commands run the peer's executor). The probe
+// loop dispatches only for a peer ProbeIfDegraded admitted under peer.mu
+// (state Degraded, no probe in flight). A peer is created Healthy inside
+// the volume's UpdateReplicaSet (under the volume's mu, which also runs its
+// seed barrier) and turns Degraded only after its own live session failed
+// and was invalidated; a degraded peer is not shipped to. So the adapter's
+// first session starts only after the volume's session on that peer has
+// ended: there is no window in which both act on the replica.
+func (r *PeerAdapterRegistry) PrimePending(replicaID string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	info, ok := r.pending[replicaID]
+	delete(r.pending, replicaID)
+	adpt := r.adapters[replicaID]
+	r.mu.Unlock()
+	if !ok || adpt == nil {
+		return false
+	}
+	adpt.OnAssignment(info)
+	return true
 }
 
 // AdapterFor returns the per-peer adapter for replicaID, or nil if
@@ -182,4 +225,5 @@ func (r *PeerAdapterRegistry) Close() {
 	}
 	r.closed = true
 	r.adapters = nil
+	r.pending = nil
 }
