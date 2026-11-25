@@ -35,11 +35,16 @@ var volumeIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // VolumeSpec is the product-level desired volume shape. It carries no
 // authority lineage and no placement decision.
 type VolumeSpec struct {
-	VolumeID          string `json:"volume_id"`
-	LayoutID          string `json:"layout_id,omitempty"`
-	SizeBytes         uint64 `json:"size_bytes"`
-	BlockSize         uint32 `json:"block_size"`
-	ChunkBytes        uint64 `json:"chunk_bytes"`
+	VolumeID   string `json:"volume_id"`
+	LayoutID   string `json:"layout_id,omitempty"`
+	SizeBytes  uint64 `json:"size_bytes"`
+	BlockSize  uint32 `json:"block_size"`
+	ChunkBytes uint64 `json:"chunk_bytes"`
+	// A restore request is bound to one source snapshot before the target's
+	// layout is created. These fields never change on a replay.
+	SourceVolume      string `json:"source_volume,omitempty"`
+	SourceSnapshot    string `json:"source_snapshot,omitempty"`
+	CreateRequestID   string `json:"create_request_id,omitempty"`
 	ReplicationFactor int    `json:"replication_factor"`
 	Protocol          string `json:"protocol,omitempty"`
 	FrontendTransport string `json:"frontend_transport,omitempty"`
@@ -226,6 +231,9 @@ func volumeSpecsCompatible(a, b VolumeSpec) bool {
 		a.SizeBytes == b.SizeBytes &&
 		a.BlockSize == b.BlockSize &&
 		a.ChunkBytes == b.ChunkBytes &&
+		a.SourceVolume == b.SourceVolume &&
+		a.SourceSnapshot == b.SourceSnapshot &&
+		a.CreateRequestID == b.CreateRequestID &&
 		a.ReplicationFactor == b.ReplicationFactor &&
 		a.Protocol == b.Protocol &&
 		a.FrontendTransport == b.FrontendTransport
@@ -385,6 +393,11 @@ func validateSpec(spec VolumeSpec) error {
 	spec = normalizeVolumeSpec(spec)
 	if err := validateVolumeID(spec.VolumeID); err != nil {
 		return err
+	}
+	if spec.SourceVolume != "" || spec.SourceSnapshot != "" || spec.CreateRequestID != "" {
+		if err := validateVolumeID(spec.SourceVolume); err != nil || spec.SourceSnapshot == "" || spec.CreateRequestID == "" || spec.SourceVolume == spec.VolumeID {
+			return fmt.Errorf("%w: restore needs a distinct source volume, snapshot and request id", ErrInvalidVolumeSpec)
+		}
 	}
 	if spec.LayoutID != "" {
 		if _, err := layout.ParseVolumeID(spec.LayoutID); err != nil {

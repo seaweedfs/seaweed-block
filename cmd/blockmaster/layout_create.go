@@ -27,3 +27,30 @@ func layoutVolumeCreator(cat *chunkstore.BCatalog) func(context.Context, lifecyc
 		return err
 	}
 }
+
+func layoutVolumeReader(cat *chunkstore.BCatalog) func(context.Context, lifecycle.VolumeSpec) (layout.Volume, error) {
+	return func(ctx context.Context, spec lifecycle.VolumeSpec) (layout.Volume, error) {
+		id, err := layout.ParseVolumeID(spec.LayoutID)
+		if err != nil {
+			return layout.Volume{}, err
+		}
+		return cat.ReadVolume(ctx, chunkstore.VolumeRef{Name: spec.VolumeID, ID: id})
+	}
+}
+
+func layoutTargetCreator(cat *chunkstore.BCatalog) func(context.Context, lifecycle.VolumeSpec, lifecycle.VolumeSpec, string) error {
+	return func(ctx context.Context, source, target lifecycle.VolumeSpec, snapshot string) error {
+		sid, err := layout.ParseVolumeID(source.LayoutID)
+		if err != nil {
+			return err
+		}
+		tid, err := layout.ParseVolumeID(target.LayoutID)
+		if err != nil {
+			return err
+		}
+		_, err = cat.Restore(ctx,
+			chunkstore.VolumeRef{Name: source.VolumeID, ID: sid}, snapshot,
+			chunkstore.VolumeRef{Name: target.VolumeID, ID: tid})
+		return err
+	}
+}

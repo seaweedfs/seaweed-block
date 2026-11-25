@@ -29,6 +29,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/auth"
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/host/bootstrap"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -86,6 +87,10 @@ type Config struct {
 	// LayoutCreateVolume writes VOLUME then the unclaimed HEAD using the
 	// immutable identity and geometry in the persisted lifecycle record.
 	LayoutCreateVolume func(context.Context, lifecycle.VolumeSpec) error
+	// Restore creation reads the source VOLUME's immutable geometry before
+	// persisting the target, then replays CreateTarget using that record.
+	LayoutReadVolume   func(context.Context, lifecycle.VolumeSpec) (layout.Volume, error)
+	LayoutCreateTarget func(context.Context, lifecycle.VolumeSpec, lifecycle.VolumeSpec, string) error
 
 	// FrontendPublicationRuntimeHTTP enables the frontend publication runtime
 	// HTTP surface. It is disabled by default and only confirms a post-failback

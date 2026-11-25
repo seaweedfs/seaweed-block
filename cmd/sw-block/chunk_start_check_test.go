@@ -9,6 +9,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 // Every ops chunk command that writes chunk metadata runs the
@@ -34,7 +35,6 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 	filer := []string{"--chunk-filer", "filer:18888"}
 	writing := map[string][]string{
 		"snapshot-delete": append(append([]string{"ops", "chunk", "snapshot-delete", "--volume", "v1", "--name", "s1"}, id...), filer...),
-		"restore":         append(append(append([]string{"ops", "chunk", "restore", "--snapshot", "s1"}, src...), tgt...), filer...),
 		"release":         append(append(append([]string{"ops", "chunk", "release"}, src...), tgt...), filer...),
 		"retain":          append(append([]string{"ops", "chunk", "retain", "--volume", "v1"}, id...), filer...),
 		"volume-delete":   append(append([]string{"ops", "chunk", "volume-delete", "--volume", "v1", "--master", "m:1", "--request-id", "r"}, id...), filer...),
@@ -63,6 +63,42 @@ func TestOpsChunk_WritingCommandsRunTheSingleFilerCheck(t *testing.T) {
 		if checks != before {
 			t.Errorf("%s: a read-only command ran the start check", name)
 		}
+	}
+}
+
+// Restore has one master authority call. The master owns the filer check
+// and target creation; the CLI must never write the filer independently.
+func TestOpsChunkRestoreUsesOnlyMasterCreate(t *testing.T) {
+	prevDial, prevRestore := dialChunkFiler, restoreCreateRPC
+	t.Cleanup(func() { dialChunkFiler, restoreCreateRPC = prevDial, prevRestore })
+	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
+		t.Fatal("restore CLI contacted the filer")
+		return nil, nil, nil
+	}
+	calls := 0
+	var firstID string
+	restoreCreateRPC = func(_ context.Context, master string, req *control.CreateVolumeRequest) (*control.CreateVolumeResponse, error) {
+		calls++
+		if master != "m:1" || req.GetVolumeId() != "v2" || req.GetSourceVolume() != "v1" || req.GetSourceSnapshot() != "s1" || req.GetCreateRequestId() == "" {
+			t.Fatalf("restore RPC: master=%q req=%+v", master, req)
+		}
+		if firstID == "" {
+			firstID = req.GetCreateRequestId()
+		}
+		if req.GetCreateRequestId() != firstID {
+			t.Fatal("retry changed request id")
+		}
+		return &control.CreateVolumeResponse{VolumeId: "v2", LayoutId: (layout.VolumeID{1}).String(), StoreReady: true}, nil
+	}
+	args := []string{"ops", "chunk", "restore", "--master", "m:1", "--source", "v1", "--target", "v2", "--snapshot", "s1"}
+	for i := 0; i < 2; i++ {
+		var out, errs bytes.Buffer
+		if code := run(args, &out, &errs); code != 0 {
+			t.Fatalf("restore replay: code=%d out=%q err=%q", code, out.String(), errs.String())
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("restore made %d RPCs; want one per invocation", calls)
 	}
 }
 

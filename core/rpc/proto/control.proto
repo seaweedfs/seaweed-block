@@ -429,6 +429,9 @@ message CreateVolumeRequest {
     string frontend_transport = 9; // NVMe: "tcp" default | "rdma"
     uint32 block_size = 10; // omitted: 4096, persisted on first create
     uint64 chunk_bytes = 11; // omitted: 4 MiB, persisted on first create
+    string source_volume = 12; // restore only: source lifecycle name
+    string source_snapshot = 13; // restore only: named source snapshot
+    string create_request_id = 14; // restore retry identity, bound to name/source/snapshot
 }
 
 message CreateVolumeResponse {
