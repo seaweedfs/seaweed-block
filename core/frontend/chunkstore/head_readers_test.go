@@ -56,6 +56,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                  "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
 	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                        "refuses ErrHeadAbsent (probe BCatalog)",
 	"core/frontend/chunkstore/layout_remote.go AbortOpenSession -> ReadHead":         "refuses ErrHeadAbsent, aborts nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go CommitPendingSnapshot -> ReadHead":    "refuses ErrHeadAbsent, commits nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                  "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                 "refuses ErrHeadAbsent (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":           "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
@@ -319,6 +320,10 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		r, err := NewLayoutRemote(c, VolumeRef{Name: "v", ID: layout.VolumeID{1}}, layout.HolderID{Epoch: 1, Holder: "a", ClaimID: "k"})
 		if err != nil {
 			t.Fatal(err)
+		}
+		r.SetSnapshot("x", layout.SnapshotMeta{})
+		if err := r.CommitPendingSnapshot(ctx); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
+			t.Fatalf("naming over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
 		}
 		if _, err := r.AbortOpenSession(ctx); !errors.Is(err, layout.ErrHeadAbsent) {
 			t.Fatalf("settling a stop over an absent HEAD: %v; want ErrHeadAbsent", err)

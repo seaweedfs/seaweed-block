@@ -448,6 +448,56 @@ func isKernelRefusal(err error) bool {
 	return false
 }
 
+// CommitPendingSnapshot names HEAD's current image with the snapshot set
+// by SetSnapshot when no cut committed it (the engine had nothing to
+// publish): one session, the current root and position again, the name.
+// Nothing pending is a no-op. A name or facts the kernel refuses is the
+// typed refusal.
+func (l *LayoutRemote) CommitPendingSnapshot(ctx context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.takeAbandonLocked()
+	if l.pending == nil {
+		return nil
+	}
+	p := l.pending
+	if err := layout.CheckSnapshot(p.name, p.meta); err != nil {
+		l.pending = nil
+		return err
+	}
+	if err := l.openSessionLocked(ctx); err != nil {
+		return err
+	}
+	h, found, err := l.st.ReadHead(ctx)
+	if err != nil {
+		return layoutRemoteErr(err)
+	}
+	if !found {
+		return layout.ErrHeadAbsent
+	}
+	l.viewLocked(h)
+	m := map[uint64]layout.Ref{}
+	if h.Current != nil {
+		if m, err = l.manifest(ctx, *h.Current); err != nil {
+			return err
+		}
+	}
+	if err := l.writeRootLocked(ctx, m); err != nil {
+		return err
+	}
+	got, err := layout.RunCommit(ctx, l.st, l.st, l.vol.Name, l.me, layout.CommitRequest{Session: l.session, Prev: m, Next: m, Position: h.Position, State: layout.StateLive, Snapshot: p.name, Meta: p.meta})
+	if err != nil {
+		if snapshotRefusal(err) {
+			l.pending = nil
+			return err
+		}
+		return layoutRemoteErr(err)
+	}
+	l.session, l.pending, l.lastCommit = "", nil, got
+	l.ownGen, l.visible, l.seen = got.Gen, got.Gen, imageOf(got)
+	return nil
+}
+
 // TakeSnapshotErr returns, and clears, why the last commit could not name
 // its snapshot (nil when it did, or none was asked).
 func (l *LayoutRemote) TakeSnapshotErr() error {
