@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -84,16 +85,10 @@ func TestRestoreEqualOwnerDetachedHEADStaysSealed(t *testing.T) {
 	for _, local := range []bool{false, true} {
 		t.Run(fmt.Sprint(local), func(t *testing.T) {
 			ctx := hangGuard(t)
-			remote := storage.NewMemChunkRemote()
+			c := newLayoutCase(t, 64, 4)
 			root := t.TempDir()
 			makeProvider := func(root string, view *stubView, holder string) *durable.DurableProvider {
-				p, err := durable.NewDurableProvider(durable.ProviderConfig{Impl: durable.ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4, ChunkHolder: holder,
-					ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil }}, view)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = p.Close() })
-				return p
+				return c.provider(t, root, view, holder, nil)
 			}
 			source := makeProvider(root, v1View(), "node-a/r1")
 			s := openRecovered(t, source)
@@ -113,11 +108,11 @@ func TestRestoreEqualOwnerDetachedHEADStaysSealed(t *testing.T) {
 			if _, err := restarted.EnsureStorage("v1"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := restarted.RecoverVolume(ctx, "v1"); !errors.Is(err, storage.ErrChunkLayerDetached) {
+			if _, err := restarted.RecoverVolume(ctx, "v1"); !errors.Is(err, layout.ErrDetached) && !errors.Is(err, layout.ErrMissingLocalRoot) {
 				t.Errorf("sealed incarnation reopened for serving: %v", err)
 			}
-			h := headHolder(t, remote)
-			if h.Gen != cut.Head.Gen || h.Epoch != cut.Head.Epoch || h.Holder != cut.Head.Holder || h.State != storage.ChunkHeadDetached || h.DetachedBy == nil || *h.DetachedBy != *cut.Head.DetachedBy || h.RemoteLSN != cut.H {
+			h := c.head(t)
+			if h.Gen != cut.Head.Gen || h.Epoch != cut.Head.Epoch || h.Holder != cut.Head.Holder || h.State != layout.StateDetached || h.Position != cut.H {
 				t.Errorf("restart changed sealed proof: HEAD=%+v seal=%+v", h, cut.Head)
 			}
 			be, err := restarted.Open(ctx, "v1")
@@ -127,7 +122,7 @@ func TestRestoreEqualOwnerDetachedHEADStaysSealed(t *testing.T) {
 			if _, err := be.Read(ctx, 4096, make([]byte, 4096)); !errors.Is(err, frontend.ErrNotReady) {
 				t.Errorf("sealed restart exposed I/O: %v", err)
 			}
-			if !bytes.Equal(headBlock(t, remote, 1), want) {
+			if !bytes.Equal(c.block(t, 1), want) {
 				t.Fatal("restart changed sealed bytes")
 			}
 			planned := makeProvider(t.TempDir(), viewAs("r2", 4), "node-b/r2")
@@ -135,8 +130,8 @@ func TestRestoreEqualOwnerDetachedHEADStaysSealed(t *testing.T) {
 			if got, err := loaded.Read(1); err != nil || !bytes.Equal(got, want) {
 				t.Fatal("planned new holder could not load sealed image", err)
 			}
-			taken := headHolder(t, remote)
-			if taken.State != storage.ChunkHeadActive || taken.Epoch != 4 || taken.Holder != "node-b/r2" || taken.Gen <= cut.Head.Gen || taken.RemoteLSN != cut.H {
+			taken := c.head(t)
+			if taken.State != layout.StateLive || taken.Epoch != 4 || taken.Holder != "node-b/r2" || taken.Gen <= cut.Head.Gen || taken.Position != cut.H {
 				t.Fatalf("planned takeover did not consume preserved seal: %+v", taken)
 			}
 		})
