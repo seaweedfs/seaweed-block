@@ -123,6 +123,7 @@ func TestStoreLearnerRedialsAfterABrokenConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := drop.Addr().String()
+	dropped := make(chan struct{}, 64)
 	go func() {
 		for {
 			c, err := drop.Accept()
@@ -130,6 +131,10 @@ func TestStoreLearnerRedialsAfterABrokenConnection(t *testing.T) {
 				return
 			}
 			_ = c.Close() // connected, then the read fails
+			select {
+			case dropped <- struct{}{}:
+			default:
+			}
 		}
 	}()
 	v := NewReplicationVolume("v", storage.NewBlockStore(64, 4096))
@@ -138,7 +143,12 @@ func TestStoreLearnerRedialsAfterABrokenConnection(t *testing.T) {
 	if err := v.UpdateReplicaSet(1, []ReplicaTarget{{ReplicaID: "r2", DataAddr: addr, ControlAddr: addr, Epoch: 1, EndpointVersion: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(400 * time.Millisecond) // a few connected, failed attempts
+	// The learner did hold a connection whose read failed.
+	select {
+	case <-dropped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no learner barrier was accepted and dropped: the schedule did not run")
+	}
 	_ = drop.Close()
 
 	s, err := storage.CreateWALStore(filepath.Join(t.TempDir(), "r2.wal"), 64, 4096)
