@@ -23,8 +23,11 @@ import (
 // its writes: a session that names a chunk no root named at its Begin
 // writes that chunk's entry (create, or reuse with a new tag), so the MARK
 // or the DELETE fails its condition, however late it lands. No lease
-// reasoning is needed. A candidate marked by another session is left
-// alone. Chunks a restore target names stay live: the source's snapshot
+// reasoning is needed. A candidate an earlier session marked and did not
+// delete (it died in between) is planned again: its tag carries that
+// mark, so the MARK replaces it, and the earlier session's late DELETE,
+// conditional on its own mark, fails. Every unreachable name is therefore
+// removed by the next completed cleaning. Chunks a restore target names stay live: the source's snapshot
 // root names them while it has dependents. It returns the names it
 // deleted, in index order.
 func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectStore, me HolderID, session string, shard uint64, candidates []ChunkName) ([]ChunkName, error) {
@@ -42,7 +45,7 @@ func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectSt
 		if err != nil {
 			return nil, err
 		}
-		if found && meta.Mark == "" {
+		if found {
 			plan[c] = meta
 		}
 	}
