@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -62,13 +63,17 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 			}
 			// The primary attests its write-ACK set: each replica with the store
 			// its barriers reported (the live ship above ran them).
-			attested := cluster.Primary().RepVol.AttestedStores()
+			// (the component cluster names its peers replica-0 and replica-1;
+			// the master's placement names them r2 and r3)
+			peers := cluster.Primary().RepVol.AttestedStores()
+			attested := map[string]storage.StoreID{"r1": cluster.Primary().RepVol.LocalStoreID()}
 			for i, id := range []string{"r2", "r3"} {
-				if want := storage.StoreIDOf(cluster.Replica(i).Store); want.IsZero() || attested[id] != want {
-					t.Fatalf("primary attests %s as %x, its store is %x", id, attested[id], want)
+				got := peers[fmt.Sprintf("replica-%d", i)]
+				if want := storage.StoreIDOf(cluster.Replica(i).Store); want.IsZero() || got != want {
+					t.Fatalf("primary attests replica-%d as %x, its store is %x", i, got, want)
 				}
+				attested[id] = got
 			}
-			attested["r1"] = cluster.Primary().RepVol.LocalStoreID()
 			if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", initial.Epoch, attested)); err != nil {
 				t.Fatal(err)
 			}
