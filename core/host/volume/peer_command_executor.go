@@ -1,6 +1,9 @@
 package volume
 
 import (
+	"context"
+	"time"
+
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/replication"
@@ -80,7 +83,9 @@ func (p *PeerCommandExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 				r.FailReason = err.Error()
 				p.peer.Invalidate("live session refresh failed: " + err.Error())
 			} else {
-				p.peer.SetState(replication.ReplicaHealthy)
+				ctx, cancel := context.WithTimeout(context.Background(), healReconcileTimeout)
+				p.peer.HealIfInSync(ctx, "recovery session completed")
+				cancel()
 			}
 		}
 		// Failure path: the adapter feeds engine
@@ -142,9 +147,16 @@ func (p *PeerCommandExecutor) Fence(replicaID string, sessionID, epoch, endpoint
 // after a successful catch-up and the probe loop keeps polling a
 // peer that's already caught up.
 func (p *PeerCommandExecutor) PublishHealthy(replicaID string) {
-	p.peer.SetState(replication.ReplicaHealthy)
+	ctx, cancel := context.WithTimeout(context.Background(), healReconcileTimeout)
+	defer cancel()
+	if !p.peer.HealIfInSync(ctx, "engine published healthy") {
+		return // not in sync by (epoch, LSN): not counted, never healed on length
+	}
 	p.inner.PublishHealthy(replicaID)
 }
+
+// healReconcileTimeout bounds the reconciliation barrier a heal runs.
+const healReconcileTimeout = 5 * time.Second
 
 // PublishDegraded translates the engine's degraded-publication
 // verdict into peer.Invalidate(reason). Same rationale as

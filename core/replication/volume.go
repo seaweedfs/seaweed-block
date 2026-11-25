@@ -235,6 +235,27 @@ func (v *ReplicationVolume) SetEpochTable(t *transport.EpochTable) {
 	v.mu.Unlock()
 }
 
+// reconcilePeer asks the peer for its (last data epoch, end) in a barrier
+// to this node's frontier and answers from the epoch table: in sync, diverged
+// (entries this primary never had), or neither (behind, or no answer).
+func (v *ReplicationVolume) reconcilePeer(ctx context.Context, peer *ReplicaPeer) (inSync, diverged bool, reason string) {
+	frontier, err := v.store.Sync()
+	if err != nil {
+		return false, false, fmt.Sprintf("local sync: %v", err)
+	}
+	ack, err := peer.Barrier(ctx, frontier)
+	if err != nil {
+		return false, false, fmt.Sprintf("barrier: %v", err)
+	}
+	if shared, ok := v.epochs.SharedEnd(ack.LastDataEpoch, ack.AchievedLSN); !ok {
+		return false, true, fmt.Sprintf("divergent (last data epoch %d, end %d; shared up to %d)", ack.LastDataEpoch, ack.AchievedLSN, shared)
+	}
+	if ack.AchievedLSN < frontier {
+		return false, false, fmt.Sprintf("achieved %d below frontier %d", ack.AchievedLSN, frontier)
+	}
+	return true, false, ""
+}
+
 // markDiverged takes a peer whose entries are not this primary's out of
 // every count: degraded, then NeedsRebuild, which nothing heals but a rebuild.
 func markDiverged(peer *ReplicaPeer, reason string) {
@@ -444,6 +465,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		peer.setOnHealthy(func() {
 			v.resetTerminalPeerQueue(peer)
 		})
+		if v.epochs != nil {
+			peer.setReconcile(func(ctx context.Context) (bool, bool, string) { return v.reconcilePeer(ctx, peer) })
+		}
 		// Push the volume-level probe cooldown config onto the fresh
 		// peer. A new peer (whether first add or post-lineage-bump
 		// recreate) starts with cooldown reset to defaults; the prior
