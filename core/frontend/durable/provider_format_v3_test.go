@@ -8,11 +8,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"path"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -24,6 +26,7 @@ func (formatV3View) Projection() frontend.Projection {
 }
 
 type formatV3Fixture struct {
+	filer *chunkstore.MemFiler
 	cat   *chunkstore.BCatalog
 	ref   chunkstore.VolumeRef
 	blobs *layoutCrashBlobs
@@ -32,7 +35,8 @@ type formatV3Fixture struct {
 func newFormatV3Fixture(t *testing.T) *formatV3Fixture {
 	t.Helper()
 	blobs := &layoutCrashBlobs{b: map[string][]byte{}}
-	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), blobs, "/format-v3")
+	filer := chunkstore.NewMemFiler()
+	cat, err := chunkstore.NewBCatalog(filer, blobs, "/format-v3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +48,7 @@ func newFormatV3Fixture(t *testing.T) *formatV3Fixture {
 	if _, err := cat.CreateVolume(context.Background(), ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
 		t.Fatal(err)
 	}
-	return &formatV3Fixture{cat: cat, ref: ref, blobs: blobs}
+	return &formatV3Fixture{filer: filer, cat: cat, ref: ref, blobs: blobs}
 }
 
 func (f *formatV3Fixture) head(t *testing.T) layout.Head {
@@ -89,6 +93,55 @@ func (f *formatV3Fixture) puts() int {
 	f.blobs.Lock()
 	defer f.blobs.Unlock()
 	return len(f.blobs.b)
+}
+
+type formatV3Entry struct {
+	Dir   string
+	Entry *filerpb.Entry
+}
+
+type formatV3Image struct {
+	Ref     chunkstore.VolumeRef
+	Entries []formatV3Entry
+	Blobs   map[string][]byte
+}
+
+func (f *formatV3Fixture) image(t *testing.T) formatV3Image {
+	t.Helper()
+	img := formatV3Image{Ref: f.ref, Blobs: map[string][]byte{}}
+	base := path.Join("/format-v3", f.ref.Dir())
+	for _, suffix := range []string{"", layout.RootDir, layout.SegDir, path.Join(layout.PoolDir, "0")} {
+		dir := path.Join(base, suffix)
+		entries, err := f.filer.ListEntries(context.Background(), dir, "", "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			img.Entries = append(img.Entries, formatV3Entry{Dir: dir, Entry: entry})
+		}
+	}
+	f.blobs.Lock()
+	for name, data := range f.blobs.b {
+		img.Blobs[name] = append([]byte(nil), data...)
+	}
+	f.blobs.Unlock()
+	return img
+}
+
+func restoreFormatV3Image(t *testing.T, img formatV3Image) *formatV3Fixture {
+	t.Helper()
+	filer := chunkstore.NewMemFiler()
+	for _, item := range img.Entries {
+		if err := filer.CreateEntry(context.Background(), item.Dir, item.Entry, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blobs := &layoutCrashBlobs{b: img.Blobs}
+	cat, err := chunkstore.NewBCatalog(filer, blobs, "/format-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &formatV3Fixture{filer: filer, cat: cat, ref: img.Ref, blobs: blobs}
 }
 
 func mappedProviderV3(t *testing.T, root string, fixture *formatV3Fixture, view frontend.ProjectionView, override ...layout.StartStore) *DurableProvider {
