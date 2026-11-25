@@ -478,7 +478,7 @@ func removeVariant(t *testing.T, mode string) string {
 		t.Fatal(err)
 	}
 	src := strings.ReplaceAll(string(b), "\r\n", "\n")
-	gate := "if err := os.Mark(ctx, c.Path(), plan, session); err != nil {"
+	gate := "if err := os.Mark(ctx, c.Path(), tag, session); err != nil {"
 	if !strings.Contains(src, gate) {
 		t.Fatal("remove.go mark gate not found")
 	}
