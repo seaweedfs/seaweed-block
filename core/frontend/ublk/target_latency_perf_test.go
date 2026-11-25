@@ -11,7 +11,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 )
 
 func TestTargetDurabilityLatencyPerf(t *testing.T) {
@@ -23,8 +23,7 @@ func TestTargetDurabilityLatencyPerf(t *testing.T) {
 			cfg := durable.ProviderConfig{Impl: kind, StorageRoot: t.TempDir(), NumBlocks: 256, BlockSize: 4096}
 			if kind == durable.ImplWALStoreChunk {
 				cfg.ChunkBlocks = 16
-				remote := storage.NewMemChunkRemote()
-				cfg.ChunkRemoteFor = func(string) (storage.ChunkRemote, error) { return remote, nil }
+				testutil.NewLayoutFixture(t, "v1", 256, 16).Configure(&cfg)
 			}
 			p, err := durable.NewDurableProvider(cfg, targetPerfView{})
 			if err != nil {

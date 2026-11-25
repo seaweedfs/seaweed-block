@@ -101,7 +101,7 @@ func TestWorkspaceCleanMoveRecordsNoLostRange(t *testing.T) {
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "old", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "old", Epoch: 1, HeadGen: 7}); err != nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "old", Epoch: 1, HeadGen: 7, Holder: "old-node/old", RemoteLSN: 42}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "old-node/old", RemoteLSN: 42}); err != nil {
 		t.Fatal(err)
 	}
 	req := WorkspaceMoveRequest{RequestID: "c", VolumeID: "v", ExpectedReplicaID: "old", ExpectedHost: "old-node", TargetHost: "new-node", ExpectedEpoch: 1,

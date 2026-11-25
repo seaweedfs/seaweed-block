@@ -34,6 +34,7 @@ func (h *Host) LifecycleSnapshot() (LifecycleSnapshot, bool) {
 }
 
 func (h *Host) verifyPlacements(placements []lifecycle.PlacementIntent, nodes []lifecycle.NodeRegistration) []lifecycle.VerifiedPlacement {
+	placements = h.readyPlacements(placements)
 	verified := make([]lifecycle.VerifiedPlacement, 0, len(placements))
 	var obsStore *authority.ObservationStore
 	if h.obs != nil {

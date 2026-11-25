@@ -26,6 +26,23 @@ type recordCrashFixture struct {
 	get       func() (any, bool)
 }
 
+func (f *recordCrashFixture) captureLayoutIdentity(t *testing.T) {
+	old, volume := f.old.(VolumeRecord)
+	if !volume {
+		return
+	}
+	got, ok := f.get()
+	if !ok || got.(VolumeRecord).Spec.LayoutID == "" {
+		t.Fatal("fixture did not persist its layout identity")
+	}
+	old.Spec.LayoutID = got.(VolumeRecord).Spec.LayoutID
+	old.Spec.BlockSize, old.Spec.ChunkBytes = 4096, 4<<20
+	next := f.next.(VolumeRecord)
+	next.Spec.LayoutID = old.Spec.LayoutID
+	next.Spec.BlockSize, next.Spec.ChunkBytes = old.Spec.BlockSize, old.Spec.ChunkBytes
+	f.old, f.next = old, next
+}
+
 func openRecordCrashFixture(t *testing.T, kind, dir string, hook func(string)) recordCrashFixture {
 	t.Helper()
 	durableRecordHooksForTest.Store(nil)
@@ -113,6 +130,7 @@ func checkStoreCrash(t *testing.T, kind string) {
 			if err := f.put(false); err != nil {
 				t.Fatal(err)
 			}
+			f.captureLayoutIdentity(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRecordStoreCrashChild$", "-test.timeout=8s")
@@ -197,6 +215,7 @@ func TestLifecyclePutSyncChild(t *testing.T) {
 	if err := f.put(false); err != nil {
 		t.Fatal(err)
 	}
+	f.captureLayoutIdentity(t)
 	fault := errors.New("injected sync failure")
 	var events []string
 	if failure != "nil-hooks" {

@@ -4,23 +4,80 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// kzProvider is a walstore-chunk provider for v1 (256 blocks, 16 per
-// chunk: 16 chunks) over root and remote.
-func kzProvider(t *testing.T, root string, remote storage.ChunkRemote) *DurableProvider {
+type kzLayoutBlobs struct {
+	sync.Mutex
+	b    map[string][]byte
+	gets atomic.Int64
+}
+
+func (b *kzLayoutBlobs) Put(_ context.Context, data []byte) (string, error) {
+	b.Lock()
+	defer b.Unlock()
+	id := fmt.Sprint(len(b.b) + 1)
+	b.b[id] = append([]byte(nil), data...)
+	return id, nil
+}
+func (b *kzLayoutBlobs) Get(_ context.Context, id string) ([]byte, error) {
+	b.gets.Add(1)
+	b.Lock()
+	defer b.Unlock()
+	v, ok := b.b[id]
+	if !ok {
+		return nil, chunkstore.ErrBlobNotFound
+	}
+	return append([]byte(nil), v...), nil
+}
+
+type kzLayout struct {
+	cat   *chunkstore.BCatalog
+	ref   chunkstore.VolumeRef
+	blobs *kzLayoutBlobs
+}
+
+func newKZLayout(t *testing.T) *kzLayout {
 	t.Helper()
-	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1}
+	b := &kzLayoutBlobs{b: map[string][]byte{}}
+	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), b, "/kz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
+	if _, err := cat.CreateVolume(context.Background(), ref, layout.Geometry{SizeBytes: 256 * 4096, BlockSize: 4096, ChunkBytes: 16 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	return &kzLayout{cat: cat, ref: ref, blobs: b}
+}
+
+// kzProvider is a B-layout chunk provider for v1 (16 chunks).
+func kzProvider(t *testing.T, root string, remote *kzLayout) *DurableProvider {
+	return kzProviderAt(t, root, remote, "r1", 3)
+}
+
+func kzProviderAt(t *testing.T, root string, remote *kzLayout, replica string, epoch uint64) *DurableProvider {
+	t.Helper()
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: replica, Epoch: epoch, EndpointVersion: 1}
 	p, err := NewDurableProvider(ProviderConfig{
 		Impl: ImplWALStoreChunk, StorageRoot: root, BlockSize: 4096, NumBlocks: 256, ChunkBlocks: 16,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
+		ChunkLayoutHeadFor: func(string) (layout.StartStore, error) { return remote.cat.Store(remote.ref) },
+		ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			return chunkstore.NewLayoutRemote(remote.cat, remote.ref, me)
+		},
 	}, precopyQueueView{id})
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +97,20 @@ func kzCandidates(t *testing.T, p *DurableProvider) int {
 	return -1
 }
 
+func kzFreshAtRoot(t *testing.T, path string) bool {
+	t.Helper()
+	ws, err := storage.OpenWALStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	_, fresh, ok := ws.LayoutIdentity()
+	if !ok {
+		t.Fatal("layout identity missing from durable root")
+	}
+	return fresh
+}
+
 // The premise of RULE-FRESH-KNOWN-ZERO: until the attach commit retires the
 // fresh marker, no write reaches the store. Held at that boundary (after the
 // claim and the certification, before the commit), a frontend write is not
@@ -48,7 +119,7 @@ func kzCandidates(t *testing.T, p *DurableProvider) int {
 func TestNoWriteReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	p := kzProvider(t, t.TempDir(), storage.NewMemChunkRemote())
+	p := kzProvider(t, t.TempDir(), newKZLayout(t))
 	st, err := p.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +163,7 @@ func TestNoWriteReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
 func TestFreshKnownZeroNotAfterARestartBeforeTheAttachCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	root, remote := t.TempDir(), storage.NewMemChunkRemote()
+	root, remote := t.TempDir(), newKZLayout(t)
 	p := kzProvider(t, root, remote)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
@@ -105,8 +176,8 @@ func TestFreshKnownZeroNotAfterARestartBeforeTheAttachCommit(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); err != nil {
-		t.Fatalf("fresh marker after the crash: %v; want it kept", err)
+	if !kzFreshAtRoot(t, p.volumePath("v1")) {
+		t.Fatal("durable layout identity was not fresh after the crash")
 	}
 	p2 := kzProvider(t, root, remote)
 	if _, err := p2.EnsureStorage("v1"); err != nil {
@@ -125,7 +196,7 @@ func TestFreshKnownZeroNotAfterARestartBeforeTheAttachCommit(t *testing.T) {
 func TestFreshKnownZeroNotAfterARestartBeforeAnyAttach(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	root, remote := t.TempDir(), storage.NewMemChunkRemote()
+	root, remote := t.TempDir(), newKZLayout(t)
 	p := kzProvider(t, root, remote)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
@@ -153,7 +224,7 @@ func TestFreshKnownZeroNotAfterARestartBeforeAnyAttach(t *testing.T) {
 func TestFreshKnownZeroCrashBetweenMarkerRetireAndMarking(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	root, remote := t.TempDir(), storage.NewMemChunkRemote()
+	root, remote := t.TempDir(), newKZLayout(t)
 	p := kzProvider(t, root, remote)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
@@ -166,8 +237,8 @@ func TestFreshKnownZeroCrashBetweenMarkerRetireAndMarking(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(chunkFreshMarker(p.volumePath("v1"))); !os.IsNotExist(err) {
-		t.Fatalf("fresh marker after the crash: %v; want it retired", err)
+	if kzFreshAtRoot(t, p.volumePath("v1")) {
+		t.Fatal("durable layout identity remained fresh after its clear")
 	}
 	p2 := kzProvider(t, root, remote)
 	if _, err := p2.EnsureStorage("v1"); err != nil {
@@ -183,7 +254,7 @@ func TestFreshKnownZeroCrashBetweenMarkerRetireAndMarking(t *testing.T) {
 }
 
 // kzWriteAndPublish writes chunk 5, cuts, and checks HEAD publishes it.
-func kzWriteAndPublish(t *testing.T, ctx context.Context, p *DurableProvider, remote *storage.MemChunkRemote) {
+func kzWriteAndPublish(t *testing.T, ctx context.Context, p *DurableProvider, remote *kzLayout) {
 	t.Helper()
 	want := bytes.Repeat([]byte{0x6b}, 4096)
 	if _, err := p.Backend("v1").Write(ctx, 5*16*4096, want); err != nil {
@@ -195,32 +266,29 @@ func kzWriteAndPublish(t *testing.T, ctx context.Context, p *DurableProvider, re
 	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
-	head, err := remote.GetHead(ctx)
+	head, found, err := remote.cat.ReadHead(ctx, remote.ref)
+	if err != nil || !found || head.Current == nil {
+		t.Fatalf("the cut did not publish a B root: found=%v err=%v head=%+v", found, err, head)
+	}
+	st, err := remote.cat.Store(remote.ref)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, ok := head.Chunks[5]
-	if !ok {
-		t.Fatal("the cut did not publish chunk 5")
+	reader, err := layout.NewReader("/kz", remote.ref.Dir(), st.Fetch)
+	if err != nil {
+		t.Fatal(err)
 	}
-	chunk, err := remote.Get(ctx, ref.Key)
-	if err != nil || !bytes.Equal(chunk[:4096], want) {
+	image, err := reader.Open(ctx, *head.Current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := image.Chunk(ctx, 5)
+	if err != nil || chunk.Zero || !bytes.Equal(chunk.Data[:4096], want) {
 		t.Fatalf("published chunk 5: %v", err)
 	}
 	if got := kzCandidates(t, p); got != 0 {
 		t.Fatalf("after the cut: %d candidate chunks; want 0", got)
 	}
-}
-
-// kzCountingRemote counts chunk reads (Get) of the remote it wraps.
-type kzCountingRemote struct {
-	storage.ChunkRemote
-	gets atomic.Int64
-}
-
-func (r *kzCountingRemote) Get(ctx context.Context, key string) ([]byte, error) {
-	r.gets.Add(1)
-	return r.ChunkRemote.Get(ctx, key)
 }
 
 // The premise again, for fills (test #12): until the attach commit retires
@@ -233,8 +301,8 @@ func (r *kzCountingRemote) Get(ctx context.Context, key string) ([]byte, error) 
 func TestNoFetchOrFillReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mem := storage.NewMemChunkRemote()
-	src := kzProvider(t, t.TempDir(), mem)
+	remote := newKZLayout(t)
+	src := kzProvider(t, t.TempDir(), remote)
 	if _, err := src.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -257,19 +325,18 @@ func TestNoFetchOrFillReachesAFreshStoreBeforeItsAttachCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	remote := &kzCountingRemote{ChunkRemote: mem}
-	p := kzProvider(t, t.TempDir(), remote)
+	p := kzProviderAt(t, t.TempDir(), remote, "r2", 4)
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
 	var readErr error
 	var getsAtBoundary int64 = -1
 	p.testBeforeChunkFreshRetire = func() error {
-		before := remote.gets.Load()
+		before := remote.blobs.gets.Load()
 		rctx, rcancel := context.WithTimeout(ctx, 300*time.Millisecond)
 		defer rcancel()
 		_, readErr = p.Backend("v1").Read(rctx, 3*16*4096, make([]byte, 4096))
-		getsAtBoundary = remote.gets.Load() - before
+		getsAtBoundary = remote.blobs.gets.Load() - before
 		return nil
 	}
 	if _, err := p.RecoverVolume(ctx, "v1"); err != nil {

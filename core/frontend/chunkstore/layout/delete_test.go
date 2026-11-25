@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -82,7 +84,7 @@ func TestDeleting_RefusesEveryHolderStep(t *testing.T) {
 	for name, step := range map[string]func() error{
 		"Begin":      func() error { _, _, err := h.Begin(me, "s"); return err },
 		"Abort":      func() error { _, _, err := h.Abort(me, "s"); return err },
-		"Commit":     func() error { _, _, err := h.Commit(me, "s", rn, 1, "", StateLive); return err },
+		"Commit":     func() error { _, _, err := h.Commit(me, "s", rn, 1, "", SnapshotMeta{}, StateLive); return err },
 		"BeginClean": func() error { _, _, err := h.BeginClean(me, "c"); return err },
 		"EndClean":   func() error { _, _, err := h.EndClean(me, "c"); return err },
 		"Claim":      func() error { _, _, err := h.Claim(newer); return err },
@@ -208,7 +210,7 @@ func TestDeleteVolume_ALateDeleteSparesTheNameReused(t *testing.T) {
 	ctx := context.Background()
 	w := newDeleteWorld()
 	o := w.objects()
-	if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, w.rels); err != nil {
+	if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); err != nil {
 		t.Fatal(err)
 	}
 	o.volume = idFor("t again") // the name holds a new volume, which writes the same content name
@@ -230,19 +232,19 @@ func TestDeleteVolume(t *testing.T) {
 	ctx := context.Background()
 	w := newDeleteWorld()
 	o := w.objects()
-	if err := DeleteVolume(ctx, w.t, &fakeMaster{leases: 1}, idFor("t"), []HeadStore{w.src}, o, w.rels); !errors.Is(err, ErrHolderActive) || w.t.updates != 0 {
+	if err := DeleteVolume(ctx, w.t, &fakeMaster{leases: 1}, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); !errors.Is(err, ErrHolderActive) || w.t.updates != 0 {
 		t.Fatalf("delete while held: %v (%d HEAD writes)", err, w.t.updates)
 	}
-	if err := DeleteVolume(ctx, w.src, &fakeMaster{}, idFor("src"), nil, o, nil); !errors.Is(err, ErrHasDependents) {
+	if err := DeleteVolume(ctx, w.src, &fakeMaster{}, idFor("src"), nil, o, fixed(nil)); !errors.Is(err, ErrHasDependents) {
 		t.Fatalf("delete of a volume with a dependent: %v; want ErrHasDependents", err)
 	}
-	if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, w.rels); err != nil {
+	if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); err != nil {
 		t.Fatal(err)
 	}
 	if w.t.h.State != StateDeleted || len(o.objs) != 0 || len(w.src.h.Snapshots["daily"].Dependents) != 0 {
 		t.Fatalf("after the delete: state %q, %d objects, source dependents %+v", w.t.h.State, len(o.objs), w.src.h.Snapshots["daily"].Dependents)
 	}
-	if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, w.rels); err != nil {
+	if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); err != nil {
 		t.Fatalf("a further re-run: %v", err)
 	}
 }
@@ -275,7 +277,7 @@ func TestDeleteVolume_InterruptAtEveryStep(t *testing.T) {
 				case "object":
 					o.killAt, o.after = nth, after
 				}
-				if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, w.rels); !errors.Is(err, errKilled) {
+				if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); !errors.Is(err, errKilled) {
 					t.Fatalf("killed run: %v", err)
 				}
 				if len(o.objs) < len(w.rels) && (w.t.h.State == StateLive || len(w.src.h.Snapshots["daily"].Dependents) != 0) {
@@ -287,7 +289,7 @@ func TestDeleteVolume_InterruptAtEveryStep(t *testing.T) {
 				w.t.restart()
 				w.src.restart()
 				o.dead, o.killAt = false, 0
-				if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, w.rels); err != nil {
+				if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); err != nil {
 					t.Fatalf("re-run: %v", err)
 				}
 				if w.t.h.State != StateDeleted || len(o.objs) != 0 || len(w.src.h.Snapshots["daily"].Dependents) != 0 {
@@ -307,7 +309,7 @@ func operatorCase(t *testing.T, tgtHead *Head, tgtVolume *VolumeID, namesSource 
 	objs := map[string][]byte{}
 	put := func(rel string, b []byte) { objs[path.Join(removeBase, "t", rel)] = b }
 	if tgtVolume != nil {
-		b, err := Volume{ID: *tgtVolume, Name: "t", Format: VolumeFormat}.Encode()
+		b, err := Volume{ID: *tgtVolume, Name: "t", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}.Encode()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -417,14 +419,15 @@ func (r *raceTarget) CreateDeletedHead(ctx context.Context, h Head) error {
 	return r.memHead.CreateDeletedHead(ctx, h)
 }
 
-// A volume delete removes only content-named objects: HEAD (which stays,
-// deleted), VOLUME and the directory are refused before any write.
+// A volume delete removes only content-named objects: a listing that
+// names HEAD (which stays, deleted), VOLUME or the directory is refused
+// before any object is deleted.
 func TestDeleteVolume_RemovesOnlyObjects(t *testing.T) {
 	for _, bad := range []string{HeadName, VolumeName, "", "pool/", "pool/../HEAD", "other/x"} {
 		w := newDeleteWorld()
 		o := w.objects()
-		if err := DeleteVolume(context.Background(), w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, append(append([]string(nil), w.rels...), bad)); !errors.Is(err, ErrMalformed) || w.t.updates != 0 || len(o.writes) != 0 {
-			t.Errorf("delete listing %q: %v (%d HEAD writes, %d object writes); want ErrMalformed and nothing written", bad, err, w.t.updates, len(o.writes))
+		if err := DeleteVolume(context.Background(), w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, fixed(append(append([]string(nil), w.rels...), bad))); !errors.Is(err, ErrMalformed) || len(o.writes) != 0 {
+			t.Errorf("delete listing %q: %v (%d object writes); want ErrMalformed and no object deleted", bad, err, len(o.writes))
 		}
 	}
 }
@@ -445,7 +448,7 @@ func TestDeleteVolume_AGrantRaceNeverDeletesALiveVolume(t *testing.T) {
 			t.Fatal(err)
 		}
 		claim(w.t)
-		if err := DeleteVolume(ctx, w.t, m, idFor("t"), []HeadStore{w.src}, o, w.rels); !errors.Is(err, ErrHolderActive) || len(o.writes) != 0 || w.t.h.State != StateLive {
+		if err := DeleteVolume(ctx, w.t, m, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); !errors.Is(err, ErrHolderActive) || len(o.writes) != 0 || w.t.h.State != StateLive {
 			t.Fatalf("delete of a volume with a granted line: %v, %d object writes, HEAD %s; want ErrHolderActive, nothing deleted", err, len(o.writes), w.t.h.State)
 		}
 	})
@@ -459,7 +462,7 @@ func TestDeleteVolume_AGrantRaceNeverDeletesALiveVolume(t *testing.T) {
 				claim(w.t)
 			}
 		}
-		if err := DeleteVolume(ctx, w.t, m, idFor("t"), []HeadStore{w.src}, o, w.rels); err != nil {
+		if err := DeleteVolume(ctx, w.t, m, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
 		if grantErr == nil {
@@ -470,8 +473,51 @@ func TestDeleteVolume_AGrantRaceNeverDeletesALiveVolume(t *testing.T) {
 		w := newDeleteWorld()
 		o := w.objects()
 		w.t.afterRead = func() { claim(w.t) }
-		if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, w.rels); err == nil || len(o.writes) != 0 || w.t.h.State != StateLive {
+		if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, fixed(w.rels)); err == nil || len(o.writes) != 0 || w.t.h.State != StateLive {
 			t.Fatalf("delete with a claim after its HEAD read: %v, %d object writes, HEAD %s; want the update refused, nothing deleted", err, len(o.writes), w.t.h.State)
 		}
 	})
+}
+
+// fixed is a lister of a fixed set of objects.
+func fixed(rels []string) func(context.Context) ([]string, error) {
+	return func(context.Context) ([]string, error) { return rels, nil }
+}
+
+// dirLister lists every object of the store, at the time it is called.
+func dirLister(o *memObjects) func(context.Context) ([]string, error) {
+	return func(context.Context) ([]string, error) {
+		var out []string
+		for p := range o.objs {
+			out = append(out, strings.TrimPrefix(p, o.root+"/"))
+		}
+		sort.Strings(out)
+		return out, nil
+	}
+}
+
+// The objects are listed after HEAD is deleting: one a holder uploaded
+// between an early listing point and the reservation is deleted too; a
+// re-run on the deleted HEAD sweeps one that landed after the delete.
+func TestDeleteVolume_ListsAfterTheMark(t *testing.T) {
+	ctx := context.Background()
+	w := newDeleteWorld()
+	o := w.objects()
+	late := NameChunk(9, []byte("late")).Path()
+	m := &fakeMaster{onReserve: func() {
+		o.objs[path.Join(o.root, late)] = &memObject{data: []byte("late"), meta: ObjectMeta{Session: "s9", Volume: o.volume}}
+	}}
+	if err := DeleteVolume(ctx, w.t, m, idFor("t"), []HeadStore{w.src}, o, dirLister(o)); err != nil {
+		t.Fatal(err)
+	}
+	if len(o.objs) != 0 {
+		t.Fatalf("objects left after the delete: %d; want none (also the one uploaded before the reservation)", len(o.objs))
+	}
+	o.objs[path.Join(o.root, late)] = &memObject{data: []byte("late"), meta: ObjectMeta{Session: "s9", Volume: o.volume}}
+	if err := DeleteVolume(ctx, w.t, &fakeMaster{}, idFor("t"), []HeadStore{w.src}, o, dirLister(o)); err != nil || len(o.objs) != 0 {
+		t.Fatalf("sweep re-run on the deleted HEAD: %v, %d objects left", err, len(o.objs))
+	}
+	if w.t.h.State != StateDeleted {
+		t.Fatalf("HEAD after the sweep: %s", w.t.h.State)
+	}
 }

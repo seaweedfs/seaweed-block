@@ -8,11 +8,17 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"path"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"google.golang.org/protobuf/proto"
 )
 
 type formatV3View struct{}
@@ -21,13 +27,151 @@ func (formatV3View) Projection() frontend.Projection {
 	return frontend.Projection{VolumeID: "v1", ReplicaID: "r1", Epoch: 3, EndpointVersion: 1, Healthy: true}
 }
 
-func mappedProviderV3(t *testing.T, root string, remote storage.ChunkRemote) *DurableProvider {
+type formatV3Fixture struct {
+	filer *chunkstore.MemFiler
+	cat   *chunkstore.BCatalog
+	ref   chunkstore.VolumeRef
+	blobs *layoutCrashBlobs
+}
+
+func newFormatV3Fixture(t *testing.T) *formatV3Fixture {
 	t.Helper()
+	blobs := &layoutCrashBlobs{b: map[string][]byte{}}
+	filer := chunkstore.NewMemFiler()
+	cat, err := chunkstore.NewBCatalog(filer, blobs, "/format-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
+	if _, err := cat.CreateVolume(context.Background(), ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	return &formatV3Fixture{filer: filer, cat: cat, ref: ref, blobs: blobs}
+}
+
+func (f *formatV3Fixture) head(t *testing.T) layout.Head {
+	t.Helper()
+	h, found, err := f.cat.ReadHead(context.Background(), f.ref)
+	if err != nil || !found {
+		t.Fatalf("B HEAD: found=%v err=%v", found, err)
+	}
+	return h
+}
+
+func (f *formatV3Fixture) block(t *testing.T, lba uint64) []byte {
+	t.Helper()
+	h := f.head(t)
+	if h.Current == nil {
+		return make([]byte, 4096)
+	}
+	st, err := f.cat.Store(f.ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := layout.NewReader("/format-v3", f.ref.Dir(), st.Fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := r.Open(context.Background(), *h.Current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := img.Chunk(context.Background(), lba/4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunk.Zero {
+		return make([]byte, 4096)
+	}
+	off := int(lba%4) * 4096
+	return chunk.Data[off : off+4096]
+}
+
+func (f *formatV3Fixture) puts() int {
+	f.blobs.Lock()
+	defer f.blobs.Unlock()
+	return len(f.blobs.b)
+}
+
+func (f *formatV3Fixture) chunkPuts() int {
+	f.blobs.Lock()
+	defer f.blobs.Unlock()
+	count := 0
+	for _, data := range f.blobs.b {
+		if len(data) == 4*4096 {
+			count++
+		}
+	}
+	return count
+}
+
+type formatV3Entry struct {
+	Dir   string
+	Entry *filerpb.Entry
+}
+
+type formatV3Image struct {
+	Ref     chunkstore.VolumeRef
+	Entries []formatV3Entry
+	Blobs   map[string][]byte
+}
+
+func (f *formatV3Fixture) image(t *testing.T) formatV3Image {
+	t.Helper()
+	img := formatV3Image{Ref: f.ref, Blobs: map[string][]byte{}}
+	base := path.Join("/format-v3", f.ref.Dir())
+	for _, suffix := range []string{"", layout.RootDir, layout.SegDir, path.Join(layout.PoolDir, "0")} {
+		dir := path.Join(base, suffix)
+		entries, err := f.filer.ListEntries(context.Background(), dir, "", "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			img.Entries = append(img.Entries, formatV3Entry{Dir: dir, Entry: entry})
+		}
+	}
+	f.blobs.Lock()
+	for name, data := range f.blobs.b {
+		img.Blobs[name] = append([]byte(nil), data...)
+	}
+	f.blobs.Unlock()
+	return img
+}
+
+func restoreFormatV3Image(t *testing.T, img formatV3Image) *formatV3Fixture {
+	t.Helper()
+	filer := chunkstore.NewMemFiler()
+	for _, item := range img.Entries {
+		if err := filer.CreateEntry(context.Background(), item.Dir, item.Entry, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blobs := &layoutCrashBlobs{b: img.Blobs}
+	cat, err := chunkstore.NewBCatalog(filer, blobs, "/format-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &formatV3Fixture{filer: filer, cat: cat, ref: img.Ref, blobs: blobs}
+}
+
+func mappedProviderV3(t *testing.T, root string, fixture *formatV3Fixture, view frontend.ProjectionView, override ...layout.StartStore) *DurableProvider {
+	t.Helper()
+	headFor := func(string) (layout.StartStore, error) { return fixture.cat.Store(fixture.ref) }
+	if len(override) > 0 {
+		headFor = func(string) (layout.StartStore, error) { return override[0], nil }
+	}
 	p, err := NewDurableProvider(ProviderConfig{
 		Impl: ImplWALStoreChunk, StorageRoot: root, NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 4,
 		WALRecoveryTestDisableFlusher: true,
-		ChunkRemoteFor:                func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, formatV3View{})
+		ChunkLayoutHeadFor:            headFor,
+		ChunkLayoutRemoteFor: func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			return chunkstore.NewLayoutRemote(fixture.cat, fixture.ref, me)
+		},
+	}, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,8 +184,8 @@ func TestDurableProviderV3_MappedCheckpointCaptureAndReopen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	remote := storage.NewMemChunkRemote()
-	p := mappedProviderV3(t, root, remote)
+	fixture := newFormatV3Fixture(t)
+	p := mappedProviderV3(t, root, fixture, formatV3View{})
 	st, err := p.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -65,23 +209,17 @@ func TestDurableProviderV3_MappedCheckpointCaptureAndReopen(t *testing.T) {
 	}
 	check := func(want []byte) {
 		t.Helper()
-		head, e := remote.GetHead(ctx)
-		if e != nil {
-			t.Fatal(e)
-		}
-		ref, ok := head.Chunks[1]
-		if !ok {
+		if fixture.head(t).Current == nil {
 			t.Fatal("capture omitted checkpointed chunk")
 		}
-		chunk, e := remote.Get(ctx, ref.Key)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if !bytes.Equal(chunk[4096:8192], want) {
+		if !bytes.Equal(fixture.block(t, 5), want) {
 			t.Fatal("published chunk bytes differ")
 		}
 	}
 	check(data)
+	if err = p.Close(); err != nil {
+		t.Fatal(err)
+	}
 	raw, err := os.ReadFile(p.volumePath("v1"))
 	if err != nil {
 		t.Fatal(err)
@@ -92,10 +230,7 @@ func TestDurableProviderV3_MappedCheckpointCaptureAndReopen(t *testing.T) {
 	if _, err = os.Stat(p.volumePath("v1") + ".chunkbitmap"); !os.IsNotExist(err) {
 		t.Fatalf("legacy bitmap exists: %v", err)
 	}
-	if err = p.Close(); err != nil {
-		t.Fatal(err)
-	}
-	p2 := mappedProviderV3(t, root, remote)
+	p2 := mappedProviderV3(t, root, fixture, formatV3View{})
 	st2, err := p2.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -118,12 +253,12 @@ func TestDurableProviderV3_MappedCheckpointCaptureAndReopen(t *testing.T) {
 	if err = storage.FlushMappedWALStoreV3Test(st2.(*storage.WALStore)); err != nil {
 		t.Fatal(err)
 	}
-	before := remote.Puts()
+	before := fixture.chunkPuts()
 	if _, err = p2.CaptureVolume(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
-	if remote.Puts()-before != 1 {
-		t.Fatalf("incremental capture uploaded %d chunks", remote.Puts()-before)
+	if fixture.chunkPuts()-before != 1 {
+		t.Fatalf("incremental capture uploaded %d chunks", fixture.chunkPuts()-before)
 	}
 	check(next)
 }
@@ -133,8 +268,8 @@ func TestDurableProviderV3_MissingMapRefusesBeforeBackend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	remote := storage.NewMemChunkRemote()
-	p := mappedProviderV3(t, root, remote)
+	fixture := newFormatV3Fixture(t)
+	p := mappedProviderV3(t, root, fixture, formatV3View{})
 	if _, err := p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +283,7 @@ func TestDurableProviderV3_MissingMapRefusesBeforeBackend(t *testing.T) {
 	if err := os.Remove(path + ".chunkmap"); err != nil {
 		t.Fatal(err)
 	}
-	p2 := mappedProviderV3(t, root, remote)
+	p2 := mappedProviderV3(t, root, fixture, formatV3View{})
 	if st, err := p2.EnsureStorage("v1"); err == nil || st != nil {
 		t.Fatalf("accepted missing map: store=%v err=%v", st, err)
 	}
@@ -169,6 +304,9 @@ func TestDurableProviderV3_DefaultSelectorCreatesV3(t *testing.T) {
 	if _, err = p.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
+	if err = p.Close(); err != nil {
+		t.Fatal(err)
+	}
 	f, err := os.Open(p.volumePath("v1"))
 	if err != nil {
 		t.Fatal(err)
@@ -187,31 +325,69 @@ func TestDurableProviderV3_DefaultSelectorCreatesV3(t *testing.T) {
 func TestDurableProviderV3_InvalidHEADFrontierRefusesBeforeClaim(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{Epoch: 2, Holder: "old", RemoteLSN: ^uint64(0)}); err != nil {
-		t.Fatal(err)
-	}
-	before, err := remote.GetHead(ctx)
+	fixture := newFormatV3Fixture(t)
+	store, err := fixture.cat.Store(fixture.ref)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := mappedProviderV3(t, t.TempDir(), remote)
+	bad := fixture.head(t)
+	bad.Epoch, bad.Holder, bad.ClaimID = 2, "old", "old-claim"
+	if err := store.UpdateHead(ctx, bad.Gen, bad); err != nil {
+		t.Fatal(err)
+	}
+	// An old writer could leave a HEAD with no next LSN. The current kernel
+	// refuses to write it, so inject its canonical bytes through the filer.
+	dir := path.Join("/format-v3", fixture.ref.Dir())
+	entry, err := fixture.filer.LookupEntry(ctx, dir, layout.HeadName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPosition := []byte(`"position":` + strconv.FormatUint(bad.Position, 10))
+	if bytes.Count(entry.Content, oldPosition) != 1 {
+		t.Fatalf("HEAD position field not unique: %s", entry.Content)
+	}
+	entry.Content = bytes.Replace(entry.Content, oldPosition, []byte(`"position":`+strconv.FormatUint(^uint64(0), 10)), 1)
+	entry.Attributes.FileSize = uint64(len(entry.Content))
+	if err := fixture.filer.UpdateEntry(ctx, dir, entry, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fixture.filer.LookupEntry(ctx, dir, layout.HeadName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	p := mappedProviderV3(t, root, fixture, formatV3View{})
 	if _, err = p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Close(); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(p.volumePath("v1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = p.RecoverVolume(ctx, "v1"); err == nil {
+	p = mappedProviderV3(t, root, fixture, formatV3View{})
+	if _, err = p.EnsureStorage("v1"); err != nil {
+		t.Fatal(err)
+	}
+	_, recoverErr := p.RecoverVolume(ctx, "v1")
+	if recoverErr == nil {
 		t.Fatal("invalid HEAD frontier accepted")
 	}
-	after, err := remote.GetHead(ctx)
+	after, err := fixture.filer.LookupEntry(ctx, dir, layout.HeadName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Gen != before.Gen || after.Epoch != before.Epoch || after.Holder != before.Holder {
-		t.Fatal("failed seed claimed HEAD")
+	if !proto.Equal(after, before) {
+		t.Fatalf("failed seed claimed HEAD: before=%+v after=%+v recovery=%v", before, after, recoverErr)
+	}
+	var buf [4096]byte
+	if _, err := p.Backend("v1").Read(ctx, 0, buf[:]); err == nil {
+		t.Fatal("failed restore left backend operational")
+	}
+	if err = p.Close(); err != nil {
+		t.Fatal(err)
 	}
 	now, err := os.ReadFile(p.volumePath("v1"))
 	if err != nil {
@@ -221,10 +397,6 @@ func TestDurableProviderV3_InvalidHEADFrontierRefusesBeforeClaim(t *testing.T) {
 	// a legacy header or advance the inherited logical frontier.
 	if binary.LittleEndian.Uint16(now[4:6]) != 3 || binary.LittleEndian.Uint16(raw[4:6]) != 3 {
 		t.Fatal("restore serialized a legacy header")
-	}
-	var buf [4096]byte
-	if _, err := p.Backend("v1").Read(ctx, 0, buf[:]); err == nil {
-		t.Fatal("failed restore left backend operational")
 	}
 }
 
@@ -237,22 +409,22 @@ func (formatV3TakeoverView) Projection() frontend.Projection {
 }
 
 type formatV3RestoreRemote struct {
-	storage.ChunkRemote
+	layout.StartStore
 	beforeClaim       func() error
 	loseClaimResponse bool
 }
 
-func (r *formatV3RestoreRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
-	if expected.Epoch == 3 {
+func (r *formatV3RestoreRemote) UpdateHead(ctx context.Context, expected uint64, next layout.Head) error {
+	if next.Epoch == 4 {
 		if err := r.beforeClaim(); err != nil {
-			return 0, err
+			return err
 		}
 	}
-	gen, err := r.ChunkRemote.CASHead(ctx, expected, next)
-	if err == nil && expected.Epoch == 3 && r.loseClaimResponse {
-		return 0, errors.New("claim response lost after commit")
+	err := r.StartStore.UpdateHead(ctx, expected, next)
+	if err == nil && next.Epoch == 4 && r.loseClaimResponse {
+		return errors.New("claim response lost after commit")
 	}
-	return gen, err
+	return err
 }
 func TestDurableProviderV3_HEADRestorePreservesRemoteImageAndNextLSN(t *testing.T) {
 	exerciseMappedHEADRestoreV3(t, false)
@@ -263,8 +435,8 @@ func TestDurableProviderV3_HEADRestoreAfterLostClaimResponse(t *testing.T) {
 func exerciseMappedHEADRestoreV3(t *testing.T, loseClaimResponse bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	source := mappedProviderV3(t, t.TempDir(), remote)
+	fixture := newFormatV3Fixture(t)
+	source := mappedProviderV3(t, t.TempDir(), fixture, formatV3View{})
 	st, err := source.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -291,18 +463,27 @@ func exerciseMappedHEADRestoreV3(t *testing.T, loseClaimResponse bool) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	probe := &formatV3RestoreRemote{ChunkRemote: remote, loseClaimResponse: loseClaimResponse}
-	target := mappedProviderV3(t, root, probe)
-	target.view = formatV3TakeoverView{}
+	store, err := fixture.cat.Store(fixture.ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := &formatV3RestoreRemote{StartStore: store, loseClaimResponse: loseClaimResponse}
+	target := mappedProviderV3(t, root, fixture, formatV3TakeoverView{}, probe)
 	restored, err := target.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	probe.beforeClaim = func() error {
-		if restored.NextLSN() != 3 {
-			return errors.New("HEAD takeover attempted before durable seed/rebase")
+		if id, _, ok := restored.(*storage.WALStore).LayoutIdentity(); !ok || id == "" {
+			return errors.New("HEAD takeover attempted before durable local identity")
 		}
 		return nil
+	}
+	if loseClaimResponse {
+		if _, err = target.RecoverVolume(ctx, "v1"); err == nil {
+			t.Fatal("lost B claim reply was treated as an acknowledged claim")
+		}
+		probe.loseClaimResponse = false
 	}
 	if _, err = target.RecoverVolume(ctx, "v1"); err != nil {
 		t.Fatalf("actual mapped HEAD restore refused: %v", err)
@@ -310,14 +491,11 @@ func exerciseMappedHEADRestoreV3(t *testing.T, loseClaimResponse bool) {
 	if restored.NextLSN() != 3 {
 		t.Fatalf("restored nextLSN=%d want3", restored.NextLSN())
 	}
-	head, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if head.RemoteLSN != 2 || head.Epoch != 4 || head.Holder != "r2" {
+	head := fixture.head(t)
+	if head.Position != 2 || head.Epoch != 4 || head.Holder != "r2" {
 		t.Fatalf("takeover changed image/frontier: %+v", head)
 	}
-	before := remote.Puts()
+	before := fixture.puts()
 	check := func(p *DurableProvider, lba int64, want []byte) {
 		t.Helper()
 		got := make([]byte, 4096)
@@ -328,7 +506,7 @@ func exerciseMappedHEADRestoreV3(t *testing.T, loseClaimResponse bool) {
 	check(target, 5, first)
 	check(target, 12, second)
 	check(target, 0, make([]byte, 4096))
-	if remote.Puts() != before {
+	if fixture.puts() != before {
 		t.Fatal("lazy read uploaded remote chunks")
 	}
 	next := bytes.Repeat([]byte{0x83}, 4096)
@@ -353,8 +531,7 @@ func exerciseMappedHEADRestoreV3(t *testing.T, loseClaimResponse bool) {
 	if err = target.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened := mappedProviderV3(t, root, remote)
-	reopened.view = formatV3TakeoverView{}
+	reopened := mappedProviderV3(t, root, fixture, formatV3TakeoverView{})
 	if _, err = reopened.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +547,7 @@ func exerciseMappedHEADRestoreV3(t *testing.T, loseClaimResponse bool) {
 func TestDurableProviderV3_StatusTracksRecoverSyncAndCapture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	p := mappedProviderV3(t, t.TempDir(), storage.NewMemChunkRemote())
+	p := mappedProviderV3(t, t.TempDir(), newFormatV3Fixture(t), formatV3View{})
 	st, err := p.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -420,8 +597,8 @@ func TestDurableProviderV3_ContiguousWriteSurvivesCheckpointAndReopen(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	remote := storage.NewMemChunkRemote()
-	p := mappedProviderV3(t, root, remote)
+	fixture := newFormatV3Fixture(t)
+	p := mappedProviderV3(t, root, fixture, formatV3View{})
 	st, e := p.EnsureStorage("v1")
 	if e != nil {
 		t.Fatal(e)
@@ -445,7 +622,7 @@ func TestDurableProviderV3_ContiguousWriteSurvivesCheckpointAndReopen(t *testing
 	if e = p.Close(); e != nil {
 		t.Fatal(e)
 	}
-	q := mappedProviderV3(t, root, remote)
+	q := mappedProviderV3(t, root, fixture, formatV3View{})
 	if _, e = q.EnsureStorage("v1"); e != nil {
 		t.Fatal(e)
 	}

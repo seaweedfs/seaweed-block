@@ -26,6 +26,9 @@ func (s *services) workspaceVolume(volume string) error {
 	if !ok || r.Spec.ReplicationFactor != 1 {
 		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
 	}
+	if !s.host.layoutStoreReady(volume) {
+		return status.Error(codes.FailedPrecondition, "workspace: created, store not ready; retry CreateVolume")
+	}
 	if s.host.lifecycle.Deletions.Reserved(volume) {
 		return status.Error(codes.FailedPrecondition, "workspace: volume is being deleted")
 	}
@@ -48,6 +51,9 @@ func (s *services) workspaceVolumeForRenewal(volume string) error {
 	r, ok := s.host.lifecycle.Volumes.GetVolumeSnapshot(volume)
 	if !ok || r.Spec.ReplicationFactor != 1 {
 		return status.Error(codes.FailedPrecondition, "workspace move requires an existing RF1 volume")
+	}
+	if !s.host.layoutStoreReady(volume) {
+		return status.Error(codes.FailedPrecondition, "workspace: created, store not ready; retry CreateVolume")
 	}
 	if s.host.lifecycle.Deletions.ReservedSnapshot(volume) {
 		if s.host.lifecycle.Deletions.CommittedSnapshot(volume) {
@@ -200,7 +206,19 @@ func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.Workspace
 	} else if !ok {
 		return nil, status.Error(codes.FailedPrecondition, "workspace ACK: server identity does not match the current holder")
 	}
-	if err := s.host.Publisher().AckWorkspaceRevocation(ctx, id.GetVolumeId(), authority.WorkspaceRevokeAck{ReplicaID: id.GetReplicaId(), Epoch: id.GetEpoch(), HeadGen: q.GetHeadGen()}); err != nil {
+	// The holder ACK proves its local drain. Read the store-owned stop here:
+	// detached at this epoch is stable, but operator metadata may advance gen.
+	if s.host.cfg.WorkspaceHeadReader == nil {
+		return nil, status.Error(codes.Unavailable, "workspace ACK: detached HEAD reader unavailable")
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	head, err := s.host.cfg.WorkspaceHeadReader(readCtx, id.GetVolumeId())
+	cancel()
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "workspace ACK: read detached HEAD: %v", err)
+	}
+	holder := id.GetServerId() + "/" + id.GetReplicaId()
+	if err := s.host.Publisher().AckWorkspaceRevocation(ctx, id.GetVolumeId(), authority.WorkspaceRevokeAck{ReplicaID: id.GetReplicaId(), Epoch: id.GetEpoch(), HeadGen: q.GetHeadGen(), Holder: holder}, head); err != nil {
 		return nil, workspaceError(err)
 	}
 	if err := s.host.reconcileWorkspaceBindings(); err != nil {
@@ -411,10 +429,8 @@ func (s *services) workspaceMoveCheckLocked(q *control.WorkspaceMove) (req autho
 		refusal = fmt.Sprintf("move source unknown: no issued move or placement names replica %q at epoch %d", q.GetExpectedReplicaId(), q.GetExpectedEpoch())
 	case !ok:
 		refusal = fmt.Sprintf("move target node %q is not registered", q.GetTargetServerId())
-	// INV-WS-SAME-HOST-CLEAN-MOVE-001: the authority clean-proof
-	// checks still run after these endpoint and binding checks.
-	case target.ServerID == oldHost && (q.GetKind() != "clean" || q.GetForce()):
-		refusal = fmt.Sprintf("move target %q is the current source host", target.ServerID)
+	// The authority still checks the clean seal/ACK or forced lease barrier
+	// after these endpoint and binding checks, also for a same-host target.
 	case !replay && s.host.colocatedTargetRefused(target.ServerID):
 		refusal = fmt.Sprintf("move target node %q shares the authority store's file system (strict journal isolation)", target.ServerID)
 	case !matched:

@@ -132,7 +132,9 @@ func (h *Host) reconcileWorkspaceBindings() error {
 			continue
 		}
 		for _, m := range state.Moves {
-			if m.Issued {
+			// A move must not retire its own target reservation. A same-host
+			// successor reuses it; a later ACK still retires that epoch below.
+			if m.Issued && m.OldHost != m.NewHost {
 				if err := h.lifecycle.WorkspaceBindings.Retire(volume, m.OldHost, m.OldEpoch); err != nil {
 					return err
 				}
@@ -215,6 +217,9 @@ func (h *Host) admitWorkspacePublication(ask authority.AssignmentAsk, publish fu
 	}
 	if _, alive := h.lifecycle.Volumes.GetVolume(ask.VolumeID); !alive {
 		return fmt.Errorf("workspace publication: no lifecycle VolumeRecord for %s; register it (CreateVolume) before publishing", ask.VolumeID)
+	}
+	if !h.layoutStoreReady(ask.VolumeID) {
+		return fmt.Errorf("workspace publication: volume %s created, store not ready; retry CreateVolume", ask.VolumeID)
 	}
 	bindings, bound, err := h.lifecycle.WorkspaceBindings.Get(ask.VolumeID)
 	if err != nil {

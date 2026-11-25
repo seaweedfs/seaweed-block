@@ -145,6 +145,22 @@ func (s *DeletionReservationStore) CommittedSnapshot(vol string) bool {
 	return ok && r.State == ReservationCommitted
 }
 
+// CommittedVolumes returns the permanent exclusions for publisher recovery
+// before the master serves its first request.
+func (s *DeletionReservationStore) CommittedVolumes() []string {
+	m := s.snap.Load()
+	var volumes []string
+	if m != nil {
+		for volume, r := range *m {
+			if r.State == ReservationCommitted {
+				volumes = append(volumes, volume)
+			}
+		}
+	}
+	sort.Strings(volumes)
+	return volumes
+}
+
 // Get returns vol's reservation.
 func (s *DeletionReservationStore) Get(vol string) (DeletionReservation, bool) {
 	s.mu.Lock()

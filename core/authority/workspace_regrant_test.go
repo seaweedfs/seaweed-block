@@ -191,7 +191,7 @@ func TestWorkspaceLeaseSealedAckNeverRegrants(t *testing.T) {
 	if err := p.BeginWorkspaceRevocation(ctx, "v", "r", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7}); err != nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7, Holder: "host/r", RemoteLSN: 42}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "host/r", RemoteLSN: 42}); err != nil {
 		t.Fatal(err)
 	}
 	// ACK is the master's durable evidence for this holder's sealed generation.

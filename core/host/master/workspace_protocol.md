@@ -70,14 +70,14 @@ refresh cannot bypass an enrolled workspace's move path.
 
 ## Move admission and persistence
 
-Clean: the configured filer HEAD reader must observe `state: "detached"` and
-`detachedBy: {holder, epoch, gen}` matching the installed HEAD's holder, epoch and
-generation. W2 writes both in the same final-cut CAS. State is exactly `active`
-or `detached`; missing state means active for older HEADs. No boolean `detached`
-is accepted. A new holder's takeover CAS sets active and clears detachedBy; the
-move journal retains history. The master's stored revocation ACK must name that
-exact HEAD generation. Revocation stops extending the lease. `AckWorkspaceRevoked`
-is a trusted host protocol fact, not a request to close another host remotely.
+Clean: the configured filer HEAD reader must observe B's detached state.
+After the holder drains, `AckWorkspaceRevoked` reads that HEAD, checks its epoch
+and holder against the authenticated caller, and persists its published position
+in the ACK. Move admission matches that detached epoch, holder and position.
+Snapshot deletion and restore dependencies may change generation without
+changing the stopped image; generation is diagnostic readout only. A higher
+epoch claim ends the stable detached predicate. Revocation stops extending the
+lease. The ACK is a trusted host drain fact, not a request to close another host.
 
 Forced: the request must explicitly say `kind: "forced", force: true`; the
 master's lease must have expired. The journal records the observed HEAD gen and

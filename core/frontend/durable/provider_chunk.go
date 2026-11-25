@@ -8,14 +8,13 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -125,10 +124,25 @@ func (p *DurableProvider) recoverChunk(ctx context.Context, volumeID string, h *
 		p.startChunkAuthorityWait(volumeID, h, gen)
 		return false, nil
 	}
-	if errors.Is(err, storage.ErrChunkLayerFenced) && (!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim)) {
+	if (errors.Is(err, storage.ErrChunkLayerFenced) &&
+		(!errors.Is(err, ErrChunkStaleLocalRoot) || errors.Is(err, errChunkForeignClaim))) ||
+		finalLayoutStartRefusal(err) {
 		p.endChunkStartup(h, gen, err)
 	}
 	return err == nil, err
+}
+
+// finalLayoutStartRefusal distinguishes a store's definite Start refusal
+// from an unavailable read or a conditional-write race that may be retried.
+// A detached HEAD has its separate replay-retained disposition below.
+func finalLayoutStartRefusal(err error) bool {
+	return errors.Is(err, layout.ErrStaleLocalRoot) || errors.Is(err, layout.ErrMissingLocalRoot) ||
+		errors.Is(err, layout.ErrGeometryMismatch) || errors.Is(err, layout.ErrHeadAbsent) ||
+		errors.Is(err, layout.ErrVolumeDeleting) || errors.Is(err, layout.ErrStaleEpoch) ||
+		errors.Is(err, layout.ErrNotHolder) || errors.Is(err, layout.ErrIdentity) ||
+		errors.Is(err, layout.ErrCorrupt) || errors.Is(err, layout.ErrMalformed) ||
+		errors.Is(err, layout.ErrMissing) || errors.Is(err, layout.ErrHeadTooLarge) ||
+		errors.Is(err, chunkstore.ErrLegacyStore)
 }
 
 // startChunkAuthorityWait starts the authority wait of recovery gen,
@@ -268,7 +282,7 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 		case errors.Is(err, errProviderClosed):
 			ended = "provider closed"
 			return
-		case errors.Is(err, storage.ErrChunkLayerDetached):
+		case errors.Is(err, storage.ErrChunkLayerDetached), errors.Is(err, layout.ErrDetached):
 			// INV-WS-STARTUP-RETRY-001: an assigned sealed incarnation stays
 			// non-serving for exact seal replay; restarting cannot unseal it.
 			retained = true
@@ -288,6 +302,16 @@ func (p *DurableProvider) chunkAuthorityWait(volumeID string, h *volHandle, gen 
 			} else {
 				p.endChunkStartup(h, gen, err)
 			}
+			return
+		case finalLayoutStartRefusal(err):
+			ended = "layout Start refused, not serving"
+			log.Printf("durable: chunk layer for volume=%s: %v (final refusal)", volumeID, err)
+			h.attachMu.Lock()
+			if p.current(h, gen) && h.chunk == nil {
+				h.backend.SetOperational(false, "chunk layer attach refused: "+err.Error())
+				p.endChunkStartup(h, gen, err)
+			}
+			h.attachMu.Unlock()
 			return
 		case errors.Is(err, errChunkNoAuthority):
 			log.Printf("durable: chunk layer attach for volume=%s: authority lost before attempt %d (projection lacks %s); waiting",
@@ -341,12 +365,7 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 	}
 	// The owner commit is serialized with a later BASE begin. The callback
 	// does marker I/O only: no store/layer reentry while installMu is held.
-	commit := func() error {
-		if h.fresh {
-			return removeChunkFreshMarker(h.path)
-		}
-		return nil
-	}
+	commit := func() error { return nil }
 	if h.fresh {
 		if hook := p.testBeforeChunkFreshRetire; hook != nil {
 			if err := hook(); err != nil {
@@ -359,6 +378,11 @@ func (p *DurableProvider) attachChunk(ctx context.Context, volumeID string, h *v
 			return err
 		}
 	} else if err := commit(); err != nil {
+		return err
+	}
+	ws := h.storage.(*storage.WALStore)
+	id, _, _ := ws.LayoutIdentity()
+	if err := ws.SetLayoutIdentity(id, false); err != nil {
 		return err
 	}
 	// RULE-FRESH-KNOWN-ZERO order: the marker is retired (above), THEN the
@@ -444,12 +468,36 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return nil, fmt.Errorf("durable: chunk attach check for %s: %w", volumeID, err)
 		}
 	}
-	inner, err := p.cfg.ChunkRemoteFor(volumeID)
+	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
+	holder := p.chunkHolder(proj)
+	var inner storage.ChunkRemote
+	var layoutHead layout.Head
+	var err error
+	st, e := p.cfg.ChunkLayoutHeadFor(volumeID)
+	if e != nil {
+		return nil, e
+	}
+	layoutHead, err = startLayoutRoot(ctx, ws, st, layout.HolderID{Epoch: proj.Epoch, Holder: holder})
+	if err != nil {
+		return nil, err
+	}
+	me := layout.HolderID{Epoch: layoutHead.Epoch, Holder: layoutHead.Holder, ClaimID: layoutHead.ClaimID}
+	p.mu.Lock()
+	if h.layoutHolder == me {
+		inner = h.layoutRemote
+	}
+	p.mu.Unlock()
+	if inner == nil {
+		inner, err = p.cfg.ChunkLayoutRemoteFor(volumeID, me)
+	}
+	if err == nil {
+		p.mu.Lock()
+		h.layoutHolder, h.layoutHead, h.layoutRemote = me, st, inner
+		p.mu.Unlock()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("durable: chunk remote for %s: %w", volumeID, err)
 	}
-	lin := chunkLineage{volumeID: proj.VolumeID, replicaID: proj.ReplicaID, epoch: proj.Epoch, endpoint: proj.EndpointVersion}
-	holder := p.chunkHolder(proj)
 	bound := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
 	if pace, ok := p.cfg.ChunkBudget.(interface {
 		WaitUpload(context.Context, int) error
@@ -458,10 +506,11 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 	}
 	bound.setAttach(ctx) // the attach's calls also end with the caller's ctx
 	defer bound.setAttach(nil)
-	var remote storage.ChunkRemote = bound
-	if builder, ok := inner.(storage.ChunkManifestBuilder); ok {
-		remote = &manifestBoundRemote{closeBoundRemote: bound, builder: builder}
+	keyer, ok := inner.(storage.ChunkKeyer)
+	if !ok {
+		return nil, errors.New("durable: layout remote lacks content keys")
 	}
+	var remote storage.ChunkRemote = &layoutBoundRemote{closeBoundRemote: bound, keyer: keyer}
 	cfg := storage.ChunkLayerConfig{
 		OnPublishSettled:    p.publishSettledHook(volumeID),
 		ChunkBlocks:         p.cfg.ChunkBlocks,
@@ -491,105 +540,27 @@ func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h 
 			return nil
 		},
 	}
-	if !h.fresh {
-		// An existing local volume is this holder's image only while HEAD is
-		// still this holder's publication (INV-WS-STALE-LOCAL-ROOT-001).
-		// Check again on the exact claim image before its CAS. Another holder means the
-		// workspace moved away and back: refuse rather than serve, or cut
-		// over, the newer image with the stale one.
-		head, err := remote.GetHead(ctx)
+	if p.cfg.ChunkLayoutHeadFor != nil {
+		// The kernel already claimed and validated this root. Seed only a fresh
+		// root; an existing root keeps its acknowledged WAL and synced position.
+		path, err := canStartFrom(ws, h.fresh, layoutHead)
 		if err != nil {
-			return nil, fmt.Errorf("durable: read HEAD before attaching existing volume %s: %w", volumeID, err)
-		}
-		cfg.PrepareRestore = func(head storage.ChunkHead) error {
-			if head.Gen != 0 && head.Holder != holder {
-				err := fmt.Errorf("%w: %w: volume %s local root %s, HEAD holder %q gen %d epoch %d, local holder %q; remove or quarantine the local root to attach fresh from HEAD",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
-				// INV-WS-STARTUP-RETRY-001: at or above this assignment,
-				// the foreign holder is a supersede proof. A lower epoch is
-				// the existing move-back/stale-root diagnostic, never 78.
-				if claimHeadSupersedes(head, cfg) {
-					err = fmt.Errorf("%w: %w", err, errChunkForeignClaim)
-				}
-				log.Printf("durable: refusing to attach volume=%s root=%s: HEAD holder=%q gen=%d epoch=%d is not this holder %q (remove or quarantine the local root)",
-					volumeID, h.path, head.Holder, head.Gen, head.Epoch, holder)
-				return err
-			}
-			// The durable-reopen rule: HEAD names this holder, but a root whose local
-			// durable LSN is below HEAD's remote_lsn is a rolled-back copy
-			// (a backup taken before a later cut). Restarting cannot cure it.
-			// A crash cannot cause it: a cut syncs its LSN locally before the
-			// HEAD CAS publishes it (storage chunkLayer capture: the barrier
-			// syncWithPhases result is next.RemoteLSN).
-			if durableLSN, _, _ := ws.Boundaries(); head.Gen != 0 && durableLSN < head.RemoteLSN {
-				log.Printf("durable: refusing to attach volume=%s root=%s: local durable LSN %d is below HEAD gen=%d remote_lsn=%d (remove or quarantine the local root)",
-					volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
-				return fmt.Errorf("%w: %w: %w: volume %s local root %s, local durable LSN %d below HEAD gen %d remote_lsn %d; remove or quarantine the local root to attach fresh from HEAD",
-					ErrChunkStaleLocalRoot, storage.ErrChunkLayerFenced, errChunkForeignClaim, volumeID, h.path, durableLSN, head.Gen, head.RemoteLSN)
-			}
-			return nil
-		}
-		if err := cfg.PrepareRestore(head); err != nil {
 			return nil, err
 		}
-	}
-	if h.fresh {
-		// Attach preparation is gated. Seed the exact observed HEAD before
-		// its takeover CAS; only then finalize lazy attachment and expose I/O.
-		cfg.PrepareRestore = func(head storage.ChunkHead) error {
-			log.Printf("durable: HEAD claim for volume=%s observed HEAD gen=%d epoch=%d holder=%q state=%v remote_lsn=%d; preparing",
-				volumeID, head.Gen, head.Epoch, head.Holder, head.State, head.RemoteLSN)
-			if baseLSN, complete := ws.InstalledBaseLSN(); complete {
-				// The fresh marker can outlive a full local BASE. It is not
-				// permission to seed backwards or to fill from an older HEAD.
-				if head.RemoteLSN > baseLSN {
-					return fmt.Errorf("durable: completed BASE frontier %d is behind HEAD %d", baseLSN, head.RemoteLSN)
-				}
-				cfg.FreshFromHead = false
-				return nil
+		switch path {
+		case startAttachBase:
+			cfg.FreshFromHead = false
+		case startSeed:
+			if err := h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(layoutHead.Position) }); err != nil {
+				return nil, err
 			}
-			// No HEAD is a new lineage; preserve any pre-assignment local
-			// writes instead of replacing their frontier with zero.
-			if head.Gen == 0 {
-				return nil
-			}
-			// EnsureVolume's initial ZERO HEAD is not a remote data image.
-			// A local frontier already advanced before assignment belongs to
-			// this bootstrap: retain its extent bytes and unknown dirty set,
-			// rather than seeding backwards or installing lazy absence.
-			if head.RemoteLSN == 0 && len(head.Chunks) == 0 && head.State != storage.ChunkHeadDetached && head.DetachedBy == nil && ws.NextLSN() > 1 {
-				cfg.FreshFromHead = false
-				return nil
-			}
-			// Every component that cached the next LSN learns the seeded
-			// one before the takeover CAS and before the volume serves I/O,
-			// serialized with observer installs. A refused rebase fails the
-			// restore here, so HEAD is never claimed for a mis-ordered ship.
-			return h.backend.seedAndRebase(func() error { return ws.SeedChunkFrontier(head.RemoteLSN) })
 		}
 	}
-	// INV-WS-REOPEN-FENCE-001: local-root reopens claim too, without
-	// reseeding their acknowledged WAL or replacing it with remote absence.
-	claimStart := time.Now()
-	log.Printf("durable: HEAD claim for volume=%s starting: target epoch=%d holder=%q", volumeID, cfg.Epoch, cfg.Holder)
-	head, err := storage.ClaimChunkHead(ctx, remote, cfg)
-	if err != nil {
-		// INV-WS-STARTUP-RETRY-001: only the claim's exact foreign-holder
-		// proof permits no-retry; a higher epoch of our own holder retries.
-		if errors.Is(err, storage.ErrChunkLayerFenced) && claimHeadSupersedes(head, cfg) {
-			err = errors.Join(err, errChunkForeignClaim)
-		}
-		log.Printf("durable: HEAD claim for volume=%s failed after %s: %v", volumeID, time.Since(claimStart), err)
-		return nil, fmt.Errorf("durable: restore HEAD claim: %w", err)
-	}
-	log.Printf("durable: HEAD claim for volume=%s done in %s: gen=%d epoch=%d holder=%q", volumeID, time.Since(claimStart), head.Gen, head.Epoch, head.Holder)
-	cfg.RestoreGuard = &storage.ChunkHeadVersion{Gen: head.Gen, Epoch: head.Epoch}
-
-	layer, attachErr := storage.AttachChunkLayer(ws, remote, cfg)
-	if attachErr == nil {
+	layer, err := storage.AttachChunkLayer(ws, remote, cfg)
+	if err == nil {
 		h.chunkLineage = lin
 	}
-	return layer, attachErr
+	return layer, err
 }
 
 // closeBoundRemote ends every remote call when the provider closes, so a
@@ -676,77 +647,15 @@ func (r *closeBoundRemote) Delete(ctx context.Context, key string) error {
 	return r.ChunkRemote.Delete(c, key)
 }
 
-func (r *closeBoundRemote) PutIntent(ctx context.Context, in storage.ChunkIntent) (string, error) {
+func (r *closeBoundRemote) Begin(ctx context.Context) (string, error) {
 	c, end := r.bind(ctx)
 	defer end()
-	return r.ChunkRemote.PutIntent(c, in)
+	return r.ChunkRemote.Begin(c)
 }
 
-func (r *closeBoundRemote) DeleteIntent(ctx context.Context, id string) error {
-	c, end := r.bind(ctx)
-	defer end()
-	return r.ChunkRemote.DeleteIntent(c, id)
-}
-
-// DeleteSettledIntent is reserved for joined layer shutdown. Provider Close
-// has already cancelled ordinary operations; a settled root can still be
-// removed using the cleanup caller's bounded context. Unknown CAS roots never
-// reach this method: the layer retains them until publication is settled.
-func (r *closeBoundRemote) DeleteSettledIntent(ctx context.Context, id string) error {
-	return r.ChunkRemote.DeleteIntent(ctx, id)
-}
-
-func (r *closeBoundRemote) ListIntents(ctx context.Context) ([]storage.ChunkIntent, error) {
-	c, end := r.bind(ctx)
-	defer end()
-	return r.ChunkRemote.ListIntents(c)
-}
-
-// The fresh marker: <volume path>.chunkfresh.
-
-func chunkFreshMarker(path string) string { return path + ".chunkfresh" }
-
-func writeChunkFreshMarker(path string) error {
-	m := chunkFreshMarker(path)
-	f, err := os.OpenFile(m, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("durable: fresh marker: %w", err)
-	}
-	_, werr := f.WriteString("fresh\n")
-	serr := f.Sync()
-	cerr := f.Close()
-	if err := errors.Join(werr, serr, cerr); err != nil {
-		return fmt.Errorf("durable: fresh marker: %w", err)
-	}
-	return syncParentDir(m)
-}
-
-func removeChunkFreshMarker(path string) error {
-	m := chunkFreshMarker(path)
-	if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("durable: remove fresh marker: %w", err)
-	}
-	return syncParentDir(m)
-}
-
-// syncParentDir makes a create or remove in path's directory durable. A
-// directory cannot be fsynced on Windows; there it is a no-op (no Windows
-// crash-durability claim).
-func syncParentDir(path string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("durable: open directory: %w", err)
-	}
-	serr := d.Sync()
-	cerr := d.Close()
-	if err := errors.Join(serr, cerr); err != nil {
-		return fmt.Errorf("durable: fsync directory: %w", err)
-	}
-	return nil
-}
+// Abort never blocks; it is passed through even after Close (a cut left
+// open is rolled back at the next HEAD read).
+func (r *closeBoundRemote) Abort() { r.ChunkRemote.Abort() }
 
 // Cut scheduler constants (B9 W3 ruling).
 const (
@@ -1051,6 +960,11 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 		})
 		if err != nil && ctx.Err() == nil {
 			log.Printf("durable: maintenance volume=%s: %v", volumeID, err)
+		}
+		// The holder's cleaning may be the first call to see HEAD move away
+		// (an idle volume runs no cut): its refusal latches the layer too.
+		if obs, ok := layer.(interface{ ObserveRemoteError(error) error }); ok && err != nil {
+			_ = obs.ObserveRemoteError(err)
 		}
 		// Completion-relative reset coalesces all elapsed ticks; no catch-up queue.
 		timer.Reset(interval)
@@ -1377,7 +1291,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		// Log only after capture releases its barrier; at most five records.
 		for _, a := range r.Precopy.Rounds {
 			p := a.FixedParts
-			log.Printf("durable: pre-copy fixed spans volume=%s attempt=%d candidate_ms=%.3f window_setup_ms=%.3f publish_prepare_ms=%.3f manifest_ms=%.3f commit_state_ms=%.3f intent_cleanup_ms=%.3f non_payload_copy_ms=%.3f barrier_overage_ms=%.3f live_drain_ms=%.3f live_capture_lock_ms=%.3f live_sync_ms=%.3f live_candidate_ms=%.3f live_other_ms=%.3f live_sync_lifecycle_wait_ms=%.3f live_sync_store_wait_ms=%.3f live_sync_group_commit_ms=%.3f live_sync_completion_wait_ms=%.3f", volumeID, a.Attempt, float64(p.Candidate)/float64(time.Millisecond), float64(p.WindowSetup)/float64(time.Millisecond), float64(p.PublishPrepare)/float64(time.Millisecond), float64(p.Manifest)/float64(time.Millisecond), float64(p.CommitState)/float64(time.Millisecond), float64(p.IntentCleanup)/float64(time.Millisecond), float64(p.NonPayloadCopy)/float64(time.Millisecond), float64(a.BarrierOverage)/float64(time.Millisecond), float64(a.BarrierParts.Drain)/float64(time.Millisecond), float64(a.BarrierParts.StoreLock)/float64(time.Millisecond), float64(a.BarrierParts.DataSync)/float64(time.Millisecond), float64(a.BarrierParts.Candidate)/float64(time.Millisecond), float64(a.BarrierParts.Other)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.LifecycleWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.StoreWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.GroupCommitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.CompletionWaitNs)/float64(time.Millisecond))
+			log.Printf("durable: pre-copy fixed spans volume=%s attempt=%d candidate_ms=%.3f window_setup_ms=%.3f publish_prepare_ms=%.3f manifest_ms=%.3f commit_state_ms=%.3f non_payload_copy_ms=%.3f barrier_overage_ms=%.3f live_drain_ms=%.3f live_capture_lock_ms=%.3f live_sync_ms=%.3f live_candidate_ms=%.3f live_other_ms=%.3f live_sync_lifecycle_wait_ms=%.3f live_sync_store_wait_ms=%.3f live_sync_group_commit_ms=%.3f live_sync_completion_wait_ms=%.3f", volumeID, a.Attempt, float64(p.Candidate)/float64(time.Millisecond), float64(p.WindowSetup)/float64(time.Millisecond), float64(p.PublishPrepare)/float64(time.Millisecond), float64(p.Manifest)/float64(time.Millisecond), float64(p.CommitState)/float64(time.Millisecond), float64(p.NonPayloadCopy)/float64(time.Millisecond), float64(a.BarrierOverage)/float64(time.Millisecond), float64(a.BarrierParts.Drain)/float64(time.Millisecond), float64(a.BarrierParts.StoreLock)/float64(time.Millisecond), float64(a.BarrierParts.DataSync)/float64(time.Millisecond), float64(a.BarrierParts.Candidate)/float64(time.Millisecond), float64(a.BarrierParts.Other)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.LifecycleWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.StoreWaitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.GroupCommitNs)/float64(time.Millisecond), float64(a.BarrierParts.SyncPhases.CompletionWaitNs)/float64(time.Millisecond))
 			log.Printf("durable: pre-copy attempt volume=%s attempt=%d drain_ms=%.3f barrier_ms=%.3f pause_ms=%.3f reason=%s tail=%d rate_samples=%d estimate_ms=%.3f frozen=%t fixed_ms=%.3f drain_cost_ms=%.3f store_lock_ms=%.3f local_sync_ms=%.3f head_cas_ms=%.3f readback_ms=%.3f map_persist_ms=%.3f other_fixed_ms=%.3f tail_ms=%.3f declared_freeze_ms=%.3f err=%s", volumeID, a.Attempt, float64(a.Drain)/float64(time.Millisecond), float64(a.Barrier)/float64(time.Millisecond), float64(a.Pause)/float64(time.Millisecond), a.Reason, a.TailBytes, a.RateSamples, float64(a.Estimate)/float64(time.Millisecond), a.Frozen, float64(a.Fixed)/float64(time.Millisecond), float64(a.FixedParts.Drain)/float64(time.Millisecond), float64(a.FixedParts.StoreLock)/float64(time.Millisecond), float64(a.FixedParts.DataSync)/float64(time.Millisecond), float64(a.FixedParts.HeadCAS)/float64(time.Millisecond), float64(a.FixedParts.HeadReadback)/float64(time.Millisecond), float64(a.FixedParts.MapPersist)/float64(time.Millisecond), float64(a.FixedParts.Other)/float64(time.Millisecond), float64(a.TailEstimate)/float64(time.Millisecond), float64(a.DeclaredFreeze)/float64(time.Millisecond), a.Error)
 		}
 		log.Printf("durable: pre-copy volume=%s attempts=%d measurement_rounds=%d samples_at_start=%d tail=%d rate=%.0f sample_age=%s fixed=%s estimate=%s frozen=%t reason=%s err=%v", volumeID, r.Precopy.Attempts, r.Precopy.MeasurementRounds, r.Precopy.SamplesAtStart, r.Precopy.TailBytes, r.Precopy.BytesPerSecond, r.Precopy.SampleAge, r.Precopy.Fixed, r.Precopy.Estimate, r.Precopy.Frozen, r.Precopy.Reason, err)
@@ -1455,7 +1369,19 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		dl, _ := sctx.Deadline()
 		trace("settle", dl)
 	}
-	how, dr, serr := layer.SettleDetach(sctx)
+	var how storage.DetachSettlement
+	var dr storage.ChunkCutResult
+	var serr error
+	if h.layoutHead != nil {
+		if remote, ok := h.layoutRemote.(layoutStopRemote); ok {
+			how, dr, serr = settleLayoutStop(sctx, remote, h.layoutHolder)
+		} else {
+			serr = errors.New("durable: layout remote cannot settle its open stop session")
+		}
+	} else {
+		how, dr, serr = layer.SettleDetach(sctx)
+	}
+
 	if precopy {
 		attempts := countCAS() - casAtFreeze
 		extra := uint64(0)
@@ -1512,19 +1438,6 @@ func (p *DurableProvider) resumeAfterDetach(volumeID string, h *volHandle, layer
 	return fmt.Errorf("%w: %w", ErrDetachAborted, cause)
 }
 
-// Preserve the optional manifest capability only when the inner remote has it;
-// legacy in-memory/flat remotes keep their existing no-op cut behavior.
-type manifestBoundRemote struct {
-	*closeBoundRemote
-	builder storage.ChunkManifestBuilder
-}
-
-func (r *manifestBoundRemote) PrepareManifest(ctx context.Context, base, next storage.ChunkHead, chunkBytes uint64) (storage.ChunkHead, []string, error) {
-	c, end := r.bind(ctx)
-	defer end()
-	return r.builder.PrepareManifest(c, base, next, chunkBytes)
-}
-
 // publishSettledHook adapts ChunkOnPublishSettled to one volume's layer.
 func (p *DurableProvider) publishSettledHook(volumeID string) func(context.Context, storage.ChunkHead, storage.ChunkHead) {
 	hook := p.cfg.ChunkOnPublishSettled
@@ -1566,10 +1479,4 @@ func (w *cutWaitSlot) status(cutSeq uint64) CutScheduleStatus {
 		st.HostSlotWaitSinceNs = 0
 	}
 	return st
-}
-
-// INV-WS-STARTUP-RETRY-001: a displaced lower-epoch claim fences this
-// attempt, but cannot prove the assigned holder was superseded.
-func claimHeadSupersedes(head storage.ChunkHead, cfg storage.ChunkLayerConfig) bool {
-	return head.Gen != 0 && head.Holder != "" && head.Holder != cfg.Holder && head.Epoch >= cfg.Epoch
 }

@@ -13,6 +13,9 @@ var (
 	// ErrStaleLocalRoot: the local root belongs to an earlier claim of this
 	// server (a same-host forced move published past it).
 	ErrStaleLocalRoot = errors.New("layout: local root is from an earlier claim")
+	// ErrCannotStartFrom: the step the local root takes after its claim
+	// could not succeed on this HEAD; nothing is written.
+	ErrCannotStartFrom = errors.New("layout: the local root cannot start from this HEAD")
 )
 
 // StaleLocalRootCure is the way back a stale-root refusal names: after a
@@ -30,9 +33,16 @@ const MissingLocalRootCure = "check for a wrong or unmounted data directory; if 
 // reported non-fresh before that, its position below HEAD's would be
 // refused as an old copy.
 type LocalRoot struct {
+	Geometry
 	ClaimID  string
 	Fresh    bool
 	Position uint64 // the position the local root holds synced
+	// CanStartFrom answers, before the claim, whether the step the local
+	// root takes after it (seed at HEAD's position, attach a completed
+	// base, or nothing) can succeed on this HEAD: nil, or the refusal that
+	// step would give. A fresh root without it is refused: the question is
+	// never skipped.
+	CanStartFrom func(h Head) error
 }
 
 // Start is the HEAD side of a holder's start on the line it was granted
@@ -47,7 +57,12 @@ type LocalRoot struct {
 // older than HEAD's image and is ErrStaleLocalRoot. An older epoch,
 // another server at HEAD's epoch, a deleting volume and an absent HEAD
 // are refused.
-func Start(ctx context.Context, st HeadStore, lease LeaseWait, line HolderID, local LocalRoot) (Head, error) {
+type StartStore interface {
+	HeadStore
+	ReadVolumeRecord(context.Context) (Volume, bool, error)
+}
+
+func Start(ctx context.Context, st StartStore, lease LeaseWait, line HolderID, local LocalRoot) (Head, error) {
 	if local.ClaimID == "" {
 		return Head{}, errors.New("layout: start needs the local root's claim id")
 	}
@@ -58,11 +73,37 @@ func Start(ctx context.Context, st HeadStore, lease LeaseWait, line HolderID, lo
 	if !found {
 		return Head{}, ErrHeadAbsent
 	}
+	v, present, err := st.ReadVolumeRecord(ctx)
+	if err != nil {
+		return Head{}, err
+	}
+	if !present {
+		return Head{}, ErrMissing
+	}
+	if v.ID != h.VolumeID {
+		return Head{}, ErrIdentity
+	}
+	if err := v.Geometry.Check(); err != nil {
+		return Head{}, err
+	}
+	if local.Geometry != v.Geometry {
+		return Head{}, fmt.Errorf("%w: local %+v differs from VOLUME %+v", ErrGeometryMismatch, local.Geometry, v.Geometry)
+	}
 	if err := startCheck(h, line, local); err != nil {
 		return Head{}, err
 	}
 	if h.Epoch == line.Epoch && h.Holder == line.Holder && h.State == StateLive {
-		return h, nil // HEAD holds this root's claim id: it continues
+		// HEAD holds this root's claim id: it continues, after ending the
+		// transaction the previous process of this claim left open (never a
+		// new one beside it): its session is rolled back, its cleaning ended.
+		me := HolderID{Epoch: line.Epoch, Holder: line.Holder, ClaimID: local.ClaimID}
+		switch h.Activity.Kind {
+		case ActSnap:
+			return RunAbort(ctx, st, me, h.Activity.Session)
+		case ActClean:
+			return RunEndClean(ctx, st, me, h.Activity.Session)
+		}
+		return h, nil
 	}
 	// The claim re-checks the local root against the very HEAD it updates:
 	// another lineage's claim or a higher published position after the
@@ -76,24 +117,42 @@ func Start(ctx context.Context, st HeadStore, lease LeaseWait, line HolderID, lo
 // and server a root without HEAD's claim id, and above HEAD's epoch a
 // non-fresh root of another lineage.
 func startCheck(h Head, line HolderID, local LocalRoot) error {
-	if h.State == StateDetached && line.Epoch == h.Epoch {
-		return ErrDetached
-	}
-	if !local.Fresh && local.ClaimID == h.ClaimID && local.Position < h.Position && line.Epoch >= h.Epoch {
-		return fmt.Errorf("%w (%w): the local root holds position %d, HEAD published %d: an old copy of this lineage", ErrStaleLocalRoot, ErrNotHolder, local.Position, h.Position)
-	}
-	if h.Epoch == line.Epoch && h.Holder == line.Holder && h.State == StateLive {
-		switch {
-		case h.ClaimID == local.ClaimID:
-			return nil
-		case local.Fresh:
-			return fmt.Errorf("%w at epoch %d: %s", ErrMissingLocalRoot, h.Epoch, MissingLocalRootCure)
-		default:
-			return fmt.Errorf("%w (%w): HEAD holds claim %q at epoch %d, the local root carries %q: %s", ErrStaleLocalRoot, ErrNotHolder, h.ClaimID, h.Epoch, local.ClaimID, StaleLocalRootCure)
+	if err := func() error {
+		if h.State == StateDetached && line.Epoch == h.Epoch {
+			return ErrDetached
 		}
+		if !local.Fresh && local.ClaimID == h.ClaimID && local.Position < h.Position && line.Epoch >= h.Epoch {
+			return fmt.Errorf("%w (%w): the local root holds position %d, HEAD published %d: an old copy of this lineage", ErrStaleLocalRoot, ErrNotHolder, local.Position, h.Position)
+		}
+		if h.Epoch == line.Epoch && h.Holder == line.Holder && h.State == StateLive {
+			switch {
+			case h.ClaimID == local.ClaimID:
+				return nil
+			case local.Fresh:
+				return fmt.Errorf("%w at epoch %d: %s", ErrMissingLocalRoot, h.Epoch, MissingLocalRootCure)
+			default:
+				return fmt.Errorf("%w (%w): HEAD holds claim %q at epoch %d, the local root carries %q: %s", ErrStaleLocalRoot, ErrNotHolder, h.ClaimID, h.Epoch, local.ClaimID, StaleLocalRootCure)
+			}
+		}
+		if line.Epoch > h.Epoch && !local.Fresh && local.ClaimID != h.ClaimID {
+			return fmt.Errorf("%w (%w): the local root carries claim %q, HEAD's lineage is %q: %s", ErrStaleLocalRoot, ErrNotHolder, local.ClaimID, h.ClaimID, StaleLocalRootCure)
+		}
+		return nil
+	}(); err != nil {
+		return err
 	}
-	if line.Epoch > h.Epoch && !local.Fresh && local.ClaimID != h.ClaimID {
-		return fmt.Errorf("%w (%w): the local root carries claim %q, HEAD's lineage is %q: %s", ErrStaleLocalRoot, ErrNotHolder, local.ClaimID, h.ClaimID, StaleLocalRootCure)
+	// One question before any claim: can the step this root takes after it
+	// succeed on this HEAD? (A deleting volume is refused by the claim as
+	// such.) A fresh root must ask it.
+	if h.State != StateDeleting && h.State != StateDeleted {
+		if local.CanStartFrom == nil && local.Fresh {
+			return fmt.Errorf("%w: a fresh local root must say whether it can start from HEAD", ErrCannotStartFrom)
+		}
+		if local.CanStartFrom != nil {
+			if err := local.CanStartFrom(h); err != nil {
+				return fmt.Errorf("%w: HEAD position %d: %w", ErrCannotStartFrom, h.Position, err)
+			}
+		}
 	}
 	return nil
 }

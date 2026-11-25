@@ -20,9 +20,12 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/auth/authtest"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
 	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
@@ -87,7 +90,9 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		"--listen", masterListen, "--tls-cert", filepath.Join(tlsDir, "master.crt"), "--tls-key", filepath.Join(tlsDir, "master.key"),
 		"--tls-client-ca", filepath.Join(tlsDir, "ca.crt"), "--role-file", filepath.Join(tlsDir, "roles"), "--audit-log", filepath.Join(tlsDir, "audit.log"), "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
 		"--cluster-spec", spec, "--lifecycle-product-loop-interval", "200ms", "--expected-slots-per-volume", "1",
-		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base)
+		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base,
+		// A workspace master writes the layout VOLUME and unclaimed HEAD itself.
+		"--chunk-filer", cluster.filerGRPC, "--chunk-path", base)
 	w4WaitTCP(t, masterAddr, 20*time.Second)
 	admin, err := link.ClientCredentials(link.TLSFiles{Cert: filepath.Join(tlsDir, "admin.crt"), Key: filepath.Join(tlsDir, "admin.key"), CA: filepath.Join(tlsDir, "ca.crt")}, "")
 	if err != nil {
@@ -99,8 +104,19 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	ws := control.NewWorkspaceServiceClient(conn)
+	// The master mints the volume's layout identity; the holder and every
+	// HEAD read name it.
+	var layoutID layout.VolumeID
+	waitGAP1(t, "master never resolved the volume's layout identity", 20*time.Second, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		id, e := lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), volume)
+		layoutID = id
+		return e == nil
+	})
 	args := []string{"--master", masterAddr, "--server-id", "s1",
-		"--master-tls-cert", filepath.Join(tlsDir, "s1.crt"), "--master-tls-key", filepath.Join(tlsDir, "s1.key"), "--master-ca", filepath.Join(tlsDir, "ca.crt"), "--volume-id", volume, "--replica-id", "r1",
+		"--master-tls-cert", filepath.Join(tlsDir, "s1.crt"), "--master-tls-key", filepath.Join(tlsDir, "s1.key"), "--master-ca", filepath.Join(tlsDir, "ca.crt"),
+		"--volume-id", volume, "--replica-id", "r1", "--layout-id", layoutID.String(),
 		"--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--heartbeat-interval", "200ms", "--t1-readiness", "--status-addr", statusAddr,
 		"--durable-root", filepath.Join(root, "store"), "--durable-impl", "walstore-chunk", "--durable-blocks", "64",
 		"--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease",
@@ -142,13 +158,19 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	t.Logf("acknowledged NVMe record: lba=8 bytes=%d sha256=%x", len(want), sha256.Sum256(want))
 	client.readExact(t, 8, want)
 	client.close()
-	remote := cluster.remote(t, base+"/"+volume)
+	remote := cluster.remote(t, base, chunkstore.VolumeRef{Name: volume, ID: layoutID})
 	before, err := gap1ReadHead(t, remote)
 	if err != nil || before.Gen == 0 {
 		t.Fatalf("bootstrap HEAD: %+v %v", before, err)
 	}
 	gap1Systemctl(t, "kill", "--signal=KILL", "--kill-who=main", bootstrap)
 	waitGAP1(t, "bootstrap still running", 10*time.Second, func() bool { return gap1Unit(t, bootstrap)["MainPID"] == "0" })
+	// HEAD as the killed holder left it (no process can move it now).
+	ref := chunkstore.VolumeRef{Name: volume, ID: layoutID}
+	atKill := layoutHead(t, cluster, base, ref)
+	if atKill.Holder != "s1/r1" || atKill.ClaimID == "" || atKill.State != layout.StateLive {
+		t.Fatalf("HEAD at the kill: %+v; want live, held by s1/r1 under a claim", atKill)
+	}
 	// QueryWorkspace is read-only. These real binaries and this test share
 	// one WSL kernel wall clock. Use the reported MASTER expiry timestamp,
 	// not ValidForNs (which ends half a skew earlier and could renew live).
@@ -207,10 +229,20 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 		}
 		return true
 	})
-	after, err := gap1ReadHead(t, remote)
-	if err != nil || after.Gen <= before.Gen || after.Holder != before.Holder || after.Epoch != before.Epoch {
-		t.Fatalf("return did not claim HEAD: before%+v after%+v err%v", before, after, err)
+	// The holder returns with its own claim at the same epoch: over an idle
+	// HEAD it resumes with no HEAD write; a session of its claim left open at
+	// the kill is aborted (a HEAD write) before it serves.
+	after := layoutHead(t, cluster, base, ref)
+	if after.Holder != atKill.Holder || after.Epoch != atKill.Epoch || after.ClaimID != atKill.ClaimID || after.State != layout.StateLive || after.Activity.Kind != layout.ActIdle {
+		t.Fatalf("return did not resume its claim: at kill %+v, after %+v", atKill, after)
 	}
+	switch {
+	case atKill.Activity.Kind == layout.ActIdle && after.Gen != atKill.Gen:
+		t.Fatalf("return over an idle HEAD wrote it: gen %d -> %d", atKill.Gen, after.Gen)
+	case atKill.Activity.Kind != layout.ActIdle && after.Gen <= atKill.Gen:
+		t.Fatalf("return left the open %s session %q: gen %d -> %d", atKill.Activity.Kind, atKill.Activity.Session, atKill.Gen, after.Gen)
+	}
+	t.Logf("return resumed claim %s at epoch %d: activity at kill %s, gen %d -> %d", after.ClaimID, after.Epoch, atKill.Activity.Kind, atKill.Gen, after.Gen)
 	returned := gap1ConnectNVMe(t, nvmeAddr, "nqn.2026-11.test:"+stem)
 	returned.readExact(t, 8, want)
 	returned.writeFlush(t, 9, want)

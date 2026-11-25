@@ -14,10 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // RED: a remote HEAD at LSN 5000 is inherited, so the frontier jumps after
@@ -38,12 +39,32 @@ func TestWALStoreChunk_NewLineageHostWritesWithoutSeed(t *testing.T) {
 
 func restoredHostWrites(t *testing.T, inheritedLSN uint64, observerAfterSeed bool) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
+	fixture := testutil.NewLayoutFixture(t, "v1", 256, 16)
 	if inheritedLSN > 0 {
-		// The remote HEAD a previous holder (epoch 1) published.
-		if _, err := remote.CASHead(ctx, storage.ChunkHeadVersion{}, storage.ChunkHead{
-			Epoch: 1, Holder: "old/r1", RemoteLSN: inheritedLSN, Chunks: map[uint64]storage.ChunkRef{},
-		}); err != nil {
+		// The previous holder committed an empty image at the inherited
+		// frontier. The returning host's first guest write is beyond it.
+		st, err := fixture.Catalog.Store(fixture.Ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, _, err := layout.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, raw, err := layout.NameRoot(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := layout.EnsureObject(ctx, st, name.Path(), raw, "seed-fixture"); err != nil {
+			t.Fatal(err)
+		}
+		head, found, err := st.ReadHead(ctx)
+		if err != nil || !found {
+			t.Fatalf("initial HEAD: found=%v err=%v", found, err)
+		}
+		head.Epoch, head.Holder, head.ClaimID = 1, "old/r1", "old-claim"
+		head.Current, head.Position = &name, inheritedLSN
+		if err := st.UpdateHead(ctx, head.Gen, head); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -64,14 +85,15 @@ func restoredHostWrites(t *testing.T, inheritedLSN uint64, observerAfterSeed boo
 	h.BlockLocalReadiness("awaiting durable recovery")
 	h.applyFixtureFact(&control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 5, EndpointVersion: 2, PeerSetGeneration: 1})
 
-	dp, err := durable.NewDurableProvider(durable.ProviderConfig{
-		Impl:           durable.ImplWALStoreChunk,
-		StorageRoot:    t.TempDir(), // empty: a fresh host
-		BlockSize:      4096,
-		NumBlocks:      256,
-		ChunkBlocks:    16,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, h.ProjectionView())
+	cfg := durable.ProviderConfig{
+		Impl:        durable.ImplWALStoreChunk,
+		StorageRoot: t.TempDir(), // empty: a fresh host
+		BlockSize:   4096,
+		NumBlocks:   256,
+		ChunkBlocks: 16,
+	}
+	fixture.Configure(&cfg)
+	dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
 	if err != nil {
 		t.Fatal(err)
 	}

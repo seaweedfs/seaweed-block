@@ -15,6 +15,10 @@ var (
 	// ErrStaleBase: the previous manifest given is not HEAD's current
 	// root, so what is new cannot be told.
 	ErrStaleBase = errors.New("layout: previous manifest is not HEAD's current root")
+	// ErrPositionBehind: a commit's position is below HEAD's. HEAD's position
+	// only rises (an equal one names an unchanged image); a lower commit
+	// has no legitimate source, so it is fenced, never retried.
+	ErrPositionBehind = errors.New("layout: commit position below HEAD's")
 	// ErrSnapshotExists: the snapshot name is taken by another root.
 	ErrSnapshotExists = errors.New("layout: snapshot name taken")
 	// ErrTooManySnapshots: HEAD already holds MaxSnapshots.
@@ -33,8 +37,9 @@ type CommitRequest struct {
 	Prev     map[uint64]Ref
 	Next     map[uint64]Ref
 	Position uint64
-	Snapshot string // "" = no named snapshot
-	State    string // StateLive, or StateDetached for the final synced image
+	Snapshot string       // "" = no named snapshot
+	Meta     SnapshotMeta // the new snapshot's retention facts
+	State    string       // StateLive, or StateDetached for the final synced image
 }
 
 // rootOf names the root of a manifest.
@@ -67,7 +72,7 @@ func newOwn(vol string, prev, next map[uint64]Ref) map[uint64]Ref {
 // A live HEAD that already shows this commit
 // applied (idle, current = root, position, the snapshot) is a replay:
 // unchanged, changed=false.
-func (h Head) Commit(me HolderID, session string, root RootName, position uint64, snapshot, state string) (next Head, changed bool, err error) {
+func (h Head) Commit(me HolderID, session string, root RootName, position uint64, snapshot string, meta SnapshotMeta, state string) (next Head, changed bool, err error) {
 	if session == "" {
 		return Head{}, false, errors.New("layout: Commit needs a session id")
 	}
@@ -78,27 +83,43 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 		return Head{}, false, fmt.Errorf("%w: invalid commit state %q", ErrMalformed, state)
 	}
 	if h.State == state && h.Activity.Kind == ActIdle && h.Current != nil && *h.Current == root && h.Position == position {
-		if s, ok := h.Snapshots[snapshot]; snapshot == "" || ok && s.Root == root {
+		if s, ok := h.Snapshots[snapshot]; snapshot == "" || ok && s.Root == root && s.Position == position {
 			return h, false, nil
 		}
 	}
 	if h.Activity != (Activity{Kind: ActSnap, Session: session}) {
 		return Head{}, false, fmt.Errorf("%w: HEAD has %s(%s), not snap(%s)", ErrNoSession, h.Activity.Kind, h.Activity.Session, session)
 	}
+	// The position is produced here: never one with no room for a next
+	// LSN (a HEAD already there keeps it, e.g. to stop).
+	if position == ^uint64(0) && position != h.Position {
+		return Head{}, false, fmt.Errorf("%w: commit at %d", ErrNoNextPosition, position)
+	}
+	if position < h.Position {
+		return Head{}, false, fmt.Errorf("%w: commit at %d, HEAD at %d", ErrPositionBehind, position, h.Position)
+	}
 	next = h.clone()
 	if snapshot != "" {
 		if s, ok := next.Snapshots[snapshot]; ok {
-			if s.Root != root {
+			// the same name at another root or another position is another
+			// commit's snapshot, never this one's replay
+			if s.Root != root || s.Position != position {
 				return Head{}, false, fmt.Errorf("%w: %q", ErrSnapshotExists, snapshot)
 			}
 		} else {
 			if len(next.Snapshots) >= MaxSnapshots {
-				return Head{}, false, fmt.Errorf("%w: %d", ErrTooManySnapshots, MaxSnapshots)
+				return Head{}, false, fmt.Errorf("%w: at most %d per volume; delete a snapshot, or let retention prune", ErrTooManySnapshots, MaxSnapshots)
 			}
 			if next.Snapshots == nil {
 				next.Snapshots = map[string]Snapshot{}
 			}
-			next.Snapshots[snapshot] = Snapshot{Root: root}
+			if len(snapshot) > MaxSnapshotNameBytes {
+				return Head{}, false, fmt.Errorf("%w: snapshot name %q is %d bytes, at most %d", ErrMalformed, snapshot, len(snapshot), MaxSnapshotNameBytes)
+			}
+			if err := meta.check(snapshot); err != nil {
+				return Head{}, false, err
+			}
+			next.Snapshots[snapshot] = Snapshot{Root: root, Position: position, Meta: meta.clone()}
 		}
 	}
 	rn := root
@@ -124,7 +145,7 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 		return Head{}, err
 	}
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) {
-		if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.State); err != nil || !changed {
+		if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State); err != nil || !changed {
 			return next, changed, err // refused, or already applied: no lookups
 		}
 		// The base is HEAD's current root. Before any commit there is none
@@ -172,6 +193,17 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 				return Head{}, false, fmt.Errorf("%w: %s (absent, written by another session, or marked)", ErrNotPrepared, rel)
 			}
 		}
-		return h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.State)
+		return h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State)
 	})
+}
+
+func (m SnapshotMeta) clone() SnapshotMeta {
+	if m.Labels != nil {
+		l := make(map[string]string, len(m.Labels))
+		for k, v := range m.Labels {
+			l[k] = v
+		}
+		m.Labels = l
+	}
+	return m
 }

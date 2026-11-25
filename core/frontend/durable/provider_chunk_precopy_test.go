@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,11 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func TestPrecopyFreezeDoesNotWaitForAdmittedIO(t *testing.T) {
-	p, view := parkedProvider(t, storage.NewMemChunkRemote())
+	p, view := parkedLayoutProvider(t, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks))
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
@@ -75,9 +78,26 @@ func TestPrecopyFreezeDoesNotWaitForAdmittedIO(t *testing.T) {
 
 func precopyProvider(t *testing.T, remote storage.ChunkRemote, view *parkView, hooks ...*detachHooks) *durable.DurableProvider {
 	t.Helper()
+	_ = remote // Other legacy callers migrate to the layout fixture separately.
+	return precopyBProvider(t, testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), view, nil, hooks...)
+}
+
+func precopyBProvider(t *testing.T, fixture *testutil.LayoutFixture, view *parkView, delayed *precopyLayoutDelayedRemote, hooks ...*detachHooks) *durable.DurableProvider {
+	t.Helper()
 	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096, NumBlocks: pcBlocks, ChunkBlocks: pcChunkBlocks,
-		ChunkDetachPrecopy: true, ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
+		ChunkDetachPrecopy: true,
+	}
+	fixture.Configure(&cfg)
+	if delayed != nil {
+		cfg.ChunkLayoutRemoteFor = func(_ string, me layout.HolderID) (storage.ChunkRemote, error) {
+			inner, err := chunkstore.NewLayoutRemote(fixture.Catalog, fixture.Ref, me)
+			if err != nil {
+				return nil, err
+			}
+			delayed.LayoutRemote = inner
+			return delayed, nil
+		}
 	}
 	if len(hooks) > 0 {
 		cfg.OnChunkDetach = hooks[0].detach
@@ -92,12 +112,22 @@ func precopyProvider(t *testing.T, remote storage.ChunkRemote, view *parkView, h
 }
 
 func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
-	remote := storage.NewMemChunkRemote()
-	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := precopyBProvider(t, fixture, &parkView{stubView: v1View()}, nil)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Establish the measured upload rate on the B content path before the
+	// pre-copy admission decision; one dirty chunk alone has no rate window.
+	for _, lba := range []int64{16, 32, 48} {
+		if _, err := b.Write(context.Background(), lba*4096, block(byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err = b.Write(context.Background(), 4096, block(0x8a)); err != nil {
 		t.Fatal(err)
@@ -106,7 +136,7 @@ func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 	if err != nil || !r.Precopy.Frozen || r.Head.State != storage.ChunkHeadDetached || r.H != last {
 		t.Fatalf("detach=%+v last=%d err=%v", r, last, err)
 	}
-	if !bytes.Equal(headBlock(t, remote, 1), block(0x8a)) {
+	if !bytes.Equal(layoutHeadBlock(t, fixture, 1), block(0x8a)) {
 		t.Fatal("detached image lost write")
 	}
 	if _, err = b.Write(context.Background(), 4096, block(0x9a)); err == nil {
@@ -136,6 +166,24 @@ func (r *precopyFixedSampleRemote) CASHead(ctx context.Context, expected storage
 	return r.MemChunkRemote.CASHead(ctx, expected, next)
 }
 
+type precopyLayoutDelayedRemote struct {
+	*chunkstore.LayoutRemote
+	nextDelay atomic.Int64
+}
+
+func (r *precopyLayoutDelayedRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	if delay := time.Duration(r.nextDelay.Swap(0)); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return r.LayoutRemote.CASHead(ctx, expected, next)
+}
+
 func TestPrecopyProviderBusyOwnerKeepsServing(t *testing.T) {
 	precopyBusyOwnerKeepsServing(t, 0)
 }
@@ -146,10 +194,11 @@ func TestPrecopyProviderBusyOwnerRetryRetainsSlowFixedSample(t *testing.T) {
 
 func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 	t.Helper()
-	remote := &precopyFixedSampleRemote{MemChunkRemote: storage.NewMemChunkRemote()}
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	remote := &precopyLayoutDelayedRemote{}
 	view := &parkView{stubView: v1View()}
 	k := &detachHooks{}
-	p := precopyProvider(t, remote, view, k)
+	p := precopyBProvider(t, fixture, view, remote, k)
 	openRecovered(t, p)
 	b, err := p.Open(context.Background(), "v1")
 	if err != nil {
@@ -223,7 +272,7 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 	if started, resumed := k.calls(); len(started) != 1 || len(resumed) != 1 {
 		t.Fatalf("nonconverged hooks: started=%v resumed=%v", started, resumed)
 	}
-	if h, _ := remote.GetHead(ctx); h.State == storage.ChunkHeadDetached {
+	if h := layoutHead(t, fixture); h.State == layout.StateDetached {
 		t.Fatal("busy owner detached")
 	}
 	if _, err = b.Write(ctx, 8192, block(0x9b)); err != nil {
@@ -245,15 +294,17 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 		// Releasing the owner does not erase a slow sample. Admission must
 		// still refuse a tail-bound point; a small stalled tail can now declare
 		// the retained fixed-cost exception instead of recopying indefinitely.
-		if !errors.Is(err, storage.ErrPrecopyNotConverged) || r.Precopy.Frozen || r.Precopy.Estimate <= 1200*time.Millisecond || (r.Precopy.Reason != "tail_too_large" && r.Precopy.Reason != "barrier_over_budget" && r.Precopy.Reason != "freeze_budget_exceeded") {
+		unknownRate := r.Precopy.Reason == "samples_unknown" && r.Precopy.RateSamples == 0
+		overBudget := r.Precopy.Estimate > 1200*time.Millisecond && (r.Precopy.Reason == "tail_too_large" || r.Precopy.Reason == "barrier_over_budget" || r.Precopy.Reason == "freeze_budget_exceeded")
+		if r.Precopy.Frozen || !(unknownRate && errors.Is(err, storage.ErrPrecopyUnknown) || overBudget && errors.Is(err, storage.ErrPrecopyNotConverged)) {
 			t.Fatalf("post-release retry violated measured admission: report=%+v err=%v", r.Precopy, err)
 		}
 		if delay > 0 && r.Precopy.Fixed < delay {
 			t.Fatal("retry forgot the controlled slow fixed sample")
 		}
 		resumedCount = 2
-		if h, e := remote.GetHead(ctx); e != nil || h.State == storage.ChunkHeadDetached {
-			t.Fatalf("over-budget retry detached: head=%+v err=%v", h, e)
+		if h := layoutHead(t, fixture); h.State == layout.StateDetached {
+			t.Fatalf("over-budget retry detached: head=%+v", h)
 		}
 		buf := make([]byte, 4096)
 		if n, e := b.Read(ctx, 8192, buf); e != nil || n != len(buf) || !bytes.Equal(buf, block(0x9b)) {
@@ -267,7 +318,16 @@ func precopyBusyOwnerKeepsServing(t *testing.T, delay time.Duration) {
 	if started, resumed := k.calls(); len(started) != 2 || len(resumed) != resumedCount {
 		t.Fatalf("retry hooks: started=%v resumed=%v", started, resumed)
 	}
-	if !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x8a)) || !bytes.Equal(headBlock(t, remote.MemChunkRemote, 2), block(0x9b)) {
+	if err != nil {
+		for lba, want := range map[int64][]byte{1: block(0x8a), 2: block(0x9b)} {
+			buf := make([]byte, 4096)
+			if n, readErr := b.Read(ctx, lba*4096, buf); readErr != nil || n != len(buf) || !bytes.Equal(buf, want) {
+				t.Fatalf("refused retry stopped serving block %d: n=%d err=%v", lba, n, readErr)
+			}
+		}
+		return
+	}
+	if !bytes.Equal(layoutHeadBlock(t, fixture, 1), block(0x8a)) || !bytes.Equal(layoutHeadBlock(t, fixture, 2), block(0x9b)) {
 		t.Fatal("retry lost admitted bytes")
 	}
 }

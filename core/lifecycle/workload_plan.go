@@ -10,6 +10,7 @@ import (
 // authority-shaped: no epoch, endpoint_version, primary, ready, or healthy.
 type BlockVolumeWorkloadPlan struct {
 	VolumeID      string
+	LayoutID      string
 	SizeBytes     uint64
 	Protocol      string
 	NVMeTransport string
@@ -72,6 +73,7 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 
 	out := BlockVolumeWorkloadPlan{
 		VolumeID:      volume.Spec.VolumeID,
+		LayoutID:      volume.Spec.LayoutID,
 		SizeBytes:     volume.Spec.SizeBytes,
 		Protocol:      protocol,
 		NVMeTransport: volume.Spec.FrontendTransport,

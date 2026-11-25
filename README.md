@@ -132,7 +132,6 @@ sw-block ops chunk restore   --chunk-filer <filer> --source v1 --snapshot s1 --t
 sw-block ops chunk restore   --volume v3 --status-addr <status> --status  # restore progress
 sw-block ops chunk detach    --volume v1 --status-addr <status>  # final cut (seal); moving needs revoke + move, see docs/volume-lifecycle.md
 sw-block ops chunk volume-delete --volume v2 --chunk-filer <filer> --master <blockmaster> --request-id del-v2
-sw-block ops chunk gc        --chunk-filer <filer> --master <blockmaster>  # preview; --apply to reclaim
 sw-block ops chunk verify    --volume v1 --chunk-filer <filer>   # read-only check of the remote image
 ```
 

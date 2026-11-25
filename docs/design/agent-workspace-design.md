@@ -111,6 +111,25 @@ Per volume, under the chunk base directory in the filer (`core/frontend/chunksto
 - Example: a volume holds 100 non-zero chunks when snapshot `init` is taken; then 20 of them are rewritten and snapshot `snap1` is taken. `snap1` and HEAD each list 100 keys, 80 of them the same as in `init`. The store holds 120 chunk objects, not 200. Deleting `init` frees exactly its 20 old keys, and only once GC finds them unreferenced (§6); the 80 shared objects are neither moved nor copied.
 - The cost of complete maps falls on the cut: a scattered write pattern dirties many 4 MiB chunks and many segments (§14, cut cost).
 
+### Content-named catalog callers during the cutover
+
+The host control binds a `BCatalog` to the master's `(name, layout_id)` as a `VolumeRef`. A request for a different name is refused; a missing HEAD or failed lookup is an error, never an empty catalog or an invitation to read an older incarnation.
+
+```mermaid
+flowchart LR
+  Master[Durable master name and layout id] --> Ref[VolumeRef]
+  Ref --> Attach[Attach: BCatalog.CreateVolume]
+  Ref --> Evidence[Master: one HEAD metadata response]
+  Ref --> List[List: read HEAD snapshots]
+  Ref --> Delete[Delete: conditional snapshot removal]
+  Ref --> Usage[Usage: HEAD and current root]
+  Data[Named snapshot data path] --> Commit[Commit snapshot name in HEAD]
+```
+
+Blockmaster resolves that identity from its published lifecycle record and reads the filer's conventional `?metadata=true` endpoint once. The shared inline-HEAD decoder binds the entry generation and volume attributes to canonical content, including the claim-bearing detached image. The existing clean-move check still requires the expected epoch/holder and the recorded ACK of that generation. Failed or missing metadata refuses the move; there is no old-directory or old-codec fallback. Entry mtime comes from that same response and is diagnostic evidence, never authority. Do not edit, restore or remove HEAD outside the kernel; its single-entry generation is the proof version.
+
+Listings carry each snapshot's root and dependents. Usage reports snapshot/dependent counts and own/foreign current chunks; it does not synthesize byte accounting. Retention policy is read separately through the catalog. Snapshot entries carry their creation time, class, expiry and bounded labels, sampled once for a named capture and supplied as `CommitRequest.Meta`. A replay keeps the facts already in HEAD. Attach creates the identified VOLUME and unclaimed HEAD idempotently and never creates the legacy name-only directory. Snapshot creation belongs to the data path's HEAD commit, rather than a post-cut catalog write. The runtime cutover remains incomplete while scheduled snapshots, geometry checks and cleaning still reference the old catalog; those references must be removed before that catalog is deleted or this branch ships.
+
 ## 4. Dirty tracking
 
 - **Native v3:** the owned per-chunk LSN map and retained WAL/in-memory mutations determine dirt relative to HEAD (`captureCandidates`). UNKNOWN is conservative. Map coverage is durable with the checkpoint before reuse, and a cut certifies only unchanged captured versions after successful publication.
@@ -190,7 +209,7 @@ stateDiagram-v2
 - **Restore** (`Catalog.Restore`, independent restore): the fork steps with `VOLUME` origin `restore`; until its first HEAD the parent stays rooted by GC's grace after any delete, and from then on the target's owner-qualified refs keep the source's chunks live, so deleting the source snapshot or volume mid-restore is normal. The background walker (`HydrateAll`) makes every chunk local through the shared fill flights, under one host fill permit per flight. Bounded batch cuts then upload the chunks under the target's own keys; when the resolved HEAD holds no ref to another volume, the write-once `RESTORE-INDEPENDENT` entry is created (`MarkIndependent`). Snapshots of the target are refused until then, and a snapshot image that still names another volume's chunks is refused even after it. Model: `docs/spec/RestoreIndependence.tla`.
 - **Retention** (`retention.go`): classes `semantic` and `pinned`; newest N, recent window and log-spaced keeps; no snapshot is kept because of a fork or restore; deletion uses the same conditional mark as `DeleteSnapshot`.
 - **Snapshot delete in any order with forks** (no claims): a fork publishes only before its read time + operation deadline, and GC keeps a deleted attempt rooted for a grace of at least deadline + clock skew + CAS apply bound (`NewCollector` refuses otherwise); an unknown publish keeps the fork intent, which roots the keys until the target is resolved. Model: `ForkDelete` (`G >= D + E + P`).
-- **GC** (`gc.go` `Collector.run`, operator-driven through `sw-block ops chunk gc`, preview by default; see also `core/frontend/chunkstore/GC.md`):
+- **GC** (legacy store, `gc.go` `Collector.run`; no longer wired: its operator command is removed, and on the content-named layout cleaning is the holder's `BCatalog.Clean` in its maintenance pass; this description goes with the legacy store):
   - roots: every HEAD, every named snapshot (including one whose delete is still in progress), every snapshot attempt that is not aborted, live intents, and segment objects; an unreadable segment aborts the mark. A deleted snapshot's attempt stays a root for one grace period after its delete time, then stops counting (`Collector.snapshotAttemptHeads` in `gc_copy.go`);
   - a capture intent expires only if it is older than the TTL, blockmaster has issued a higher epoch, and the remote HEAD has moved to a higher epoch; copy intents are settled only by a permanent tombstone at their publication target;
   - the whole mark must finish within the grace period minus the operation deadline, and the collector requires grace greater than the deadline;
@@ -198,7 +217,7 @@ stateDiagram-v2
   - deletion tombstones the binding (`swb.gc.deleted=1`), deletes the needle, then marks it `done`; bindings are never removed, so a key is never rebound.
 - **Freeing an old snapshot's data** takes three separate steps:
   1. **Delete the snapshot** (`sw-block ops chunk snapshot-delete`, `POST /chunk/snapshot/delete`, `Catalog.DeleteSnapshot`), or let retention delete it. This marks the attempt `deleting` with its delete time and removes the name record; no chunk or segment is touched, and a retry is safe (`deleting` and `absent` are both success).
-  2. **Run GC with `--apply`.** The deleted attempt stops being a root one grace period after its delete time. A chunk referenced by nothing else then becomes a candidate (if it is itself older than the grace period), and it is deleted only after a second mark at least one grace period later still finds it unreferenced. With the default grace of one hour, a chunk is reclaimed two hours or more after the snapshot delete, and only by GC passes that run after those points. Chunks still referenced by HEAD, another snapshot or a fork are never candidates.
+  2. **Clean** (the holder's maintenance pass, `--chunk-maintenance-gc`; formerly GC with `--apply`). The deleted attempt stops being a root one grace period after its delete time. A chunk referenced by nothing else then becomes a candidate (if it is itself older than the grace period), and it is deleted only after a second mark at least one grace period later still finds it unreferenced. With the default grace of one hour, a chunk is reclaimed two hours or more after the snapshot delete, and only by GC passes that run after those points. Chunks still referenced by HEAD, another snapshot or a fork are never candidates.
   3. **Volume vacuum in SeaweedFS.** GC deletes the needle; SeaweedFS returns the disk space when it vacuums that volume. Until then the bytes stay on the volume servers.
 - **Why a reachability mark and not reference counts.** Chunks and segments are shared by snapshots and forks of any number of volumes. A reference count kept in filer entries and changed by several hosts can be lost or applied twice by a crash or an unknown outcome; a lost increment would delete live data. The mark recomputes reachability from the roots on every pass, and the two-mark grace covers writers that are about to publish keys they already uploaded. The cost is delay: space comes back hours after a delete, not at once.
 - **Volume delete** (`volume_delete.go` `DeleteVolume`): (a) a blockmaster deletion reservation; (b) one HEAD write to `deleting` (refused while HEAD is held); (c) refuse and revert if any snapshot name record exists; (c') commit `deleting �' purging` bound to the same incarnation; (e) HEAD becomes `deleted` with no chunks and `VOLUME` is marked deleted. A deleted id is never attached or created again.
@@ -333,6 +352,7 @@ sequenceDiagram
     M->>M: wait for expiry, restart deadline and skew bound, then mint epoch e+1
   end
   M->>M: the issue write also starts B's lease (horizon issue+1.5·TTL, deadline issue+TTL)
+  Note over M,B: target B may be source A; the same clean proof or forced barrier applies
   M->>B: assignment at epoch e+1 and a lease
   opt B dies before renewing or claiming (HEAD still at epoch e)
     M->>M: wait for B's lease expiry, deadline and skew bound
@@ -366,12 +386,16 @@ stateDiagram-v2
     Granted --> Expired: horizon or deadline passes
     Expired --> Granted: unchanged holder from its registered host, no move/revocation, MAX expiry + skew passed; durable re-grant
     Expired --> Moved: FORCED move after expiry + skew bound, then HEAD read (an older-epoch HEAD is accepted)
+    Granted --> DeleteReserved: lifecycle deletion committed, then exclusion published under publisher mu -> leaseMu
+    Expired --> DeleteReserved: same permanent reservation
+    DeleteReserved --> DeleteReserved: every grant/renewal/extension refuses; restart rebuilds exclusion before serving
+    DeleteReserved --> NoLiveLease: durable horizon and granted/restart deadline plus skew have both passed
   }
 ```
 
 **Return after lease expiry.** A new process of the unchanged holder and epoch may obtain one durable re-grant after the existing forced-move barrier: both the persisted horizon and granted/restart deadline plus full skew have passed. Re-grant and forced issue serialize under the publisher lock; the winner prevents the competing operation. Revocation, a pending move or uncertain persistence refuses a usable grant. Existing fenced guards remain terminal. The returning process claims a new HEAD generation before I/O, keeps its local acknowledged WAL, and publishes it on the first cut. An empty local root restores only HEAD; a same-epoch sealed HEAD remains detached.
 
-**Same-host planned return.** A sealed volume can be moved cleanly back to its source host after the exact detached-generation ACK was recorded. The move issues a higher epoch even when the host and endpoints are unchanged. The returning process claims the sealed HEAD before serving; a same-epoch reopen remains detached. Forced moves to the source host remain refused. Re-preparing the binding preserves the old retired-epoch tag, so replaying that retirement cannot retire the new binding.
+**Same-host planned return.** A sealed volume can be moved cleanly back to its source host after the exact detached-generation ACK was recorded. The move issues a higher epoch even when the host and endpoints are unchanged. The returning process claims the sealed HEAD before serving; a same-epoch reopen remains detached. A forced recovery can also target the same host after the normal expired-lease, restart and skew barriers; it issues a higher epoch and records the abandoned suffix. Bindings identify a volume/server, not its epoch: the old process is fenced by its expired lease and a shared host-volume lock excludes a simultaneous successor. Re-preparing the binding preserves the old retired-epoch tag, so replaying that retirement cannot retire the new binding.
 
 **Moving back to a host with a surviving local file.** A fresh volume claims HEAD before serving. A non-fresh attach reads HEAD first; if another holder published it, the attach fails closed with `ErrChunkStaleLocalRoot` (`core/frontend/durable/provider_chunk.go`): the volume is not served, and one log line and the status evidence name the local root to remove or quarantine, after which the next attach starts fresh from HEAD (#167).
 

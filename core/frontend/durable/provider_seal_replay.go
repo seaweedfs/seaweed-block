@@ -2,7 +2,9 @@ package durable
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -51,12 +53,7 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 	}
 	h.chunkDetach = true
 	p.stopChunkLoop(h)
-	inner, err := p.cfg.ChunkRemoteFor(volumeID)
-	if err != nil {
-		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w", ErrDetachOutcomeUnknown, err)
-	}
-	remote := &closeBoundRemote{ChunkRemote: inner, done: p.closeCtx}
-	head, err := storage.ReadDetachedChunkHead(ctx, remote, proj.Epoch, p.chunkHolder(proj))
+	head, err := p.readLayoutSeal(ctx, volumeID, h, proj)
 	if err != nil {
 		return storage.ChunkCutResult{}, 0, fmt.Errorf("%w: %w", ErrDetachOutcomeUnknown, err)
 	}
@@ -72,4 +69,53 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 	}
 	result.H, result.Head = head.RemoteLSN, head
 	return result, head.RemoteLSN, nil
+}
+
+// readLayoutSeal reads the same layout HEAD as Start; it never constructs a
+// second runtime or falls back to the removed key/intent protocol. After a
+// same-epoch detached restart there is no attached runtime, so the durable
+// local claim id supplies the identity checked against the record.
+func (p *DurableProvider) readLayoutSeal(ctx context.Context, volumeID string, h *volHandle, proj frontend.Projection) (storage.ChunkHead, error) {
+	ws, ok := h.storage.(*storage.WALStore)
+	if !ok {
+		return storage.ChunkHead{}, ErrNotChunkVolume
+	}
+	claim, _, present := ws.LayoutIdentity()
+	if !present || claim == "" {
+		return storage.ChunkHead{}, errors.New("durable: detached proof requires the local layout identity")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(p.closeCtx, cancel)
+	defer func() { stop(); cancel() }()
+	var head layout.Head
+	var err error
+	if remote, ok := h.layoutRemote.(interface {
+		ReadHead(context.Context) (layout.Head, error)
+	}); ok {
+		head, err = remote.ReadHead(ctx)
+	} else {
+		var st layout.StartStore
+		st, err = p.cfg.ChunkLayoutHeadFor(volumeID)
+		if err == nil && st == nil {
+			err = errors.New("durable: nil layout store for detached proof")
+		}
+		if err == nil {
+			var found bool
+			head, found, err = st.ReadHead(ctx)
+			if err == nil && !found {
+				err = layout.ErrHeadAbsent
+			}
+		}
+	}
+	if err != nil {
+		return storage.ChunkHead{}, err
+	}
+	me := layout.HolderID{Epoch: proj.Epoch, Holder: p.chunkHolder(proj), ClaimID: claim}
+	if head.Epoch != me.Epoch || head.Holder != me.Holder || head.ClaimID != me.ClaimID {
+		return storage.ChunkHead{}, ErrChunkEpochStale
+	}
+	if !layout.DetachedBy(head, me) {
+		return storage.ChunkHead{}, errors.New("durable: layout HEAD is not detached")
+	}
+	return layoutDetachResult(head).Head, nil
 }

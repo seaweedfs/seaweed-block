@@ -96,63 +96,54 @@ type fakeChunkRemote struct {
 	beforeCAS  func(f *fakeChunkRemote) // runs once, under mu, before the next CAS is decided
 	onGetHead  func(f *fakeChunkRemote) // runs under mu inside every GetHead while set (a read that blocks across a change)
 	afterCAS   func(f *fakeChunkRemote) // runs once, under mu, after the next CAS is decided
-	intents    map[string]chunkIntent
 	deferred   []deferredCAS
 
-	failPutIntent    error         // PutIntent fails without writing
-	failDeleteIntent int           // the next N DeleteIntent calls fail without deleting
-	putIntents       []chunkIntent // every intent written, in order
+	// session is the open cut session ("" = none); sessions counts the
+	// Begins that opened one, aborts the Aborts that ended one.
+	session          string
+	sessions, aborts int
+	failBegin        error // Begin fails without opening a session
 }
 
 func newFakeChunkRemote() *fakeChunkRemote {
-	return &fakeChunkRemote{objs: map[string][]byte{}, putBytes: map[string][]byte{}, everStored: map[string]bool{}, intents: map[string]chunkIntent{}}
+	return &fakeChunkRemote{objs: map[string][]byte{}, putBytes: map[string][]byte{}, everStored: map[string]bool{}}
 }
 
-func (f *fakeChunkRemote) PutIntent(ctx context.Context, in chunkIntent) (string, error) {
-	for _, k := range in.Keys {
-		if err := validChunkKey(k); err != nil {
-			return "", err
-		}
-	}
-	id, err := newChunkIntentID(in.Gen)
-	if err != nil {
-		return "", err
-	}
-	in.ID, in.CreatedNs, in.Keys = id, time.Now().UnixNano(), append([]string(nil), in.Keys...)
+// Begin opens the cut's session ("begin:<session>"), or replays the open
+// one ("begin:replay").
+func (f *fakeChunkRemote) Begin(ctx context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.failPutIntent != nil {
-		f.ops = append(f.ops, "putintent:fail")
-		return "", f.failPutIntent
+	if f.failBegin != nil {
+		f.ops = append(f.ops, "begin:fail")
+		return "", f.failBegin
 	}
-	f.ops = append(f.ops, "putintent:"+id)
-	f.intents[id] = in
-	f.putIntents = append(f.putIntents, in)
-	return id, nil
+	if f.session != "" {
+		f.ops = append(f.ops, "begin:replay")
+		return f.session, nil
+	}
+	f.sessions++
+	f.session = fmt.Sprintf("s%d", f.sessions)
+	f.ops = append(f.ops, "begin:"+f.session)
+	return f.session, nil
 }
 
-func (f *fakeChunkRemote) DeleteIntent(ctx context.Context, id string) error {
+// Abort ends the open session without a commit ("abort:<session>").
+func (f *fakeChunkRemote) Abort() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.failDeleteIntent > 0 {
-		f.failDeleteIntent--
-		f.ops = append(f.ops, "deleteintent:fail:"+id)
-		return errors.New("fake remote: injected DeleteIntent failure")
+	if f.session != "" {
+		f.ops = append(f.ops, "abort:"+f.session)
+		f.aborts++
+		f.session = ""
 	}
-	f.ops = append(f.ops, "deleteintent:"+id)
-	delete(f.intents, id)
-	return nil
 }
 
-func (f *fakeChunkRemote) ListIntents(ctx context.Context) ([]chunkIntent, error) {
+// openSession is the open session ("" = none).
+func (f *fakeChunkRemote) openSession() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]chunkIntent, 0, len(f.intents))
-	for _, in := range f.intents {
-		in.Keys = append([]string(nil), in.Keys...)
-		out = append(out, in)
-	}
-	return out, nil
+	return f.session
 }
 
 func (f *fakeChunkRemote) Put(ctx context.Context, key string, data []byte) error {
@@ -305,6 +296,7 @@ func (f *fakeChunkRemote) CASHead(ctx context.Context, expected chunkHeadVersion
 		}
 	}
 	f.installLocked(next)
+	f.session = "" // the commit ends the cut's session
 	if mode == casAppliedLost {
 		outcome = "cas:lost"
 		return 0, errFakeCASResponseLost
@@ -386,7 +378,7 @@ func (f *fakeChunkRemote) seedHead(t *testing.T, image []byte, remoteLSN, epoch 
 		key := fmt.Sprintf("seed/%d", idx)
 		f.objs[key] = append([]byte(nil), c...)
 		f.everStored[key] = true
-		head.Chunks[uint64(idx)] = chunkRef{Key: key, SHA256: sha256.Sum256(c), Encoding: "full", BirthLSN: remoteLSN}
+		head.Chunks[uint64(idx)] = chunkRef{Key: key, SHA256: sha256.Sum256(c), Encoding: "full"}
 	}
 	f.installLocked(head)
 }

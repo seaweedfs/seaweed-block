@@ -152,11 +152,6 @@ func validateReadOnlyMapV3(path string, d descriptorV3, fallback *descriptorV3) 
 }
 
 func (v *walStoreReaderV3) loadPresence(path string) error {
-	if _, err := os.Stat(path + ".chunkfresh"); err == nil {
-		return ErrReadOnlyNotResident
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	data, err := os.ReadFile(path + ".chunkpresence")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

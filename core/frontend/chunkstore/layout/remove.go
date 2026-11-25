@@ -93,34 +93,19 @@ func RemoveUnreachable(ctx context.Context, st HeadStore, r *Reader, os ObjectSt
 // names. A root or segment that cannot be read is an error: nothing is
 // removed on a partial view.
 func reachable(ctx context.Context, r *Reader, h Head, shard uint64) (map[ChunkName]bool, error) {
-	roots := map[RootName]bool{}
-	if h.Current != nil {
-		roots[*h.Current] = true
-	}
-	for _, s := range h.Snapshots {
-		roots[s.Root] = true
-	}
 	own, err := r.VolumeID(ctx, r.vol)
 	if err != nil {
 		return nil, err
 	}
 	live := map[ChunkName]bool{}
-	for rn := range roots {
-		img, err := r.Open(ctx, rn)
-		if err != nil {
-			return nil, err
-		}
-		seg, ok, err := img.Segment(ctx, shard)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			continue
-		}
-		for _, ref := range seg.Chunks {
+	for _, rn := range HeadRoots(h) {
+		if err := r.EachRef(ctx, rn, shard, func(_ uint64, ref Ref) bool {
 			if ref.OwnerID == own {
 				live[ref.Chunk] = true
 			}
+			return true
+		}); err != nil {
+			return nil, err
 		}
 	}
 	return live, nil

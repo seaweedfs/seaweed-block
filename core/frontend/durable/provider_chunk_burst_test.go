@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/binary"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 	"testing"
 	"time"
 )
@@ -18,12 +18,13 @@ func TestWALStoreChunkV3_SequentialBurstFlush(t *testing.T) {
 	const transfer = 128 * 1024
 	const flushEvery = 48 * 1024 * 1024
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p, err := durable.NewDurableProvider(durable.ProviderConfig{
+	fixture := testutil.NewLayoutFixture(t, "v1", total/4096, 1024)
+	cfg := durable.ProviderConfig{
 		Impl: durable.ImplWALStoreChunk, StorageRoot: t.TempDir(), BlockSize: 4096,
 		NumBlocks: total / 4096, ChunkBlocks: 1024,
-		ChunkRemoteFor: func(string) (storage.ChunkRemote, error) { return remote, nil },
-	}, v1View())
+	}
+	fixture.Configure(&cfg)
+	p, err := durable.NewDurableProvider(cfg, v1View())
 	if err != nil {
 		t.Fatal(err)
 	}

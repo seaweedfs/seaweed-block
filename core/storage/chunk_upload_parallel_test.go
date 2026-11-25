@@ -36,8 +36,8 @@ func TestChunkUploads_DefaultOverlapsBeforeCAS(t *testing.T) {
 		}
 	}
 	f.mu.Lock()
-	if len(f.intents) == 0 || f.casCalls != baselineCAS {
-		t.Error("overlapping uploads require a durable intent and no root CAS")
+	if f.session == "" || f.casCalls != baselineCAS {
+		t.Error("overlapping uploads require an open session and no root CAS")
 	}
 	f.mu.Unlock()
 	_ = w
@@ -94,7 +94,11 @@ func TestChunkUploads_ConfiguredBoundAndCancellation(t *testing.T) {
 			if f.stats().cas != 0 {
 				t.Fatal("cancelled upload published root")
 			}
-			assertNoIntentsLeft(t, f) // joined abort; no publication can refer to its keys
+			// joined: no publication refers to its keys; its completed
+			// uploads stay reusable, so the session stays for the retry
+			if f.openSession() == "" {
+				t.Fatal("a cancelled cut dropped the session its reusable uploads belong to")
+			}
 		})
 	}
 }
@@ -175,8 +179,8 @@ func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 		t.Fatalf("returned with owned upload still active: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("intent removed before join")
+	if f.openSession() == "" {
+		t.Fatal("session aborted before join")
 	}
 	closed := make(chan struct{})
 	t.Cleanup(func() { release(); cowWaitSignal(t, closed, "upload close cleanup") })
@@ -198,8 +202,8 @@ func TestChunkUploads_FailureJoinsBeforeIntentCleanup(t *testing.T) {
 	if f.stats().cas != 0 {
 		t.Fatal("failed batch published")
 	}
-	assertNoIntentsLeft(t, f)
 	cowWaitSignal(t, closed, "upload close")
+	assertNoSessionOpen(t, f) // Close ended the failed cut's session
 	files, err := filepath.Glob(s.path + ".cut-cow-*")
 	if err != nil || len(files) != 0 {
 		t.Fatalf("payload files after join: %v %v", files, err)

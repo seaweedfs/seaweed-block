@@ -11,19 +11,22 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 )
 
 // chunkVerify: sw-block ops chunk verify --volume v --chunk-filer host:port
-// checks the volume's remote image against its HEAD (and, on request, its
-// snapshots), read-only (chunkstore.Catalog.Verify). Exit 0: clean; 3: the
-// pass completed with findings; 1: it could not complete (the partial result
-// is printed with the error); 2: usage.
+// checks the volume's store read-only: VOLUME, HEAD, every root HEAD names
+// (the current image and every snapshot), their segments and chunks
+// (chunkstore.VerifyLayout). --orphans also reports the volume's own names
+// that no reachable root names (it never deletes them). Exit 0: clean; 3:
+// the pass completed with findings; 1: it could not complete (the partial
+// result is printed with the reason); 2: usage.
 func chunkVerify(args []string, stdout, stderr io.Writer) int {
 	fs := chunkFlagSet("verify", stderr)
 	var (
 		volumeID, filer, base, snapshot, depth string
-		allSnapshots                           bool
+		allSnapshots, orphans                  bool
 		concurrency                            int
 		bytesPerSec                            int64
 		timeout                                time.Duration
@@ -31,11 +34,12 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&filer, "chunk-filer", "", "SeaweedFS filer gRPC address host:port")
 	fs.StringVar(&base, "chunk-path", defaultChunkPathCLI, "filer directory holding one directory per volume")
-	fs.StringVar(&snapshot, "snapshot", "", "also check this snapshot")
-	fs.BoolVar(&allSnapshots, "all-snapshots", false, "also check every snapshot")
-	fs.StringVar(&depth, "depth", string(chunkstore.VerifyBindings), "meta, bindings or data (data reads every chunk once)")
-	fs.IntVar(&concurrency, "concurrency", chunkstore.DefaultVerifyConcurrency, "chunk reads in flight (depth data)")
-	fs.Int64Var(&bytesPerSec, "bytes-per-sec", chunkstore.DefaultVerifyBytesPerSecond, "pace chunk reads (depth data); 0 leaves them unpaced")
+	fs.StringVar(&snapshot, "snapshot", "", "accepted for compatibility: every snapshot HEAD names is always checked")
+	fs.BoolVar(&allSnapshots, "all-snapshots", false, "accepted for compatibility: every snapshot HEAD names is always checked")
+	fs.StringVar(&depth, "depth", "bindings", "meta or bindings: every named object exists; data: and every chunk's bytes hash to its name")
+	fs.BoolVar(&orphans, "orphans", false, "also report the volume's own names no reachable root names (report only)")
+	fs.IntVar(&concurrency, "concurrency", 1, "accepted for compatibility: chunks are read one at a time")
+	fs.Int64Var(&bytesPerSec, "bytes-per-sec", 0, "accepted for compatibility: chunk reads are not paced")
 	fs.DurationVar(&timeout, "timeout", 10*time.Minute, "bound for the whole pass; required with --depth data")
 	if err := fs.Parse(args); err != nil {
 		return chunkFail(chunkName(fs), stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
@@ -49,37 +53,37 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 	usage := func(msg string) int {
 		return chunkFail("verify", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, msg, false)
 	}
-	d := chunkstore.VerifyDepth(depth)
+	d := map[string]string{"meta": layout.DepthNames, "bindings": layout.DepthNames, "data": layout.DepthFull}[depth]
 	switch {
 	case fs.NArg() != 0:
 		return usage("unexpected arguments")
 	case volumeID == "":
 		return usage("--volume is required")
-	case d != chunkstore.VerifyMeta && d != chunkstore.VerifyBindings && d != chunkstore.VerifyData:
+	case filer == "":
+		return usage("--chunk-filer is required")
+	case d == "":
 		return usage(fmt.Sprintf("--depth %q: meta, bindings or data", depth))
 	case snapshot != "" && allSnapshots:
 		return usage("--snapshot and --all-snapshots do not combine")
-	case d == chunkstore.VerifyData && !timeoutSet:
+	case d == layout.DepthFull && !timeoutSet:
 		return usage("--depth data reads every chunk: give an explicit --timeout for the pass")
 	case timeout <= 0 || concurrency <= 0 || bytesPerSec < 0:
 		return usage("--timeout and --concurrency must be positive and --bytes-per-sec not negative")
 	}
-	// One bound for the whole pass, the single-filer start check included:
-	// the deadline starts before the check. Verify writes nothing, but it
-	// runs the check (writes=true): against a split filer view it would
-	// report false findings.
+	// One bound for the whole pass, the single-filer start check included.
+	// Verify writes nothing, but against a split filer view it would report
+	// false findings, so it runs the check.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cat, closeFn, exit := chunkCatalog("verify", filer, base, true, timeout, stdout, stderr)
-	if exit >= 0 {
-		return exit
+	f, closeFn, err := dialChunkFiler(filer)
+	if err != nil {
+		return usage(err.Error())
 	}
 	defer closeFn()
-	if bytesPerSec == 0 {
-		bytesPerSec = -1 // the library's "unpaced"
+	if exit := refuseUnlessSingleFiler("verify", f, timeout, stdout, stderr); exit >= 0 {
+		return exit
 	}
-	res, err := cat.Verify(ctx, volumeID, chunkstore.VerifyOptions{Depth: d, Snapshot: snapshot, AllSnapshots: allSnapshots,
-		Concurrency: concurrency, BytesPerSecond: bytesPerSec})
+	res, err := chunkstore.VerifyLayout(ctx, f, base, volumeID, layout.VerifyOptions{Depth: d, Orphans: orphans})
 	if err != nil {
 		return verifyIncomplete(res, err, stdout, stderr)
 	}
@@ -92,12 +96,12 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops chunk verify: write the result: %v\n", err)
 		return chunkExitFailed
 	}
+	if !res.Complete {
+		fmt.Fprintf(stderr, "sw-block ops chunk verify: %s: incomplete: %s\n", volumeID, res.Incomplete)
+		return chunkExitFailed
+	}
 	if len(res.Findings) != 0 {
-		fmt.Fprintf(stderr, "sw-block ops chunk verify: %s: %d findings %v\n", volumeID, len(res.Findings), res.FindingsByClass)
-		if res.ChunksNotRead != 0 {
-			// READ_ERROR is not damage: those objects were not verified.
-			fmt.Fprintf(stderr, "sw-block ops chunk verify: %s: %d could not be read and were not verified; re-run\n", volumeID, res.ChunksNotRead)
-		}
+		fmt.Fprintf(stderr, "sw-block ops chunk verify: %s: %d findings\n", volumeID, len(res.Findings))
 		return chunkExitFindings
 	}
 	return ops.VolumeStatusExitOK
@@ -105,20 +109,20 @@ func chunkVerify(args []string, stdout, stderr io.Writer) int {
 
 // verifyJSON is the result as one JSON object whose findings array holds
 // one finding per line.
-func verifyJSON(res chunkstore.VerifyResult) ([]byte, error) {
+func verifyJSON(res layout.VerifyResult) ([]byte, error) {
 	findings := res.Findings
 	res.Findings = nil
 	head, err := json.Marshal(res)
 	if err != nil {
 		return nil, err
 	}
-	const tail = `"findings":null}`
+	const tail = `"Findings":null}`
 	if !bytes.HasSuffix(head, []byte(tail)) {
 		return nil, errors.New("verify result: unexpected field order")
 	}
 	var buf bytes.Buffer
 	buf.Write(head[:len(head)-len(tail)])
-	buf.WriteString(`"findings":[`)
+	buf.WriteString(`"Findings":[`)
 	for i, f := range findings {
 		line, err := json.Marshal(f)
 		if err != nil {
@@ -139,17 +143,13 @@ func verifyJSON(res chunkstore.VerifyResult) ([]byte, error) {
 
 // verifyIncomplete prints the error body with the partial result under
 // "verify", and fails.
-func verifyIncomplete(res chunkstore.VerifyResult, err error, stdout, stderr io.Writer) int {
+func verifyIncomplete(res layout.VerifyResult, err error, stdout, stderr io.Writer) int {
 	body := struct {
 		chunkErrBody
-		Verify chunkstore.VerifyResult `json:"verify"`
+		Verify layout.VerifyResult `json:"verify"`
 	}{Verify: res}
 	body.Code, body.Message = codeInternalCLI, err.Error()
-	var ce *chunkstore.CatalogError
-	switch {
-	case errors.As(err, &ce):
-		body.Code, body.Message, body.Retryable = ce.Code, ce.Detail(), ce.Retryable
-	case errors.Is(err, context.DeadlineExceeded):
+	if errors.Is(err, context.DeadlineExceeded) {
 		body.Code, body.Retryable = chunkstore.CodeDeadlineExceeded, true
 	}
 	fmt.Fprintf(stderr, "sw-block ops chunk verify: %s: %s (incomplete)\n", body.Code, body.Message)

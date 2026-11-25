@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
 type chunkRoute struct {
@@ -130,71 +129,13 @@ func TestOpsChunk_ErrorsAreJSONOnStdout(t *testing.T) {
 		t.Fatalf("unreachable blockvolume: %+v, want remote_unavailable and retryable", e)
 	}
 
-	mem := chunkstore.NewMemFiler()
-	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
-	t.Cleanup(func() { dialChunkFiler = prev })
-	if code, out, _ := runChunk("fork", "--chunk-filer", "f:1", "--source", "v1", "--snapshot", "s9", "--target", "v2", "--request-id", "r"); code != chunkExitFailed {
-		t.Fatalf("fork of a missing snapshot: exit %d %q", code, out)
+	store := newMemChunkStore()
+	useMemChunkStore(t, store)
+	src := cliVolume(t, store, "v1", "s1")
+	tid, _ := layout.NewVolumeID()
+	if code, out, _ := runChunk(cliArgs("restore", volArgs("source", src), volArgs("target", chunkstore.VolumeRef{Name: "v2", ID: tid}), []string{"--snapshot", "s9"})...); code != chunkExitFailed {
+		t.Fatalf("restore of a missing snapshot: exit %d %q", code, out)
 	} else if e := chunkErrorOut(t, out); e.Code != "snapshot_not_found" || e.Retryable {
-		t.Fatalf("fork of a missing snapshot: %+v", e)
-	}
-}
-
-// snapshots, snapshot-delete and fork go to the filer directly.
-func TestOpsChunk_FilerCommands(t *testing.T) {
-	ctx := context.Background()
-	mem := chunkstore.NewMemFiler()
-	prev := dialChunkFiler
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) { return mem, func() error { return nil }, nil }
-	t.Cleanup(func() { dialChunkFiler = prev })
-	cat, err := chunkstore.NewCatalog(mem, defaultChunkPathCLI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cat.EnsureVolume(ctx, "v1", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
-		t.Fatal(err)
-	}
-	head := storage.ChunkHead{Gen: 2, Epoch: 1, Holder: "r1", RemoteLSN: 42, State: storage.ChunkHeadActive,
-		Chunks: map[uint64]storage.ChunkRef{0: {Key: "chunks/e1/c0/k"}}}
-	manifestMem := newManifestFixtureFiler(mem)
-	cat, err = chunkstore.NewCatalog(manifestMem, defaultChunkPathCLI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialChunkFiler = func(string) (chunkstore.Filer, func() error, error) {
-		return manifestMem, func() error { return nil }, nil
-	}
-	head = prepareFixtureHead(t, manifestMem, head)
-	if _, err := cat.CreateSnapshot(ctx, "v1", chunkstore.SnapshotRequest{Name: "s1", RequestID: "r"}, head); err != nil {
-		t.Fatal(err)
-	}
-
-	code, out, errs := runChunk("snapshots", "--volume", "v1", "--chunk-filer", "filer:18888")
-	var list chunkstore.SnapshotListBody
-	if code != 0 || json.Unmarshal([]byte(out), &list) != nil || len(list.Snapshots) != 1 || list.Snapshots[0].Name != "s1" || list.Snapshots[0].CutLSN != 42 {
-		t.Fatalf("snapshots: %d %q %q", code, out, errs)
-	}
-	code, out, errs = runChunk("fork", "--chunk-filer", "filer:18888", "--source", "v1", "--snapshot", "s1", "--target", "v2", "--request-id", "f1")
-	var fork chunkstore.ForkResult
-	if code != 0 || json.Unmarshal([]byte(out), &fork) != nil || fork.Target != "v2" || fork.HeadGen != 1 || fork.RemoteLSN != 42 || fork.Replayed ||
-		!strings.Contains(out, `"remoteLSN":42`) {
-		t.Fatalf("fork: %d %q %q", code, out, errs)
-	}
-	if code, out, _ := runChunk("fork", "--chunk-filer", "filer:18888", "--source", "v1", "--snapshot", "s1", "--target", "v2", "--request-id", "f1"); code != 0 || !strings.Contains(out, `"replayed":true`) {
-		t.Fatalf("fork retry: %d %q", code, out)
-	}
-	if code, _, errs := runChunk("fork", "--chunk-filer", "filer:18888", "--source", "v1", "--snapshot", "s1", "--target", "v2", "--request-id", "other"); code != chunkExitFailed || !strings.Contains(errs, "target_exists") {
-		t.Fatalf("fork with another request id: %d %q", code, errs)
-	}
-	// The first delete frees the name; a repeated one finds it absent.
-	for i, want := range []string{`"state":"deleting"`, `"state":"absent"`} {
-		code, out, errs = runChunk("snapshot-delete", "--volume", "v1", "--name", "s1", "--chunk-filer", "filer:18888")
-		if code != 0 || !strings.Contains(out, want) {
-			t.Fatalf("snapshot-delete #%d: %d %q %q, want %s", i+1, code, out, errs, want)
-		}
-	}
-	if code, _, _ := runChunk("snapshots", "--volume", "v1"); code != 2 {
-		t.Fatalf("snapshots without --chunk-filer: exit %d, want 2", code)
+		t.Fatalf("restore of a missing snapshot: %+v", e)
 	}
 }

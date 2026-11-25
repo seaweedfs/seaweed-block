@@ -21,6 +21,8 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
@@ -46,6 +48,7 @@ type flags struct {
 	masterAddr     string
 	serverID       string
 	volumeID       string
+	layoutID       string
 	replicaID      string
 	dataAddr       string
 	ctrlAddr       string
@@ -186,6 +189,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.masterTLS.Key, "master-tls-key", "", "the key of --master-tls-cert (PEM)")
 	fs.StringVar(&f.masterTLS.CA, "master-ca", "", "CA (PEM) blockmaster's certificate must verify against")
 	fs.StringVar(&f.volumeID, "volume-id", "", "served volume (required)")
+	fs.StringVar(&f.layoutID, "layout-id", "", "master-minted layout identity; when set, durable-root is the base for <volume>-<id8>")
 	fs.StringVar(&f.replicaID, "replica-id", "", "served replica (required)")
 	fs.StringVar(&f.dataAddr, "data-addr", "", "data-path address (required)")
 	fs.StringVar(&f.ctrlAddr, "ctrl-addr", "", "control-path address (required)")
@@ -219,17 +223,14 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
 	fs.StringVar(&f.durableImpl, "durable-impl", "", "LogicalStorage impl: empty (default) = auto: an existing volume opens with its on-disk format (a walstore-chunk root needs the explicit walstore-chunk selector), a new volume is created as walstore; or walstore, smartwal (experimental), opt-in parallel-walstore, or opt-in walstore-chunk (walstore published to SeaweedFS; proof of concept); ignored unless --durable-root is set")
 	registerHostLimitFlags(fs, &f.chunk.hostLimit)
-	fs.StringVar(&f.chunk.filer, "chunk-filer", "", "walstore-chunk: SeaweedFS filer gRPC address host:port")
-	fs.StringVar(&f.chunk.path, "chunk-path", defaultChunkPath, "walstore-chunk: filer directory holding one directory per volume (HEAD and chunk key bindings)")
-	fs.StringVar(&f.chunk.collection, "chunk-collection", "", "walstore-chunk: collection for chunk needles (empty = filer default / storage rule)")
-	fs.StringVar(&f.chunk.replication, "chunk-replication", "", "walstore-chunk: replication for chunk needles (empty = filer default / storage rule)")
+	chunkstore.RegisterSWFSFlags(fs, &f.chunk.filer, &f.chunk.path, &f.chunk.collection, &f.chunk.replication)
 	fs.Bool("chunk-detach-plain-supported", false, "capability: supports idle plain=true on /chunk/detach (no-op flag)")
 	fs.BoolVar(&f.chunk.detachPrecopy, "chunk-detach-precopy", false, "walstore-chunk: not supported in this release; blockvolume refuses to start when it is set")
 	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: periodic HEAD capture interval (default 0: off; when set, at least "+durable.MinCaptureInterval.String()+")")
 	f.chunk.snapshotSchedule = defaultSnapshotSchedule
 	fs.Var(&f.chunk.snapshotSchedule, "chunk-snapshot-schedule", "walstore-chunk: scheduled snapshots, daily:N or weekly:N (once per period at a per-volume offset, the newest N kept) or off")
 	fs.DurationVar(&f.chunk.maintenanceInterval, "chunk-maintenance-interval", defaultChunkMaintenanceInterval, "walstore-chunk: retention and optional GC pass interval; 0 disables")
-	fs.BoolVar(&f.chunk.automaticGC, "chunk-maintenance-gc", false, "walstore-chunk: enable scoped automatic GC; off pending restart-safe unknown-CAS settlement and density qualification")
+	fs.BoolVar(&f.chunk.automaticGC, "chunk-maintenance-gc", false, "walstore-chunk: let the holder's maintenance pass remove chunks no root of the volume reaches (cleaning); off by default")
 	fs.IntVar(&f.chunk.uploadConcurrency, "chunk-upload-concurrency", 8, "walstore-chunk: maximum concurrent dirty-chunk uploads (1..64)")
 	fs.IntVar(&f.chunk.hydrationWorkers, "chunk-hydration-workers", 2, "walstore-chunk: concurrent lazy chunk fetches per volume (1..64)")
 	fs.IntVar(&f.chunk.hydrationQueueDepth, "chunk-hydration-queue-depth", 64, "walstore-chunk: distinct queued/in-flight hydration chunks per volume (1..65536)")
@@ -336,6 +337,19 @@ func parseFlags(args []string) (flags, error) {
 		if f.durableImpl != "walstore" {
 			return flags{}, fmt.Errorf("--durable-wal-recovery-test-disable-flusher requires --durable-impl=walstore")
 		}
+	}
+	if f.layoutID != "" {
+		id, err := layout.ParseVolumeID(f.layoutID)
+		if err != nil {
+			return flags{}, fmt.Errorf("--layout-id: %w", err)
+		}
+		if f.durableRoot == "" {
+			return flags{}, fmt.Errorf("--layout-id requires --durable-root")
+		}
+		if err := (layout.Volume{ID: id, Name: f.volumeID, Format: layout.VolumeFormat}).CheckIdentity(); err != nil {
+			return flags{}, err
+		}
+		f.durableRoot = filepath.Join(f.durableRoot, layout.VolumeDir(f.volumeID, id))
 	}
 	if f.durableRoot != "" {
 		if _, _, err := durableCreateGeometry(f); err != nil {
@@ -684,14 +698,16 @@ func runVolume(f flags, exits *processExit) int {
 	// accept connections.
 	var provider frontend.Provider
 	var durableProv *durable.DurableProvider
-	var workspaceRemoteFor func(string) (storage.ChunkRemote, error)
+	var workspaceLayoutHead layout.HeadStore
 	if f.durableRoot != "" {
 		blocks, blockSize, geometryErr := durableCreateGeometry(f)
+		var dp *durable.DurableProvider
 		cfg := durable.ProviderConfig{
 			Impl:                          durable.ImplName(f.durableImpl),
 			StorageRoot:                   f.durableRoot,
 			BlockSize:                     blockSize,
 			NumBlocks:                     blocks,
+			ChunkBlocks:                   durable.DefaultChunkBlocks,
 			WALRetentionLSNs:              f.walRetentionLSNs,
 			WALMultiBlockRecords:          f.durableWALMultiBlockRecords,
 			WALRecoveryTestDisableFlusher: f.durableWALRecoveryTestDisableFlusher,
@@ -710,7 +726,6 @@ func runVolume(f flags, exits *processExit) int {
 			cfg.ChunkCutTimeout = defaultChunkCutTimeout
 			cfg.ChunkMaintenanceInterval = f.chunk.maintenanceInterval
 			cfg.ChunkMaintenanceTimeout = defaultChunkMaintenanceTimeout
-			cfg.ChunkMaintenance = chunk.maintenance
 			if f.workspaceLease {
 				// The startup wait does not run out while the master gives no
 				// reply; it ends 30 s after the first reply received after the
@@ -721,9 +736,21 @@ func runVolume(f flags, exits *processExit) int {
 					return deadline, final != ""
 				}
 			}
-			if chunk.catalog != nil && f.chunk.snapshotSchedule.period > 0 {
+			if chunk.bCatalog != nil && f.chunk.snapshotSchedule.period > 0 {
 				cfg.ChunkSnapshotPeriod = f.chunk.snapshotSchedule.period
-				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(chunk.catalog, f.chunk.snapshotSchedule.keep)
+				cfg.ChunkScheduledSnapshot = volume.ScheduledSnapshot(func(ctx context.Context, name, snapshot string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
+					p, ok := any(dp).(interface {
+						SnapshotVolume(context.Context, string, string, layout.SnapshotMeta) (layout.Head, error)
+					})
+					if !ok {
+						return chunkstore.SnapshotInfo{}, errors.New("chunk snapshot data path is not configured")
+					}
+					h, err := p.SnapshotVolume(ctx, name, snapshot, meta)
+					if err != nil {
+						return chunkstore.SnapshotInfo{}, err
+					}
+					return chunkstore.SnapshotInfoFromHead(name, snapshot, h), nil
+				}, f.chunk.snapshotSchedule.keep)
 			}
 			cfg.ChunkDetachPrecopy = f.chunk.detachPrecopy
 			cfg.ChunkUploadConcurrency = f.chunk.uploadConcurrency
@@ -752,18 +779,49 @@ func runVolume(f flags, exits *processExit) int {
 			cfg.OnChunkDetach = h.WorkspaceStopPending
 			cfg.OnChunkDetachResumed = h.WorkspaceStopResumed
 			if chunkErr == nil {
-				cfg.ChunkRemoteFor = chunk.remoteFor
-				workspaceRemoteFor = chunk.remoteFor
-				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.catalog)
+
+				layoutID, _ := layout.ParseVolumeID(f.layoutID) // parseFlags validates a supplied id
+				ref := chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}
+				cfg.ChunkAttachCheck = chunkAttachCheck(chunk.bCatalog, ref)
+				cfg.ChunkLayoutHeadFor = func(name string) (layout.StartStore, error) {
+					if name != ref.Name {
+						return nil, layout.ErrIdentity
+					}
+					return chunk.bCatalog.Store(ref)
+				}
+				cfg.ChunkLayoutRemoteFor = func(name string, me layout.HolderID) (storage.ChunkRemote, error) {
+					if name != ref.Name {
+						return nil, layout.ErrIdentity
+					}
+					return chunkstore.NewLayoutRemote(chunk.bCatalog, ref, me)
+				}
+				workspaceLayoutHead, chunkErr = chunk.bCatalog.Store(ref)
+				// The holder identity comes from Start (until it is wired, the
+				// pass retains and does not clean).
+				cfg.ChunkMaintenance = newChunkMaintenance(chunk.bCatalog, ref, func(ctx context.Context) (layoutCleaner, error) {
+					if dp == nil {
+						return nil, errNoLayoutHolder
+					}
+					r, err := dp.LayoutRemote(ctx, f.volumeID)
+					if err != nil {
+						return nil, fmt.Errorf("%w: %w", errNoLayoutHolder, err)
+					}
+					c, ok := r.(layoutCleaner)
+					if !ok {
+						return nil, fmt.Errorf("%w: the attachment's remote (%T) cannot clean", errNoLayoutHolder, r)
+					}
+					return c, nil
+				}, f.chunk.automaticGC, time.Now)
 				defer chunk.close()
 			}
 		}
 		// Only a store about to be created takes its geometry from the flags;
 		// an existing store opens with its own (blocks == 0), and a mismatch
 		// between it and the record is the attach check's.
-		if chunkErr == nil && geometryErr == nil && blocks != 0 && chunk.catalog != nil {
+		if chunkErr == nil && geometryErr == nil && blocks != 0 && chunk.bCatalog != nil {
 			readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			refusal, code := geometryFlagsRefusal(readCtx, chunk.catalog, f.volumeID, uint64(blocks), uint32(blockSize))
+			layoutID, _ := layout.ParseVolumeID(f.layoutID)
+			refusal, code := geometryFlagsRefusal(readCtx, chunk.bCatalog, chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}, uint64(blocks), uint32(blockSize), cfg.ChunkBlocks)
 			readCancel()
 			if refusal != "" {
 				fmt.Fprintln(os.Stderr, refusal)
@@ -776,7 +834,6 @@ func runVolume(f flags, exits *processExit) int {
 				return code
 			}
 		}
-		var dp *durable.DurableProvider
 		err := geometryErr
 		if err == nil {
 			dp, err = durable.NewDurableProvider(cfg, h.ProjectionView())
@@ -805,8 +862,9 @@ func runVolume(f flags, exits *processExit) int {
 		provider = dp
 		if status != nil {
 			status.SetDurableStatusSource(dp)
-			if f.chunk.controlEndpoint && chunk.catalog != nil {
-				status.SetChunkControl(volume.NewChunkControl(dp, chunk.catalog))
+			if f.chunk.controlEndpoint && chunk.bCatalog != nil {
+				layoutID, _ := layout.ParseVolumeID(f.layoutID)
+				status.SetChunkControl(volume.NewChunkControl(dp, chunk.bCatalog, chunkstore.VolumeRef{Name: f.volumeID, ID: layoutID}))
 			}
 		}
 
@@ -1399,6 +1457,16 @@ func runVolume(f flags, exits *processExit) int {
 	if replVolume != nil {
 		drainErr = errors.Join(drainErr, replVolume.Close())
 	}
+	// A detached HEAD is stable until a higher grant. Read it while the
+	// attachment identity is still available, then ACK only after Close succeeds.
+	var detachedGen uint64
+	if leaseStop != nil && drainErr == nil && workspaceLayoutHead != nil {
+		var me layout.HolderID
+		me, drainErr = durableProv.LayoutHolder(leaseStop.ctx, leaseStop.id.VolumeId)
+		if drainErr == nil {
+			detachedGen, drainErr = workspaceLayoutDetachedGeneration(leaseStop.ctx, workspaceLayoutHead, leaseStop.id, me)
+		}
+	}
 	// T3b: close DurableProvider in correct order — Provider.Close
 	// closes backends first (flags them closed) then storage files
 	// (releases fd + final fsync).
@@ -1411,9 +1479,9 @@ func runVolume(f flags, exits *processExit) int {
 		shutCancel()
 	}
 	if leaseStop != nil {
-		gen := uint64(0)
-		if drainErr == nil {
-			gen, drainErr = workspaceDetachedGeneration(leaseStop.ctx, workspaceRemoteFor, leaseStop.id, chunkHolder(f))
+		gen := detachedGen
+		if drainErr == nil && workspaceLayoutHead == nil {
+			drainErr = errors.New("workspace layout HEAD unavailable for detached proof")
 		}
 		leaseStop.reply <- workspaceStopResult{gen: gen, err: drainErr}
 	}

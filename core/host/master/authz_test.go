@@ -40,10 +40,10 @@ func TestMasterAuthorizationTableCoversEveryMethod(t *testing.T) {
 	if len(missing) > 0 || len(stale) > 0 {
 		t.Fatalf("authorization table out of date: methods without a rule %v; rules without a method %v", missing, stale)
 	}
-	// 26: SubscribeProbeRounds and AnswerProbe (the promotion probe round)
-	// are node-only, each for the caller's own server id.
-	if len(registered) != 26 {
-		t.Fatalf("%d registered methods; the table was written for 26: review the new ones", len(registered))
+	// SubscribeProbeRounds and AnswerProbe (the promotion probe round) are
+	// node-only, each for the caller's own server id.
+	if len(registered) != 29 {
+		t.Fatalf("%d registered methods; the table was written for 29: review the new ones", len(registered))
 	}
 }
 
@@ -77,7 +77,7 @@ func TestMasterOperatorMethodsAreStrict(t *testing.T) {
 			t.Errorf("%s is named in notStrict but is not a non-strict operator method: drop the entry", m)
 		}
 	}
-	if strict != 10 {
-		t.Errorf("%d strict methods; the phase 0 set is 10 (update this count with the change that adds one)", strict)
+	if strict != 11 {
+		t.Errorf("%d strict methods; the phase 0 set is 11 (update this count with the change that adds one)", strict)
 	}
 }

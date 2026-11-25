@@ -71,6 +71,11 @@ func TestDurableProvider_AutoCreatesWALStore(t *testing.T) {
 	if got := statusImpl(t, p); got != string(durable.ImplWALStore) {
 		t.Fatalf("status impl=%q, want walstore", got)
 	}
+	// Windows keeps the active WALStore file locked; inspect its magic after
+	// the provider has released the descriptor, as a restart would.
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if got := onDiskMagic(t, filepath.Join(root, "v1.bin")); got != "SWBK" {
 		t.Fatalf("on-disk magic=%q, want SWBK (walstore)", got)
 	}

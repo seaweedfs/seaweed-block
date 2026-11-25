@@ -13,8 +13,8 @@ import (
 func TestDurableProviderV3_AttachedChunkBASEInstallAndCapture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	p := mappedProviderV3(t, t.TempDir(), remote)
+	fixture := newFormatV3Fixture(t)
+	p := mappedProviderV3(t, t.TempDir(), fixture, formatV3View{})
 	st, e := p.EnsureStorage("v1")
 	if e != nil {
 		t.Fatal(e)
@@ -41,24 +41,18 @@ func TestDurableProviderV3_AttachedChunkBASEInstallAndCapture(t *testing.T) {
 	if _, e = p.CaptureVolume(ctx, "v1"); e != nil {
 		t.Fatalf("completed BASE capture refused: %v", e)
 	}
-	head, e := remote.GetHead(ctx)
-	if e != nil {
-		t.Fatal(e)
-	}
-	ref, ok := head.Chunks[1]
-	if !ok {
+	if fixture.head(t).Current == nil {
 		t.Fatal("completed BASE chunk omitted")
 	}
-	chunk, e := remote.Get(ctx, ref.Key)
-	if e != nil || len(chunk) < 8192 || !bytes.Equal(chunk[4096:8192], want) {
-		t.Fatalf("captured BASE mismatch: %v", e)
+	if !bytes.Equal(fixture.block(t, 5), want) {
+		t.Fatal("captured BASE mismatch")
 	}
 }
 
 func TestDurableProviderV3_AttachesCompletedChunkBASE(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	p := mappedProviderV3(t, t.TempDir(), storage.NewMemChunkRemote())
+	p := mappedProviderV3(t, t.TempDir(), newFormatV3Fixture(t), formatV3View{})
 	st, e := p.EnsureStorage("v1")
 	if e != nil {
 		t.Fatal(e)
@@ -101,8 +95,8 @@ func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	source := mappedProviderV3(t, t.TempDir(), remote)
+	fixture := newFormatV3Fixture(t)
+	source := mappedProviderV3(t, t.TempDir(), fixture, formatV3View{})
 	if _, e := source.EnsureStorage("v1"); e != nil {
 		t.Fatal(e)
 	}
@@ -124,7 +118,7 @@ func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
 		t.Fatal(e)
 	}
 	root := t.TempDir()
-	target := mappedProviderV3(t, root, remote)
+	target := mappedProviderV3(t, root, fixture, formatV3TakeoverView{})
 	st, e := target.EnsureStorage("v1")
 	if e != nil {
 		t.Fatal(e)
@@ -169,7 +163,7 @@ func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
 		if e = target.Close(); e != nil {
 			t.Fatal(e)
 		}
-		target = mappedProviderV3(t, root, remote)
+		target = mappedProviderV3(t, root, fixture, formatV3TakeoverView{})
 		st, e = target.EnsureStorage("v1")
 		if e != nil {
 			t.Fatal(e)
@@ -204,7 +198,7 @@ func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
 	if e = target.Close(); e != nil {
 		t.Fatal(e)
 	}
-	target = mappedProviderV3(t, root, remote)
+	target = mappedProviderV3(t, root, fixture, formatV3TakeoverView{})
 	if _, e = target.EnsureStorage("v1"); e != nil {
 		t.Fatal(e)
 	}
@@ -218,8 +212,8 @@ func completedBASEDoesNotRestoreOlderHEAD(t *testing.T, retire bool) {
 func TestDurableProviderV3_SeedOnlyCheckpointStillRestoresHEAD(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	remote := storage.NewMemChunkRemote()
-	source := mappedProviderV3(t, t.TempDir(), remote)
+	fixture := newFormatV3Fixture(t)
+	source := mappedProviderV3(t, t.TempDir(), fixture, formatV3View{})
 	if _, err := source.EnsureStorage("v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -239,11 +233,8 @@ func TestDurableProviderV3_SeedOnlyCheckpointStillRestoresHEAD(t *testing.T) {
 	if err := source.Close(); err != nil {
 		t.Fatal(err)
 	}
-	head, err := remote.GetHead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := mappedProviderV3(t, t.TempDir(), remote)
+	head := fixture.head(t)
+	target := mappedProviderV3(t, t.TempDir(), fixture, formatV3TakeoverView{})
 	st, err := target.EnsureStorage("v1")
 	if err != nil {
 		t.Fatal(err)
@@ -251,7 +242,7 @@ func TestDurableProviderV3_SeedOnlyCheckpointStillRestoresHEAD(t *testing.T) {
 	if _, err = st.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	if err = st.(*storage.WALStore).SeedChunkFrontier(head.RemoteLSN); err != nil {
+	if err = st.(*storage.WALStore).SeedChunkFrontier(head.Position); err != nil {
 		t.Fatal(err)
 	}
 	if st.(*storage.WALStore).CheckpointLSN() == 0 || st.NextLSN() <= 1 {

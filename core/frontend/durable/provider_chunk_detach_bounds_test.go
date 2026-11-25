@@ -13,13 +13,14 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func TestWALStoreChunk_TimedOutDetachRetriesShareOneDrain(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p, view := parkedProvider(t, remote)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p, view := parkedLayoutProvider(t, fixture)
 	openRecovered(t, p)
 	b, err := p.Open(ctx, "v1")
 	if err != nil {
@@ -53,13 +54,13 @@ func TestWALStoreChunk_TimedOutDetachRetriesShareOneDrain(t *testing.T) {
 	if err != nil || r.Head.State != storage.ChunkHeadDetached {
 		t.Fatalf("detach once the write finished: %+v %v", r, err)
 	}
-	if acked && !bytesEqual(headBlock(t, remote, 1), block(4)) {
+	if acked && !bytesEqual(layoutHeadBlock(t, fixture, 1), block(4)) {
 		t.Fatal("the held write was acknowledged but is not in the detached HEAD")
 	}
 }
 
 func TestWALStoreChunk_CutVolumeSurvivesCloseAfterResolve(t *testing.T) {
-	p := chunkProvider(t, t.TempDir(), storage.NewMemChunkRemote(), v1View(), 0)
+	p := layoutChunkProvider(t, t.TempDir(), testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks), v1View(), 0)
 	s := openRecovered(t, p)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)

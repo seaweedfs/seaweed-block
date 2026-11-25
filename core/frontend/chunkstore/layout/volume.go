@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -64,33 +65,65 @@ const VolumeFormat = 1
 
 // Volume is the VOLUME record: the volume's id, its name when created, and
 // the layout format.
+// Geometry is immutable and lives only in VOLUME.
+type Geometry struct {
+	SizeBytes  uint64
+	BlockSize  uint32
+	ChunkBytes uint64
+}
+
+// ErrGeometryMismatch refuses local or restore geometry that differs from VOLUME.
+var ErrGeometryMismatch = errors.New("layout: geometry_mismatch")
+
+func (g Geometry) Check() error {
+	if g.SizeBytes == 0 || g.BlockSize == 0 || g.ChunkBytes == 0 || g.SizeBytes%uint64(g.BlockSize) != 0 || g.ChunkBytes%uint64(g.BlockSize) != 0 {
+		return fmt.Errorf("%w: size_bytes, block_size and chunk_bytes must be nonzero block multiples", ErrMalformed)
+	}
+	return nil
+}
+
+// CheckIdentity validates a volume reference without inventing geometry.
+func (v Volume) CheckIdentity() error {
+	if v.ID.IsZero() {
+		return fmt.Errorf("%w: VOLUME without an id", ErrMalformed)
+	}
+	if err := checkOwner(v.Name); err != nil {
+		return err
+	}
+	if err := validName("volume name", v.Name); err != nil {
+		return err
+	}
+	if v.Format != VolumeFormat {
+		return fmt.Errorf("%w: VOLUME format %d, want %d", ErrMalformed, v.Format, VolumeFormat)
+	}
+	return nil
+}
+
 type Volume struct {
+	Geometry
 	ID     VolumeID
 	Name   string
 	Format int
 }
 
 type volumeDoc struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Format int    `json:"format"`
+	SizeBytes  uint64 `json:"size_bytes"`
+	BlockSize  uint32 `json:"block_size"`
+	ChunkBytes uint64 `json:"chunk_bytes"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Format     int    `json:"format"`
 }
 
 // Encode returns the record's canonical bytes.
 func (v Volume) Encode() ([]byte, error) {
-	if v.ID.IsZero() {
-		return nil, fmt.Errorf("%w: VOLUME without an id", ErrMalformed)
-	}
-	if err := checkOwner(v.Name); err != nil {
+	if err := v.CheckIdentity(); err != nil {
 		return nil, err
 	}
-	if err := validName("volume name", v.Name); err != nil {
+	if err := v.Geometry.Check(); err != nil {
 		return nil, err
 	}
-	if v.Format != VolumeFormat {
-		return nil, fmt.Errorf("%w: VOLUME format %d, want %d", ErrMalformed, v.Format, VolumeFormat)
-	}
-	return json.Marshal(volumeDoc{ID: v.ID.String(), Name: v.Name, Format: v.Format})
+	return json.Marshal(volumeDoc{SizeBytes: v.SizeBytes, BlockSize: v.BlockSize, ChunkBytes: v.ChunkBytes, ID: v.ID.String(), Name: v.Name, Format: v.Format})
 }
 
 // DecodeVolume parses canonical VOLUME bytes.
@@ -105,7 +138,7 @@ func DecodeVolume(b []byte) (Volume, error) {
 	if err != nil {
 		return Volume{}, err
 	}
-	v := Volume{ID: id, Name: d.Name, Format: d.Format}
+	v := Volume{ID: id, Name: d.Name, Format: d.Format, Geometry: Geometry{SizeBytes: d.SizeBytes, BlockSize: d.BlockSize, ChunkBytes: d.ChunkBytes}}
 	again, err := v.Encode()
 	if err != nil {
 		return Volume{}, err

@@ -40,7 +40,7 @@ func cleanMoveToGrantee(t *testing.T, store AuthorityStore, now *time.Time) (*Pu
 	if err := p.BeginWorkspaceRevocation(ctx, "v", "r", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: predecessorHead.Gen}); err != nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: predecessorHead.Gen, Holder: predecessorHead.Holder, RemoteLSN: predecessorHead.RemoteLSN}, WorkspaceHead{Detached: true, Epoch: 1, Holder: predecessorHead.Holder, RemoteLSN: predecessorHead.RemoteLSN}); err != nil {
 		t.Fatal(err)
 	}
 	*now = now.Add(100 * time.Millisecond)
@@ -145,7 +145,7 @@ func TestWorkspaceUnclaimedGrantHEADRule(t *testing.T) {
 	if err := p.BeginWorkspaceRevocation(ctx, "v", "r", 2); err != nil {
 		t.Fatal("revoke the grantee's issued lease:", err)
 	}
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 2, HeadGen: predecessorHead.Gen}); err != nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 2, HeadGen: predecessorHead.Gen, Holder: predecessorHead.Holder, RemoteLSN: predecessorHead.RemoteLSN}, WorkspaceHead{Detached: true, Epoch: 2, Holder: predecessorHead.Holder, RemoteLSN: predecessorHead.RemoteLSN}); err != nil {
 		t.Fatal(err)
 	}
 	clean := forcedFromGrantee("clean-2")

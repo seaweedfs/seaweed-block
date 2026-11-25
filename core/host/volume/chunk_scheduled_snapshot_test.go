@@ -7,39 +7,35 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/retain"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// A scheduled snapshot is one named snapshot of class "scheduled", named
-// for its attempt time and labelled with the schedule's keep, recording
-// exactly the HEAD its own cut installed. A retry of the same attempt
-// replays without cutting again.
+// A scheduled attempt uses the provider's atomic snapshot path and stable
+// name/metadata on retry; it never invokes an ordinary cut or catalog write.
 func TestScheduledSnapshot_SealsTheCutHeadAsScheduled(t *testing.T) {
 	ctx := context.Background()
-	fp, cat := adapterCatalog(t)
-	take := ScheduledSnapshot(cat, 7)
 	at := time.Date(2026, 11, 21, 3, 4, 5, 0, time.UTC)
-	cuts := 0
-	cut := func(ctx context.Context) (storage.ChunkHead, error) {
-		cuts++
-		r, err := fp.CutVolume(ctx, "v1", 0)
-		return r.Head, err
+	calls := 0
+	take := ScheduledSnapshot(func(_ context.Context, volume, name string, meta layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
+		calls++
+		if volume != "v1" || name != "sched-20261121T030405Z" || meta.Class != layout.ClassScheduled || meta.CreatedNs != at.UnixNano() || meta.Labels[retain.LabelScheduleKeep] != "7" {
+			t.Fatalf("snapshot %s %s %+v", volume, name, meta)
+		}
+		return chunkstore.SnapshotInfo{}, nil
+	}, 7)
+	for i := 0; i < 2; i++ {
+		if err := take(ctx, "v1", at, func(context.Context) (storage.ChunkHead, error) {
+			t.Fatal("ordinary cut bypasses snapshot commit")
+			return storage.ChunkHead{}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := take(ctx, "v1", at, cut); err != nil {
-		t.Fatal(err)
-	}
-	if err := take(ctx, "v1", at, cut); err != nil || cuts != 1 {
-		t.Fatalf("retry of the same attempt: %v, %d cuts; want a replay without a second cut", err, cuts)
-	}
-	list, _, err := cat.ListSnapshots(ctx, "v1", chunkstore.ListOptions{})
-	if err != nil || len(list) != 1 {
-		t.Fatalf("list: %+v %v", list, err)
-	}
-	s := list[0]
-	if s.Name != "sched-20261121T030405Z" || s.Class != chunkstore.SnapshotClassScheduled || s.Labels[chunkstore.LabelScheduleKeep] != "7" ||
-		s.HeadGen != fp.cut.Head.Gen || s.HeadEpoch != fp.cut.Head.Epoch || s.CutLSN != fp.cut.Head.RemoteLSN {
-		t.Fatalf("snapshot %+v; want sched-20261121T030405Z, class scheduled, keep 7, the cut's HEAD", s)
+	if calls != 2 {
+		t.Fatalf("snapshot calls=%d", calls)
 	}
 }
 
@@ -47,8 +43,6 @@ func TestScheduledSnapshot_SealsTheCutHeadAsScheduled(t *testing.T) {
 // the control endpoint gives the same error, and records nothing.
 func TestScheduledSnapshot_FailureCarriesTheEndpointCode(t *testing.T) {
 	ctx := context.Background()
-	_, cat := adapterCatalog(t)
-	take := ScheduledSnapshot(cat, 7)
 	for _, c := range []struct {
 		err  error
 		code string
@@ -57,13 +51,13 @@ func TestScheduledSnapshot_FailureCarriesTheEndpointCode(t *testing.T) {
 		{storage.ErrChunkRemoteUnavailable, chunkstore.CodeRemoteUnavailable},
 		{context.DeadlineExceeded, chunkstore.CodeDeadlineExceeded},
 	} {
-		err := take(ctx, "v1", time.Now(), func(context.Context) (storage.ChunkHead, error) { return storage.ChunkHead{}, c.err })
+		take := ScheduledSnapshot(func(context.Context, string, string, layout.SnapshotMeta) (chunkstore.SnapshotInfo, error) {
+			return chunkstore.SnapshotInfo{}, c.err
+		}, 7)
+		err := take(ctx, "v1", time.Now(), nil)
 		var f *durable.SnapshotFailure
 		if !errors.As(err, &f) || f.Code != c.code || !errors.Is(err, c.err) {
 			t.Fatalf("cut error %v: got %v; want a SnapshotFailure with code %s", c.err, err, c.code)
 		}
-	}
-	if list, _, _ := cat.ListSnapshots(ctx, "v1", chunkstore.ListOptions{}); len(list) != 0 {
-		t.Fatalf("failed attempts recorded %+v", list)
 	}
 }

@@ -102,13 +102,28 @@ type descriptorV3 struct {
 	BaseInstallID  [16]byte
 	WMode          WMode
 	MigrationPhase MigrationPhase
+
+	// The layout identity of this local root: the claim id its marker
+	// carries (written before any claim) and whether the root is fresh
+	// (until its restore base is durable). Bytes 88-122 of the slot.
+	LayoutSet     bool
+	LayoutFresh   bool
+	LayoutClaimID string
 }
+
+// MaxLayoutClaimIDBytes bounds the claim id the descriptor holds.
+const MaxLayoutClaimIDBytes = 32
+
+const (
+	layoutFlagSet   = 1 << 0
+	layoutFlagFresh = 1 << 1
+)
 
 var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
 
 // reservedRangesV3 are the [start, end) byte ranges that must be zero.
 var reservedRangesV3 = [][2]int{
-	{9, 12}, {88, 128}, {164, 168}, {240, 256}, {273, 280}, {306, slotCRCOffsetV3},
+	{9, 12}, {122, 128}, {164, 168}, {240, 256}, {273, 280}, {306, slotCRCOffsetV3},
 }
 
 // encode serializes d into one sealed slot. It does not validate; callers
@@ -131,6 +146,14 @@ func (d *descriptorV3) encode() []byte {
 	le.PutUint64(b[64:], d.CreatedAt)
 	le.PutUint64(b[72:], d.SlotGen)
 	le.PutUint64(b[80:], d.CheckpointLSN)
+	if d.LayoutSet {
+		b[88] = layoutFlagSet
+		if d.LayoutFresh {
+			b[88] |= layoutFlagFresh
+		}
+		b[89] = uint8(len(d.LayoutClaimID))
+		copy(b[90:90+MaxLayoutClaimIDBytes], d.LayoutClaimID)
+	}
 	copy(b[128:144], d.Nonce[:])
 	le.PutUint64(b[144:], d.RetainedTail)
 	le.PutUint64(b[152:], d.RetainedHead)
@@ -198,6 +221,9 @@ func decodeSlotV3(b []byte, accept slotImplAcceptor) (descriptorV3, error) {
 	d.CreatedAt = le.Uint64(b[64:])
 	d.SlotGen = le.Uint64(b[72:])
 	d.CheckpointLSN = le.Uint64(b[80:])
+	if err := decodeLayoutIdentityV3(&d, b[88:122]); err != nil {
+		return descriptorV3{}, err
+	}
 	copy(d.Nonce[:], b[128:144])
 	d.RetainedTail = le.Uint64(b[144:])
 	d.RetainedHead = le.Uint64(b[152:])
@@ -218,6 +244,29 @@ func decodeSlotV3(b []byte, accept slotImplAcceptor) (descriptorV3, error) {
 		return descriptorV3{}, err
 	}
 	return d, nil
+}
+
+// decodeLayoutIdentityV3 reads the layout identity bytes (88-122): a flags
+// byte, a length, the claim id, zero after it; unset means all zero.
+func decodeLayoutIdentityV3(d *descriptorV3, b []byte) error {
+	flags, n := b[0], int(b[1])
+	if flags&^(layoutFlagSet|layoutFlagFresh) != 0 {
+		return invalidV3("layout identity flags %#x", flags)
+	}
+	if flags&layoutFlagSet == 0 {
+		if i := firstNonZero(b); i >= 0 {
+			return invalidV3("layout identity byte %d set without the identity", 88+i)
+		}
+		return nil
+	}
+	if n == 0 || n > MaxLayoutClaimIDBytes {
+		return invalidV3("layout claim id of %d bytes", n)
+	}
+	if i := firstNonZero(b[2+n:]); i >= 0 {
+		return invalidV3("layout identity byte %d after the claim id", 90+n+i)
+	}
+	d.LayoutSet, d.LayoutFresh, d.LayoutClaimID = true, flags&layoutFlagFresh != 0, string(b[2:2+n])
+	return nil
 }
 
 func firstNonZero(b []byte) int {

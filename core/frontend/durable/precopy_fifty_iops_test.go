@@ -12,6 +12,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -38,8 +39,9 @@ func TestPrecopyFiftyIOPSSlowMeasuredCostsKeepServing(t *testing.T) {
 
 func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay time.Duration) {
 	t.Helper()
-	remote := &precopyFixedSampleRemote{MemChunkRemote: storage.NewMemChunkRemote()}
-	p := precopyProvider(t, remote, &parkView{stubView: v1View()})
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	remote := &precopyLayoutDelayedRemote{}
+	p := precopyBProvider(t, fixture, &parkView{stubView: v1View()}, remote)
 	openRecovered(t, p)
 	backend, err := p.Open(context.Background(), "v1")
 	if err != nil {
@@ -198,7 +200,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 			// Staging or later rounds may leave an empty tail, which needs
 			// only measured fixed cost. A nonempty first tail still needs
 			// three upload samples; the one-sample fixture cannot supply them.
-			if err != nil || (len(result.Precopy.Rounds) == 1 && result.Precopy.TailBytes != 0) || guestErrors.Load() != 0 || !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x5b)) {
+			if err != nil || (len(result.Precopy.Rounds) == 1 && result.Precopy.TailBytes != 0) || guestErrors.Load() != 0 || !bytes.Equal(layoutHeadBlock(t, fixture, 1), block(0x5b)) {
 				t.Fatalf("cold samples claimed premature fit: report=%+v guest_errors=%d err=%v", result.Precopy, guestErrors.Load(), err)
 			}
 			return
@@ -274,7 +276,7 @@ func precopyFiftyIOPS(t *testing.T, samples byte, wantUnknown bool, fixedDelay t
 	if guestErrors.Load() != 0 {
 		t.Fatalf("guest errors before cutover: %d", guestErrors.Load())
 	}
-	if !bytes.Equal(headBlock(t, remote.MemChunkRemote, 1), block(0x5b)) {
+	if !bytes.Equal(layoutHeadBlock(t, fixture, 1), block(0x5b)) {
 		t.Fatal("final cut lost synchronous writer bytes")
 	}
 }

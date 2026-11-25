@@ -78,7 +78,7 @@ func crashReadOnlyStoreV3(t *testing.T, s *WALStore) {
 	s.mu.Unlock()
 }
 func TestWALStoreV3_ReadOnlyRefusesIncompleteOrCorruptDependencies(t *testing.T) {
-	for _, fault := range []string{"installing", "acknowledged_wal", "missing_map", "fallback_page", "presence", "fresh"} {
+	for _, fault := range []string{"installing", "acknowledged_wal", "missing_map", "fallback_page", "presence"} {
 		t.Run(fault, func(t *testing.T) {
 			s, path := newMappedCheckpointStoreV3(t)
 			if fault == "fallback_page" {
@@ -133,10 +133,6 @@ func TestWALStoreV3_ReadOnlyRefusesIncompleteOrCorruptDependencies(t *testing.T)
 				}
 			case "presence":
 				if e := os.WriteFile(path+".chunkpresence", []byte("absent nope\n"), 0600); e != nil {
-					t.Fatal(e)
-				}
-			case "fresh":
-				if e := os.WriteFile(path+".chunkfresh", []byte("fresh\n"), 0600); e != nil {
 					t.Fatal(e)
 				}
 			}

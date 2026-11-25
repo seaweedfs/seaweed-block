@@ -157,7 +157,9 @@ named like an admin client's or blockmaster's, but it cannot see a certificate's
 - **`--host-limit-dir`:** keep it on a local file system with free space. When it cannot be written, background cuts
   are refused (they fail closed); the seal at stop still runs.
 - **SeaweedFS space:** every cut and snapshot stores the chunks that changed since the previous one. Space comes
-  back only by GC and then a SeaweedFS vacuum (below).
+  back only by GC and then a SeaweedFS vacuum (below). An upload interrupted before its filer entry is
+  created can leave an unreferenced needle; include this crash-window overhead in space accounting.
+  Do not run volume.fsck with real deletion on a block cluster.
 
 Each volume process reports its own heartbeat slot (server, volume and replica).
 The master orders each slot against that slot's previous report. In version 1.0,
@@ -185,6 +187,13 @@ default) can expire the host's slots; keep host clocks synchronized.
     tested in 1.0.
 
 ## Snapshots, restore and space
+
+A chunk volume delete refuses to reserve a volume while its lease may still be live. Once the permanent
+reservation succeeds at blockmaster, the volume cannot be returned to service, even if a snapshot dependent
+refuses the next step. Resolve snapshot dependents and rerun with the same request id;
+the command asks blockmaster for a fresh no-live-lease proof before the HEAD compare-and-swap.
+A late upload by a dead holder into a deleted volume can remain; rerun volume-delete to sweep it.
+
 
 [Standalone deployment: snapshots, restore and space](standalone-deployment.md#snapshots-restore-and-space-walstore-chunk):
 - scheduled and manual snapshots;
@@ -272,8 +281,7 @@ Every command on the pages above, and the test that runs it.
 | `sw-block ops workspace force-move [--dry-run]`, `lost-range` | `TestProcedureForcedMoveWithTheOldHostReturning`, `TestProcedureRevokeWithoutACKThenForcedMove` | binary |
 | `sw-block ops volume-unheld --path` | `cmd/sw-block/volume_unheld_test.go` | CLI |
 | `sw-block ops chunk snapshot`, `snapshots`, `snapshot-delete` | `cmd/sw-block/chunk_test.go` | CLI |
-| `sw-block ops chunk gc --chunk-filer --master --apply [--grace]` | `cmd/sw-block/chunk_gc_test.go`; `chunk_gc_integration_test.go` (real SeaweedFS) | CLI |
-| `sw-block ops chunk verify --all-snapshots --depth data` | `cmd/sw-block/chunk_verify_test.go` | CLI |
+| `sw-block ops chunk verify --depth data [--orphans]` | `cmd/sw-block/chunk_verify_test.go` | CLI |
 | `sw-block ops chunk restore --source --snapshot --target`, `--volume ... [--status]` | `cmd/sw-block/chunk_restore_test.go` | CLI |
 | `curl STATUS/status?volume=v1` | the status checks in the binary tests above | binary |
 | `nvme connect`, `nvme list`, `nvme disconnect` | not run here: the binary tests use an NVMe/TCP host inside the test | not run |

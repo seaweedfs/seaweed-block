@@ -49,7 +49,7 @@ func TestWorkspaceAckUsesGrantedHalfSkewBoundary(t *testing.T) {
 				}
 			}
 			now = start.Add(tc.elapsed)
-			err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7})
+			err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7, Holder: "host/r", RemoteLSN: 42}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "host/r", RemoteLSN: 42})
 			if (err == nil) != tc.allowed {
 				t.Fatalf("ACK allowed=%t, want %t: %v", err == nil, tc.allowed, err)
 			}

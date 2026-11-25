@@ -223,7 +223,11 @@ func TestClusterSpecCLIMissingSizeExplainsCreateVolumePrerequisite(t *testing.T)
 	o2, e2, l2 := importedVolumeClients(t, p2)
 	reportImportedVolume(t, o2)
 	waitImportedAuthority(t, p2, e2)
-	got, err := l2.CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "v1", SizeBytes: 1048576, ReplicationFactor: 1, Protocol: "nvme", FrontendTransport: "tcp"})
+	// The earlier RPC budget belongs to the first daemon. Give this distinct
+	// request the same budget after the restart, without extending either RPC.
+	replayCtx, replayCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer replayCancel()
+	got, err := l2.CreateVolume(replayCtx, &control.CreateVolumeRequest{VolumeId: "v1", SizeBytes: 1048576, ReplicationFactor: 1, Protocol: "nvme", FrontendTransport: "tcp"})
 	if err != nil || got.Protocol != "nvme" || got.FrontendTransport != "tcp" || got.PvcNamespace != "workspaces" || got.PvcName != "claim-v1" {
 		t.Fatalf("cluster import changed existing protocol/metadata: %v %v", got, err)
 	}

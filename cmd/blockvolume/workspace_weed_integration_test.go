@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -225,9 +227,17 @@ func (c *w4WeedCluster) client(t *testing.T, assignPath string) *chunkstore.SWFS
 	return cl
 }
 
-func (c *w4WeedCluster) remote(t *testing.T, root string) *chunkstore.ChunkRemote {
+// remote reads ref's HEAD under base as the chunk engine sees it, through the
+// layout remote of an observer that holds nothing: its epoch, holder and
+// claim match no HEAD, so it never rolls a session back or writes.
+func (c *w4WeedCluster) remote(t *testing.T, base string, ref chunkstore.VolumeRef) *chunkstore.LayoutRemote {
 	t.Helper()
-	r, err := chunkstore.NewSWFSChunkRemote(c.client(t, root), root)
+	cl := c.client(t, base)
+	cat, err := chunkstore.NewBCatalog(cl, cl, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := chunkstore.NewLayoutRemote(cat, ref, layout.HolderID{Epoch: math.MaxUint64, Holder: "test-observer", ClaimID: "observer"})
 	if err != nil {
 		t.Fatal(err)
 	}

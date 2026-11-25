@@ -18,7 +18,6 @@ type (
 	ChunkCutResult    = chunkCutResult
 	ChunkCutStats     = chunkCutStats
 	ChunkLayerStats   = chunkLayerStats
-	ChunkIntent       = chunkIntent
 	ChunkDetachedBy   = chunkDetachedBy
 	DetachSettlement  = detachSettlement
 )
@@ -39,12 +38,6 @@ const (
 	ChunkHeadPurging  = chunkHeadPurging
 	ChunkHeadDeleted  = chunkHeadDeleted
 )
-
-// NewChunkIntentID returns a fresh intent id "<gen>-<nonce>" for a remote
-// implementation's PutIntent; ValidChunkIntentID accepts exactly those ids.
-func NewChunkIntentID(gen uint64) (string, error) { return newChunkIntentID(gen) }
-
-func ValidChunkIntentID(id string) bool { return validChunkIntentID(id) }
 
 const (
 	ChunkBaseNone                 = chunkBaseNone
@@ -71,7 +64,7 @@ var (
 )
 
 // ValidChunkKey enforces the chunk key domain (non-empty valid UTF-8); a
-// remote implementation calls it in Put and, for every key, in PutIntent.
+// remote implementation calls it in Put.
 func ValidChunkKey(key string) error { return validChunkKey(key) }
 
 // AttachChunkLayer attaches a chunk layer to an open, recovered WALStore.

@@ -28,7 +28,7 @@ func TestCommitDetached_ProofAndLostReply(t *testing.T) {
 				if proof.State != StateDetached || proof.Position != req.Position || proof.Activity.Kind != ActIdle {
 					t.Fatal("HEAD lacks the final synced image proof", proof)
 				}
-				if _, err := Start(context.Background(), st, &fakeLease{}, me, LocalRoot{ClaimID: me.ClaimID, Position: req.Position}); !errors.Is(err, ErrDetached) || !strings.Contains(err.Error(), "new grant") {
+				if _, err := Start(context.Background(), st, &fakeLease{}, me, LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: me.ClaimID, Position: req.Position}); !errors.Is(err, ErrDetached) || !strings.Contains(err.Error(), "new grant") {
 					t.Fatal("same-epoch start did not refuse with the cure", err)
 				}
 			} else if proof.State != StateLive || proof.Position != h.Position {
@@ -48,7 +48,7 @@ func TestDetachedHEAD_RefusesEveryHolderTransition(t *testing.T) {
 	steps := map[string]func() error{
 		"Begin":      func() error { _, _, e := h.Begin(me, "s"); return e },
 		"Abort":      func() error { _, _, e := h.Abort(me, "s"); return e },
-		"Commit":     func() error { _, _, e := h.Commit(me, "s", rn, h.Position, "", StateLive); return e },
+		"Commit":     func() error { _, _, e := h.Commit(me, "s", rn, h.Position, "", SnapshotMeta{}, StateLive); return e },
 		"BeginClean": func() error { _, _, e := h.BeginClean(me, "c"); return e },
 		"EndClean":   func() error { _, _, e := h.EndClean(me, "c"); return e },
 		"Claim":      func() error { _, _, e := h.Claim(me); return e },
@@ -95,7 +95,7 @@ func TestDetachedHEAD_NewGrantStillWaitsForTheOldLease(t *testing.T) {
 	line := me
 	line.Epoch++
 	lease := &fakeLease{}
-	local := LocalRoot{ClaimID: me.ClaimID, Position: h.Position}
+	local := LocalRoot{Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: me.ClaimID, Position: h.Position}
 	if _, err := Start(context.Background(), st, lease, line, local); err == nil || st.updates != 0 || len(lease.calls) != 1 {
 		t.Fatal("higher epoch bypassed old lease", err, st.updates, lease.calls)
 	}

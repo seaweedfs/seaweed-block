@@ -10,23 +10,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable/testutil"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 func TestWALStoreChunk_CutVolumeReturnsInstalledHead(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p := chunkProvider(t, t.TempDir(), remote, v1View(), 0)
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := layoutChunkProvider(t, t.TempDir(), fixture, v1View(), 0)
 	s := openRecovered(t, p)
-	claimed := freshV1Claim(t, remote)
+	claimed := layoutHead(t, fixture)
 	if _, err := s.Write(1, block(1)); err != nil {
 		t.Fatal(err)
 	}
 	r, err := p.CutVolume(ctx, "v1", 0)
-	head, _ := remote.GetHead(ctx)
+	head := layoutHead(t, fixture)
 	// (r.Stats is W3's: its fields read zero until then.)
-	if err != nil || r.Noop || head.Gen != claimed.Gen+1 || r.Head.Gen != head.Gen || r.H != s.NextLSN()-1 || r.Head.RemoteLSN != r.H {
+	if err != nil || r.Noop || head.Gen <= claimed.Gen || r.Head.Gen != head.Gen || r.H != s.NextLSN()-1 || head.Position != r.H || r.Head.RemoteLSN != r.H {
 		t.Fatalf("cut: %+v %v; remote HEAD gen %d", r, err, head.Gen)
 	}
 	again, err := p.CutVolume(ctx, "v1", 0)
@@ -40,8 +42,8 @@ func TestWALStoreChunk_CutVolumeReturnsInstalledHead(t *testing.T) {
 
 func TestWALStoreChunk_DetachVolumeStopsIOAndPublishesDetached(t *testing.T) {
 	ctx := context.Background()
-	remote := storage.NewMemChunkRemote()
-	p := chunkProvider(t, t.TempDir(), remote, v1View(), time.Hour) // a periodic loop runs until the detach
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	p := layoutChunkProvider(t, t.TempDir(), fixture, v1View(), time.Hour) // a periodic loop runs until the detach
 	s := openRecovered(t, p)
 	b, err := p.Open(ctx, "v1")
 	if err != nil {
@@ -51,12 +53,12 @@ func TestWALStoreChunk_DetachVolumeStopsIOAndPublishesDetached(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, last, err := p.DetachVolume(ctx, "v1")
-	head, _ := remote.GetHead(ctx)
-	if err != nil || r.Head.State != storage.ChunkHeadDetached || head.State != storage.ChunkHeadDetached || r.Head.Gen != head.Gen ||
+	head := layoutHead(t, fixture)
+	if err != nil || r.Head.State != storage.ChunkHeadDetached || head.State != layout.StateDetached || r.Head.Gen != head.Gen ||
 		r.H != s.NextLSN()-1 || last != r.H {
 		t.Fatalf("detach: %+v last %d %v; remote HEAD %+v", r, last, err, head)
 	}
-	if !bytesEqual(headBlock(t, remote, 1), block(2)) {
+	if !bytesEqual(layoutHeadBlock(t, fixture, 1), block(2)) {
 		t.Fatal("the detached HEAD lacks the write acknowledged before the detach")
 	}
 	if _, err := b.Write(ctx, 4096, block(3)); err == nil {

@@ -6,7 +6,6 @@ package storage
 // write reached it since staging, so the image at H stays exact.
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -35,14 +34,6 @@ func precopyLayer(t *testing.T, bound, n int) (*WALStore, *fakeChunkRemote, *chu
 		w.write(t, s, uint32(c*ctChunkBlocks+1), byte(0x10+c))
 	}
 	return s, f, l, w
-}
-
-func assertNoIntentsLeft(t *testing.T, f *fakeChunkRemote) {
-	t.Helper()
-	in, err := f.ListIntents(context.Background())
-	if err != nil || len(in) != 0 {
-		t.Fatalf("intents left after the cut settled: %d (%v)", len(in), err)
-	}
 }
 
 // A chunk re-dirtied between staging and the barrier is copied again in
@@ -74,7 +65,7 @@ func TestChunkPrecopy_RedirtiedStagedChunkIsRecopied(t *testing.T) {
 					r.Stats.StagedChunksUsed, r.Stats.BarrierCopyChunks, r.Stats.BarrierOverBound)
 			}
 			assertEveryHeadIsPrefixImage(t, f, w)
-			assertNoIntentsLeft(t, f)
+			assertNoSessionOpen(t, f)
 		})
 	}
 }
@@ -102,7 +93,7 @@ func TestChunkPrecopy_WritesOutpacingStagingGoOverBound(t *testing.T) {
 		t.Fatalf("BarrierOverBound counter %d, want 0 for COW", got)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
 
 // Control: no bound, no staging; within the bound, no staging either.
@@ -133,7 +124,7 @@ func TestChunkPrecopy_DetachUsesTheSamePath(t *testing.T) {
 		t.Fatalf("detach: %d staging rounds, %d copied under the barrier; want staging and at most 2 copied", r.Stats.StageRounds, r.Stats.BarrierCopyChunks)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
 
 // W5 holds for staged keys: every upload, staged or at the barrier, is
@@ -152,34 +143,24 @@ func TestChunkPrecopy_StagedUploadsAreCoveredByIntents(t *testing.T) {
 		t.Fatal(err)
 	}
 	ops := opsSince(f, mark)
-	f.mu.Lock()
-	keysOf := map[string][]string{}
-	for _, in := range f.putIntents {
-		keysOf[in.ID] = in.Keys
-	}
-	f.mu.Unlock()
-	covered := map[string]bool{}
-	iCAS := indexOf(ops, func(op string) bool { return op == "cas:ok" })
-	intents := 0
+	open, begins := false, 0
 	for i, op := range ops {
-		if id, ok := strings.CutPrefix(op, "putintent:"); ok {
-			intents++
-			for _, k := range keysOf[id] {
-				covered[k] = true
-			}
+		switch {
+		case strings.HasPrefix(op, "begin:") && op != "begin:fail":
+			open = true
+			begins++
+		case strings.HasPrefix(op, "abort:"), op == "cas:ok":
+			open = false
 		}
-		if k, ok := strings.CutPrefix(op, "put:"); ok && !covered[k] {
-			t.Fatalf("upload %q (op %d) not named by an earlier intent: ops %q", k, i, ops)
-		}
-		if strings.HasPrefix(op, "deleteintent:") && (iCAS < 0 || i < iCAS) {
-			t.Fatalf("intent deleted before the confirmed CAS: ops %q", ops)
+		if k, ok := strings.CutPrefix(op, "put:"); ok && !open {
+			t.Fatalf("upload %q (op %d) outside an open session: ops %q", k, i, ops)
 		}
 	}
-	if intents < 2 {
-		t.Fatalf("%d intents written; want staging rounds and the barrier covered (ops %q)", intents, ops)
+	if begins < 2 {
+		t.Fatalf("%d Begins; want the staging rounds and the barrier each in the session (ops %q)", begins, ops)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }
 
 // A write that lands right after a chunk's staging read (flushed before
@@ -201,9 +182,9 @@ func TestChunkPrecopy_WriteRightAfterStagingReadIsNotLost(t *testing.T) {
 	assertEveryHeadIsPrefixImage(t, f, w)
 }
 
-// A barrier Sync that fails after staging uploaded keys is a clean abort:
-// the cut's staging intents are deleted (a failed delete is kept and
-// retried by the next cut), and the next cut publishes the exact image.
+// A barrier Sync that fails after staging uploaded keys keeps the session
+// with the staged uploads open, and the next cut publishes the exact image
+// in it.
 func TestChunkPrecopy_BarrierSyncFailureSettlesStagedIntents(t *testing.T) {
 	s, f, l, w := precopyLayer(t, 2, 5)
 	orig := s.committer.syncFunc
@@ -219,31 +200,14 @@ func TestChunkPrecopy_BarrierSyncFailureSettlesStagedIntents(t *testing.T) {
 	if st := f.stats(); st.puts == before.puts {
 		t.Fatal("schedule did not stage any upload before the barrier")
 	}
-	if len(liveIntents(t, f)) == 0 {
-		t.Fatal("completed uploads lost their retry roots")
+	if f.openSession() == "" {
+		t.Fatal("completed uploads lost their open session")
 	}
-
-	// The same abort with the intent delete failing: kept, retried next cut.
-	w.write(t, s, 2, 0x22)
-	w.write(t, s, uint32(ctChunkBlocks+2), 0x23)
-	w.write(t, s, uint32(2*ctChunkBlocks+2), 0x24)
-	f.mu.Lock()
-	f.failDeleteIntent = 100
-	f.mu.Unlock()
-	if _, err := l.Cut(ctTimeout(t)); err == nil {
-		t.Fatal("second cut with a failing barrier Sync succeeded")
-	}
-	if left := len(liveIntents(t, f)); left == 0 {
-		t.Fatal("schedule: the failing delete left no intent to retry")
-	}
-	f.mu.Lock()
-	f.failDeleteIntent = 0
-	f.mu.Unlock()
 	l.testAfterStageHook = nil
 	s.committer.syncFunc = orig
 	if _, err := l.Cut(ctTimeout(t)); err != nil {
 		t.Fatal(err)
 	}
 	assertEveryHeadIsPrefixImage(t, f, w)
-	assertNoIntentsLeft(t, f)
+	assertNoSessionOpen(t, f)
 }

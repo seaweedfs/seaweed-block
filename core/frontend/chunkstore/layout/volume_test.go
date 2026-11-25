@@ -27,12 +27,12 @@ func TestVolumeID_RandomAndParsed(t *testing.T) {
 }
 
 func TestVolume_GoldenEncodingRoundTrip(t *testing.T) {
-	v := Volume{ID: idFor("v1"), Name: "v1", Format: VolumeFormat}
+	v := Volume{ID: idFor("v1"), Name: "v1", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat}
 	b, err := v.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"id":"` + idFor("v1").String() + `","name":"v1","format":1}`
+	want := `{"size_bytes":262144,"block_size":4096,"chunk_bytes":16384,"id":"` + idFor("v1").String() + `","name":"v1","format":1}`
 	if string(b) != want {
 		t.Fatalf("encoding\n got %s\nwant %s", b, want)
 	}
@@ -41,9 +41,9 @@ func TestVolume_GoldenEncodingRoundTrip(t *testing.T) {
 		t.Fatalf("decode: %+v %v", back, err)
 	}
 	for name, bad := range map[string]Volume{
-		"zero id":        {Name: "v1", Format: VolumeFormat},
-		"name with path": {ID: idFor("v1"), Name: "a/b", Format: VolumeFormat},
-		"invalid UTF-8":  {ID: idFor("v1"), Name: "a\xff", Format: VolumeFormat},
+		"zero id":        {Name: "v1", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat},
+		"name with path": {ID: idFor("v1"), Name: "a/b", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat},
+		"invalid UTF-8":  {ID: idFor("v1"), Name: "a\xff", Geometry: Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, Format: VolumeFormat},
 		"other format":   {ID: idFor("v1"), Name: "v1", Format: 2},
 	} {
 		if _, err := bad.Encode(); !errors.Is(err, ErrMalformed) {

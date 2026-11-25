@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// INV-WS-SAME-HOST-CLEAN-MOVE-001: an unchanged sealed generation and its
+// INV-WS-SAME-HOST-CLEAN-MOVE-001: an unchanged sealed image and its
 // durable ACK remain a clean-move proof after the lease expires overnight.
 func TestWorkspaceSameHostCleanMoveUsesOvernightSeal(t *testing.T) {
 	disk, _ := newTempStore(t)
@@ -22,24 +22,19 @@ func TestWorkspaceSameHostCleanMoveUsesOvernightSeal(t *testing.T) {
 	if err := p.BeginWorkspaceRevocation(ctx, "v", "r", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7}); err != nil {
+	if err := p.AckWorkspaceRevocation(ctx, "v", WorkspaceRevokeAck{ReplicaID: "r", Epoch: 1, HeadGen: 7, Holder: "host/r", RemoteLSN: 42}, WorkspaceHead{Detached: true, Epoch: 1, Holder: "host/r", RemoteLSN: 42}); err != nil {
 		t.Fatal(err)
 	}
 	clock.at(86400)
 	for _, bad := range []WorkspaceHead{
 		{Gen: 7, Epoch: 1, Holder: "host/r", RemoteLSN: 42},
-		{Gen: 8, Epoch: 1, Holder: "host/r", RemoteLSN: 42, Detached: true},
+		{Gen: 7, Epoch: 1, Holder: "host/r", RemoteLSN: 43, Detached: true},
 		{Gen: 7, Epoch: 1, Holder: "other/r", RemoteLSN: 42, Detached: true},
 		{Gen: 7, Epoch: 2, Holder: "host/r", RemoteLSN: 42, Detached: true},
 	} {
 		if _, err := p.MoveWorkspace(ctx, req, bad); err == nil {
-			t.Fatal("same-host move bypassed sealed-generation proof", bad)
+			t.Fatal("same-host move bypassed sealed-image proof", bad)
 		}
-	}
-	forced := req
-	forced.Kind, forced.Force = "forced", true
-	if _, err := p.MoveWorkspace(ctx, forced, head); err == nil {
-		t.Fatal("same-host forced move accepted")
 	}
 	if line, _ := p.VolumeAuthorityLine("v"); line.Epoch != 1 || len(p.WorkspaceState("v").Moves) != 0 {
 		t.Fatal("refusal reserved or published authority", line)

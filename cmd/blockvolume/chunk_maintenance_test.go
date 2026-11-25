@@ -1,114 +1,189 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
-	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
-	"github.com/seaweedfs/seaweed-block/core/storage"
+	"fmt"
 	"path"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/filerpb"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-type maintenanceGCFiler struct {
-	chunkstore.Filer
-	gcCalls, marked, freed int
-	failSecond             bool
+// maintenanceBlobs is an in-memory needle store.
+type maintenanceBlobs struct {
+	mu sync.Mutex
+	n  int
+	d  map[string][]byte
 }
 
-func (f *maintenanceGCFiler) LookupEntry(ctx context.Context, dir, name string) (*filerpb.Entry, error) {
-	if name == "_GC_MARK" {
-		f.gcCalls++
-		return nil, errors.New("witness: GC reached")
-	}
-	return f.Filer.LookupEntry(ctx, dir, name)
+func (b *maintenanceBlobs) Put(_ context.Context, data []byte) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.n++
+	fid := fmt.Sprintf("1,%x", b.n)
+	b.d[fid] = append([]byte(nil), data...)
+	return fid, nil
 }
-func (f *maintenanceGCFiler) UpdateEntry(ctx context.Context, dir string, e *filerpb.Entry, expected map[string][]byte) error {
-	if string(e.Extended["swb.snap.state"]) == chunkstore.SnapDeleting {
-		if f.failSecond && f.marked == 1 {
-			return errors.New("second retention mark refused")
+
+func (b *maintenanceBlobs) Get(_ context.Context, fid string) ([]byte, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	d, ok := b.d[fid]
+	if !ok {
+		return nil, chunkstore.ErrBlobNotFound
+	}
+	return append([]byte(nil), d...), nil
+}
+
+// failingLookups fails every entry lookup once armed (a filer gone away).
+type failingLookups struct {
+	*chunkstore.MemFiler
+	armed bool
+}
+
+func (f *failingLookups) LookupEntry(ctx context.Context, dir, name string) (*filerpb.Entry, error) {
+	if f.armed {
+		return nil, errors.New("filer: unavailable")
+	}
+	return f.MemFiler.LookupEntry(ctx, dir, name)
+}
+
+type okLease struct{}
+
+func (okLease) OldLeaseEnded(context.Context, uint64) error { return nil }
+
+var maintenanceHolder = layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "k"}
+
+// maintenanceFixture is volume v1 started by maintenanceHolder, with one
+// orphan chunk in shard 0 that no root names.
+func maintenanceFixture(t *testing.T) (*chunkstore.BCatalog, chunkstore.VolumeRef, *failingLookups, *chunkstore.LayoutStore, layout.ChunkName) {
+	t.Helper()
+	ctx := context.Background()
+	f := &failingLookups{MemFiler: chunkstore.NewMemFiler()}
+	cat, err := chunkstore.NewBCatalog(f, &maintenanceBlobs{d: map[string][]byte{}}, "/blocks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := layout.NewVolumeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := chunkstore.VolumeRef{Name: "v1", ID: id}
+	if _, err := cat.CreateVolume(ctx, ref, layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := cat.Store(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.Start(ctx, s, okLease{}, layout.HolderID{Epoch: 1, Holder: "s/r"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 4 * 4096}, ClaimID: "k", Fresh: true, CanStartFrom: anyStart}); err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte{9}, 4096)
+	orphan := layout.NameChunk(3, data)
+	if err := layout.EnsureObject(ctx, s, orphan.Path(), data, "dead-session"); err != nil {
+		t.Fatal(err)
+	}
+	// A real filer lists the shard directory it created; the in-memory one
+	// keeps only entries.
+	if err := f.CreateEntry(ctx, path.Join("/blocks", ref.Dir(), layout.PoolDir), &filerpb.Entry{Name: "0", IsDirectory: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	return cat, ref, f, s, orphan
+}
+
+func orphanPresent(t *testing.T, s *chunkstore.LayoutStore, n layout.ChunkName) bool {
+	t.Helper()
+	_, found, err := s.Stat(context.Background(), n.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return found
+}
+
+// holderCalls is the attachment's layout remote for holder me (or err when
+// the process has no holder identity yet), counting the calls.
+func holderCalls(cat *chunkstore.BCatalog, ref chunkstore.VolumeRef, me layout.HolderID, err error) (func(context.Context) (layoutCleaner, error), *int) {
+	n := 0
+	return func(context.Context) (layoutCleaner, error) {
+		n++
+		if err != nil {
+			return nil, err
 		}
-		f.marked++
-	}
-	return f.Filer.UpdateEntry(ctx, dir, e, expected)
-}
-func (f *maintenanceGCFiler) DeleteEntry(ctx context.Context, dir, name string, expected map[string][]byte) error {
-	err := f.Filer.DeleteEntry(ctx, dir, name, expected)
-	if err == nil && path.Base(dir) == "snapnames" {
-		f.freed++
-	}
-	return err
+		return chunkstore.NewLayoutRemote(cat, ref, me)
+	}, &n
 }
 
-type maintenanceBlobs struct{}
-
-func (maintenanceBlobs) DeleteBlob(context.Context, string) error    { return nil }
-func (maintenanceBlobs) Put(context.Context, []byte) (string, error) { return "unused", nil }
-func (maintenanceBlobs) Get(context.Context, string) ([]byte, error) {
-	return nil, errors.New("unexpected blob read")
+// Default-off: the pass retains and never asks for a holder or removes.
+func TestMaintenanceDefaultRetainsAndDoesNotClean(t *testing.T) {
+	cat, ref, _, s, orphan := maintenanceFixture(t)
+	holder, calls := holderCalls(cat, ref, maintenanceHolder, nil)
+	pass := newChunkMaintenance(cat, ref, holder, false, time.Now)
+	if err := pass(context.Background(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 0 || !orphanPresent(t, s, orphan) {
+		t.Fatalf("default pass: holder asked %d times, orphan present %v; want 0, true", *calls, orphanPresent(t, s, orphan))
+	}
 }
-func TestMaintenanceRetentionFailureNeverStartsGC(t *testing.T) {
-	for _, partial := range []bool{false, true} {
-		t.Run(map[bool]string{false: "missing", true: "partial"}[partial], func(t *testing.T) {
-			ctx := context.Background()
-			f := &maintenanceGCFiler{Filer: chunkstore.NewMemFiler(), failSecond: partial}
-			cat, err := chunkstore.NewCatalog(f, defaultChunkPath)
-			if err != nil {
-				t.Fatal(err)
+
+// With collect on, the holder's pass removes the orphan; a process with
+// another claim, or with no holder identity yet, removes nothing.
+func TestMaintenanceCleansOnlyAsTheHolder(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		me      layout.HolderID
+		err     error
+		removed bool
+	}{
+		"holder":      {me: maintenanceHolder, removed: true},
+		"other claim": {me: layout.HolderID{Epoch: 1, Holder: "s/r", ClaimID: "old"}},
+		"next epoch":  {me: layout.HolderID{Epoch: 2, Holder: "s/r", ClaimID: "k"}},
+		"no identity": {err: errNoLayoutHolder},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cat, ref, _, s, orphan := maintenanceFixture(t)
+			holder, _ := holderCalls(cat, ref, tc.me, tc.err)
+			err := newChunkMaintenance(cat, ref, holder, true, time.Now)(ctx, "v1")
+			if gone := !orphanPresent(t, s, orphan); gone != tc.removed || (err == nil) != tc.removed {
+				t.Fatalf("pass: err %v, orphan removed %v; want removed %v", err, gone, tc.removed)
 			}
-			vol := "missing-volume"
-			if partial {
-				vol = "v1"
-				if _, err = cat.EnsureVolume(ctx, vol, chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
-					t.Fatal(err)
-				}
-				if err = cat.SetRetentionPolicy(ctx, vol, chunkstore.RetentionPolicy{}); err != nil {
-					t.Fatal(err)
-				}
-				now := time.Now().Add(-48 * time.Hour)
-				cat.SetClock(func() time.Time { return now })
-				for _, name := range []string{"a", "b"} {
-					if _, err = cat.CreateSnapshot(ctx, vol, chunkstore.SnapshotRequest{Name: name, RequestID: "req"}, storage.ChunkHead{Gen: 1, Epoch: 1, Holder: "h1", RemoteLSN: 1, Chunks: map[uint64]storage.ChunkRef{}}); err != nil {
-						t.Fatal(err)
-					}
-					now = now.Add(time.Second)
-				}
-				now = time.Now()
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Fatalf("pass: %v; want %v", err, tc.err)
 			}
-			pass, closeFn, err := newChunkMaintenance(cat, maintenanceBlobs{}, true, "unused-master:1234", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer closeFn()
-			if err = pass(ctx, vol); err == nil {
-				t.Fatal("retention failure accepted")
-			}
-			if f.gcCalls != 0 {
-				t.Fatalf("retention failure entered GC %d times", f.gcCalls)
-			}
-			if partial && (f.marked != 1 || f.freed != 1) {
-				t.Fatalf("partial retention effects not retained: marked=%d freed=%d err=%v", f.marked, f.freed, err)
+			// HEAD is another claim's or epoch's: the refusal is the fence a
+			// cut would see, so the provider latches the layer on it.
+			if (name == "other claim" || name == "next epoch") && !errors.Is(err, storage.ErrChunkLayerFenced) {
+				t.Fatalf("pass refused as %v; want it classified as the fence", err)
 			}
 		})
 	}
 }
 
-func TestMaintenanceDefaultRetainNeedsNoEpochClient(t *testing.T) {
-	f := chunkstore.NewMemFiler()
-	cat, err := chunkstore.NewCatalog(f, defaultChunkPath)
-	if err != nil {
-		t.Fatal(err)
+// A failed retention ends the pass before the cleaning starts.
+func TestMaintenanceRetentionFailureNeverStartsCleaning(t *testing.T) {
+	cat, ref, f, s, orphan := maintenanceFixture(t)
+	holder, calls := holderCalls(cat, ref, maintenanceHolder, nil)
+	f.armed = true
+	err := newChunkMaintenance(cat, ref, holder, true, time.Now)(context.Background(), "v1")
+	f.armed = false
+	if err == nil || *calls != 0 || !orphanPresent(t, s, orphan) {
+		t.Fatalf("pass with retention failing: err %v, holder asked %d, orphan present %v", err, *calls, orphanPresent(t, s, orphan))
 	}
-	if _, err = cat.EnsureVolume(context.Background(), "v", chunkstore.Geometry{NumBlocks: 64, BlockSize: 4096, ChunkBlocks: 8}); err != nil {
-		t.Fatal(err)
-	}
-	pass, closeFn, err := newChunkMaintenance(cat, nil, false, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeFn()
-	if err = pass(context.Background(), "v"); err != nil {
-		t.Fatal(err)
+}
+
+// The pass serves only the volume the process was started for.
+func TestMaintenanceRefusesAnotherVolume(t *testing.T) {
+	cat, ref, _, _, _ := maintenanceFixture(t)
+	holder, _ := holderCalls(cat, ref, maintenanceHolder, nil)
+	if err := newChunkMaintenance(cat, ref, holder, true, time.Now)(context.Background(), "v2"); !errors.Is(err, layout.ErrIdentity) {
+		t.Fatalf("pass for another volume: %v; want ErrIdentity", err)
 	}
 }

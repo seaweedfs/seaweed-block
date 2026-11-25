@@ -13,11 +13,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -32,9 +36,9 @@ type ChunkControl interface {
 	ListSnapshots(ctx context.Context, volumeID string, opts chunkstore.ListOptions) ([]chunkstore.SnapshotInfo, string, error)
 	DeleteSnapshot(ctx context.Context, volumeID, name string) (string, error)
 	Detach(ctx context.Context, volumeID string) (ChunkDetachResponse, error)
-	// Usage is the volume's space accounting and retention policy
+	// Usage counts snapshots, dependents, and current own/foreign chunks
 	// (GET /status/chunk).
-	Usage(ctx context.Context, volumeID string) (chunkstore.VolumeUsage, error)
+	Usage(ctx context.Context, volumeID string) (chunkstore.Usage, error)
 }
 
 // ChunkCutResponse is the body of a successful POST /chunk/cut (§3.1).
@@ -63,7 +67,6 @@ type ChunkCutStatsBody struct {
 	PublishPrepareNs int64                  `json:"publishPrepareNs"`
 	ManifestNs       int64                  `json:"manifestNs"`
 	CommitStateNs    int64                  `json:"commitStateNs"`
-	IntentCleanupNs  int64                  `json:"intentCleanupNs"`
 	NonPayloadCopyNs int64                  `json:"nonPayloadCopyNs"`
 
 	PayloadNs          int64  `json:"payloadNs"`
@@ -104,7 +107,6 @@ func cutStatsBody(s storage.ChunkCutStats) ChunkCutStatsBody {
 		PublishPrepareNs: s.PublishPrepareNs,
 		ManifestNs:       s.ManifestNs,
 		CommitStateNs:    s.CommitStateNs,
-		IntentCleanupNs:  s.IntentCleanupNs,
 		NonPayloadCopyNs: s.NonPayloadCopyNs,
 
 		PayloadNs:          s.PayloadNs,
@@ -238,7 +240,6 @@ func (s *StatusServer) chunkMux() http.Handler {
 	mux.HandleFunc("/chunk/snapshots", s.handleChunkSnapshots)
 	mux.HandleFunc("/chunk/snapshot/delete", s.handleChunkSnapshotDelete)
 	mux.HandleFunc("/chunk/detach", s.handleChunkDetach)
-	mux.HandleFunc("/chunk/restore", s.handleChunkRestore)
 	// Any other /chunk path: a typed JSON 404, like every other /chunk
 	// error, not net/http's plain-text page.
 	mux.HandleFunc("/chunk/", func(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +300,12 @@ func chunkErrorCode(err error) (int, string, bool) {
 	case errors.Is(err, durable.ErrDetachOutcomeUnknown):
 		// Before any cause: the detach may still have landed; I/O stays stopped.
 		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
+	case errors.Is(err, layout.ErrGeometryMismatch):
+		return http.StatusConflict, chunkstore.CodeGeometryMismatch, false
+	case errors.Is(err, layout.ErrHeadAbsent), errors.Is(err, layout.ErrNoSnapshot):
+		return http.StatusNotFound, "not_found", false
+	case errors.Is(err, layout.ErrHasDependents), errors.Is(err, layout.ErrVolumeDeleting), errors.Is(err, layout.ErrDetached), errors.Is(err, layout.ErrIdentity):
+		return http.StatusConflict, "layout_refused", false
 	case errors.As(err, &ce):
 		return catalogStatus(ce.Code), ce.Code, ce.Retryable
 	case errors.Is(err, storage.ErrChunkLayerFenced):
@@ -620,15 +627,21 @@ type ChunkProvider interface {
 var errFrozenDetachUnsupported = errors.New("frozen detach unsupported by provider")
 
 type chunkControl struct {
-	p        ChunkProvider
-	cat      *chunkstore.Catalog
-	restores restoreRuns
+	p      ChunkProvider
+	cat    *chunkstore.BCatalog
+	volume chunkstore.VolumeRef
 }
 
-// NewChunkControl serves the routes from a durable provider (cut, detach)
-// and the catalog under the provider's chunk base (snapshots).
-func NewChunkControl(p ChunkProvider, cat *chunkstore.Catalog) ChunkControl {
-	return &chunkControl{p: p, cat: cat}
+// NewChunkControl binds catalog operations to the master's immutable volume identity.
+func NewChunkControl(p ChunkProvider, cat *chunkstore.BCatalog, volume chunkstore.VolumeRef) ChunkControl {
+	return &chunkControl{p: p, cat: cat, volume: volume}
+}
+
+func (c *chunkControl) catalogVolume(name string) (chunkstore.VolumeRef, error) {
+	if c.cat == nil || name != c.volume.Name || c.volume.ID.IsZero() {
+		return chunkstore.VolumeRef{}, layout.ErrIdentity
+	}
+	return c.volume, nil
 }
 
 func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) (ChunkCutResponse, error) {
@@ -640,64 +653,88 @@ func (c *chunkControl) Cut(ctx context.Context, volumeID string, minLSN uint64) 
 		Noop: r.Noop, FullHash: r.FullHash, CandidateTail: r.CandidateTail, Stats: cutStatsBody(r.Stats)}, nil
 }
 
-// Snapshot resolves the request against the catalog first (§3.2 step 1):
-// a retry of a recorded request returns that snapshot and another request
-// for the name gets snapshot_exists, both without cutting. Only a free name
-// is cut, and the HEAD that cut installed is stored.
+// Snapshot belongs to the data path: its commit names the snapshot in HEAD.
+// The control never records a second catalog entry after an ordinary cut.
 func (c *chunkControl) Snapshot(ctx context.Context, volumeID string, req ChunkSnapshotRequest) (chunkstore.SnapshotInfo, error) {
-	// Admit the request before anything can cut: an invalid class must
-	// not advance HEAD (review of #142).
+	if _, err := c.catalogVolume(volumeID); err != nil {
+		return chunkstore.SnapshotInfo{}, err
+	}
 	if err := chunkstore.ValidateSnapshotClass(req.Class); err != nil {
 		return chunkstore.SnapshotInfo{}, err
 	}
-	sreq := chunkstore.SnapshotRequest{Name: req.Name, RequestID: req.RequestID, Labels: req.Labels,
-		Consistency: req.Consistency, ExpiresAtNs: req.ExpiresAtNs, CreatedBy: "blockvolume", Class: req.Class}
-	return sealSnapshot(ctx, c.cat, volumeID, sreq, func(ctx context.Context) (storage.ChunkHead, error) {
-		// A named seal is urgent even without a minimum LSN.
-		r, err := c.p.CutVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, 0)
-		return r.Head, err
+	if len(req.Labels) > layout.MaxSnapshotLabels {
+		return chunkstore.SnapshotInfo{}, &chunkstore.CatalogError{Code: chunkstore.CodeInvalidLabel, Message: fmt.Sprintf("snapshot has %d labels; at most %d", len(req.Labels), layout.MaxSnapshotLabels)}
+	}
+	p, ok := c.p.(interface {
+		SnapshotVolume(context.Context, string, string, layout.SnapshotMeta) (layout.Head, error)
 	})
-}
-
-// sealSnapshot resolves sreq against the catalog first: a retry of a
-// recorded request returns that snapshot and another request for the name
-// fails, both without cutting. Only a free name is cut, and the HEAD that
-// cut installed is stored.
-func sealSnapshot(ctx context.Context, cat *chunkstore.Catalog, volumeID string, sreq chunkstore.SnapshotRequest, cut func(context.Context) (storage.ChunkHead, error)) (chunkstore.SnapshotInfo, error) {
-	if info, replayed, err := cat.SnapshotReplay(ctx, volumeID, sreq); err != nil || replayed {
-		return info, err
+	if !ok {
+		return chunkstore.SnapshotInfo{}, errors.New("chunk snapshot data path is not configured")
 	}
-	// The share begins before the cut that produces the sealed HEAD.
-	if g := cat.ShareGuard(); g != nil {
-		token, err := g.Begin(ctx, volumeID)
-		if err != nil {
-			return chunkstore.SnapshotInfo{}, err
-		}
-		sreq.ShareToken = token
-	}
-	head, err := cut(ctx)
+	// Sample once for this capture. The provider carries this value unchanged in
+	// CommitRequest.Meta; a replay returns the facts already recorded in HEAD.
+	meta := layout.SnapshotMeta{CreatedNs: time.Now().UnixNano(), Class: req.Class, ExpiresNs: req.ExpiresAtNs, Labels: maps.Clone(req.Labels)}
+	h, err := p.SnapshotVolume(hostlimit.WithClass(ctx, hostlimit.Urgent), volumeID, req.Name, meta)
 	if err != nil {
 		return chunkstore.SnapshotInfo{}, err
 	}
-	sreq.SourceReadAt = time.Now()
-	return cat.CreateSnapshot(ctx, volumeID, sreq, head)
+	return chunkstore.SnapshotInfoFromHead(volumeID, req.Name, h), nil
 }
 
 func (c *chunkControl) ListSnapshots(ctx context.Context, volumeID string, opts chunkstore.ListOptions) ([]chunkstore.SnapshotInfo, string, error) {
-	return c.cat.ListSnapshots(ctx, volumeID, opts)
+	v, err := c.catalogVolume(volumeID)
+	if err != nil {
+		return nil, "", err
+	}
+	h, found, err := c.cat.ReadHead(ctx, v)
+	if err != nil {
+		return nil, "", err
+	}
+	if !found {
+		return nil, "", layout.ErrHeadAbsent
+	}
+	names := make([]string, 0, len(h.Snapshots))
+	for name := range h.Snapshots {
+		if strings.HasPrefix(name, opts.Prefix) && name > opts.StartAfter {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	next := ""
+	if opts.Limit > 0 && len(names) > opts.Limit {
+		names = names[:opts.Limit]
+		next = names[len(names)-1]
+	}
+	out := make([]chunkstore.SnapshotInfo, 0, len(names))
+	for _, name := range names {
+		sn := h.Snapshots[name]
+		out = append(out, chunkstore.SnapshotInfo{VolumeID: volumeID, Name: name, Root: sn.Root.String(), Dependents: sn.Dependents, CreatedNs: sn.Meta.CreatedNs, Class: sn.Meta.Class, ExpiresAtNs: sn.Meta.ExpiresNs, Labels: maps.Clone(sn.Meta.Labels)})
+	}
+	return out, next, nil
 }
 
 func (c *chunkControl) DeleteSnapshot(ctx context.Context, volumeID, name string) (string, error) {
-	return c.cat.DeleteSnapshot(ctx, volumeID, name)
+	v, err := c.catalogVolume(volumeID)
+	if err != nil {
+		return "", err
+	}
+	_, err = c.cat.DeleteSnapshot(ctx, v, name)
+	if err != nil {
+		return "", err
+	}
+	return "deleted", nil
 }
 
-func (c *chunkControl) Usage(ctx context.Context, volumeID string) (chunkstore.VolumeUsage, error) {
-	return c.cat.Usage(ctx, volumeID)
+func (c *chunkControl) Usage(ctx context.Context, volumeID string) (chunkstore.Usage, error) {
+	v, err := c.catalogVolume(volumeID)
+	if err != nil {
+		return chunkstore.Usage{}, err
+	}
+	return c.cat.Usage(ctx, v)
 }
 
-// handleStatusChunk answers GET /status/chunk?volume=<id>: the served
-// volume's space accounting and retention policy, computed from manifests
-// and filer listings (no chunk data reads).
+// handleStatusChunk answers GET /status/chunk?volume=<id> from HEAD and
+// its current root (no chunk data reads).
 func (s *StatusServer) handleStatusChunk(w http.ResponseWriter, r *http.Request) {
 	if !s.chunkAdmit(w, r, http.MethodGet) {
 		return
