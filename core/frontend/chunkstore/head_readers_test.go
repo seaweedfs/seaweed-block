@@ -24,11 +24,10 @@ import (
 // pins it. "GAP" marks a reader that takes an absent HEAD for an empty
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
-	"core/frontend/chunkstore/layout_remote.go CommitPendingSnapshot -> ReadHead":                     "absent refuses before snapshot commit (layout remote absent-HEAD probe)",
-	"core/frontend/durable/provider_layout_snapshot.go SnapshotVolume -> ReadHead":                    "absent refuses before cut and after commit (TestLayoutProviderSnapshotVolume, remote absent-HEAD probe)",
 	"core/frontend/durable/provider_seal_replay.go readLayoutSeal -> ReadHead":                        "absent, unreadable and foreign layout proof refuse without cached success (TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory)",
 	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                           "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopAbortMustConfirmItsOutcome)",
 	"cmd/blockvolume/workspace_lease.go workspaceLayoutDetachedGeneration -> ReadHead":                "absent refuses ACK (probe TestWorkspaceLayoutDetachedProof)",
+	"cmd/blockvolume/chunk_remote.go chunkAttachCheck -> ReadHead":                                  "absent refuses attach without creating VOLUME or HEAD (TestChunkAttachCheckAppliesVolumeRules)",
 	"core/frontend/chunkstore/layout_store.go ReadHead -> DecodeLayoutHeadEntry":                      "shared canonical entry decoder; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",
 	"core/host/master/workspace_layout_head.go NewLayoutWorkspaceHEADReader -> DecodeLayoutHeadEntry": "any missing/failed metadata refuses; identity comes from master intent (TestWorkspaceLayoutHEADRefusalsAndStates)",
 	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":                                     "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",

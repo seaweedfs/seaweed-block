@@ -162,23 +162,13 @@ type chunkWiring struct {
 // newChunkWiring dials the filer and refuses unless it is the only filer of
 // its group (chunkstore.CheckSingleFiler).
 func newChunkWiring(c chunkFlags, masterTLS grpc.DialOption, master ...string) (chunkWiring, error) {
-	client, err := chunkstore.DialSWFS(chunkstore.SWFSConfig{
+	bcat, client, err := chunkstore.DialBCatalog(context.Background(), chunkstore.SWFSConfig{
 		FilerGRPC:   c.filer,
 		Collection:  c.collection,
 		Replication: c.replication,
 		AssignPath:  c.path,
 	})
 	if err != nil {
-		return chunkWiring{}, err
-	}
-	// Deployment rule: block metadata goes through exactly one filer.
-	if err := client.CheckSingleFiler(context.Background()); err != nil {
-		_ = client.Close()
-		return chunkWiring{}, err
-	}
-	bcat, err := chunkstore.NewBCatalog(client, client, c.path)
-	if err != nil {
-		_ = client.Close()
 		return chunkWiring{}, err
 	}
 	return chunkWiring{
