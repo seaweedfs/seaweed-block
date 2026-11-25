@@ -1524,7 +1524,11 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	var dr storage.ChunkCutResult
 	var serr error
 	if h.layoutHead != nil {
-		how, dr, serr = settleLayoutStop(sctx, h.layoutHead, h.layoutHolder)
+		if pending, ok := h.layoutRemote.(interface{ StopSession() string }); ok {
+			how, dr, serr = settleLayoutStop(sctx, h.layoutHead, h.layoutHolder, pending.StopSession())
+		} else {
+			serr = errors.New("durable: layout remote cannot identify its pending stop session")
+		}
 	} else {
 		how, dr, serr = layer.SettleDetach(sctx)
 	}

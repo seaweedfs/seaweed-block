@@ -78,23 +78,33 @@ func (r *layoutBoundRemote) AbortCut() {
 	}
 }
 
-func settleLayoutStop(ctx context.Context, st layout.HeadStore, me layout.HolderID) (storage.DetachSettlement, storage.ChunkCutResult, error) {
-	h, found, err := st.ReadHead(ctx)
-	if err != nil {
-		return 0, storage.ChunkCutResult{}, err
+func settleLayoutStop(ctx context.Context, st layout.HeadStore, me layout.HolderID, session string) (storage.DetachSettlement, storage.ChunkCutResult, error) {
+	var abortErr error
+	for read := 0; read < 2; read++ {
+		h, found, err := st.ReadHead(ctx)
+		if err != nil {
+			return 0, storage.ChunkCutResult{}, err
+		}
+		if !found {
+			return 0, storage.ChunkCutResult{}, layout.ErrHeadAbsent
+		}
+		if h.Epoch != me.Epoch || h.Holder != me.Holder || h.ClaimID != me.ClaimID {
+			return storage.DetachFenced, storage.ChunkCutResult{}, nil
+		}
+		if h.State == layout.StateDetached {
+			return storage.DetachApplied, storage.ChunkCutResult{H: h.Position, Head: storage.ChunkHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, State: storage.ChunkHeadDetached, DetachedBy: &storage.ChunkDetachedBy{Holder: h.Holder, Epoch: h.Epoch, Gen: h.Gen}}}, nil
+		}
+		if h.State == layout.StateLive && h.Activity.Kind == layout.ActIdle {
+			return storage.DetachNotPublished, storage.ChunkCutResult{}, nil
+		}
+		if read == 0 && h.State == layout.StateLive && session != "" && h.Activity == (layout.Activity{Kind: layout.ActSnap, Session: session}) {
+			// Abort and Commit compete on the same generation. After an unknown abort
+			// reply, the read below still must prove idle (or detached); words alone
+			// never allow guest writes to resume ahead of a delayed Commit.
+			_, abortErr = layout.RunAbort(ctx, st, me, session)
+			continue
+		}
+		return 0, storage.ChunkCutResult{}, fmt.Errorf("durable: stop cannot prove its session ended (%s/%s): %w", h.State, h.Activity.Kind, errors.Join(ErrDetachOutcomeUnknown, abortErr))
 	}
-	if !found {
-		return 0, storage.ChunkCutResult{}, layout.ErrHeadAbsent
-	}
-	if h.Epoch != me.Epoch || h.Holder != me.Holder || h.ClaimID != me.ClaimID {
-		return storage.DetachFenced, storage.ChunkCutResult{}, nil
-	}
-	switch h.State {
-	case layout.StateDetached:
-		return storage.DetachApplied, storage.ChunkCutResult{H: h.Position, Head: storage.ChunkHead{Gen: h.Gen, Epoch: h.Epoch, Holder: h.Holder, RemoteLSN: h.Position, State: storage.ChunkHeadDetached, DetachedBy: &storage.ChunkDetachedBy{Holder: h.Holder, Epoch: h.Epoch, Gen: h.Gen}}}, nil
-	case layout.StateLive:
-		return storage.DetachNotPublished, storage.ChunkCutResult{}, nil
-	default:
-		return 0, storage.ChunkCutResult{}, fmt.Errorf("durable: unknown stop outcome: HEAD state %s", h.State)
-	}
+	return 0, storage.ChunkCutResult{}, ErrDetachOutcomeUnknown
 }
