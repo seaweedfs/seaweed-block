@@ -420,10 +420,6 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 		if err := s.host.refuseWorkspaceHolderHost(ctx, "assignment stream", req.GetServerId()); err != nil {
 			return identityRefusal(err)
 		}
-		if line, moved := pub.WorkspaceSourceMoved(req.VolumeId, req.ReplicaId, req.ServerId); moved {
-			owner, _ := line.Owner()
-			return leaseRefusal(fmt.Sprintf("workspace moved to holder %s at epoch %d", owner, line.Epoch), control.WorkspaceLeaseRefusal_MOVED, 0)
-		}
 	}
 
 	type recv struct {

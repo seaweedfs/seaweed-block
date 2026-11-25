@@ -161,41 +161,31 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if firstPID == "0" {
 		t.Fatal("returning unit did not start a real process")
 	}
-	// The returning process waits in process for the master's barrier and
-	// serves after it, with no fence exit and no restart (the startup wait,
-	// #535): first it reports the barrier as its MasterWait, never serving.
-	var barrierMs int64
-	waitGAP1(t, "returning unit never reported the master's barrier", 30*time.Second, func() bool {
+	// Existing assignment wait is30s. This is an outer failed-run guard, not
+	// an injected success delay or a replacement product deadline.
+	waitGAP1(t, "GAP-1: first startup never exited75; stayed alive non-serving", 45*time.Second, func() bool {
+		s := gap1Unit(t, unit)
 		if gap1Operational(t, statusAddr, volume) {
-			t.Fatal("the returning unit served before reporting a barrier wait: an expired lease was re-granted without the barrier")
+			t.Fatal("fixture returned before the expired-grant barrier: cannot count this as a startup-timeout red")
 		}
-		if s := gap1Unit(t, unit); s["MainPID"] != firstPID {
-			t.Fatalf("the returning unit exited while waiting for the barrier: %+v", s)
-		}
-		if w := gap1MasterWait(t, statusAddr, volume); w.Reason == "barrier" && w.UntilMs > 0 {
-			barrierMs = w.UntilMs
-			t.Logf("captured master wait: reason=%s until=%d", w.Reason, w.UntilMs)
+		if s["ExecMainStatus"] == "75" {
 			return true
+		}
+		if s["MainPID"] != "0" && s["MainPID"] != firstPID {
+			t.Fatalf("restart without captured75: %+v", s)
 		}
 		return false
 	})
-	// Then the same process serves: not before the barrier, and within the
-	// startup wait's bound (barrier + 30 s; the outer guard adds slack).
-	waitGAP1(t, "the returning unit never served after the barrier", 75*time.Second, func() bool {
+	waitGAP1(t, "systemd did not restart/regrant/attach", 100*time.Second, func() bool {
 		s := gap1Unit(t, unit)
-		if s["MainPID"] != firstPID || s["NRestarts"] != "0" {
-			t.Fatalf("the returning unit restarted (a fence exit) instead of serving in process: %+v", s)
+		n, e := strconv.Atoi(s["NRestarts"])
+		if e != nil {
+			t.Fatalf("invalid captured NRestarts: %+v", s)
 		}
-		if !gap1Operational(t, statusAddr, volume) {
-			return false
+		if n > 2 {
+			t.Fatalf("barrier retry exceeded three total launches: %+v", s)
 		}
-		if now := time.Now().UnixMilli(); now < barrierMs {
-			t.Fatalf("served at %d, before the master's barrier %d", now, barrierMs)
-		}
-		if late := time.Now().UnixMilli() - barrierMs; late > 30_000 {
-			t.Fatalf("served %d ms after the barrier: past the startup wait's 30 s bound", late)
-		}
-		return true
+		return n >= 1 && s["MainPID"] != "0" && s["MainPID"] != firstPID && gap1Operational(t, statusAddr, volume)
 	})
 	after, err := gap1ReadHead(t, remote)
 	if err != nil || after.Gen <= before.Gen || after.Holder != before.Holder || after.Epoch != before.Epoch {
@@ -225,85 +215,6 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	}
 	gap1PlannedStopDoesNotRestart(t, ws, unit, statusAddr, volume, after.Epoch, "r1", s["NRestarts"], s["InvocationID"])
 	gap1PrestartedTargetServesAfterMove(t, fixture, ws, remote, target, stem, filepath.Join(bin, "blockvolume"), args, root, volume, want)
-	moved, err := gap1ReadHead(t, remote)
-	if err != nil || moved.Holder != "s2/r1" {
-		t.Fatal("target did not claim the moved line", moved, err)
-	}
-	gap1MovedSourceNeverServes(t, fixture, filepath.Join(bin, "blockvolume"), args, stem, statusAddr, volume, moved.Epoch)
-}
-
-// gap1MovedSourceNeverServes is the negative case of the in-process wait:
-// after the volume moved to another host (and the new holder stopped), the
-// old source started again never serves and never adopts the line naming the
-// other host. The master proves it was the issued move's source and returns
-// typed MOVED even before any own assignment: exit 78, no restart loop.
-func gap1MovedSourceNeverServes(t *testing.T, fixture *gap1Fixture, exe string, args []string, stem, statusAddr, volume string, epoch uint64) {
-	t.Helper()
-	// The simulated hosts share this kernel's per-host volume lock directory:
-	// stop the new holder (the prestarted target) so the old source can open
-	// its root at all; on real separate hosts the two never share a lock.
-	target := stem + "-prestarted-target"
-	gap1Systemctl(t, "stop", target)
-	waitGAP1(t, "the new holder did not stop", 30*time.Second, func() bool { return gap1Unit(t, target)["MainPID"] == "0" })
-	unit := stem + "-moved-source"
-	fixture.start(t, unit, true, exe, args...)
-	waitGAP1(t, "the moved-away source never exited", 75*time.Second, func() bool {
-		if gap1Operational(t, statusAddr, volume) {
-			t.Fatal("the moved-away source served")
-		}
-		s := gap1Unit(t, unit)
-		switch s["ExecMainStatus"] {
-		case "", "0":
-			return false
-		case "78":
-			return true
-		}
-		t.Fatalf("the moved-away source exited %s; want 78 moved, never retry 75: %+v", s["ExecMainStatus"], s)
-		return false
-	})
-	if gap1Operational(t, statusAddr, volume) {
-		t.Fatal("the moved-away source served after its exit")
-	}
-	// Observe beyond the shipped 5 s RestartSec. The prestarted target above
-	// is the opposite control: a genuine 75 was restarted by the same policy.
-	end := time.Now().Add(6 * time.Second)
-	for time.Now().Before(end) {
-		s := gap1Unit(t, unit)
-		if s["NRestarts"] != "0" || s["MainPID"] != "0" || s["ExecMainStatus"] != "78" {
-			t.Fatalf("moved source restarted or lost its terminal status: %+v", s)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	journal, err := exec.CommandContext(ctx, "journalctl", "--unit="+unit, "--no-pager", "--output=cat").CombinedOutput()
-	if err != nil || !strings.Contains(string(journal), "status=78 reason=moved") || !strings.Contains(string(journal), fmt.Sprintf("holder s2 at epoch %d", epoch)) {
-		t.Fatalf("moved exit lacks the master's destination proof: %v %s", err, journal)
-	}
-	gap1Systemctl(t, "stop", unit)
-}
-
-// gap1MasterWait reads the volume's /status MasterWait (the startup wait's
-// reason and the master's barrier time), zero when absent.
-func gap1MasterWait(t *testing.T, addr, volume string) struct {
-	Reason  string
-	UntilMs int64
-} {
-	t.Helper()
-	var out struct {
-		MasterWait *struct {
-			Reason  string
-			UntilMs int64
-		}
-	}
-	code, body, err := gap1StatusAt(addr, volume, "/status")
-	if err != nil || code != http.StatusOK || json.Unmarshal(body, &out) != nil || out.MasterWait == nil {
-		return struct {
-			Reason  string
-			UntilMs int64
-		}{}
-	}
-	return *out.MasterWait
 }
 
 // Roots are deliberately independent of testing.TempDir: unknown unit cleanup

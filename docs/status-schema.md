@@ -37,9 +37,8 @@ The volume's authority and health projection. Go type `volume.StatusProjection`.
 | `CatchUp.ElapsedMs` | int64 | ElapsedMs is the time since this replica was admitted as a supporting replica at its current epoch. |
 | `CatchUp.LagLSN` | uint64 | LagLSN is the engine's H-R (primary head minus this replica's durable frontier) as last observed; 0 when unknown or caught up. |
 | `Warnings[]` | string | Warnings include routing disagreements and typed recovery warnings (e.g. wal_hole_suspected, issue #51). Visible, not an alert: they do not change Healthy or the frontend's readiness. (omitted when empty) |
-| `MasterWait` | object | MasterWait is why a workspace primary holds no granted lease, present only while NotReadyReason is lease_not_held: Reason (unreachable, credentials, "identity refused: <kind>" with kind unregistered or wrong_host, barrier, no_assignment, refused, moved, deleted), since when, and the startup wait's one bound or the master's barrier time (UntilMs, absent while there is no bound). Detail carries the master's diagnostic text for a typed final refusal, including a moved holder and epoch. (omitted when empty) |
+| `MasterWait` | object | MasterWait is why a workspace primary holds no granted lease, present only while NotReadyReason is lease_not_held: Reason (unreachable, credentials, "identity refused: <kind>" with kind unregistered or wrong_host, barrier, no_assignment, refused, moved, deleted), since when, and the startup wait's one bound or the master's barrier time (UntilMs, absent while there is no bound). (omitted when empty) |
 | `MasterWait.Reason` | string | — |
-| `MasterWait.Detail` | string | — (omitted when empty) |
 | `MasterWait.SinceMs` | int64 | — |
 | `MasterWait.UntilMs` | int64 | — (omitted when empty) |
 
