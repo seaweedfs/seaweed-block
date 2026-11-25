@@ -12,6 +12,21 @@ import (
 	"time"
 )
 
+// TestCutoverRestoreIntoMasterCreatedTarget pins the public create/restore
+// seam: the master must register the target's identity and placement before
+// restore, but that registration must not make an empty HEAD block restore.
+func TestCutoverRestoreIntoMasterCreatedTarget(t *testing.T) {
+	env := startHandoffEnvWith(t, 1, []string{"v2"})
+	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
+	source := startCutoverVolume(t, env, "restore-source", "s1")
+	env.adopt(t, source, "s1")
+	env.writeBlock(t, "s1", 5, pattern("restore-seam-A!"))
+	env.snapshot(t, "s1", "v1", "restore-seam")
+	t.Logf("master-created target HEAD before restore: %s", env.headOf(t, "v2"))
+	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "restore-seam", "--target", "v2",
+		"--master", env.h.masterAddr, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+}
+
 // TestCutoverWriteSnapshotKillRestartRestore follows the public path through
 // real binaries, a stock filer and the NVMe frontend. The guest is quiescent
 // at snapshot and kill; process kill is not a power-loss durability claim.
