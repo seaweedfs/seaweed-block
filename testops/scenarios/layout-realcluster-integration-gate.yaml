@@ -1,29 +1,40 @@
 # Runner-native real-cluster gate for the content-named layout.
 #
-# Goal:
-#   Run the four real-process tests of the layout cutover as one gated
-#   scenario on a Linux host (WSL by default): a clean and a forced move,
-#   the lease-owned clean shutdown, the systemd expired-startup / regrant /
-#   prestarted-target move, and the catalog restore and delete against
-#   SeaweedFS. Each test writes go test -json, and each phase passes only on
-#   that test's own "pass" event: a skip (CHUNKSTORE_WEED unset) or a build
-#   failure fails the phase.
+# One scenario for the layout's real-process tests. Each entry is one tagged Go
+# test that owns its stock filer, block processes and NVMe frontend; the
+# scenario builds an exact product commit, runs the selected entries, and
+# passes an entry only on that test's own top-level "--- PASS" line together
+# with exit code 0. A test that is skipped, renamed, or not compiled in by its
+# tags prints no such line, so it fails the entry.
+#
+# Entries (select with -env tests="..."):
+#   move         TestIntegrationWorkspaceLayoutMove (clean and forced move)
+#   lease        TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown
+#   systemd      TestSystemdExpiredStartupExits75ThenRegrantServes
+#                (needs a user systemd instance on the host)
+#   catalog      TestIntegration_CatalogRestoreAndDelete
+#   cutover-e2e  TestCutoverWriteSnapshotKillRestartRestore (write, snapshot,
+#                kill, restart, restore)
 #
 # Expected invocation (on the Linux host, as the user that owns systemd):
 #   swblock run \
-#     -env product_root=/path/to/seaweed-block \
-#     -env weed=/path/to/weed \
-#     -env go_bin=/path/to/go1.25/bin \
+#     -env product_repo=/path/to/seaweed-block -env head=<40-hex commit> \
+#     -env weed_binary=/path/to/weed -env weed_sha256=<sha256> \
+#     -env go_bin=/path/to/go/bin -env tests="move lease systemd catalog" \
 #     testops/scenarios/layout-realcluster-integration-gate.yaml
 
 name: layout-realcluster-integration-gate
-timeout: 60m
+timeout: 120m
+always_timeout: 5m
 
 env:
-  product_root: "/tmp/seaweed-block"
-  weed: "/usr/local/bin/weed"
+  product_repo: "/path/to/seaweed-block"
+  head: ""
+  weed_binary: "/path/to/weed"
+  weed_sha256: ""
   go_bin: "/usr/local/go/bin"
-  out: "/tmp/layout-realcluster"
+  tests: "move lease systemd catalog"
+  scratch_root: "/tmp/sw-layout-gate"
 
 topology:
   nodes:
@@ -31,82 +42,91 @@ topology:
       is_local: true
 
 phases:
-  - name: pre_clean
+  - name: prepare
     actions:
       - action: exec
         node: host
-        cmd: "rm -rf {{ out }}/{{ run_id }} && mkdir -p {{ out }}/{{ run_id }}"
+        timeout: 2m
+        cmd: |
+          set -eu
+          head='{{ head }}'
+          case "$head" in
+            *[!0-9a-f]*|'') echo 'head must be a full lowercase hexadecimal commit' >&2; exit 2 ;;
+          esac
+          test ${#head} -eq 40 || { echo 'head must be 40 characters' >&2; exit 2; }
+          for t in {{ tests }}; do
+            case "$t" in
+              move|lease|systemd|catalog|cutover-e2e) ;;
+              *) echo "unknown entry: $t" >&2; exit 2 ;;
+            esac
+          done
+          test -n '{{ weed_sha256 }}' || { echo 'weed_sha256 is required' >&2; exit 2; }
+          printf '%s  %s\n' '{{ weed_sha256 }}' '{{ weed_binary }}' | sha256sum -c -
+          d='{{ scratch_root }}/{{ run_id }}'
+          test ! -e "$d"
+          mkdir -p "$d/source" "$d/bin" "$d/tmp" "$d/evidence"
+          touch "$d/.layout-gate-owned"
+          git -C '{{ product_repo }}' cat-file -e "$head^{commit}"
+          git -C '{{ product_repo }}' archive "$head" | tar -xf - -C "$d/source"
+          git -C '{{ product_repo }}' rev-parse "$head^{commit}" > "$d/evidence/product.sha"
+          printf '%s  %s\n' '{{ weed_sha256 }}' '{{ weed_binary }}' > "$d/evidence/weed.sha256"
+          '{{ go_bin }}/go' version > "$d/evidence/go.version"
+          printf '%s\n' {{ tests }} > "$d/evidence/selected.txt"
 
-  - name: pin_build
+  - name: build
     actions:
       - action: exec
         node: host
-        cmd: "cd {{ product_root }} && git rev-parse HEAD > {{ out }}/{{ run_id }}/git.sha && git status --porcelain > {{ out }}/{{ run_id }}/git.status && {{ go_bin }}/go version > {{ out }}/{{ run_id }}/go.version && sha256sum {{ weed }} > {{ out }}/{{ run_id }}/weed.sha256"
+        timeout: 20m
+        cmd: |
+          set -eu
+          d='{{ scratch_root }}/{{ run_id }}'
+          export PATH='{{ go_bin }}':"$PATH"
+          cd "$d/source"
+          for b in blockmaster blockvolume sw-block; do go build -o "$d/bin/$b" "./cmd/$b"; done
+          go test -c -tags 'subprocess chunkstore_integration' -o "$d/bin/blockvolume.test" ./cmd/blockvolume
+          go test -c -tags 'subprocess chunkstore_integration systemd_integration' -o "$d/bin/blockvolume-systemd.test" ./cmd/blockvolume
+          go test -c -tags 'chunkstore_integration' -o "$d/bin/chunkstore.test" ./core/frontend/chunkstore
+          sha256sum "$d/bin/"* > "$d/evidence/binaries.sha256"
 
-  - name: layout_move
+  - name: run_tests
     actions:
       - action: exec
         node: host
-        timeout: 15m
-        cmd: "cd {{ product_root }}/cmd/blockvolume && PATH={{ go_bin }}:$PATH CHUNKSTORE_WEED={{ weed }} bash -o pipefail -c 'go test -count=1 -json -timeout 14m -tags \"subprocess chunkstore_integration\" -run \"^TestIntegrationWorkspaceLayoutMove$\" . | tee {{ out }}/{{ run_id }}/move.jsonl'"
-      - action: grep_log
-        node: host
-        path: "{{ out }}/{{ run_id }}/move.jsonl"
-        pattern: "\"Action\":\"pass\".*\"Test\":\"TestIntegrationWorkspaceLayoutMove\",\"Elapsed\""
-        save_as: move_pass
-      - action: assert_greater
-        actual: "{{ move_pass }}"
-        threshold: "0"
-
-  - name: lease_clean_shutdown
-    actions:
-      - action: exec
-        node: host
-        timeout: 10m
-        cmd: "cd {{ product_root }}/cmd/blockvolume && PATH={{ go_bin }}:$PATH CHUNKSTORE_WEED={{ weed }} bash -o pipefail -c 'go test -count=1 -json -timeout 9m -tags \"subprocess chunkstore_integration\" -run \"^TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown$\" . | tee {{ out }}/{{ run_id }}/lease.jsonl'"
-      - action: grep_log
-        node: host
-        path: "{{ out }}/{{ run_id }}/lease.jsonl"
-        pattern: "\"Action\":\"pass\".*\"Test\":\"TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown\",\"Elapsed\""
-        save_as: lease_pass
-      - action: assert_greater
-        actual: "{{ lease_pass }}"
-        threshold: "0"
-
-  - name: systemd_regrant_and_move
-    actions:
-      - action: exec
-        node: host
-        timeout: 15m
-        cmd: "cd {{ product_root }}/cmd/blockvolume && PATH={{ go_bin }}:$PATH CHUNKSTORE_WEED={{ weed }} GAP1_SYSTEMD_AUTHORIZED=1 bash -o pipefail -c 'go test -count=1 -json -timeout 14m -tags \"subprocess chunkstore_integration systemd_integration\" -run \"^TestSystemdExpiredStartupExits75ThenRegrantServes$\" . | tee {{ out }}/{{ run_id }}/systemd.jsonl'"
-      - action: grep_log
-        node: host
-        path: "{{ out }}/{{ run_id }}/systemd.jsonl"
-        pattern: "\"Action\":\"pass\".*\"Test\":\"TestSystemdExpiredStartupExits75ThenRegrantServes\",\"Elapsed\""
-        save_as: systemd_pass
-      - action: assert_greater
-        actual: "{{ systemd_pass }}"
-        threshold: "0"
-
-  - name: catalog_restore_and_delete
-    actions:
-      - action: exec
-        node: host
-        timeout: 10m
-        cmd: "cd {{ product_root }}/core/frontend/chunkstore && PATH={{ go_bin }}:$PATH CHUNKSTORE_WEED={{ weed }} bash -o pipefail -c 'go test -count=1 -json -timeout 9m -tags chunkstore_integration -run \"^TestIntegration_CatalogRestoreAndDelete$\" . | tee {{ out }}/{{ run_id }}/catalog.jsonl'"
-      - action: grep_log
-        node: host
-        path: "{{ out }}/{{ run_id }}/catalog.jsonl"
-        pattern: "\"Action\":\"pass\".*\"Test\":\"TestIntegration_CatalogRestoreAndDelete\",\"Elapsed\""
-        save_as: catalog_pass
-      - action: assert_greater
-        actual: "{{ catalog_pass }}"
-        threshold: "0"
+        timeout: 95m
+        cmd: |
+          d='{{ scratch_root }}/{{ run_id }}'
+          export PATH='{{ go_bin }}':"$PATH" TMPDIR="$d/tmp" CHUNKSTORE_WEED='{{ weed_binary }}' SWBLOCK_TEST_BINS="$d/bin"
+          : > "$d/evidence/verdicts.txt"
+          failed=0
+          for t in {{ tests }}; do
+            extra=
+            case "$t" in
+              move)        pkg=cmd/blockvolume bin=blockvolume.test name=TestIntegrationWorkspaceLayoutMove to=14m ;;
+              lease)       pkg=cmd/blockvolume bin=blockvolume.test name=TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown to=9m ;;
+              systemd)     pkg=cmd/blockvolume bin=blockvolume-systemd.test name=TestSystemdExpiredStartupExits75ThenRegrantServes to=14m extra=GAP1_SYSTEMD_AUTHORIZED=1 ;;
+              catalog)     pkg=core/frontend/chunkstore bin=chunkstore.test name=TestIntegration_CatalogRestoreAndDelete to=9m ;;
+              cutover-e2e) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverWriteSnapshotKillRestartRestore to=40m ;;
+              *) echo "unknown entry: $t" >&2; exit 2 ;;
+            esac
+            log="$d/evidence/$t.log"
+            (cd "$d/source/$pkg" && env $extra "$d/bin/$bin" -test.run "^$name\$" -test.v -test.count 1 -test.timeout "$to") > "$log" 2>&1
+            rc=$?
+            if [ "$rc" -eq 0 ] && grep -qE "^--- PASS: $name \(" "$log"; then
+              echo "PASS $t $name" >> "$d/evidence/verdicts.txt"
+            else
+              echo "FAIL $t $name rc=$rc" >> "$d/evidence/verdicts.txt"
+              tail -40 "$log"
+              failed=1
+            fi
+          done
+          cat "$d/evidence/verdicts.txt"
+          exit "$failed"
 
   - name: final_asserts
     actions:
-      # only the processes these tests start (their chunk paths): the host may
-      # run other people's volumes
+      # units the systemd entry starts do not run inside the run directory:
+      # match them by the chunk paths these tests use
       - action: assert_no_processes
         node: host
         pattern: "blockvolume .*--chunk-path /(workspace-move|workspace-lease|gap1)-"
@@ -116,6 +136,26 @@ phases:
     actions:
       - action: collect_path
         node: host
-        path: "{{ out }}/{{ run_id }}"
-        name: "go-test-json"
+        path: "{{ scratch_root }}/{{ run_id }}/evidence"
+        name: "layout-gate"
         ignore_error: true
+
+  - name: teardown
+    always: true
+    actions:
+      # only processes started inside this run's directory: the host may run
+      # other people's volumes
+      - action: exec
+        node: host
+        timeout: 2m
+        cmd: |
+          d='{{ scratch_root }}/{{ run_id }}'
+          test -f "$d/.layout-gate-owned" || exit 0
+          test "${d#'{{ scratch_root }}/'}" != "$d" || exit 2
+          for p in /proc/[0-9]*; do
+            cwd=$(readlink "$p/cwd" 2>/dev/null || true)
+            case "$cwd" in
+              "$d"/*) echo "owned process still running: ${p##*/}" >&2; exit 1 ;;
+            esac
+          done
+          rm -rf -- "$d"
