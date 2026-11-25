@@ -1,17 +1,23 @@
 package master
 
+// A test-only promotion evidence provider that reads the replicas' HTTP
+// status. Production evidence comes only from the probe round
+// (NewRoundPromotionEvidenceProvider); this stays for the tests that drive
+// the gate from a workload plan.
+
 import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/seaweedfs/seaweed-block/core/storage"
 	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -241,12 +247,4 @@ func isLocalhostOrLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-func cloneRequiredLSNMap(in map[string]uint64) map[string]uint64 {
-	out := make(map[string]uint64, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }

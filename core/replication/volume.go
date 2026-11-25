@@ -256,8 +256,11 @@ func (v *ReplicationVolume) EpochTableStatus() EpochTableStatus {
 // LocalPrimaryEvidence is this volume's epoch table and durable end, as a
 // primary line's target checks them before adopting the role.
 func (v *ReplicationVolume) LocalPrimaryEvidence() (EpochTableStatus, uint64, error) {
-	st := v.EpochTableStatus()
+	// Sync first, then read the table: a row appended in between is then
+	// read with an end that already covers it (never an old row with a
+	// newer end).
 	end, err := v.store.Sync()
+	st := v.EpochTableStatus()
 	return st, end, err
 }
 

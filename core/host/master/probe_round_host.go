@@ -85,3 +85,11 @@ func (s *services) AnswerProbe(ctx context.Context, a *control.ProbeAnswer) (*co
 	s.host.probeHub.deliver(a)
 	return &control.ProbeAck{}, nil
 }
+
+func cloneRequiredLSNMap(in map[string]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
