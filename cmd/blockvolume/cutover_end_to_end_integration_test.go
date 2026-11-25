@@ -3,10 +3,6 @@
 package main_test
 
 import (
-	"context"
-	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
-	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
-	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"syscall"
 	"testing"
 	"time"
@@ -70,25 +66,7 @@ func startCutoverLayoutEnv(t *testing.T, precreateTarget bool) *handoffEnv {
 	return startHandoffEnvConfigured(t, 1, []string{"v2"}, tlsCfg, precreateTarget)
 }
 
-// Resolve the identity from the real master before launching the public CLI.
-// Every host uses its own name's identity; the fixture never mints one.
 func startCutoverVolume(t *testing.T, env *handoffEnv, label, host string) *daemon {
 	t.Helper()
-	name := env.hosts[host].volume
-	if name == "" {
-		name = "v1"
-	}
-	conn, err := link.DialMasterFromEnv(env.h.masterAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	id, err := lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := append(env.volArgs(host), "--layout-id", id.String())
-	return env.h.start(t, label, env.h.volume, args...)
+	return env.h.start(t, label, env.h.volume, env.volArgs(host)...)
 }

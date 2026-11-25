@@ -22,6 +22,9 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
+	"google.golang.org/grpc"
 )
 
 // TestStandalonePlannedHandoffToTheSameHost runs the planned hand-over back
@@ -185,6 +188,8 @@ type handoffEnv struct {
 	// A crash test restarts exactly this owned master with the same stores.
 	masterProcess *daemon
 	masterArgs    []string
+	layoutMu      sync.Mutex
+	layoutIDs     map[string]string
 	// tls, when set, runs every process with mutual TLS (procedure_tls_harness_test.go).
 	tls *procedureTLS
 }
@@ -297,11 +302,43 @@ func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfte
 	env.show = []string{"ops", "workspace", "show", "--master", h.masterAddr, "--volume", "v1"}
 	out, _ := h.command(t, env.show...)
 	must(checkShowBeforeStart(out))
+	// Cache the identities imported by the master while it is available. Some
+	// tests assemble restart arguments after deliberately stopping the master.
+	env.layoutIDs = make(map[string]string)
+	env.layoutID("v1")
+	if precreateTargets {
+		for _, v := range targets {
+			env.layoutID(v)
+		}
+	}
 	return env
 }
 
 // volArgs is the chapter's blockvolume command for one host.
 func (env *handoffEnv) volArgs(id string) []string { return env.volArgsFor(env.hosts[id]) }
+
+func (env *handoffEnv) layoutID(volume string) string {
+	t := env.h.t
+	t.Helper()
+	env.layoutMu.Lock()
+	defer env.layoutMu.Unlock()
+	if id := env.layoutIDs[volume]; id != "" {
+		return id
+	}
+	conn, err := grpc.NewClient(env.h.masterAddr, env.masterDialOption(t, "admin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, err := lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), volume)
+	if err != nil {
+		t.Fatalf("resolve layout identity for %s: %v", volume, err)
+	}
+	env.layoutIDs[volume] = id.String()
+	return id.String()
+}
 
 // volArgsFor is the chapter's blockvolume command for b. The default
 // scheduled snapshot (daily:7, at a per-volume offset) stays on, as the page
@@ -320,6 +357,7 @@ func (env *handoffEnv) volArgsFor(b bvHost) []string {
 		replica = "r1"
 	}
 	return append([]string{"--volume-lock-dir-test-only", lockDir, "--master", env.h.masterAddr, "--server-id", server, "--volume-id", vol, "--replica-id", replica,
+		"--layout-id", env.layoutID(vol),
 		"--data-addr", b.data, "--ctrl-addr", b.ctrl, "--status-addr", b.status,
 		"--durable-root", b.root, "--durable-impl", "walstore-chunk",
 		"--durable-blocks", "65536", "--durable-blocksize", "4096",
