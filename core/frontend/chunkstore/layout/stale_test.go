@@ -83,8 +83,9 @@ func TestHolderFunctions_RefuseAStaleHolder(t *testing.T) {
 	}
 	// Start: an older line, another server at HEAD's epoch and another claim
 	// id are its cases in start_test.go (TestStart_Refusals and the same-host
-	// forced successor).
-	covered := map[string]bool{"RemoveUnreachable": true, "Start": true}
+	// forced successor); startCheck is Start's check, run again inside the
+	// claim (TestStart_ValidatesAgainstTheHeadItUpdates).
+	covered := map[string]bool{"RemoveUnreachable": true, "Start": true, "startCheck": true}
 	var missing []string
 	for fname, src := range packageSources(t, false) {
 		file, err := parser.ParseFile(token.NewFileSet(), fname, src, 0)
