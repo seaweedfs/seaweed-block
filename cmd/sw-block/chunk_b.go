@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +20,17 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 )
+
+// restoreCreateRPC is the one master transition for a restore. Tests replace
+// it with an in-process master; the CLI never creates a target in the filer.
+var restoreCreateRPC = func(ctx context.Context, master string, req *control.CreateVolumeRequest) (*control.CreateVolumeResponse, error) {
+	conn, err := link.DialMasterFromEnv(master)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return control.NewLifecycleServiceClient(conn).CreateVolume(ctx, req)
+}
 
 // bCatalog dials the filer and opens the volume catalog; a command that
 // writes first passes the single-filer start check. It returns exit -1 on
@@ -237,28 +250,37 @@ func chunkUsage(args []string, stdout, stderr io.Writer) int {
 // it. The target's layout id comes from its master record.
 func chunkRestore(args []string, stdout, stderr io.Writer) int {
 	c := newBCommand("restore", 6*time.Minute, stdout, stderr)
-	var src, tgt volumeFlags
-	var snapshot string
-	c.bindVolume(&src, "source", "source volume")
-	c.bindVolume(&tgt, "target", "new volume")
+	var source, target, snapshot, requestID string
+	c.fs.StringVar(&source, "source", "", "source volume name")
+	c.fs.StringVar(&target, "target", "", "new volume name")
 	c.fs.StringVar(&snapshot, "snapshot", "", "source snapshot name")
-	var sref, tref chunkstore.VolumeRef
-	return c.run(args, true, func() (err error) {
-		if snapshot == "" {
-			return errors.New("--snapshot is required")
-		}
-		if sref, err = src.ref("source"); err != nil {
-			return err
-		}
-		tref, err = tgt.ref("target")
-		return err
-	}, func(ctx context.Context, cat *chunkstore.BCatalog) (any, error) {
-		h, err := cat.Restore(ctx, sref, snapshot, tref)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]string{"source": sref.Dir(), "snapshot": snapshot, "target": tref.Dir(), "root": h.Current.String()}, nil
+	c.fs.StringVar(&requestID, "request-id", "", "stable identity for retries of this restore")
+	if err := c.fs.Parse(args); err != nil {
+		return chunkFail("restore", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
+	}
+	if source == "" || target == "" || snapshot == "" || c.master == "" || source == target {
+		return chunkFail("restore", stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--source, --target, --snapshot and --master are required; source and target must differ", false)
+	}
+	if requestID == "" {
+		sum := sha256.Sum256([]byte(target + "\x00" + source + "\x00" + snapshot))
+		requestID = "restore-" + hex.EncodeToString(sum[:16])
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+	resp, err := restoreCreateRPC(ctx, c.master, &control.CreateVolumeRequest{
+		VolumeId: target, SourceVolume: source, SourceSnapshot: snapshot, CreateRequestId: requestID,
 	})
+	if err != nil {
+		return chunkResult("restore", nil, err, stdout, stderr)
+	}
+	if resp.GetVolumeId() != target || !resp.GetStoreReady() {
+		return chunkFail("restore", stdout, stderr, chunkExitFailed, codeUnavailableCLI, "master did not confirm the restored target is store-ready", true)
+	}
+	id, err := layout.ParseVolumeID(resp.GetLayoutId())
+	if err != nil {
+		return chunkResult("restore", nil, err, stdout, stderr)
+	}
+	return chunkResult("restore", map[string]string{"source": source, "snapshot": snapshot, "target": (chunkstore.VolumeRef{Name: target, ID: id}).Dir(), "request_id": requestID}, nil, stdout, stderr)
 }
 
 // chunkRelease removes a restore target from its source snapshot's
