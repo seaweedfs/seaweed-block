@@ -14,7 +14,7 @@ func TestCommitDetached_ProofAndLostReply(t *testing.T) {
 	for _, applied := range []bool{false, true} {
 		t.Run(map[bool]string{false: "before apply", true: "reply lost"}[applied], func(t *testing.T) {
 			o, h, req := commitFixture(t)
-			req.State = "detached"
+			req.State = StateDetached
 			st := &memHead{h: &h, killAt: 1, after: applied}
 			if _, err := RunCommit(context.Background(), st, o, "v1", me, req); !errors.Is(err, errKilled) {
 				t.Fatal("expected interrupted commit", err)
@@ -25,7 +25,7 @@ func TestCommitDetached_ProofAndLostReply(t *testing.T) {
 				t.Fatal("stop cannot decide without reading its claim", proof, found, err)
 			}
 			if applied {
-				if proof.State != "detached" || proof.Position != req.Position || proof.Activity.Kind != ActIdle {
+				if proof.State != StateDetached || proof.Position != req.Position || proof.Activity.Kind != ActIdle {
 					t.Fatal("HEAD lacks the final synced image proof", proof)
 				}
 				if _, err := Start(context.Background(), st, &fakeLease{}, me, LocalRoot{ClaimID: me.ClaimID, Position: req.Position}); !errors.Is(err, ErrDetached) || !strings.Contains(err.Error(), "new grant") {
@@ -42,7 +42,7 @@ func TestCommitDetached_ProofAndLostReply(t *testing.T) {
 // refusal probe too. Claim is the sole exception, only at a higher epoch.
 func TestDetachedHEAD_RefusesEveryHolderTransition(t *testing.T) {
 	h := idleHead()
-	h.State = "detached"
+	h.State = StateDetached
 	rn := RootName{Hash: Sum([]byte("image"))}
 	h.Current = &rn
 	steps := map[string]func() error{
