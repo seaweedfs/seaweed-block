@@ -111,3 +111,72 @@ func TestStart_Refusals(t *testing.T) {
 		t.Error("start without a local claim id accepted")
 	}
 }
+
+// A same-host forced move put a fresh root Y at epoch 4 (claim k4, its
+// image published); the old root X (claim k3, data) is remounted while the
+// master grants epoch 5: X's data predates Y's image, so it is refused as
+// stale and fenced, HEAD unchanged. At a higher epoch only a fresh root, or
+// the root whose claim id HEAD holds (the continuing lineage), claims.
+func TestStart_HigherEpochRefusesAnOlderLineage(t *testing.T) {
+	rn := RootName{Hash: Sum([]byte("image published at epoch 4"))}
+	h := startHead(4, "s1/r1", "k4")
+	h.Current = &rn
+	st, _, err := start(t, h, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{ClaimID: "k3"})
+	if !errors.Is(err, ErrStaleLocalRoot) || !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("old root at a higher epoch: %v; want ErrStaleLocalRoot, fenced", err)
+	}
+	if st.updates != 0 || st.h.ClaimID != "k4" || st.h.Epoch != 4 || *st.h.Current != rn {
+		t.Fatalf("refused start changed HEAD: %+v (%d writes)", st.h, st.updates)
+	}
+	// The continuing lineage (the root HEAD's claim id names) claims at the
+	// higher epoch, keeping its data.
+	st2, got, err := start(t, h, HolderID{Epoch: 5, Holder: "s1/r1"}, LocalRoot{ClaimID: "k4"})
+	if err != nil || st2.updates != 1 || got.Epoch != 5 || got.ClaimID != "k4" {
+		t.Fatalf("continuing lineage at epoch 5: %+v %v (%d writes)", got, err, st2.updates)
+	}
+}
+
+// A root carrying HEAD's claim id but synced only below HEAD's published
+// position is an old copy of the right directory: refused as stale, at its
+// own epoch and at a higher one, HEAD unchanged.
+func TestStart_OldCopyOfTheRightRootRefused(t *testing.T) {
+	h := startHead(4, "s1/r1", "k4")
+	h.Position = 100
+	for _, epoch := range []uint64{4, 5} {
+		st, _, err := start(t, h, HolderID{Epoch: epoch, Holder: "s1/r1"}, LocalRoot{ClaimID: "k4", Position: 99})
+		if !errors.Is(err, ErrStaleLocalRoot) || st.updates != 0 {
+			t.Fatalf("root at position 99 under HEAD at 100, epoch %d: %v (%d writes); want ErrStaleLocalRoot, no write", epoch, err, st.updates)
+		}
+		st, _, err = start(t, h, HolderID{Epoch: epoch, Holder: "s1/r1"}, LocalRoot{ClaimID: "k4", Position: 100})
+		if err != nil {
+			t.Fatalf("root at HEAD's position, epoch %d: %v", epoch, err)
+		}
+	}
+}
+
+// Killed at the claim's HEAD write (before it applies, and applied with
+// its reply lost), the holder restarts with the same local root: the claim
+// id it writes is the one its marker already carries, so the re-run either
+// claims or finds its own claim and continues; it is never refused.
+func TestStart_InterruptAtTheClaim(t *testing.T) {
+	for _, fresh := range []bool{true, false} {
+		local := LocalRoot{ClaimID: "k3", Fresh: fresh}
+		for _, after := range []bool{false, true} {
+			h := startHead(3, "s1/r1", "k3")
+			if fresh {
+				h = startHead(3, "s1/r1", "k-previous")
+				local.ClaimID = "k-fresh"
+			}
+			st := &memHead{h: &h, killAt: 1, after: after}
+			line := HolderID{Epoch: 4, Holder: "s1/r1"}
+			if _, err := Start(context.Background(), st, &fakeLease{ended: true}, line, local); !errors.Is(err, errKilled) {
+				t.Fatalf("killed start: %v", err)
+			}
+			st.restart()
+			got, err := Start(context.Background(), st, &fakeLease{ended: true}, line, local)
+			if err != nil || got.Epoch != 4 || got.ClaimID != local.ClaimID {
+				t.Fatalf("restart (fresh %t, applied %t): %+v %v; want claimed or continued at epoch 4 with %q", fresh, after, got, err, local.ClaimID)
+			}
+		}
+	}
+}
