@@ -119,6 +119,16 @@ func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Establish the measured upload rate on the B content path before the
+	// pre-copy admission decision; one dirty chunk alone has no rate window.
+	for _, lba := range []int64{16, 32, 48} {
+		if _, err := b.Write(context.Background(), lba*4096, block(byte(lba))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.CaptureVolume(context.Background(), "v1"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err = b.Write(context.Background(), 4096, block(0x8a)); err != nil {
 		t.Fatal(err)
 	}
