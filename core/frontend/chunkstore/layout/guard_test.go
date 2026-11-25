@@ -123,14 +123,16 @@ func owners(m map[string]bool) []string {
 //   - Lease, claim half: OldLeaseEnded is used only in RunClaim, and
 //     RunClaim, when it is declared, uses it.
 //   - Every declared exported Run function goes through runTransition.
+//   - Claim: RunClaim is used only by Start, which applies the local-root
+//     rules (own epoch: continue only on HEAD's claim id) before claiming.
 //   - Release of a dependent: RunReleaseDependent is used only by
 //     DeleteVolume (its own HEAD is deleting) and OperatorReleaseDependent,
 //     which reads the target's HEAD before it releases.
 //   - Pool: a name starting with Delete or Remove is used only in
-//     RemoveUnreachable, where every delete is preceded, in the same loop
-//     body, by the remover's own lease check (StillHeld), and in
-//     DeleteVolume, whose steps run in the delete's order: no holder, HEAD
-//     deleting, the dependents released, the objects deleted, HEAD
+//     RemoveUnreachable, whose only removal is DeleteMarked, each right
+//     after a gate on its Mark's error, and in DeleteVolume, whose steps run
+//     in the delete's order: no holder, HEAD deleting, the dependents
+//     released, the objects deleted (conditional on the volume id), HEAD
 //     deleted; see removerOrderFindings and deleteOrderFindings.
 //
 // These are syntactic checks of this package's own files: they see any
@@ -177,6 +179,11 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 	for fn := range decl {
 		if strings.HasPrefix(fn, "Run") && !code["runTransition"][fn] {
 			bad = append(bad, fn+" is declared and does not go through runTransition")
+		}
+	}
+	for _, fn := range owners(code["RunClaim"]) {
+		if fn != "Start" {
+			bad = append(bad, fn+" uses RunClaim: a claim is made only by Start, which first applies the local-root rules")
 		}
 	}
 	for _, fn := range owners(code["CreateDeletedHead"]) {
@@ -472,6 +479,7 @@ func w(ctx context.Context, x g) error { return x.NoLiveLease(ctx) }`, want: "on
 		"ignored mark":                             {file: "remove.go", src: removeVariant(t, "ignored"), want: "without a mark gate immediately before it"},
 		"one mark, two deletes":                    {file: "remove.go", src: removeVariant(t, "second"), want: "without a mark gate immediately before it"},
 		"unlisted removal method":                  {file: "remove.go", src: removeVariant(t, "other"), want: "without a mark gate immediately before it"},
+		"claim outside Start":                      {src: `func w(ctx context.Context, st HeadStore, l LeaseWait, me HolderID) { _, _ = RunClaim(ctx, st, l, me) }`, want: "a claim is made only by Start"},
 		"tombstone outside the operator's release": {src: `func w(ctx context.Context, t TargetStore, h Head) { _ = t.CreateDeletedHead(ctx, h) }`, want: "only the operator's release writes a tombstone"},
 		"remover method value": {src: `type p interface{ RemoveName(string) }
 func w(x p) { f := x.RemoveName; f("o") }`, want: "only RemoveUnreachable (mark-gated) and DeleteVolume"},
