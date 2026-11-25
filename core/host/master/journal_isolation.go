@@ -169,12 +169,11 @@ func ValidateStatusListen(addr string) error {
 	return fmt.Errorf("--status-listen %q must be a loopback address (127.0.0.0/8, ::1 or localhost)", addr)
 }
 
-// ValidateControlListen refuses a control listener on a non-loopback address
-// unless allowExternal: the gRPC control API and the runtime HTTP API are
-// unauthenticated, so binding them to the node network must be an explicit
-// choice (--insecure-external-bind). An empty address is off.
-func ValidateControlListen(flag, addr string, allowExternal bool) error {
-	if addr == "" || allowExternal {
+// ValidateControlListen refuses an unauthenticated control listener (the
+// plaintext gRPC control API, the runtime HTTP API) on a non-loopback
+// address. An empty address is off.
+func ValidateControlListen(flag, addr string) error {
+	if addr == "" {
 		return nil
 	}
 	host, _, err := net.SplitHostPort(addr)
@@ -187,7 +186,7 @@ func ValidateControlListen(flag, addr string, allowExternal bool) error {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("--%s %q is not a loopback address: the control API is unauthenticated; pass --insecure-external-bind to expose it on the node network", flag, addr)
+	return fmt.Errorf("--%s %q is not a loopback address: an unauthenticated listener stays on loopback", flag, addr)
 }
 
 // WorkspaceLeaseStatus is the GET /status/workspace-lease body.

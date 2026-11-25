@@ -19,12 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/auth/authtest"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/rpc/link"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Real systemd owns every restart. No test goroutine relaunches the holder.
@@ -79,18 +80,27 @@ func TestSystemdExpiredStartupExits75ThenRegrantServes(t *testing.T) {
 	if err := os.WriteFile(spec, []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// The master listens off loopback, so it runs with mutual TLS: the test
+	// is an admin, s1 and s2 are nodes (certificates in root/tls).
+	tlsDir := gap1WriteTLS(t, root, target)
 	fixture.start(t, stem+"-master", false, filepath.Join(bin, "blockmaster"),
-		"--listen", masterListen, "--insecure-external-bind", "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
+		"--listen", masterListen, "--tls-cert", filepath.Join(tlsDir, "master.crt"), "--tls-key", filepath.Join(tlsDir, "master.key"),
+		"--tls-client-ca", filepath.Join(tlsDir, "ca.crt"), "--role-file", filepath.Join(tlsDir, "roles"), "--audit-log", filepath.Join(tlsDir, "audit.log"), "--authority-store", filepath.Join(root, "auth"), "--lifecycle-store", filepath.Join(root, "life"),
 		"--cluster-spec", spec, "--lifecycle-product-loop-interval", "200ms", "--expected-slots-per-volume", "1",
 		"--workspace-rpc", "--workspace-head-base-url", "http://"+cluster.filerHTTP+base)
 	w4WaitTCP(t, masterAddr, 20*time.Second)
-	conn, err := grpc.NewClient(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	admin, err := link.ClientCredentials(link.TLSFiles{Cert: filepath.Join(tlsDir, "admin.crt"), Key: filepath.Join(tlsDir, "admin.key"), CA: filepath.Join(tlsDir, "ca.crt")}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := grpc.NewClient(masterAddr, admin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	ws := control.NewWorkspaceServiceClient(conn)
-	args := []string{"--master", masterAddr, "--server-id", "s1", "--volume-id", volume, "--replica-id", "r1",
+	args := []string{"--master", masterAddr, "--server-id", "s1",
+		"--master-tls-cert", filepath.Join(tlsDir, "s1.crt"), "--master-tls-key", filepath.Join(tlsDir, "s1.key"), "--master-ca", filepath.Join(tlsDir, "ca.crt"), "--volume-id", volume, "--replica-id", "r1",
 		"--data-addr", dataAddr, "--ctrl-addr", ctrlAddr, "--heartbeat-interval", "200ms", "--t1-readiness", "--status-addr", statusAddr,
 		"--durable-root", filepath.Join(root, "store"), "--durable-impl", "walstore-chunk", "--durable-blocks", "64",
 		"--chunk-filer", cluster.filerGRPC, "--chunk-path", base, "--chunk-control-endpoint", "--workspace-lease",
@@ -680,6 +690,35 @@ type gap1Target struct {
 	masterAddr, dataAddr, ctrlAddr string
 }
 
+// gap1WriteTLS writes a CA, the master's certificate (valid for loopback and
+// the target's address), node certificates for s1 and s2, an admin
+// certificate and the role file to root/tls.
+func gap1WriteTLS(t *testing.T, root string, target gap1Target) string {
+	t.Helper()
+	dir := filepath.Join(root, "tls")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	host, _, err := net.SplitHostPort(target.masterAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := authtest.NewCA(t, "gap1 CA")
+	ca.WriteCA(t, dir)
+	until := time.Now().Add(24 * time.Hour)
+	ca.Issue(t, "blockmaster", until, net.ParseIP(host)).WriteFiles(t, dir, "master")
+	var roles strings.Builder
+	for _, p := range []struct{ name, role, id string }{{"s1", "node", "s1"}, {"s2", "node", "s2"}, {"admin", "admin", "gap1-test"}} {
+		leaf := ca.Issue(t, p.id, until)
+		leaf.WriteFiles(t, dir, p.name)
+		fmt.Fprintln(&roles, leaf.Fingerprint, p.role, p.id)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "roles"), []byte(roles.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func gap1TargetAddresses(t *testing.T, masterAddr string) (gap1Target, string) {
 	t.Helper()
 	_, port, err := net.SplitHostPort(masterAddr)
@@ -731,7 +770,8 @@ func gap1PrestartedTargetServesAfterMove(t *testing.T, fixture *gap1Fixture, ws 
 	changed := append([]string(nil), args...)
 	addr, nvmeAddr := leaseBinaryAddress(t), leaseBinaryAddress(t)
 	nqn := "nqn.2026-11.test:" + stem + "-prestarted-target"
-	replacements := map[string]string{"--master": target.masterAddr, "--server-id": "s2", "--data-addr": target.dataAddr, "--ctrl-addr": target.ctrlAddr, "--status-addr": addr, "--durable-root": filepath.Join(root, "target-store"), "--nvme-listen": nvmeAddr, "--nvme-subsysnqn": nqn}
+	replacements := map[string]string{"--master": target.masterAddr, "--server-id": "s2", "--data-addr": target.dataAddr, "--ctrl-addr": target.ctrlAddr, "--status-addr": addr, "--durable-root": filepath.Join(root, "target-store"), "--nvme-listen": nvmeAddr, "--nvme-subsysnqn": nqn,
+		"--master-tls-cert": filepath.Join(root, "tls", "s2.crt"), "--master-tls-key": filepath.Join(root, "tls", "s2.key")}
 	for i := 0; i+1 < len(changed); i++ {
 		if value, ok := replacements[changed[i]]; ok {
 			changed[i+1] = value

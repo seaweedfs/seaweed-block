@@ -121,7 +121,7 @@ sequenceDiagram
 | Flag | Meaning |
 |---|---|
 | `--status-addr` | expose diagnostics/status endpoint |
-| `--allow-external-status-bind` | explicit node-loss gate opt-in; default status is loopback safe |
+| `--allow-external-status-bind` | explicit node-loss gate opt-in, refused together with `--master-tls-cert`; default status is loopback safe |
 | `--iscsi-listen` | enable iSCSI frontend |
 | `--allow-external-iscsi-bind` | external iSCSI requires explicit opt-in and CHAP |
 | `--nvme-listen` | enable NVMe/TCP frontend |

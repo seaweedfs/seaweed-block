@@ -46,12 +46,23 @@ spec:
             - "--launcher-iscsi-port-base=3260"
             - "--launcher-kubernetes-apply"
             - "--listen=0.0.0.0:9333"
-            - "--insecure-external-bind"
+            - "--tls-cert=/etc/sw-block/tls/tls.crt"
+            - "--tls-key=/etc/sw-block/tls/tls.key"
+            - "--tls-client-ca=/etc/sw-block/tls/ca.crt"
+            - "--role-file=/etc/sw-block/roles/roles"
+            - "--audit-log=/var/lib/sw-block/audit.log"
+            - "--launcher-master-tls-secret-prefix=sw-block-node-tls"
             - "--expected-slots-per-volume=__EXPECTED_SLOTS_PER_VOLUME__"
           ports:
             - name: grpc
               containerPort: 9333
           volumeMounts:
+            - name: tls
+              mountPath: /etc/sw-block/tls
+              readOnly: true
+            - name: roles
+              mountPath: /etc/sw-block/roles
+              readOnly: true
             - name: cluster-spec
               mountPath: /config
               readOnly: true
@@ -60,6 +71,12 @@ spec:
             - name: manifests
               mountPath: /manifests
       volumes:
+        - name: tls
+          secret:
+            secretName: sw-block-master-tls
+        - name: roles
+          secret:
+            secretName: sw-block-roles
         - name: cluster-spec
           configMap:
             name: sw-block-cluster-spec

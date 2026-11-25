@@ -54,6 +54,8 @@ collect_daemon_logs() {
 trap 'collect_daemon_logs; cleanup' EXIT
 
 log "preflight: apply product stack"
+log "apply mutual TLS Secrets (keys kept outside the artifact directory)"
+bash "$ROOT/scripts/k8s-alpha-certs.sh" kube-system "${SW_BLOCK_TLS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/sw-block-alpha-tls}" $(awk '/server_id:/{print $NF}' "$ROOT/deploy/k8s/g15b/block-stack.yaml" | sort -u) | tee "$ARTIFACT_DIR/apply-tls.log"
 kubectl apply -f "$ROOT/deploy/k8s/g15b/block-stack.yaml" | tee "$ARTIFACT_DIR/apply-block-stack.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --timeout=120s
 kubectl -n kube-system wait --for=condition=available deploy/sw-blockvolume-r1 --timeout=120s

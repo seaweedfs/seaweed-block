@@ -738,3 +738,51 @@ func sampleWorkloadPlan() lifecycle.BlockVolumeWorkloadPlan {
 		},
 	}
 }
+
+// With a master TLS Secret prefix, each volume mounts its own server's node
+// certificate and dials blockmaster with it; an id that cannot name a Secret,
+// and external status, are refused.
+func TestK8sRenderer_MasterTLSMountsTheServersNodeSecret(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333", MasterTLSSecretPrefix: "sw-block-node-tls"})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	for i, m := range manifests {
+		raw := string(m.YAML)
+		for _, want := range []string{
+			"secretName: sw-block-node-tls-" + plan.Replicas[i].ServerID,
+			"mountPath: /etc/sw-block/master-tls",
+			"--master-tls-cert=/etc/sw-block/master-tls/tls.crt",
+			"--master-tls-key=/etc/sw-block/master-tls/tls.key",
+			"--master-ca=/etc/sw-block/master-tls/ca.crt",
+		} {
+			if !strings.Contains(raw, want) {
+				t.Fatalf("manifest %s missing %q:\n%s", m.Name, want, raw)
+			}
+		}
+	}
+	plain, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333"})
+	if err != nil || strings.Contains(string(plain[0].YAML), "master-tls") {
+		t.Fatalf("without a prefix the manifest must carry no master TLS: %v\n%s", err, plain[0].YAML)
+	}
+
+	for _, id := range []string{"Node_A", "a..b", "a.-b", "a-.b", "a.", strings.Repeat("a", 64)} {
+		bad := sampleWorkloadPlan()
+		bad.Replicas[0].ServerID = id
+		if _, err := RenderBlockVolumeDeployments(bad, K8sRenderConfig{MasterAddr: "m:9333", MasterTLSSecretPrefix: "sw-block-node-tls"}); err == nil || !strings.Contains(err.Error(), "not a valid Kubernetes name") {
+			t.Fatalf("server id %q: %v, want refused", id, err)
+		}
+	}
+	good := sampleWorkloadPlan()
+	good.Replicas[0].ServerID = "node-a.rack1"
+	if _, err := RenderBlockVolumeDeployments(good, K8sRenderConfig{MasterAddr: "m:9333", MasterTLSSecretPrefix: "sw-block-node-tls"}); err != nil {
+		t.Fatalf("server id node-a.rack1: %v, want accepted", err)
+	}
+	if _, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr: "m:9333", MasterTLSSecretPrefix: "sw-block-node-tls",
+		EnableStatus: true, ExternalISCSI: true, ExternalStatus: true, ISCSICHAP: CHAPSecretRef{Name: "chap"},
+	}); err == nil || !strings.Contains(err.Error(), "external status") {
+		t.Fatalf("external status with master TLS: %v, want refused", err)
+	}
+}
