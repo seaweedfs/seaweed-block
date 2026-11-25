@@ -100,12 +100,14 @@ func (h Head) Commit(me HolderID, session string, root RootName, position uint64
 	return next, true, nil
 }
 
-// RunCommit checks that every object the new root reaches is written (the
-// new chunks of this volume against HEAD's current root, every segment,
-// the root), then commits by one conditional update. Prev must build to
-// HEAD's current root; a re-run after a lost reply finds the commit
-// applied and writes nothing.
-func RunCommit(ctx context.Context, st HeadStore, look Lookup, volRoot, vol string, me HolderID, req CommitRequest) (Head, error) {
+// RunCommit checks that every object the new root reaches is written by
+// this session and unmarked (the new chunks of this volume against HEAD's
+// current root, every segment, the root: see EnsureObject), then commits
+// by one conditional update. An object present but written by another
+// session, or marked for removal, is not prepared: EnsureObject reuses it
+// first. Prev must build to HEAD's current root; a re-run after a lost
+// reply finds the commit applied and writes nothing.
+func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me HolderID, req CommitRequest) (Head, error) {
 	root, segs, err := rootOf(req.Next)
 	if err != nil {
 		return Head{}, err
@@ -131,12 +133,15 @@ func RunCommit(ctx context.Context, st HeadStore, look Lookup, volRoot, vol stri
 				return Head{}, false, ErrStaleBase
 			}
 		}
-		missing, err := MissingOwn(ctx, look, volRoot, vol, newOwn(vol, req.Prev, req.Next))
-		if err != nil {
-			return Head{}, false, err
+		var rels []string
+		chunks := newOwn(vol, req.Prev, req.Next)
+		idx := make([]uint64, 0, len(chunks))
+		for i := range chunks {
+			idx = append(idx, i)
 		}
-		if len(missing) > 0 {
-			return Head{}, false, fmt.Errorf("%w: %d chunks, first %s", ErrNotPrepared, len(missing), missing[0])
+		sort.Slice(idx, func(a, b int) bool { return idx[a] < idx[b] })
+		for _, i := range idx {
+			rels = append(rels, chunks[i].Chunk.Path())
 		}
 		names := make([]SegName, 0, len(segs))
 		for n := range segs {
@@ -144,24 +149,18 @@ func RunCommit(ctx context.Context, st HeadStore, look Lookup, volRoot, vol stri
 		}
 		sort.Slice(names, func(a, b int) bool { return names[a].Shard < names[b].Shard })
 		for _, n := range names {
-			if err := present(ctx, look, volRoot, n.Path()); err != nil {
-				return Head{}, false, err
-			}
+			rels = append(rels, n.Path())
 		}
-		if err := present(ctx, look, volRoot, root.Path()); err != nil {
-			return Head{}, false, err
+		rels = append(rels, root.Path())
+		for _, rel := range rels {
+			ok, err := ownedBySession(ctx, os, rel, req.Session)
+			if err != nil {
+				return Head{}, false, fmt.Errorf("layout: look up %s: %w", rel, err)
+			}
+			if !ok {
+				return Head{}, false, fmt.Errorf("%w: %s (absent, written by another session, or marked)", ErrNotPrepared, rel)
+			}
 		}
 		return h.Commit(me, req.Session, root, req.Position, req.Snapshot)
 	})
-}
-
-func present(ctx context.Context, look Lookup, volRoot, rel string) error {
-	ok, err := Present(ctx, look, volRoot, rel)
-	if err != nil {
-		return fmt.Errorf("layout: look up %s: %w", rel, err)
-	}
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrNotPrepared, rel)
-	}
-	return nil
 }

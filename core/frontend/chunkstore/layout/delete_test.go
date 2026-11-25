@@ -93,8 +93,8 @@ func TestDeleting_RefusesEveryHolderStep(t *testing.T) {
 	}
 	o, rh, _, orphans := removeFixture(t)
 	rh.State = StateDeleting
-	if _, err := removeShard0(t, &memHead{h: rh}, o, &fakeHeld{}, "c1", orphans); !errors.Is(err, ErrVolumeDeleting) || len(o.deletes) != 0 {
-		t.Fatalf("removal over a deleting HEAD: %v, %d deletes", err, len(o.deletes))
+	if _, err := removeShard0(t, &memHead{h: rh}, o, "c1", orphans); !errors.Is(err, ErrVolumeDeleting) || len(o.writes) != 0 {
+		t.Fatalf("removal over a deleting HEAD: %v, %d writes", err, len(o.writes))
 	}
 }
 
@@ -158,13 +158,45 @@ func newDeleteWorld() *deleteWorld {
 	return &deleteWorld{t: &memHead{h: &tgt}, src: &memHead{h: &src}, objs: objs, rels: rels}
 }
 
+// objects returns the target's objects as an object store of volume t.
+func (w *deleteWorld) objects() *memObjects {
+	o := newMemObjects(volRoot)
+	o.volume = idFor("t")
+	for p, b := range w.objs {
+		o.objs[p] = &memObject{data: b, meta: ObjectMeta{Session: "s0", Volume: o.volume}}
+	}
+	return o
+}
+
+// A late delete of a finished volume delete never removes the object of a
+// volume created again under the name: the delete is conditional on the
+// entry's volume id, and the new volume's entry carries another.
+func TestDeleteVolume_ALateDeleteSparesTheNameReused(t *testing.T) {
+	ctx := context.Background()
+	w := newDeleteWorld()
+	o := w.objects()
+	if err := DeleteVolume(ctx, w.t, gone{}, idFor("t"), []HeadStore{w.src}, o, w.rels); err != nil {
+		t.Fatal(err)
+	}
+	o.volume = idFor("t again") // the name holds a new volume, which writes the same content name
+	if err := o.Create(ctx, w.rels[0], []byte("o"), "n1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.DeleteOfVolume(ctx, w.rels[0], idFor("t")); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("the old run's late delete: %v; want ErrPrecondition", err)
+	}
+	if !o.has(w.rels[0]) {
+		t.Fatal("the old run's late delete removed the new volume's object")
+	}
+}
+
 // A delete is refused while a holder acts and while the volume has
 // dependents of its own; otherwise it runs in order and ends deleted with
 // its pool empty and itself released from its source.
 func TestDeleteVolume(t *testing.T) {
 	ctx := context.Background()
 	w := newDeleteWorld()
-	o := &objPool{objs: w.objs}
+	o := w.objects()
 	if err := DeleteVolume(ctx, w.t, gone{errors.New("leased to srv-a")}, idFor("t"), []HeadStore{w.src}, o, w.rels); !errors.Is(err, ErrHolderActive) || w.t.updates != 0 {
 		t.Fatalf("delete while held: %v (%d HEAD writes)", err, w.t.updates)
 	}
@@ -195,7 +227,7 @@ func TestDeleteVolume_InterruptAtEveryStep(t *testing.T) {
 		for _, after := range []bool{false, true} {
 			t.Run(fmt.Sprintf("step%d %s/after=%t", k+1, order[k], after), func(t *testing.T) {
 				w := newDeleteWorld()
-				o := &objPool{objs: w.objs}
+				o := w.objects()
 				nth := 0
 				for _, kind := range order[:k+1] {
 					if kind == order[k] {

@@ -123,12 +123,14 @@ func RunReleaseDependent(ctx context.Context, source HeadStore, target VolumeID)
 // the whole re-runnable: HEAD deleting (refused while a holder acts or a
 // snapshot has dependents; no holder transition, claim or removal applies
 // from here), then this volume released from every source it depends on,
-// then every object of its pool, segments and roots deleted, then HEAD
+// then every object of its pool, segments and roots deleted, each
+// conditional on belonging to this volume (a late delete of this run never
+// removes the object of a volume created again under the name), then HEAD
 // deleted. A source left out keeps an extra dependent, which over-protects
 // and is released by the operator's command.
-func DeleteVolume(ctx context.Context, st HeadStore, gone HolderGone, id VolumeID, sources []HeadStore, pool Pool, objects []string) error {
-	if gone == nil || pool == nil {
-		return errors.New("layout: delete needs a holder check and a pool")
+func DeleteVolume(ctx context.Context, st HeadStore, gone HolderGone, id VolumeID, sources []HeadStore, os ObjectStore, objects []string) error {
+	if gone == nil || os == nil {
+		return errors.New("layout: delete needs a holder check and an object store")
 	}
 	if err := gone.NoHolder(ctx); err != nil {
 		return fmt.Errorf("%w: %v", ErrHolderActive, err)
@@ -142,7 +144,10 @@ func DeleteVolume(ctx context.Context, st HeadStore, gone HolderGone, id VolumeI
 		}
 	}
 	for _, rel := range objects {
-		if err := pool.DeleteObject(ctx, rel); err != nil {
+		if err := os.DeleteOfVolume(ctx, rel, id); err != nil {
+			if errors.Is(err, ErrPrecondition) {
+				continue // the name holds another volume's object now
+			}
 			return fmt.Errorf("layout: delete %s: %w", rel, err)
 		}
 	}
