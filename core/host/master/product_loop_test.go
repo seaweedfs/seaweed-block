@@ -990,6 +990,9 @@ func (s staticPromotionProbe) ProbePromotionCandidates(string, authority.Authori
 	return s.result, s.err
 }
 
+// AckProfile reports the probe's ack profile (as the round provider does).
+func (s staticPromotionProbe) AckProfile() string { return s.result.AckProfile }
+
 func recvAssignmentInfo(t *testing.T, ch <-chan adapter.AssignmentInfo) adapter.AssignmentInfo {
 	t.Helper()
 	select {
