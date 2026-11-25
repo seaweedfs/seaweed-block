@@ -113,7 +113,7 @@ func TestWorkspaceForcedMoveLostRangeOverRPC(t *testing.T) {
 	logs := &syncBuffer{}
 	headTime := time.Date(2026, 11, 21, 1, 2, 3, 0, time.UTC)
 	authDir := t.TempDir()
-	cfg := Config{WorkspaceMaxClockSkew: 100 * time.Millisecond, Listen: "127.0.0.1:0", AuthorityStoreDir: authDir, LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true,
+	cfg := Config{WorkspaceMaxClockSkew: 100 * time.Millisecond, Listen: "127.0.0.1:0", AuthorityStoreDir: authDir, LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume,
 		Logger: log.New(logs, "", 0),
 		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) {
 			return authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 42, FilerMtimeNS: headTime.UnixNano()}, nil

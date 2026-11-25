@@ -29,7 +29,7 @@ func reviewBindingHostWithReader(t *testing.T, reader func(context.Context, stri
 
 func reviewBindingHostBeforeStart(t *testing.T, reader func(context.Context, string) (authority.WorkspaceHead, error), before func(*Host)) (*Host, *grpc.ClientConn, context.Context) {
 	t.Helper()
-	h, e := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, WorkspaceHeadReader: reader})
+	h, e := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume, WorkspaceHeadReader: reader})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -302,7 +302,7 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 					return e
 				})
 			} else {
-				if _, e := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-rf3", SizeBytes: 1 << 20, ReplicationFactor: 3}); e != nil {
+				if _, e := testCreateReadyVolume(h.Lifecycle().Volumes, lifecycle.VolumeSpec{VolumeID: "vol-rf3", SizeBytes: 1 << 20, ReplicationFactor: 3}); e != nil {
 					t.Fatal(e)
 				}
 				seedRF3Placement(t, h)

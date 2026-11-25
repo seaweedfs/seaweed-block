@@ -121,13 +121,13 @@ func seedSkewPublisher(t *testing.T, p *authority.Publisher, d *skewDirective) {
 }
 
 func TestWorkspaceClockSkewConfigReachesLeaseReply(t *testing.T) {
-	h, err := New(Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: true, WorkspaceMaxClockSkew: 4 * time.Second, WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) { return authority.WorkspaceHead{}, nil }})
+	h, err := New(Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume, WorkspaceMaxClockSkew: 4 * time.Second, WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) { return authority.WorkspaceHead{}, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Start()
 	defer closeTestMaster(t, h)
-	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+	if _, err := testCreateReadyVolume(h.Lifecycle().Volumes, lifecycle.VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
 		t.Fatal(err)
 	}
 	registerWorkspaceHolder(t, h, "node-a") // a workspace holder's server id must be registered (INV-AUTH-HOLDER-IDENTITY-001)
