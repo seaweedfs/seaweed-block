@@ -8,10 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
 // The SeaweedFS side down during a cut, then back,
@@ -20,6 +23,13 @@ import (
 // minute the guest keeps writing and flushing over NVMe/TCP while the test
 // records how the cut answers and how much copy-on-write side data the
 // stalled cut keeps on the local root. Then the store comes back.
+//
+// The store goes down inside the cut by construction: a filer front holds
+// the reply to the cut's first applied chunk-object create, the store is
+// stopped while that reply is held, then the reply is released. The cut
+// cannot commit while one of its uploads is unanswered. With
+// E1_TEST_SKIP_BOUNDARY=1 the front holds nothing and the test fails as
+// inconclusive (the control).
 //
 // Asserted, in every variant: the store goes down mid-cut (uploads begun,
 // HEAD unmoved); the guest keeps writing with no error and every command
@@ -48,7 +58,13 @@ func TestProcedureStoreDownDuringACut(t *testing.T) {
 }
 
 func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bool) {
-	env := startHandoffEnvWith(t, 1, []string{"v2"})
+	if testListenHost() != "127.0.0.1" {
+		t.Fatal("the causal filer front requires loopback")
+	}
+	var boundary *snapshotFilerBoundary
+	cluster := startWorkspaceWeedWith(t, t.TempDir(), w4WeedOpts{VolumeSizeLimitMB: 256, VolumeMax: 32,
+		FilerBind: "127.0.0.2", FilerFront: func(c *w4WeedCluster) { boundary = newSnapshotFilerBoundary(t, c) }})
+	env := startHandoffEnvOnCluster(t, 1, []string{"v2"}, procedureTLSConfig(), false, cluster)
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	if cowBytes > 0 {
 		// Not under a temporary directory: the host-limit launch check refuses one.
@@ -65,6 +81,12 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 	}
 	holder := env.start(t, "blockvolume-v1", "s1")
 	env.adopt(t, holder, "s1")
+	id, err := layout.ParseVolumeID(env.layoutID("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary.id = id
+	boundary.dir = path.Join(env.chunkPath, layout.VolumeDir("v1", id))
 	cut := []string{"ops", "chunk", "cut", "--volume", "v1", "--status-addr", env.hosts["s1"].status}
 	verify := []string{"ops", "chunk", "verify", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--depth", "data", "--timeout", "5m"}
 	headGen := func() uint64 {
@@ -97,8 +119,10 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 		}
 	}
 
-	// A cut starts; the store goes down once its uploads have begun.
-	gen, entries := headGen(), f1FilerEntries(t, env)
+	// A cut starts; the store goes down while the reply to its first applied
+	// chunk-object create is held, so before the cut can commit.
+	gen := headGen()
+	reached := boundary.arm("OBJECT", "")
 	type cutAnswer struct {
 		rc  int
 		out string
@@ -118,16 +142,17 @@ func storeDownDuringACut(t *testing.T, down string, cowBytes int64, cowWindow bo
 		}
 		answered <- cutAnswer{rc, out + errOut, time.Since(cutStart)}
 	}()
-	t.Cleanup(func() { cutCancel(); <-cutDone })
-	for end := time.Now().Add(10 * time.Second); f1FilerEntries(t, env) <= entries; time.Sleep(20 * time.Millisecond) {
-		if time.Now().After(end) {
-			t.Fatalf("%s: the cut uploaded nothing within 10s: the store would not go down mid-cut", down)
-		}
+	t.Cleanup(func() { boundary.unblock(); cutCancel(); <-cutDone })
+	select {
+	case <-reached:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("%s: inconclusive: the cut applied no chunk-object create within 30s, so the store would not go down mid-cut", down)
 	}
 	if g := headGen(); g != gen {
-		t.Fatalf("%s: the cut committed (HEAD gen %d -> %d) before the store went down: not mid-cut", down, gen, g)
+		t.Fatalf("%s: the cut committed (HEAD gen %d -> %d) while one of its uploads was unanswered", down, gen, g)
 	}
 	env.cluster.stopProc(t, down)
+	boundary.unblock()
 	downAt := time.Now()
 	t.Logf("%s killed %s after the cut started", down, downAt.Sub(cutStart).Round(time.Millisecond))
 
