@@ -35,6 +35,18 @@ class ModelTraceTests(unittest.TestCase):
     def test_unmapped_files_keep_existing_policy(self):
         self.assertEqual(checker.check("existing prose", ["docs/a.md", "core/a.go.bak"], self.mapping), [])
 
+    def test_repository_map_covers_claimed_head_create(self):
+        mapping = checker.read_mapping(SCRIPT.parent.parent / "model-code-trace.tsv")
+        paths = ["core/frontend/chunkstore/layout/create.go"]
+        self.assertEqual(checker.check("VolumeCreate.Claim", paths, mapping), [])
+        self.assertEqual(len(checker.check("VolumeCreate.Unknown", paths, mapping)), 1)
+
+    def test_repository_map_covers_the_replica_receiver(self):
+        mapping = checker.read_mapping(SCRIPT.parent.parent / "model-code-trace.tsv")
+        paths = ["core/transport/replica.go"]
+        self.assertEqual(checker.check("ReplicationPeer.Ship", paths, mapping), [])
+        self.assertEqual(len(checker.check("VolumeCreate.Claim", paths, mapping)), 1)
+
     def test_cli_checks_nul_paths_and_model_citations(self):
         with tempfile.TemporaryDirectory() as tmp:
             mapping = Path(tmp) / "map.tsv"
