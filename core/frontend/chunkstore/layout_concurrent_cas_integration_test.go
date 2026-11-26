@@ -101,32 +101,55 @@ func raceRound(t *testing.T, c *weedCluster, root string, id layout.VolumeID, op
 // release (nil: none), to bias which kind of writer reaches the filer first.
 func raceRoundLag(t *testing.T, c *weedCluster, root string, id layout.VolumeID, lag func(i int) time.Duration, op func(ctx context.Context, i int, s *LayoutStore) error) (errs []error, filer []gateOutcome) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	arrived := make(chan int, casWriters)
-	release := make(chan struct{})
-	outcomes := make(chan gateOutcome, casWriters)
-	stores := make([]*LayoutStore, casWriters)
-	for i := range stores {
+	return newRacers(t, c, root, id).round(t, lag, op)
+}
+
+// racers are casWriters gated writers, each on its own real filer
+// connection, kept across rounds (many rounds would otherwise open a
+// connection per writer per round).
+type racers struct {
+	gates  []*writeGate
+	stores []*LayoutStore
+}
+
+func newRacers(t *testing.T, c *weedCluster, root string, id layout.VolumeID) *racers {
+	t.Helper()
+	r := &racers{}
+	for i := 0; i < casWriters; i++ {
 		cl := c.client(t, root+"/")
-		g := &writeGate{SeaweedFilerClient: cl.fc, index: i, arrived: arrived, release: release, outcomes: outcomes}
-		if lag != nil {
-			g.lag = lag(i)
-		}
+		g := &writeGate{SeaweedFilerClient: cl.fc, index: i}
 		cl.fc = g
 		s, err := NewLayoutStore(cl, cl, root, id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		stores[i] = s
+		r.gates, r.stores = append(r.gates, g), append(r.stores, s)
+	}
+	return r
+}
+
+// round runs op on every writer at once: each is held at its filer write
+// until all have arrived, then all are released together (plus lag(i)).
+func (r *racers) round(t *testing.T, lag func(i int) time.Duration, op func(ctx context.Context, i int, s *LayoutStore) error) (errs []error, filer []gateOutcome) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	arrived := make(chan int, casWriters)
+	release := make(chan struct{})
+	outcomes := make(chan gateOutcome, casWriters)
+	for i, g := range r.gates {
+		g.arrived, g.release, g.outcomes, g.lag = arrived, release, outcomes, 0
+		if lag != nil {
+			g.lag = lag(i)
+		}
 	}
 	errs = make([]error, casWriters)
 	var wg sync.WaitGroup
-	for i := range stores {
+	for i := range r.stores {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = op(ctx, i, stores[i])
+			errs[i] = op(ctx, i, r.stores[i])
 		}(i)
 	}
 	var once sync.Once
@@ -356,12 +379,18 @@ func TestIntegration_ConcurrentConditionalWritesOneWinner(t *testing.T) {
 	// either a delete, and every reuse is refused (the entry is gone), or
 	// one reuse, and every delete and every other reuse is refused (the
 	// entry stays, unmarked, under the reuser's session). Never both.
+	// casSimultaneous rounds release both kinds at the same instant (the
+	// race itself, whichever wins); the lagged rounds then hold one kind
+	// back a few milliseconds so that each outcome is seen at least once.
 	t.Run("DELETE against REUSE of one marked entry", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		root, id, s := newVolume(t, "delreuse")
-		deletes, reuses := 0, 0
-		for round := 0; round < 2*casRounds; round++ {
+		r := newRacers(t, c, root, id)
+		const casSimultaneous = 128
+		const m = "c-mark"
+		race := func(round int, lag func(i int) time.Duration) (deleteWon bool) {
+			t.Helper()
 			data := []byte(fmt.Sprintf("raced-%d", round))
 			rel := layout.NameChunk(uint64(round+1), data).Path()
 			if err := layout.EnsureObject(ctx, s, rel, data, "s0"); err != nil {
@@ -371,21 +400,12 @@ func TestIntegration_ConcurrentConditionalWritesOneWinner(t *testing.T) {
 			if !found {
 				t.Fatalf("round %d: object %s missing after create", round, rel)
 			}
-			const m = "c-mark"
 			if err := s.Mark(ctx, rel, plan, m); err != nil {
 				t.Fatal(err)
 			}
 			marked := layout.ObjectMeta{Session: "s0", Mark: m, Volume: id}
 			reuser := func(i int) string { return fmt.Sprintf("r%d-%d", round, i) }
-			// Alternate rounds hold back the reuses or the deletes by a few
-			// milliseconds, so both outcomes occur; the filer still decides.
-			lag := func(i int) time.Duration {
-				if (i%2 == 0) == (round%2 == 1) {
-					return 5 * time.Millisecond
-				}
-				return 0
-			}
-			errs, filer := raceRoundLag(t, c, root, id, lag, func(ctx context.Context, i int, s *LayoutStore) error {
+			errs, filer := r.round(t, lag, func(ctx context.Context, i int, s *LayoutStore) error {
 				if i%2 == 0 {
 					return s.DeleteMarked(ctx, rel, m)
 				}
@@ -403,9 +423,11 @@ func TestIntegration_ConcurrentConditionalWritesOneWinner(t *testing.T) {
 			if won < 0 {
 				t.Fatalf("round %d: neither a delete nor a reuse succeeded: %+v", round, filer)
 			}
+			if errs[won] != nil {
+				t.Fatalf("round %d: the filer's winner %d reported %v", round, won, errs[won])
+			}
 			meta, found := statOf(ctx, t, s, rel)
 			if won%2 == 0 {
-				deletes++
 				if found {
 					t.Fatalf("round %d: delete %d won but the entry remains: %+v", round, won, meta)
 				}
@@ -414,9 +436,16 @@ func TestIntegration_ConcurrentConditionalWritesOneWinner(t *testing.T) {
 						t.Fatalf("round %d: reuse %d after the delete: %v; want refused", round, i, errs[i])
 					}
 				}
-				continue
+				// The other deletes lost at the filer; a refused delete of an
+				// entry already gone is no error to its caller, and nothing else
+				// is allowed.
+				for i := 0; i < casWriters; i += 2 {
+					if i != won && errs[i] != nil && !errors.Is(errs[i], layout.ErrPrecondition) {
+						t.Fatalf("round %d: delete %d after delete %d won: %v", round, i, won, errs[i])
+					}
+				}
+				return true
 			}
-			reuses++
 			if !found || meta != (layout.ObjectMeta{Session: reuser(won), Volume: id}) {
 				t.Fatalf("round %d: reuse %d won; entry %+v (found %v); want its session, unmarked", round, won, meta, found)
 			}
@@ -425,10 +454,34 @@ func TestIntegration_ConcurrentConditionalWritesOneWinner(t *testing.T) {
 					t.Fatalf("round %d: writer %d after reuse %d won: %v; want refused", round, i, won, err)
 				}
 			}
+			return false
 		}
-		t.Logf("%d rounds: a delete won %d, a reuse won %d", 2*casRounds, deletes, reuses)
+		simDeletes := 0
+		for round := 0; round < casSimultaneous; round++ {
+			if race(round, nil) {
+				simDeletes++
+			}
+		}
+		t.Logf("%d simultaneous rounds: a delete won %d, a reuse won %d, never both", casSimultaneous, simDeletes, casSimultaneous-simDeletes)
+		deletes, reuses := 0, 0
+		for k := 0; k < 2*casRounds; k++ {
+			round := casSimultaneous + k
+			// Alternate rounds hold back the reuses or the deletes.
+			lag := func(i int) time.Duration {
+				if (i%2 == 0) == (k%2 == 1) {
+					return 5 * time.Millisecond
+				}
+				return 0
+			}
+			if race(round, lag) {
+				deletes++
+			} else {
+				reuses++
+			}
+		}
+		t.Logf("%d lagged rounds: a delete won %d, a reuse won %d", 2*casRounds, deletes, reuses)
 		if deletes == 0 || reuses == 0 {
-			t.Fatalf("only one outcome occurred (deletes %d, reuses %d): the other branch was never checked", deletes, reuses)
+			t.Fatalf("only one outcome occurred in the lagged rounds (deletes %d, reuses %d): the other branch was never checked", deletes, reuses)
 		}
 	})
 }
