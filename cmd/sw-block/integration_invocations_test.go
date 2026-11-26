@@ -27,6 +27,9 @@ func TestIntegrationTestInvocationsParse(t *testing.T) {
 	if len(invocations) == 0 {
 		t.Fatal("no ops invocations found in the integration tests")
 	}
+	// Placeholders reach path flags too: whatever a call writes lands in a
+	// temporary directory, never in the source tree.
+	t.Chdir(t.TempDir())
 	for _, inv := range invocations {
 		inv := inv
 		if len(inv.args) < 2 {
