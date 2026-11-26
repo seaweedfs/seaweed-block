@@ -606,7 +606,9 @@ A restore makes a new volume from a snapshot. The new volume reads every chunk i
            replica_id: r1
    ```
 
-   Restart blockmaster to read it. An entry without `size_bytes` creates no volume record; the restore creates it, with the snapshot's geometry. An entry with `size_bytes` creates an ordinary empty volume, and the restore into it is then refused with `target_exists` (`v2 is bound to another restore request`).
+   Restart blockmaster to read it (it reads the cluster spec only at start). Volumes already serving keep serving through a short restart: each holder renews every 10 s or less and may serve until 20 s after its last renewal (the 30 s lease less half the 20 s clock-skew margin, with defaults), so a blockmaster that answers again within 10 s interrupts nothing (`TestPhase0BaselineMasterKilledAndRestartedUnderWrites`: killed and back after 5 s, no guest write fails). A longer restart is fail-closed: a holder whose lease ends stops I/O, exits 75 (`reason=lease_expired`), is started again by the unit and waits, and serves again once blockmaster is back and its barrier has passed, at least 50 s after the restart (`TestPhase0BaselineMasterDown60sOneVolume`, `TestUnitSurvivesTenMinuteMasterOutage`). Add restore targets ahead of time, several at once, to restart less often.
+
+   An entry without `size_bytes` creates no volume record; the restore creates it, with the snapshot's geometry. An entry with `size_bytes` creates an ordinary empty volume, and the restore into it is then refused with `target_exists` (`v2 is bound to another restore request`).
 2. **Create the restore:**
 
    ```bash

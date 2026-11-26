@@ -81,7 +81,8 @@ entry places the volume but creates no record; `sw-block ops chunk restore`
 creates the record, with the source snapshot's geometry. With `size_bytes` the
 entry creates an ordinary empty volume, and the restore into it is refused
 with `target_exists`. Use a new name: a name that was ever deleted is never
-created again.
+created again. blockmaster reads the cluster spec only at start, so adding the
+target means restarting it: see [what that does to serving volumes](standalone-deployment.md#restoring-a-snapshot-into-a-new-volume).
 
 ```yaml
   - id: v2                     # restore target: no size_bytes
@@ -349,10 +350,12 @@ and logs `blockvolume: waiting for the master: <reason> since <time> (no bound)`
 the reason changes and every 10 minutes (`/status` shows the same as `MasterWait`).
 The wait ends 30 seconds after the first answer received once the local store is
 open and recovered, or 30 seconds after the master's barrier time when that is later
-(fixed, no flag): a slow open does not use up the wait. If the
-grant comes inside the wait, the process serves. If it does not, the process logs
+(fixed, no flag): a slow open does not use up the wait, and a start before the
+barrier waits through it and serves once re-granted
+(`TestProcedureStartInsideTheBarrierWaitIsReGranted`). Only when blockmaster keeps
+answering without a grant for 30 seconds past its barrier does the process log
 `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable,
-not serving (...)` and exits with `blockvolume: exiting status=75
+not serving (...)` and exit with `blockvolume: exiting status=75
 reason=assignment_timeout`; the unit starts it again. A master outage therefore costs
 at most one restart (the holder's lease fence), not the unit's start limit (10 starts
 in 10 minutes). A master that answers and drops in turn postpones the 30 seconds for

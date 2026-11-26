@@ -219,11 +219,9 @@ measured up to 15 s at 32 volumes with the default 3 slots.
 ## When a host is lost
 
 1. Make sure the lost host stays down for this volume. The product does not power off an old holder.
-   - If it comes back after the move, its blockvolume gets no assignment, does not serve, and exits with status 75.
-   - The example unit starts it again about every 35 s (30 s of waiting, then `RestartSec=5s`), until its start
-     limit (10 starts in 600 s), and then shows it as failed (`start-limit-hit`).
-   - A process that was already waiting on its old assignment when the move was issued exits with status 78
-     (`reason=moved`) instead, and the unit does not start it again.
+   - If it comes back after the move, blockmaster refuses its lease: it does not serve, logs `exiting status=78
+     reason=moved` and exits 78, and the example unit does not start it again
+     (`TestProcedureForcedMoveWithTheOldHostReturning`).
    - Stop and disable that unit on the old host. Run `systemctl reset-failed` only after you have dealt with its
      local root ([do not](volume-lifecycle.md#do-not)).
 2. Run the forced move to another registered node: `--dry-run` first, then the move. See
