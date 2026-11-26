@@ -3,6 +3,9 @@ package master
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -306,12 +309,16 @@ func TestManualFailoverRF3ReachablePrimaryIsRefused(t *testing.T) {
 	}
 }
 
-// meetingFenceProbe holds each fencing round until two have arrived (or a
-// bound passes), so two callers decide the same volume at the same time.
+// meetingFenceProbe holds each fencing round until two have arrived, so two
+// callers decide the same volume at the same time. A caller that waits past
+// the bound gets an error (no decision) and marks the probe late: the test
+// then fails, it never proceeds with one caller alone.
 type meetingFenceProbe struct {
 	*fenceProbe
 	mu      sync.Mutex
 	arrived int
+	late    bool
+	bound   time.Duration
 	both    chan struct{}
 }
 
@@ -324,7 +331,11 @@ func (p *meetingFenceProbe) FencePromotionCandidates(v string, current authority
 	p.mu.Unlock()
 	select {
 	case <-p.both:
-	case <-time.After(2 * time.Second):
+	case <-time.After(p.bound):
+		p.mu.Lock()
+		p.late = true
+		p.mu.Unlock()
+		return PromotionProbeResult{}, errors.New("meetingFenceProbe: the other caller did not arrive")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -342,7 +353,7 @@ func TestManualFailoverAndThePromotionLoopPublishOneLine(t *testing.T) {
 	defer closeTestMaster(t, h)
 	ingestRF3Observation(t, h, false, true, true)
 	e := line.Epoch
-	p := &meetingFenceProbe{both: make(chan struct{}), fenceProbe: &fenceProbe{
+	p := &meetingFenceProbe{both: make(chan struct{}), bound: 5 * time.Second, fenceProbe: &fenceProbe{
 		// The primary answered not ready: the loop's own promotion applies.
 		plain: PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true,
 			Current:    PromotionCandidateEvidence{ReplicaID: "r1"},
@@ -363,10 +374,10 @@ func TestManualFailoverAndThePromotionLoopPublishOneLine(t *testing.T) {
 		t.Fatalf("product tick: %v", loopErr)
 	}
 	p.mu.Lock()
-	met := p.arrived
+	met, late := p.arrived, p.late
 	p.mu.Unlock()
-	if met < 2 {
-		t.Fatalf("%d fencing rounds; want both callers deciding at once", met)
+	if met != 2 || late {
+		t.Fatalf("%d fencing rounds, late=%t; want both callers held together before either decided", met, late)
 	}
 	after := waitAuthorityReplica(t, h.Publisher(), "vol-rf3", "r3")
 	deadline := time.Now().Add(500 * time.Millisecond)
@@ -381,16 +392,92 @@ func TestManualFailoverAndThePromotionLoopPublishOneLine(t *testing.T) {
 	}
 }
 
+// The barrier's negative control: with one caller only, the round is refused
+// at the bound and the probe is marked late, so a test that relies on two
+// callers held together cannot pass with one.
+func TestMeetingFenceProbeFailsWhenTheOtherCallerIsLate(t *testing.T) {
+	p := &meetingFenceProbe{both: make(chan struct{}), bound: 50 * time.Millisecond, fenceProbe: &fenceProbe{fenced: fencedAs()}}
+	if _, err := p.FencePromotionCandidates("v", authority.AuthorityBasis{Epoch: 1}, nil); err == nil || !p.late {
+		t.Fatalf("err=%v late=%t; want a refusal and late", err, p.late)
+	}
+}
+
+// storeFault makes every authority record write of one volume fail (a
+// directory where the store writes the record's temp file; open fails
+// before any rename, as a full or failing disk would) until cleared.
+func storeFault(t *testing.T, h *Host, volumeID string) (arm, clear func()) {
+	t.Helper()
+	var record string
+	matches, _ := filepath.Glob(filepath.Join(h.cfg.AuthorityStoreDir, volumeID+".*"))
+	for _, m := range matches {
+		if !strings.HasSuffix(m, ".tmp") {
+			record = m
+		}
+	}
+	if record == "" {
+		t.Fatalf("no authority record for %s in %s (%v)", volumeID, h.cfg.AuthorityStoreDir, matches)
+	}
+	tmp := record + ".tmp"
+	arm = func() {
+		if err := os.Mkdir(tmp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clear = func() { _ = os.Remove(tmp) }
+	t.Cleanup(clear)
+	return arm, clear
+}
+
+// waitLine polls until the volume's line is replica at epoch, else fails.
+func waitLine(t *testing.T, h *Host, volumeID, replica string, epoch uint64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		cur, _ := h.Publisher().VolumeAuthorityLine(volumeID)
+		if cur.ReplicaID == replica && cur.Epoch == epoch {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("line=%+v; want %s at %d", cur, replica, epoch)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // healedR1 is the line's own primary answering a heal round ready.
 var healedR1 = PromotionProbeResult{CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true, DurableLSN: 11,
 	LastDataEpoch: 1, LastDataFirstLSN: 1, StoreID: storage.StoreID{7}, TableValid: true}}
 
-// A fencing round the operator's failover allowed, whose publication then
-// failed (here: the evidence is decided and never applied), has fenced the
-// survivors above the line all the same. The fence is pending from the
-// moment the round is attempted, so when the primary comes back the next
-// tick continues it at e+1, without a ready survivor (they refuse it now).
-func TestManualFailoverAllowedButUnpublishedFenceIsHealed(t *testing.T) {
+// back puts r1 back ready and the fenced survivors not ready for primary
+// (they refuse r1 at e); with r3Missing its server reports no slot for the
+// volume (a partial inventory: the volume is unsupported).
+func back(t *testing.T, h *Host, r3Missing bool) {
+	t.Helper()
+	now := time.Now().UTC()
+	slot := func(r, d, c string, ready bool) []authority.SlotFact {
+		return []authority.SlotFact{{VolumeID: "vol-rf3", ReplicaID: r, DataAddr: d, CtrlAddr: c, Reachable: true, ReadyForPrimary: ready, Eligible: true, EvidenceScore: 10}}
+	}
+	r3 := slot("r3", "127.0.0.1:19301", "127.0.0.1:19302", false)
+	if r3Missing {
+		r3 = nil
+	}
+	for _, obs := range []authority.Observation{
+		{ServerID: "node-a", ObservedAt: now, Server: authority.ServerFact{Reachable: true, Eligible: true}, Slots: slot("r1", "127.0.0.1:19101", "127.0.0.1:19102", true)},
+		{ServerID: "node-b", ObservedAt: now, Server: authority.ServerFact{Reachable: true, Eligible: true}, Slots: slot("r2", "127.0.0.1:19201", "127.0.0.1:19202", false)},
+		{ServerID: "node-c", ObservedAt: now, Server: authority.ServerFact{Reachable: true, Eligible: true}, Slots: r3},
+	} {
+		if err := h.ObservationHost().Ingest(obs); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// End to end: the operator's failover is allowed by its fencing round, and
+// the publication fails (the authority store refuses the write). The line is
+// still r1 at e, but its survivors are fenced at e+1. When r1 is back, a
+// normal product tick publishes r1 at e+1 (the heal, through the same
+// dispatch as every tick), and a further tick adds no epoch.
+func TestManualFailoverPublicationFailureIsHealedByTheNextTick(t *testing.T) {
 	h, line := rf3LineOnR1(t)
 	defer closeTestMaster(t, h)
 	ingestRF3Observation(t, h, false, true, true)
@@ -402,30 +489,35 @@ func TestManualFailoverAllowedButUnpublishedFenceIsHealed(t *testing.T) {
 			PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: e + 1, TableValid: true}),
 	}
 	h.SetPromotionEvidenceProvider(ackedFenceProbe{p})
-	if _, err := h.plannedMoveEvidence("vol-rf3", "r3"); err != nil {
-		t.Fatalf("the fenced failover was not allowed: %v", err)
+	arm, clear := storeFault(t, h, "vol-rf3")
+	arm()
+	if err := failoverTo(h, line, "r3"); err == nil {
+		t.Fatal("the failover published through a failing authority store")
 	}
-	// The publication failed: the line is still r1 at e.
-	if !h.pendingFence("vol-rf3", e) {
-		t.Fatal("an allowed fencing round left no pending fence")
+	clear()
+	if cur, _ := h.Publisher().VolumeAuthorityLine("vol-rf3"); cur != line || len(p.survivors) != 2 {
+		t.Fatalf("after the fault line=%+v fenced=%v; want %+v unchanged and both survivors fenced", cur, p.survivors, line)
 	}
+
+	back(t, h, false)
 	p.heal = healedR1
-	snap := rf3DeadPrimary()
-	snap.Volumes[0].Authority.Epoch = e
-	s := snap.Volumes[0].Slots
-	s[0].Reachable, s[0].ReadyForPrimary = true, true
-	s[1].ReadyForPrimary, s[2].ReadyForPrimary = false, false // fenced: they refuse r1 at e
-	_, _, asks := h.applyPromotionEvidenceGate(&snap)
-	if len(asks) != 1 || asks[0].ReplicaID != "r1" || asks[0].Evidence.Basis != adapter.BasisHeal || asks[0].Evidence.FencedEpoch != e+1 {
-		t.Fatalf("asks %+v; want r1 healed at %d", asks, e+1)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
 	}
+	waitLine(t, h, "vol-rf3", "r1", e+1)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	waitLine(t, h, "vol-rf3", "r1", e+1)
 }
 
-// A refused operator failover leaves the fence pending; the primary then
-// returns ready while another slot is still stale, so the volume is
-// unsupported (partial inventory). The unsupported gate heals the line's own
-// primary at e+1 before any candidate check, as the supported gate does.
-func TestManualFailoverRefusedFenceIsHealedOnTheUnsupportedPath(t *testing.T) {
+// End to end on the unsupported path: the operator's failover is refused (the
+// target is below the highest fenced end), so its survivors are fenced at e+1
+// and nothing is published. r1 is back while r3's server reports no slot (a
+// partial inventory: unsupported). A normal product tick publishes r1 at
+// e+1, and a further tick adds no epoch.
+func TestManualFailoverRefusedFenceIsHealedByTheNextTickOnTheUnsupportedPath(t *testing.T) {
 	h, line := rf3LineOnR1(t)
 	defer closeTestMaster(t, h)
 	ingestRF3Observation(t, h, false, true, true)
@@ -440,16 +532,18 @@ func TestManualFailoverRefusedFenceIsHealedOnTheUnsupportedPath(t *testing.T) {
 	if err := failoverTo(h, line, "r2"); err == nil {
 		t.Fatal("a failover to the survivor below the highest fenced end was allowed")
 	}
-	// r1 is back and ready; r3's slot is stale.
-	ingestRF3ObservationForServersWithReady(t, h, "vol-rf3", "node-a", "node-b", "node-c", true, true, true, true, false, false)
+
+	back(t, h, true)
 	p.plain = PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true},
 		Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", DurableLSN: 10}}}
 	p.heal = healedR1
-	report := authority.SupportabilityReport{Unsupported: map[string]authority.VolumeUnsupportedEvidence{
-		"vol-rf3": {VolumeID: "vol-rf3", Reasons: []string{authority.ReasonPartialInventory}},
-	}}
-	_, _, asks := h.applyUnsupportedPromotionEvidenceGate(h.Lifecycle().Placements.ListPlacements(), report, nil)
-	if len(asks) != 1 || asks[0].ReplicaID != "r1" || asks[0].Evidence.Basis != adapter.BasisHeal || asks[0].Evidence.FencedEpoch != e+1 {
-		t.Fatalf("asks %+v; want r1 healed at %d on the unsupported path", asks, e+1)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
 	}
+	waitLine(t, h, "vol-rf3", "r1", e+1)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	waitLine(t, h, "vol-rf3", "r1", e+1)
 }
