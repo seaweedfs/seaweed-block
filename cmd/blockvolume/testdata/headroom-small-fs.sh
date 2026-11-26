@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Small-file-system harness for TestHeadroomRefusesARestoreAndAForkTargetThenServesThem.
+# Small-file-system harness for TestHeadroomRefusesRestoreTargetsThenServesThem.
 # Root only, on a disposable host; it formats only a loop device over a private
 # sparse file under WORKDIR.
 #
@@ -16,7 +16,7 @@
 # Example (from the repository root, as root):
 #   mkdir /tmp/headroom && cmd/blockvolume/testdata/headroom-small-fs.sh /tmp/headroom -- \
 #     env CHUNKSTORE_WEED=/path/to/weed go test -count=1 -tags 'subprocess chunkstore_integration' \
-#     -run '^TestHeadroomRefusesARestoreAndAForkTargetThenServesThem$' -timeout 15m ./cmd/blockvolume/
+#     -run '^TestHeadroomRefusesRestoreTargetsThenServesThem$' -timeout 15m ./cmd/blockvolume/
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "root required" >&2; exit 2; }
 work=$(realpath "${1:?existing empty work dir}")

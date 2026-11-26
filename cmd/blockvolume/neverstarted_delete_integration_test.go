@@ -29,7 +29,7 @@ func TestNeverAttachedRestoreTargetIsDeletable(t *testing.T) {
 	env.snapshot(t, "s1", "v1", "s1")
 
 	// The target exists in the catalog; its blockvolume never starts.
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 
 	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC,
@@ -62,7 +62,7 @@ func TestNeverStartedDeleteFencesALateStart(t *testing.T) {
 	env.adopt(t, holder, "s1")
 	env.writeBlock(t, "s1", 0, cutCrashBlock('L', 0))
 	env.snapshot(t, "s1", "v1", "s1")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC,
 		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v2-late")
@@ -93,7 +93,7 @@ func TestNeverStartedDeleteRacesAStart(t *testing.T) {
 	env.writeBlock(t, "s1", 0, cutCrashBlock('R', 0))
 	env.snapshot(t, "s1", "v1", "s1")
 	for _, v := range targets {
-		env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", v,
+		env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", v,
 			"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 		b := env.hosts["n-"+v]
 		type delResult struct {
@@ -185,7 +185,7 @@ func (env *handoffEnv) requireNeverStarted(t *testing.T, v string, e, headEpoch 
 // and the process exits. The filer comes back. Line at 1, no lease, HEAD 0.
 func (env *handoffEnv) strandStoreDown(t *testing.T, v string) {
 	t.Helper()
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", v,
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", v,
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	env.cluster.stopProc(t, "filer")
 	d := env.h.start(t, "blockvolume-"+v+"-store-down", env.h.volume, env.volArgsFor(env.hosts["n-"+v])...)
@@ -206,7 +206,7 @@ func (env *handoffEnv) strandStoreDown(t *testing.T, v string) {
 func (env *handoffEnv) strandAtGrant(t *testing.T, candidates ...string) string {
 	t.Helper()
 	for _, v := range candidates {
-		env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", v,
+		env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", v,
 			"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 		d := env.h.start(t, "blockvolume-"+v+"-stopped-at-grant", env.h.volume, env.volArgsFor(env.hosts["n-"+v])...)
 		deadline := time.Now().Add(60 * time.Second)
@@ -412,7 +412,7 @@ func TestNeverStartedDeleteAfterAMasterRestart(t *testing.T) {
 // without a revoke and an ACK is refused and the HEAD is not tombstoned.
 func TestClaimedTargetAfterAMasterRestartIsNotNeverStarted(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	d := env.startTarget(t, "v2", "blockvolume-v2")
 	if head := env.headOf(t, "v2"); strings.Contains(head, `"holder":""`) {

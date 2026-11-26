@@ -30,7 +30,7 @@ import (
 // forbids removing those files.
 func TestWrongGeometryCureAsWritten(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	plantStore(t, filepath.Join("testdata", "onezero-wrong-geometry-store.txt"), env.hosts["n-v2"].root)
 	// The planted files are byte for byte the captured ones.

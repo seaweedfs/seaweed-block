@@ -12,7 +12,7 @@ import (
 
 // TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot: two restore targets of
 // a snapshot of v1 (v2, v3) are refused for local headroom on the small file
-// system (as in TestHeadroomRefusesARestoreAndAForkTargetThenServesThem; run
+// system (as in TestHeadroomRefusesRestoreTargetsThenServesThem; run
 // it with testdata/headroom-small-fs.sh). Then:
 //
 //   - another root on the same host is a way out: v3's blockvolume, started
@@ -50,7 +50,7 @@ func TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot(t *testing.T) {
 	env.writeImage(t, "s1", img)
 	env.snapshot(t, "s1", "v1", "base")
 	for _, v := range []string{"v2", "v3"} {
-		env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", v,
+		env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "base", "--target", v,
 			"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 		env.refusedForHeadroom(t, v, "blockvolume-"+v+"-no-room")
 	}
@@ -117,7 +117,7 @@ func TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC(t *testing.T) 
 	img := ladderImage("srcgone", []uint64{0, 3, 9}, 4)
 	env.writeImage(t, "s1", img)
 	env.snapshot(t, "s1", "v1", "base")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "base", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	env.refusedForHeadroom(t, "v2", "blockvolume-v2-no-room")
 
@@ -165,9 +165,8 @@ func TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC(t *testing.T) 
 	}
 	poll(t, 60*time.Second, "v2 never reported its frontend ready", func() bool { return volumeFrontendReady(b2.status, "v2") })
 	requireImageExact(t, env, "n-v2", img, "after its source was deleted and collected")
-	env.h.command(t, "ops", "chunk", "restore", "--volume", "v2", "--status-addr", b2.status)
-	env.waitIndependent(t, "v2")
-	requireImageExact(t, env, "n-v2", img, "after its restore reached independence")
+	env.waitHydrated(t, "v2")
+	requireImageExact(t, env, "n-v2", img, "after it hydrated")
 }
 
 // requireImageExact reads every block of img on the host and fails, marked

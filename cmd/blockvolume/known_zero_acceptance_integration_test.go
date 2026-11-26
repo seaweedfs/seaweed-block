@@ -52,7 +52,7 @@ func TestKnownZeroAcceptance(t *testing.T) {
 		run = fmt.Sprintf("local-%d", time.Now().Unix())
 	}
 	// KZ_ROLE: "" = every step in this process (the smoke); "source" = steps
-	// 1, 2 and 5 here, the restore and fork targets on KZ_TARGET_HOST (the
+	// 1, 2 and 5 here, the restore target on KZ_TARGET_HOST (the
 	// second host), handed over through KZ_HANDOFF; "target" = steps
 	// 3 and 4 on this host against the source's cluster named in KZ_HANDOFF.
 	role := os.Getenv("KZ_ROLE")
@@ -70,13 +70,12 @@ func TestKnownZeroAcceptance(t *testing.T) {
 	} else if role != "" {
 		t.Fatalf("KZ_ROLE %q: want source, target or unset", role)
 	}
-	// per file system: the source and two targets of its S1, each target on
-	// its own server node (on KZ_TARGET_HOST in the source role)
+	// per file system: the source and a restore target of its S1 on its own
+	// server node (on KZ_TARGET_HOST in the source role); fork is not in v1
 	var vols []headSzVol
 	for _, fs := range fss {
 		vols = append(vols, headSzVol{id: "kz" + fs, bytes: bytes},
-			headSzVol{id: "kz" + fs + "r", bytes: bytes, server: "t-" + fs + "r", host: targetHost},
-			headSzVol{id: "kz" + fs + "f", bytes: bytes, server: "t-" + fs + "f", host: targetHost})
+			headSzVol{id: "kz" + fs + "r", bytes: bytes, server: "t-" + fs + "r", host: targetHost})
 	}
 	// step 5: up to kzCrashTries fresh volumes (a try whose stop lands after the
 	// attach commit has committed that store, so a retry needs a new one)
@@ -93,7 +92,7 @@ func TestKnownZeroAcceptance(t *testing.T) {
 		if !v.S1.Completed {
 			continue
 		}
-		for _, kind := range []string{"restore", "fork"} {
+		for _, kind := range []string{"restore"} {
 			tb := env.hosts["kz"+fs+kind[:1]]
 			if role == "source" {
 				ho.Targets = append(ho.Targets, kzHandoffTarget{Kind: kind, Volume: tb.volume, Server: tb.server, Data: tb.data, Ctrl: tb.ctrl,
@@ -111,7 +110,7 @@ func TestKnownZeroAcceptance(t *testing.T) {
 }
 
 // kzHandoff is what the source role hands to the target role (KZ_HANDOFF):
-// the cluster to use and, per target, the S1 to restore or fork and what the
+// the cluster to use and, per target, the S1 to restore and what the
 // source wrote into it.
 type kzHandoff struct {
 	Run       string            `json:"run"`
@@ -278,7 +277,7 @@ type kzTargetRecord struct {
 	FirstCut   kzCutRecord `json:"first_snapshot"`
 }
 
-// kzTarget restores or forks the source's S1 into tb, then runs step 4 (read
+// kzTarget restores the source's S1 into tb, then runs step 4 (read
 // the S1-named blocks BEFORE hydration: data, never zeros; the read itself
 // waits for its chunk) and step 3 (all contents equal the source; the target's
 // first snapshot completes without a full scan).
@@ -286,8 +285,8 @@ func kzTarget(t *testing.T, env *handoffEnv, rep *kzReport, src kzVolume, kind s
 	t.Helper()
 	r := kzTargetRecord{Volume: tb.volume, Kind: kind, Source: src.Volume, Snapshot: src.S1Name,
 		NQN: fmt.Sprintf("nqn.2026-11.io.seaweedfs:kz-%s-%s", run, tb.volume)}
-	env.h.command(t, "ops", "chunk", kind, "--source", src.Volume, "--snapshot", src.S1Name, "--target", tb.volume,
-		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--request-id", "kz-"+kind+"-"+tb.volume)
+	env.h.command(t, "ops", "chunk", "restore", "--source", src.Volume, "--snapshot", src.S1Name, "--target", tb.volume,
+		"--master", env.h.masterAddr, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--request-id", "kz-"+kind+"-"+tb.volume)
 	d, refusal := headSzStartVolume(t, env, tb, bytes, "--nvme-subsysnqn", r.NQN)
 	if d == nil {
 		rep.step(t, 3, tb.volume, false, kind+" target refused: "+refusal)
@@ -318,10 +317,9 @@ func kzTarget(t *testing.T, env *handoffEnv, rep *kzReport, src kzVolume, kind s
 		kind, r.Reads, r.ReadsEqual, r.ReadsZero, r.Before.AbsentChunks, r.After.AbsentChunks, waited,
 		r.After.Hydration.Fetches-r.Before.Hydration.Fetches))
 
-	// (3) contents equal + first snapshot without a full scan
-	if kind == "restore" {
-		env.h.command(t, "ops", "chunk", "restore", "--volume", tb.volume, "--status-addr", tb.status)
-	}
+	// (3) contents equal + first snapshot without a full scan (a restore
+	// target hydrates in the background; the reads below wait for any chunk
+	// still absent)
 	if device {
 		r.Identity, r.FilesEqual = kzDeviceVerify(t, tb, r.NQN, src, run)
 	} else {

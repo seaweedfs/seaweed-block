@@ -37,7 +37,7 @@ const (
 // deleteSnapshot deletes vol's snapshot name and checks the answer names it.
 func (env *handoffEnv) deleteSnapshot(t *testing.T, vol, name string) {
 	t.Helper()
-	out, _ := env.h.command(t, "ops", "chunk", "snapshot-delete", "--volume", vol, "--name", name,
+	out, _ := env.h.command(t, "ops", "chunk", "snapshot-delete", "--master", env.h.masterAddr, "--volume", vol, "--name", name,
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	var body struct {
 		VolumeID string `json:"volumeID"`
@@ -67,7 +67,7 @@ func (env *handoffEnv) requireSnapshotNames(t *testing.T, vol string, names ...s
 func (env *handoffEnv) restoreChecked(t *testing.T, snap, target string, img map[uint64][]byte, later ...map[uint64][]byte) {
 	t.Helper()
 	env.restoreInto(t, "v1", snap, target)
-	env.waitIndependent(t, target)
+	env.waitHydrated(t, target)
 	env.requireImage(t, "n-"+target, img, later...)
 }
 
@@ -232,7 +232,7 @@ func (env *handoffEnv) gc(t *testing.T, apply bool) ([]gcObject, int) {
 // makes eligible for collection: the chunk bytes no other holder references.
 func (env *handoffEnv) exclusiveBytes(t *testing.T, vol, name string) uint64 {
 	t.Helper()
-	out, _ := env.h.command(t, "ops", "chunk", "usage", "--volume", vol,
+	out, _ := env.h.command(t, "ops", "chunk", "usage", "--master", env.h.masterAddr, "--volume", vol,
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	var u struct {
 		Snapshots []struct {

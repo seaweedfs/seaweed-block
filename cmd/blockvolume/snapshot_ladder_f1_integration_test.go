@@ -266,15 +266,13 @@ func f1StartSources(t *testing.T, env *handoffEnv, n int) []f1Volume {
 }
 
 // f1Restore restores snapshot snap of src into target (a new volume on the
-// same server) and drives the restore; the target's blockvolume is stopped
-// once verified (f1RunRound), so restores do not pile up processes.
+// same server), which hydrates in the background; the target's blockvolume
+// is stopped once verified (f1RunRound), so restores do not pile up processes.
 func f1Restore(t *testing.T, env *handoffEnv, src, snap, target string) *daemon {
 	t.Helper()
-	b := env.hosts[target]
-	env.h.command(t, "ops", "chunk", "restore", "--source", src, "--snapshot", snap, "--target", target,
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", src, "--snapshot", snap, "--target", target,
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	d := f1Up(t, env, target)
-	env.h.command(t, "ops", "chunk", "restore", "--volume", target, "--status-addr", b.status)
 	return d
 }
 
