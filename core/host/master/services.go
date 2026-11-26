@@ -70,6 +70,19 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	if stores.Deletions.Reserved(spec.VolumeID) {
 		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s is being deleted or was deleted; its id is never reused", spec.VolumeID)
 	}
+	// One replicated factor per cluster: the controller validates every
+	// replicated volume it decides against the master's one slot count and
+	// refuses the whole decision when one differs, so a volume of another
+	// replication factor would stop every replicated volume's assignment and
+	// failover. Single-replica volumes never reach that check.
+	// A replicated lifecycle volume is bound, minted and promoted only by the
+	// lifecycle product loop: with it off the volume never gets a primary.
+	if spec.ReplicationFactor > 1 && !s.host.cfg.LifecycleProductLoop {
+		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s has replication factor %d but --lifecycle-product-loop-interval is 0 (off): a replicated volume is bound and promoted only by that loop; set --lifecycle-product-loop-interval (for example 100ms)", spec.VolumeID, spec.ReplicationFactor)
+	}
+	if c := s.host.ctrl; c != nil && spec.ReplicationFactor > 1 && spec.ReplicationFactor != c.ExpectedSlotsPerVolume() {
+		return nil, status.Errorf(codes.FailedPrecondition, "create volume: %s has replication factor %d, but this master decides replicated volumes of %d replicas (--expected-slots-per-volume); one replicated factor per cluster", spec.VolumeID, spec.ReplicationFactor, c.ExpectedSlotsPerVolume())
+	}
 	// A retry may carry a different restore tuple. The target's durable
 	// binding decides that conflict before looking up the caller's new source
 	// snapshot, which might itself be absent.
