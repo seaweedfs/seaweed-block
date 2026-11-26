@@ -65,6 +65,8 @@ log "delete CSI components"
 kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-node.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-csi-node.log"
 kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-controller.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-csi-controller.log"
 kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-csidriver.log"
+kubectl delete -f "$ROOT/deploy/k8s/alpha/failback-executor.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-failback-executor.log"
+kubectl delete -f "$ROOT/charts/seaweed-block/crds/swblockreplicafailbacks.block.seaweedfs.com.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-failback-crd.log"
 kubectl delete -f "$ROOT/deploy/k8s/alpha/rbac.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-rbac.log"
 
 log "delete alpha StorageClass"

@@ -583,6 +583,10 @@ var (
 	errChunkLayerClosed       = errors.New("storage: chunk layer closed")
 	errChunkBaseInstalling    = errors.New("storage: chunk BASE install in progress")
 	errChunkRemoteUnavailable = errors.New("storage: chunk remote unavailable")
+	// errChunkContentMismatch: a chunk read from the remote does not hash
+	// (or size) to the HEAD ref that names it. Its bytes are never served
+	// or installed.
+	errChunkContentMismatch = errors.New("storage: chunk content does not match HEAD")
 	// errChunkLSNBehind: this host's log has not reached the HEAD's
 	// remote_lsn, so a cut would move remote_lsn backwards (B9 W2 appendix;
 	// LSN continuity across hosts is W4b's).

@@ -2,6 +2,7 @@ package authority
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
@@ -39,8 +40,19 @@ type FailbackAuthorityRuntime struct {
 	// Gate is the promotion gate's decision for this planned move: the
 	// target's probed evidence, or why the move is refused. A failback is a
 	// primary change: without a gate it publishes nothing.
-	Gate func(volumeID, targetReplicaID string) (adapter.PrimaryEvidence, error)
+	// It decides on current, the line the request was checked against (the
+	// expected line), never on a line read later.
+	Gate func(volumeID, targetReplicaID string, current AuthorityBasis) (adapter.PrimaryEvidence, error)
+	// TargetEndpoint is the master's own record of the target replica's data
+	// and control addresses (its heartbeat, else its placement). The line is
+	// published at the addresses the master knows, never the caller's: a
+	// request naming other addresses, or a target with no record, is refused.
+	TargetEndpoint func(volumeID, targetReplicaID string) (dataAddr, ctrlAddr string, ok bool)
 }
+
+// ErrFailbackTargetEndpoint: the request's target addresses are not the
+// master's record of that replica (or it has none).
+var ErrFailbackTargetEndpoint = errors.New("authority failback runtime: target addresses are not the master's record of the replica")
 
 func (r FailbackAuthorityRuntime) ExecuteFailback(ctx context.Context, req FailbackRuntimeRequest) (FailbackRuntimeResult, error) {
 	if err := validateFailbackRuntimeRequest(req); err != nil {
@@ -68,7 +80,16 @@ func (r FailbackAuthorityRuntime) ExecuteFailback(ctx context.Context, req Failb
 	if r.Gate == nil {
 		return FailbackRuntimeResult{}, fmt.Errorf("authority failback runtime: %w (no promotion gate)", ErrReassignWithoutKind)
 	}
-	evidence, err := r.Gate(req.VolumeID, req.ReplicaID)
+	if r.TargetEndpoint == nil {
+		return FailbackRuntimeResult{}, fmt.Errorf("%w: no endpoint record is configured", ErrFailbackTargetEndpoint)
+	}
+	if data, ctrl, ok := r.TargetEndpoint(req.VolumeID, req.ReplicaID); !ok {
+		return FailbackRuntimeResult{}, fmt.Errorf("%w: no record of %s", ErrFailbackTargetEndpoint, req.ReplicaID)
+	} else if data != req.TargetDataAddr || ctrl != req.TargetCtrlAddr {
+		return FailbackRuntimeResult{}, fmt.Errorf("%w: %s is at data=%s ctrl=%s, the request names data=%s ctrl=%s",
+			ErrFailbackTargetEndpoint, req.ReplicaID, data, ctrl, req.TargetDataAddr, req.TargetCtrlAddr)
+	}
+	evidence, err := r.Gate(req.VolumeID, req.ReplicaID, before)
 	if err != nil {
 		return FailbackRuntimeResult{}, fmt.Errorf("authority failback runtime: %w", err)
 	}
@@ -79,6 +100,9 @@ func (r FailbackAuthorityRuntime) ExecuteFailback(ctx context.Context, req Failb
 		CtrlAddr:  req.TargetCtrlAddr,
 		Intent:    IntentReassign,
 		Evidence:  evidence,
+		// Conditional on the expected line at the mint, not only at the
+		// check above: a move that landed in between refuses this one.
+		ExpectCurrent: &ExpectedLine{ReplicaID: req.ExpectedCurrentReplicaID, Epoch: req.ExpectedCurrentEpoch},
 	}); err != nil {
 		return FailbackRuntimeResult{}, err
 	}

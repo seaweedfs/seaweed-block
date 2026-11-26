@@ -1,6 +1,7 @@
 package master
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -248,5 +249,41 @@ func recordFirstReady(t *testing.T, h *Host, volumeID string) {
 	h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID))
 	if err := h.attest.noteFirstReady(volumeID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The operator's failover runs through the same first check (the operator
+// gate, plannedMoveEvidenceAt): on a creating RF2 volume whose primary is
+// reachable, a planned move would otherwise be allowed (its target is in
+// every acknowledgement set), so without the check the line would move.
+// It is refused, and the line stays.
+func TestOperatorFailoverOfACreatingVolumeIsRefused(t *testing.T) {
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 2})
+	defer closeTestMaster(t, h)
+	h.SetPromotionEvidenceProvider(staticPromotionProbe{result: PromotionProbeResult{
+		AckProfile:   "sync_quorum",
+		CurrentKnown: true,
+		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: true},
+		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 1}},
+	}})
+	seedRF2Placement(t, h)
+	ingestRF2Observation(t, h, true, true)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	line := waitAuthorityLine(t, h.Publisher(), "vol-rf2")
+	if h.inCreationPhase("vol-rf2", line, nil) == "" {
+		t.Fatal("fixture: the volume is not creating")
+	}
+	_, err := h.FailbackAuthorityRuntime().ExecuteFailback(t.Context(), authority.FailbackRuntimeRequest{
+		VolumeID: "vol-rf2", ReplicaID: "r2", TargetDataAddr: "127.0.0.1:19201", TargetCtrlAddr: "127.0.0.1:19202",
+		ExpectedCurrentReplicaID: line.ReplicaID, ExpectedCurrentEpoch: line.Epoch,
+		AckEligible: true, FrontendFencedBeforeFailback: true, DurableFrontierCovered: true, NoCrossVolumeIdentityChange: true,
+	})
+	if !errors.Is(err, ErrMoveWhileCreating) {
+		t.Fatalf("operator failover of a creating volume: %v; want ErrMoveWhileCreating", err)
+	}
+	if after, _ := h.Publisher().VolumeAuthorityLine("vol-rf2"); after != line {
+		t.Fatalf("line=%+v; want %+v unchanged", after, line)
 	}
 }

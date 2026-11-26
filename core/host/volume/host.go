@@ -30,6 +30,11 @@ import (
 type Config struct {
 	// MasterAddr is the gRPC address of the block master daemon.
 	MasterAddr string
+	// LinesNameTheirProcess: the master stamps every primary line with the
+	// process it was issued for, so a line that names no process is not this
+	// process's either and is not adopted until re-issued. Off, a line that
+	// names none is adopted (fixtures that build lines by hand).
+	LinesNameTheirProcess bool
 	// MasterTLS is the mutual-TLS dial option of the master link
 	// (link.ClientCredentials); nil dials plaintext (development mode).
 	MasterTLS grpc.DialOption
@@ -880,7 +885,9 @@ func (h *Host) storeAttestation() *control.StoreAttestation {
 	return att
 }
 
-// newIncarnation returns a random process incarnation id.
+// newIncarnation returns a random process incarnation id. The master compares
+// incarnations only for equality (a restarted process), never for order, so
+// the clock fallback when the random source fails is enough.
 func newIncarnation() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -1088,6 +1095,18 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		}
 		h.log.Printf("blockvolume: volume %s authority is now %s@%d (not this replica %s); recording supersede, not applying to adapter",
 			h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
+		return
+	}
+
+	// A line issued for another process of this replica is the dead
+	// process's: its sessions (endpoint version, session id) are the ones
+	// each replica still holds, and a session this process opened on it
+	// could equal one of them. Nothing is adopted or recorded (no
+	// assignment, watchdog, replica set or role) until the master re-issues
+	// the line for this process (a new endpoint version).
+	if inc := fact.GetLineIncarnation(); inc != h.incarnation && (inc != "" || h.cfg.LinesNameTheirProcess) {
+		h.log.Printf("blockvolume: volume %s line epoch=%d EV=%d was issued for process %s, this is %s: NOT adopting until it is re-issued",
+			h.cfg.VolumeID, fact.Epoch, fact.EndpointVersion, inc, h.incarnation)
 		return
 	}
 

@@ -292,6 +292,15 @@ func New(cfg Config) (*Host, error) {
 		Sink:      sink,
 		Reader:    boot.Publisher,
 	})
+	// An ask built outside the controller (a heal, a planned or workspace
+	// move, an operator's request) is issued for the process its target
+	// reports now.
+	boot.Publisher.SetIncarnationSource(func(volumeID, replicaID, dataAddr, ctrlAddr string) string {
+		if f, ok := obs.Store().SlotFactAt(volumeID, replicaID, dataAddr, ctrlAddr); ok {
+			return f.Incarnation
+		}
+		return ""
+	})
 
 	lifecycleStores, err := openLifecycleStores(cfg.LifecycleStoreDir)
 	if err != nil {
@@ -453,7 +462,26 @@ func (h *Host) Publisher() *authority.Publisher {
 // the live Publisher. Callers still need an explicit policy gate before using
 // it; constructing the runtime does not execute failback.
 func (h *Host) FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime {
-	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher(), Gate: h.plannedMoveEvidence}
+	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher(), Gate: h.plannedMoveEvidenceAt, TargetEndpoint: h.replicaEndpoint}
+}
+
+// replicaEndpoint is the master's own record of a replica's addresses: its
+// fresh heartbeat slot (what the automatic path publishes), else its
+// placement slot when that names both.
+func (h *Host) replicaEndpoint(volumeID, replicaID string) (string, string, bool) {
+	if s, ok := h.freshCurrentSlot(volumeID, replicaID); ok && s.DataAddr != "" && s.CtrlAddr != "" {
+		return s.DataAddr, s.CtrlAddr, true
+	}
+	if h.lifecycle != nil {
+		if p, ok := h.lifecycle.Placements.GetPlacement(volumeID); ok {
+			for _, s := range p.Slots {
+				if s.ReplicaID == replicaID && s.DataAddr != "" && s.CtrlAddr != "" {
+					return s.DataAddr, s.CtrlAddr, true
+				}
+			}
+		}
+	}
+	return "", "", false
 }
 
 // Controller exposes the controller for tests.
