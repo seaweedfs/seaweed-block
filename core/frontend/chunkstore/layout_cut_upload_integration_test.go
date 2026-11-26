@@ -107,8 +107,9 @@ func TestIntegration_CutUploadLeavesNoEntryOrACompleteOne(t *testing.T) {
 	var absent, complete int
 	for round := 0; round < rounds; round++ {
 		seed := int64(round + 1)
-		target := pick.Intn(4)                                  // the upload to cut
-		delay := time.Duration(pick.Intn(40)) * time.Millisecond // into that upload
+		// the upload to cut, and how far into it
+		target := pick.Intn(4)
+		delay := time.Duration(pick.Intn(40)) * time.Millisecond
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestIntegration_CutUploadHelper$", "-test.v")
 		cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%s|%s|%s|%d|child-%d", cutHelperEnv, c.filerGRPC, root, id, seed, round))
 		stdout, err := cmd.StdoutPipe()
