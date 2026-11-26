@@ -31,6 +31,12 @@ type attestedStores struct {
 	// meanwhile is not waited for); it is cleared, for good, the first time
 	// every current replica has a recorded store.
 	Initial []string `json:"initial,omitempty"`
+	// AwaitingFirstReady: every initial store is attested, but the volume's
+	// primary has not yet answered ready at its first line (first Healthy).
+	// Set in the same write that clears Initial, cleared for good by the
+	// first ready answer: creation ends there. A record written before this
+	// field existed has none, so an established volume is never reopened.
+	AwaitingFirstReady bool `json:"awaiting_first_ready,omitempty"`
 }
 
 // storeAttestations is the master's record of which store each replica
@@ -157,6 +163,7 @@ func (s *storeAttestations) awaited(volumeID string, current []string) (waiting,
 		vols[k] = x
 	}
 	v.Initial = nil
+	v.AwaitingFirstReady = true // creation ends at the primary's first ready answer
 	vols[volumeID] = v
 	if err := s.persist(vols); err != nil {
 		// Not cleared: the volume keeps answering from its stores (nothing
@@ -166,6 +173,38 @@ func (s *storeAttestations) awaited(volumeID string, current []string) (waiting,
 	s.vols = vols
 	s.notifyLocked(volumeID)
 	return 0, len(current)
+}
+
+// awaitingFirstReady: the volume's stores are all attested and its primary
+// has not yet answered ready at its first line.
+func (s *storeAttestations) awaitingFirstReady(volumeID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, had := s.vols[volumeID]
+	return had && v.AwaitingFirstReady
+}
+
+// noteFirstReady records, durably and for good, that the volume's primary
+// answered ready at its first line: its creation is complete.
+func (s *storeAttestations) noteFirstReady(volumeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, had := s.vols[volumeID]
+	if !had || !v.AwaitingFirstReady {
+		return nil
+	}
+	vols := make(map[string]attestedStores, len(s.vols))
+	for k, x := range s.vols {
+		vols[k] = x
+	}
+	v.AwaitingFirstReady = false
+	vols[volumeID] = v
+	if err := s.persist(vols); err != nil {
+		return err
+	}
+	s.vols = vols
+	s.notifyLocked(volumeID)
+	return nil
 }
 
 // record merges att into the volume's record, in one write: each replica it
@@ -200,7 +239,8 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 			next.Stores[id] = sid
 		}
 	}
-	next.Initial = cur.Initial // cleared only by awaited
+	next.Initial = cur.Initial                       // cleared only by awaited
+	next.AwaitingFirstReady = cur.AwaitingFirstReady // cleared only by noteFirstReady
 	if had && sameAttestation(cur, next) {
 		return nil
 	}
@@ -218,7 +258,7 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 }
 
 func sameAttestation(a, b attestedStores) bool {
-	if a.Primary != b.Primary || a.Epoch != b.Epoch || len(a.Stores) != len(b.Stores) || len(a.Initial) != len(b.Initial) {
+	if a.Primary != b.Primary || a.Epoch != b.Epoch || len(a.Stores) != len(b.Stores) || len(a.Initial) != len(b.Initial) || a.AwaitingFirstReady != b.AwaitingFirstReady {
 		return false
 	}
 	for k, v := range a.Stores {

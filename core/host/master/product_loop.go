@@ -1104,8 +1104,10 @@ func (h *Host) freshCurrentSlot(volumeID, replicaID string) (authority.ReplicaCa
 // replacement entry (both promotion gates, the operator's move and planned
 // move, the rebalance through the gate) calls first: it returns why the
 // volume is creating, or "" once it is not. Two sources, in order:
-//   - the master's own durable record still awaits a replica store (every
-//     initial store attested clears it, durably; no other state);
+//   - the master's own durable record: it still awaits a replica store, or
+//     every store is attested but the primary has not yet answered ready at
+//     its first line (its first ready answer ends creation, recorded durably
+//     and for good; no other state);
 //   - the current primary's own answer, when one was read, says its
 //     assignment at this line's epoch still awaits the stores (the master's
 //     wait may be over before the re-sent assignment arrives). The answer
@@ -1115,11 +1117,44 @@ func (h *Host) inCreationPhase(volumeID string, current authority.AuthorityBasis
 		if waiting, _ := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID)); waiting > 0 {
 			return "the master's record awaits replica stores"
 		}
+		if h.attest.awaitingFirstReady(volumeID) {
+			if !h.firstReadyNow(volumeID, current, answer) {
+				return "the primary has not yet answered ready at its first line"
+			}
+			if err := h.attest.noteFirstReady(volumeID); err != nil {
+				return "the first ready answer could not be recorded: " + err.Error()
+			}
+			h.log.Printf("blockmaster: volume=%s creation complete: primary %s answered ready at epoch %d", volumeID, current.ReplicaID, current.Epoch)
+		}
 	}
 	if answer != nil && answer.CurrentKnown && current.Epoch != 0 && answer.Current.AwaitingReplicaStoresEpoch == current.Epoch {
 		return "the primary's answer awaits replica stores"
 	}
 	return ""
+}
+
+// firstReadyNow: the line's own primary answers ready now (from the answer
+// given, or a round of the primary alone). A primary that awaits the stores,
+// or one that does not answer, is not ready.
+func (h *Host) firstReadyNow(volumeID string, current authority.AuthorityBasis, answer *PromotionProbeResult) bool {
+	if !current.Assigned || current.ReplicaID == "" {
+		return false
+	}
+	res := answer
+	if res == nil {
+		h.promotionMu.RLock()
+		prober := h.promotionProber
+		h.promotionMu.RUnlock()
+		if prober == nil {
+			return false
+		}
+		r, err := prober.ProbePromotionCandidates(volumeID, current, nil)
+		if err != nil {
+			return false
+		}
+		res = &r
+	}
+	return res.CurrentKnown && res.Current.ReplicaID == current.ReplicaID && res.Current.Ready && res.Current.AwaitingReplicaStoresEpoch == 0
 }
 
 // answerOf is the probe's answer, or nil when the probe gave none.
