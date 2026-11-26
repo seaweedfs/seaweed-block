@@ -6,12 +6,25 @@ import (
 )
 
 // requireProductLoop refuses a start whose cluster spec holds a replicated
-// volume (replication factor above 1) while the lifecycle product loop is
-// off. On the cluster-spec path that loop alone binds a replicated volume's
-// placement, mints its line and runs its promotion gate, so with the loop
-// off the volume never gets a line. A static --topology (whose observation
-// controller mints) and single-replica volumes are untouched.
-func requireProductLoop(interval time.Duration, spec clusterSpecImport) error {
+// volume (replication factor above 1) that the master could never decide:
+//   - one whose replication factor differs from --expected-slots-per-volume:
+//     the controller validates every replicated volume against that one
+//     count and refuses the whole decision when one differs, so it would
+//     stop every replicated volume's assignment and failover;
+//   - any, while the lifecycle product loop is off: on the cluster-spec path
+//     that loop alone binds a replicated volume's placement, mints its line
+//     and runs its promotion gate, so with the loop off it never gets a line.
+//
+// A static --topology (whose observation controller mints) and
+// single-replica volumes are untouched.
+func requireProductLoop(interval time.Duration, expectedSlots int, spec clusterSpecImport) error {
+	for _, v := range spec.Volumes {
+		if v.ReplicationFactor > 1 && v.ReplicationFactor != expectedSlots {
+			return fmt.Errorf("cluster spec volume %s has replication factor %d but --expected-slots-per-volume is %d: "+
+				"the master decides replicated volumes of one slot count only (one replicated factor per cluster)",
+				v.VolumeID, v.ReplicationFactor, expectedSlots)
+		}
+	}
 	if interval > 0 {
 		return nil
 	}

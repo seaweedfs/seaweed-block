@@ -79,18 +79,35 @@ func TestTheProductLoopGuardPassesWhatItShould(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if err := requireProductLoop(c.interval, spec); err != nil {
+		if err := requireProductLoop(c.interval, c.rf, spec); err != nil {
 			t.Fatalf("%s: refused: %v", name, err)
 		}
 	}
-	if err := requireProductLoop(0, clusterSpecImport{}); err != nil {
+	if err := requireProductLoop(0, 3, clusterSpecImport{}); err != nil {
 		t.Fatalf("no cluster spec (static topology): refused: %v", err)
 	}
 	spec, err := loadClusterSpec(clusterSpecWithRF(t, 2))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := requireProductLoop(0, spec); err == nil {
+	if err := requireProductLoop(0, 2, spec); err == nil {
 		t.Fatal("rf2 with the loop off passed")
+	}
+}
+
+// A replicated cluster-spec volume whose replication factor differs from
+// --expected-slots-per-volume is refused at start, naming the volume and
+// both counts, also with the loop on; a matching one passes.
+func TestAClusterSpecVolumeOfAnotherReplicationFactorIsRefused(t *testing.T) {
+	spec, err := loadClusterSpec(clusterSpecWithRF(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = requireProductLoop(100*time.Millisecond, 3, spec)
+	if err == nil || !strings.Contains(err.Error(), "v1") || !strings.Contains(err.Error(), "--expected-slots-per-volume is 3") {
+		t.Fatalf("an RF2 volume on an expected-3 master: %v; want a refusal naming v1 and both counts", err)
+	}
+	if err := requireProductLoop(100*time.Millisecond, 2, spec); err != nil {
+		t.Fatalf("an RF2 volume on an expected-2 master: refused: %v", err)
 	}
 }

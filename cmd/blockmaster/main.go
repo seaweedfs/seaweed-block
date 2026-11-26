@@ -227,7 +227,7 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 2
 	}
-	if err := requireProductLoop(f.lifecycleLoop, clusterImport); err != nil {
+	if err := requireProductLoop(f.lifecycleLoop, f.expectedSlotsPerVol, clusterImport); err != nil {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 2
 	}
