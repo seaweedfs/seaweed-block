@@ -199,6 +199,13 @@ func TestRF1RefreshDecidedBeforeACrossHostMoveIsNotApplied(t *testing.T) {
 		t.Fatalf("moved line %+v; want r1@%d at the target", moved, grant.NewEpoch)
 	}
 
+	// A tick deciding now, with the move already in, decides no refresh for
+	// the source: the line it reads is not at the source's addresses (one
+	// read; never an expectation naming the moved line).
+	if refresh, again := h.restartedHolderRefresh(authority.AssignmentAsk{VolumeID: "rt", ReplicaID: "r1", DataAddr: src.DataAddr, CtrlAddr: src.CtrlAddr, Intent: authority.IntentBind}); again {
+		t.Fatalf("a refresh %+v (expecting %+v) was decided for the source after the move", refresh, refresh.ExpectCurrent)
+	}
+
 	// Then the stale refresh is submitted.
 	if err := h.ctrl.SubmitAssignmentAsk(stale); err != nil {
 		t.Fatal(err)
