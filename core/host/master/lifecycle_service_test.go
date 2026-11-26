@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -92,15 +93,16 @@ func TestRestoreCreateVolumePersistsRequestBeforeTargetAndHealsRetry(t *testing.
 	if _, ok := h.Lifecycle().Volumes.GetVolume("net-target"); ok {
 		t.Fatal("RF2 restore created a target record")
 	}
-	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "net-source", SizeBytes: 1 << 20, ReplicationFactor: 2}); err != nil {
+	h.cfg.LifecycleProductLoop = true // a replicated create needs the product loop
+	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "net-source", SizeBytes: 1 << 20, ReplicationFactor: 3}); err != nil {
 		t.Fatal(err)
 	}
 	unsafe = &control.CreateVolumeRequest{VolumeId: "from-net", SourceVolume: "net-source", SourceSnapshot: "daily", CreateRequestId: "restore-from-net"}
 	if _, err := svc.CreateVolume(context.Background(), unsafe); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("RF2 source restore: %v; want refusal", err)
+		t.Fatalf("RF3 source restore: %v; want refusal", err)
 	}
 	if _, ok := h.Lifecycle().Volumes.GetVolume("from-net"); ok {
-		t.Fatal("RF2 source restore created a target record")
+		t.Fatal("RF3 source restore created a target record")
 	}
 }
 
@@ -138,8 +140,11 @@ func TestCreateVolumeRetriesFilerCreateBeforeStoreReady(t *testing.T) {
 }
 
 func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
-	h := newTestMaster(t, t.TempDir())
+	// An RF2 volume is admitted by a master that decides RF2 volumes and
+	// runs its product loop (#646).
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 2})
 	defer closeTestMaster(t, h)
+	h.cfg.LifecycleProductLoop = true
 	svc := newServices(h)
 
 	resp, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
