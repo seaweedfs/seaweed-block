@@ -90,7 +90,7 @@ func validAuthorityFailbackRequest() FailbackRuntimeRequest {
 
 // allowGate stands in for the master's planned-move decision: the target is
 // allowed with the probe round's evidence.
-func allowGate(volumeID, target string) (adapter.PrimaryEvidence, error) {
+func allowGate(volumeID, target string, _ AuthorityBasis) (adapter.PrimaryEvidence, error) {
 	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1, Basis: adapter.BasisPlanned}, nil
 }
 
@@ -101,7 +101,7 @@ func TestFailbackAuthorityRuntime_PublishesNothingWithoutTheGatesEvidence(t *tes
 	for name, rt := range map[string]func(*Publisher) FailbackAuthorityRuntime{
 		"no gate": func(p *Publisher) FailbackAuthorityRuntime { return FailbackAuthorityRuntime{Publisher: p} },
 		"gate refuses": func(p *Publisher) FailbackAuthorityRuntime {
-			return FailbackAuthorityRuntime{Publisher: p, TargetEndpoint: r1Endpoint, Gate: func(string, string) (adapter.PrimaryEvidence, error) {
+			return FailbackAuthorityRuntime{Publisher: p, TargetEndpoint: r1Endpoint, Gate: func(string, string, AuthorityBasis) (adapter.PrimaryEvidence, error) {
 				return adapter.PrimaryEvidence{}, errors.New("not caught up")
 			}}
 		},
@@ -155,9 +155,9 @@ func TestFailbackAuthorityRuntime_RefusesAddressesThatAreNotTheMastersRecord(t *
 			req := validAuthorityFailbackRequest()
 			req.TargetDataAddr, req.TargetCtrlAddr = c.data, c.ctrl
 			gated := false
-			rt := FailbackAuthorityRuntime{Publisher: pub, TargetEndpoint: c.endpoint, Gate: func(v, r string) (adapter.PrimaryEvidence, error) {
+			rt := FailbackAuthorityRuntime{Publisher: pub, TargetEndpoint: c.endpoint, Gate: func(v, r string, cur AuthorityBasis) (adapter.PrimaryEvidence, error) {
 				gated = true
-				return allowGate(v, r)
+				return allowGate(v, r, cur)
 			}}
 			if _, err := rt.ExecuteFailback(context.Background(), req); !errors.Is(err, ErrFailbackTargetEndpoint) {
 				t.Fatalf("err=%v; want ErrFailbackTargetEndpoint", err)
@@ -169,5 +169,36 @@ func TestFailbackAuthorityRuntime_RefusesAddressesThatAreNotTheMastersRecord(t *
 				t.Fatalf("line=%+v; want %+v unchanged", after, before)
 			}
 		})
+	}
+}
+
+// The operator's expected line binds the move through publication, not only
+// at the first check: a move that lands after the check and before the mint
+// (here: inside the gate) makes the stale request publish nothing, and the
+// line is the intervening one. The gate decides on the expected line.
+func TestFailbackAuthorityRuntime_AnInterveningMoveRefusesTheStaleRequest(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil))
+	if err := pub.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r2", DataAddr: "data-r2", CtrlAddr: "ctrl-r2", Intent: IntentBind}); err != nil {
+		t.Fatal(err)
+	}
+	var decidedOn AuthorityBasis
+	rt := FailbackAuthorityRuntime{Publisher: pub, TargetEndpoint: r1Endpoint, Gate: func(v, r string, cur AuthorityBasis) (adapter.PrimaryEvidence, error) {
+		decidedOn = cur
+		// Another move lands now: r3 at epoch 2.
+		if err := pub.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r3", DataAddr: "data-r3", CtrlAddr: "ctrl-r3", Intent: IntentReassign,
+			Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1, Basis: adapter.BasisPlanned}}); err != nil {
+			t.Fatalf("intervening move: %v", err)
+		}
+		return allowGate(v, r, cur)
+	}}
+	_, err := rt.ExecuteFailback(context.Background(), validAuthorityFailbackRequest())
+	if !errors.Is(err, ErrExpectedLineMoved) {
+		t.Fatalf("err=%v; want ErrExpectedLineMoved", err)
+	}
+	if decidedOn.ReplicaID != "r2" || decidedOn.Epoch != 1 {
+		t.Fatalf("the gate decided on %+v; want the expected line r2@1", decidedOn)
+	}
+	if line, _ := pub.VolumeAuthorityLine("v1"); line.ReplicaID != "r3" || line.Epoch != 2 {
+		t.Fatalf("line=%+v; want the intervening r3@2, not the stale request's r1", line)
 	}
 }

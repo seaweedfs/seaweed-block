@@ -17,7 +17,7 @@ type AuthorityFailbackRuntime struct {
 // NewAuthorityFailbackRuntime adapts the authority failback runtime; gate is
 // the promotion gate's planned-move decision and endpoint the master's record
 // of the target's addresses (nil either: every failback refuses).
-func NewAuthorityFailbackRuntime(publisher *authority.Publisher, gate func(volumeID, targetReplicaID string) (adapter.PrimaryEvidence, error), endpoint func(volumeID, targetReplicaID string) (string, string, bool)) *AuthorityFailbackRuntime {
+func NewAuthorityFailbackRuntime(publisher *authority.Publisher, gate func(volumeID, targetReplicaID string, current authority.AuthorityBasis) (adapter.PrimaryEvidence, error), endpoint func(volumeID, targetReplicaID string) (string, string, bool)) *AuthorityFailbackRuntime {
 	return &AuthorityFailbackRuntime{
 		Runtime: authority.FailbackAuthorityRuntime{Publisher: publisher, Gate: gate, TargetEndpoint: endpoint},
 	}

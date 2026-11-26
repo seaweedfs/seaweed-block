@@ -147,7 +147,7 @@ func seededFailbackPublisher(t *testing.T) *authority.Publisher {
 }
 
 // opsAllowGate stands in for the master's planned-move decision (allowed).
-func opsAllowGate(string, string) (adapter.PrimaryEvidence, error) {
+func opsAllowGate(string, string, authority.AuthorityBasis) (adapter.PrimaryEvidence, error) {
 	return adapter.PrimaryEvidence{Kind: adapter.PrimaryKindPromotion, DurableLSN: 1, Basis: adapter.BasisPlanned}, nil
 }
 

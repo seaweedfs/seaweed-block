@@ -74,7 +74,22 @@ type AssignmentAsk struct {
 	// target (a bind is always a bootstrap); see adapter.PrimaryEvidence. It
 	// is a probe fact about the target, never an authority fact.
 	Evidence adapter.PrimaryEvidence
+	// ExpectCurrent, when set, makes a reassign conditional on the volume's
+	// line being exactly this replica at this epoch when the publisher mints
+	// (under its lock): an operator's move never lands on a line it did not
+	// see.
+	ExpectCurrent *ExpectedLine
 }
+
+// ExpectedLine is the line a conditional reassign was decided against.
+type ExpectedLine struct {
+	ReplicaID string
+	Epoch     uint64
+}
+
+// ErrExpectedLineMoved: a conditional reassign found the volume's line no
+// longer the one it was decided against; the publisher mints nothing.
+var ErrExpectedLineMoved = errors.New("authority: the volume's line moved since the move was decided")
 
 // ErrReassignWithoutKind: a primary change was asked without a kind (no
 // promotion-gate evidence, not a forced move); the publisher mints no line.

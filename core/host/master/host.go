@@ -453,7 +453,7 @@ func (h *Host) Publisher() *authority.Publisher {
 // the live Publisher. Callers still need an explicit policy gate before using
 // it; constructing the runtime does not execute failback.
 func (h *Host) FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime {
-	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher(), Gate: h.plannedMoveEvidence, TargetEndpoint: h.replicaEndpoint}
+	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher(), Gate: h.plannedMoveEvidenceAt, TargetEndpoint: h.replicaEndpoint}
 }
 
 // replicaEndpoint is the master's own record of a replica's addresses: its

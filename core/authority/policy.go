@@ -88,6 +88,11 @@ func (p *Publisher) LastAuthorityBasis(volumeID, replicaID string) (AuthorityBas
 func (p *Publisher) VolumeAuthorityLine(volumeID string) (AuthorityBasis, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.volumeLineLocked(volumeID)
+}
+
+// volumeLineLocked is VolumeAuthorityLine with p.mu held.
+func (p *Publisher) volumeLineLocked(volumeID string) (AuthorityBasis, bool) {
 	var best AuthorityBasis
 	any := false
 	for k, st := range p.state {

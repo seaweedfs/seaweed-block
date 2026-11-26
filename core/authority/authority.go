@@ -586,6 +586,12 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			return ErrReassignNotBound
 		}
+		if exp := ask.ExpectCurrent; exp != nil {
+			if cur, ok := p.volumeLineLocked(ask.VolumeID); !ok || cur.ReplicaID != exp.ReplicaID || cur.Epoch != exp.Epoch {
+				p.mu.Unlock()
+				return fmt.Errorf("%w: volume %s expected %s@%d, the line is %s@%d", ErrExpectedLineMoved, ask.VolumeID, exp.ReplicaID, exp.Epoch, cur.ReplicaID, cur.Epoch)
+			}
+		}
 		next = adapter.AssignmentInfo{
 			VolumeID:        ask.VolumeID,
 			ReplicaID:       ask.ReplicaID,
