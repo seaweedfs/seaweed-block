@@ -38,6 +38,11 @@ type attestedStores struct {
 	// (creation ended). A record written before this field existed has none,
 	// so an established volume is never reopened.
 	AwaitingFirstReady bool `json:"awaiting_first_ready,omitempty"`
+	// DeleteWithoutAck: a delete without the holder's acknowledgement was
+	// admitted while the volume was creating (written before the delete's
+	// reservation). Creation never ends after it, and the delete finishes
+	// only on proof that the volume is empty (Host.provenEmptyForDelete).
+	DeleteWithoutAck bool `json:"delete_without_ack,omitempty"`
 }
 
 // storeAttestations is the master's record of which store each replica
@@ -188,13 +193,17 @@ func (s *storeAttestations) awaitingFirstReady(volumeID string) bool {
 }
 
 // noteFirstReady records, durably and for good, that the volume's creation
-// ended. It reports whether creation has ended (false: it may not end now).
+// ended. It reports whether creation has ended: false when a delete without
+// the holder's acknowledgement was admitted first (it may not end now).
 func (s *storeAttestations) noteFirstReady(volumeID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, had := s.vols[volumeID]
 	if !had || !v.AwaitingFirstReady {
 		return true, nil
+	}
+	if v.DeleteWithoutAck {
+		return false, nil // the delete reads the record as it was admitted
 	}
 	vols := make(map[string]attestedStores, len(s.vols))
 	for k, x := range s.vols {
@@ -208,6 +217,43 @@ func (s *storeAttestations) noteFirstReady(volumeID string) (bool, error) {
 	s.vols = vols
 	s.notifyLocked(volumeID)
 	return true, nil
+}
+
+// markDeleteWithoutAck admits, durably, a delete without the holder's
+// acknowledgement of a volume whose creation has not ended, in the same
+// lock as noteFirstReady: creation cannot end between the check and the
+// mark. false: creation ended (or the volume never waited): the ordinary
+// delete applies.
+func (s *storeAttestations) markDeleteWithoutAck(volumeID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, had := s.vols[volumeID]
+	if !had || len(v.Initial) == 0 && !v.AwaitingFirstReady {
+		return false, nil
+	}
+	if v.DeleteWithoutAck {
+		return true, nil
+	}
+	vols := make(map[string]attestedStores, len(s.vols))
+	for k, x := range s.vols {
+		vols[k] = x
+	}
+	v.DeleteWithoutAck = true
+	vols[volumeID] = v
+	if err := s.persist(vols); err != nil {
+		return false, err
+	}
+	s.vols = vols
+	s.notifyLocked(volumeID)
+	return true, nil
+}
+
+// deleteWithoutAck: a delete without the holder's acknowledgement was
+// admitted for the volume.
+func (s *storeAttestations) deleteWithoutAck(volumeID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.vols[volumeID].DeleteWithoutAck
 }
 
 // record merges att into the volume's record, in one write: each replica it

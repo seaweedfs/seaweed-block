@@ -78,6 +78,9 @@ type switchProbe struct {
 	// awaitingEpoch: the current primary answers that it is not ready only
 	// because its assignment at this epoch awaits replica stores (0: no).
 	awaitingEpoch uint64
+	// tableValid: the survivors' answers are read on valid epoch tables
+	// (evidence a delete's proof counts); r3Silent: r3 gives no valid answer.
+	tableValid, r3Silent bool
 	// When hold is set, a probe signals entered and then blocks until
 	// release is closed.
 	hold    bool
@@ -108,13 +111,21 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 		p.mu.Lock()
 	}
 	defer p.mu.Unlock()
+	res := p.answerLocked()
+	for i := range res.Candidates {
+		res.Candidates[i].TableValid = p.tableValid && !(p.r3Silent && res.Candidates[i].ReplicaID == "r3")
+	}
+	return res, nil
+}
+
+func (p *switchProbe) answerLocked() PromotionProbeResult {
 	if p.empty {
 		return PromotionProbeResult{
 			AckProfile:   "sync-quorum",
 			CurrentKnown: !p.currentUnknown,
 			Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, AwaitingReplicaStoresEpoch: p.awaitingEpoch},
 			Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true}, {ReplicaID: "r3"}},
-		}, nil
+		}
 	}
 	return PromotionProbeResult{
 		AckProfile: "sync-quorum",
@@ -124,7 +135,7 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 		CurrentKnown: !p.currentUnknown,
 		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, AwaitingReplicaStoresEpoch: p.awaitingEpoch, DurableLSN: 70},
 		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}, {ReplicaID: "r3", DurableLSN: p.lagEnd()}},
-	}, nil
+	}
 }
 
 func (p *switchProbe) lagEnd() uint64 {
