@@ -135,6 +135,11 @@ type Host struct {
 	probeSlots          slotServers // replica -> server, for the round
 	cfg                 Config
 	attest              *storeAttestations // primaries' attested write-ACK stores
+	// startingLines: volume -> epoch of a primary line seen inside the
+	// creation wait whose primary has not answered frontend-ready yet
+	// (creationLineStarting). In memory: a master restart forgets it.
+	startingMu    sync.Mutex
+	startingLines map[string]uint64
 	healthMu            sync.Mutex // orders replica health events with their accepted heartbeats (#128 rule 6)
 	log                 *log.Logger
 	boot                *bootstrap.DurableAuthorityBootstrap

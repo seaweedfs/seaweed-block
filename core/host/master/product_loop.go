@@ -805,18 +805,26 @@ func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authorit
 	// belongs to the wait; the next round judges the established volume.
 	creating := h.inCreationWait(volumeID)
 	result, ok := h.probePromotionCandidates(volumeID, current, candidates)
+	starting := h.creationLineStarting(volumeID, current.Epoch, creating)
+	if ok && result.CurrentKnown && result.Current.Ready {
+		h.creationLineServed(volumeID, current.Epoch)
+	}
 	if !ok || (result.CurrentKnown && result.Current.Ready) {
 		return result, ok
 	}
 	after, afterOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
 	// A new volume's primary hides its frontend until the master has
-	// recorded every replica's store (the creation wait), so it answers "not
-	// primary-ready" by design. That answer is the wait, not a failure: the
-	// primary is judged ready for this decision, but only while its own fresh
-	// slot is acceptable. One that is unreachable, ineligible (an unhealthy
-	// heartbeat) or withdrawn is replaced as for an established volume.
-	if result.CurrentKnown && afterOK && after.Reachable && after.Eligible && !after.Withdrawn && creating {
-		h.log.Printf("blockmaster: promotion gate volume=%s current=%s not frontend-ready inside the creation wait; judged ready", volumeID, current.ReplicaID)
+	// recorded every replica's store (the creation wait), and opens it only
+	// once the re-sent assignment reaches it: it answers "not primary-ready"
+	// by design until then. On a line that began inside the wait, that answer
+	// is the wait, not a failure, until the primary has answered ready once
+	// on the line (the wait may have cleared a moment before it opened). It
+	// is judged ready for this decision, but only while its own fresh slot is
+	// acceptable: one that is unreachable, ineligible (an unhealthy
+	// heartbeat; the recovery watchdog reports one that never becomes ready)
+	// or withdrawn is replaced as for an established volume.
+	if result.CurrentKnown && afterOK && after.Reachable && after.Eligible && !after.Withdrawn && starting {
+		h.log.Printf("blockmaster: promotion gate volume=%s current=%s not frontend-ready on a line that began in the creation wait (still waiting: %t); judged ready", volumeID, current.ReplicaID, creating)
 		result.Current.Ready = true
 		return result, ok
 	}
@@ -1028,6 +1036,34 @@ func (h *Host) assignmentAskAlreadyCurrent(volumeID, replicaID, dataAddr, ctrlAd
 // fresh heartbeat slot read now: placeable by that report and inside its
 // boot grace (#128). No fresh slot, or an explicit unhealthy report
 // (unreachable, ineligible, withdrawn), never holds.
+// creationLineStarting reports whether volumeID's line at epoch is still
+// starting from its creation: the volume is in the creation wait now, or
+// was when this line was seen and its primary has not answered
+// frontend-ready on it since.
+func (h *Host) creationLineStarting(volumeID string, epoch uint64, creating bool) bool {
+	h.startingMu.Lock()
+	defer h.startingMu.Unlock()
+	if creating {
+		if h.startingLines == nil {
+			h.startingLines = map[string]uint64{}
+		}
+		h.startingLines[volumeID] = epoch
+		return true
+	}
+	e, ok := h.startingLines[volumeID]
+	return ok && e == epoch
+}
+
+// creationLineServed ends the start of volumeID's line at epoch: its
+// primary answered frontend-ready.
+func (h *Host) creationLineServed(volumeID string, epoch uint64) {
+	h.startingMu.Lock()
+	defer h.startingMu.Unlock()
+	if e, ok := h.startingLines[volumeID]; ok && e == epoch {
+		delete(h.startingLines, volumeID)
+	}
+}
+
 // inCreationWait reports whether the master still awaits the stores of a
 // new volume's replicas (its primary serves nothing until then).
 func (h *Host) inCreationWait(volumeID string) bool {

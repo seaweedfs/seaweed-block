@@ -151,3 +151,28 @@ func TestCreationWaitEmptyVolumeOutcomes(t *testing.T) {
 		})
 	}
 }
+
+// The NET bring-up schedule: the wait clears (every store recorded) a
+// moment before the primary opens its frontend (it opens only when the
+// re-sent assignment reaches it). On a line that began in the wait, its
+// not-ready answer is still the start, not a failure, until it has answered
+// ready once on the line; after that a not-ready primary is replaced as
+// usual. The primary's own slot reports ready for primary (its engine is
+// ready), so the boot grace does not hold here.
+func TestCreationLineIsExcusedUntilItsPrimaryAnsweredReadyOnce(t *testing.T) {
+	h := newBootGraceMasterCreating(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}})
+	defer closeTestMaster(t, h)
+	p := probeOf(t, h)
+	time.Sleep(250 * time.Millisecond) // past the boot grace
+	unsupportedTick(t, h, readySlot("r1-a"))
+	expectLineStaysR1(t, h, "inside the creation wait")
+	attestAllStores(t, h) // the wait clears
+	unsupportedTick(t, h, readySlot("r1-a"))
+	expectLineStaysR1(t, h, "the wait cleared and the primary has not opened its frontend yet")
+	p.setCurrentReady(true)
+	unsupportedTick(t, h, readySlot("r1-a"))
+	expectLineStaysR1(t, h, "the primary answered ready")
+	p.setCurrentReady(false)
+	unsupportedTick(t, h, readySlot("r1-a"))
+	expectFailoverToR2(t, h, "an established primary that served on its line, now not ready")
+}
