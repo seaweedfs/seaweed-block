@@ -101,6 +101,36 @@ func deleteLeaseHorizon(out string, code int) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, strings.TrimSuffix(fields[0], ":"))
 }
 
+// The CLI error body, rather than a substring in combined output, is the
+// authority for retry timing. Every refusal class stays distinguishable.
+func TestDeleteLeaseHorizonRequiresTypedRefusal(t *testing.T) {
+	const valid = `{"code":"not_admitted","message":"workspace delete: live until 2026-11-26T13:00:00.125Z: lease expiry plus clock-skew margin has not elapsed"}`
+	for _, tc := range []struct {
+		name, out string
+		code      int
+		ok        bool
+	}{
+		{"typed horizon", valid, 1, true},
+		{"successful exit cannot refuse", valid, 0, false},
+		{"usage failure", valid, 2, false},
+		{"plain stderr is not evidence", "not_admitted: live until 2026-11-26T13:00:00.125Z", 1, false},
+		{"dependent refusal", `{"code":"snapshot_has_dependents","message":"snapshot s1"}`, 1, false},
+		{"uncertain lease", `{"code":"not_admitted","message":"restart required"}`, 1, false},
+		{"missing time", `{"code":"not_admitted","message":"live until "}`, 1, false},
+		{"invalid time", `{"code":"not_admitted","message":"live until tomorrow: refused"}`, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			until, err := deleteLeaseHorizon(tc.out, tc.code)
+			if (err == nil) != tc.ok {
+				t.Fatalf("horizon %s error %v, want valid=%v", until, err, tc.ok)
+			}
+			if tc.ok && until.Format(time.RFC3339Nano) != "2026-11-26T13:00:00.125Z" {
+				t.Fatalf("wrong horizon %s", until)
+			}
+		})
+	}
+}
+
 // requireDeleteCompleted checks step 4's documented state:"deleted" result
 // (volume-lifecycle.md, "Delete a volume", step 4). Retries use the same
 // request id and must complete again; the CLI reports no replayed flag.
