@@ -45,7 +45,7 @@ func TestProcedureMasterKilledAfterMoveBeforeTargetStarts(t *testing.T) {
 		}
 	}
 	out, _ = env.h.command(t, env.chunkShow()...)
-	if got := mustU(sealedHeadLSN(out, e, g)); got != l {
+	if got := mustU(sealedLayoutHeadPosition(out, e, g)); got != l {
 		t.Fatalf("sealed HEAD LSN %d; want %d", got, l)
 	}
 	nw := env.start(t, "blockvolume-s2", "s2")

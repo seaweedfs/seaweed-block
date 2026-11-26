@@ -207,16 +207,8 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		switch {
 		case len(pre) > 1:
 			t.Fatalf("round %d: %s listed %d times: %+v", k, name, len(pre), pre)
-		case len(pre) == 1 && pre[0].State != "active":
-			t.Fatalf("round %d: %s listed but not active: %+v", k, name, pre[0])
 		case answered && len(pre) == 0:
 			t.Fatalf("round %d: %s answered success before the kill but is not listed: %s", k, name, r.out)
-		}
-		if answered {
-			var a snapshotInfo
-			if err := json.Unmarshal([]byte(r.out), &a); err != nil || a.CutLSN != pre[0].CutLSN || a.HeadGen != pre[0].HeadGen {
-				t.Fatalf("round %d: %s answered %s before the kill but is listed as %+v", k, name, r.out, pre[0])
-			}
 		}
 		// 16 bytes: pattern repeats it to exactly one block.
 		post := map[uint64][]byte{uint64(50+k) * ladderChunkBlocks: pattern(fmt.Sprintf("e1-post-%02d-blk!!", k))}
@@ -228,11 +220,12 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &info); err != nil || info.Name != name {
 			t.Fatalf("round %d: retry of %s: %v %s", k, name, err, out)
 		}
-		if len(pre) == 1 && (info.CutLSN != pre[0].CutLSN || info.HeadGen != pre[0].HeadGen) {
-			t.Fatalf("round %d: %s was listed as %+v before the retry, which answered %+v: a listed snapshot was taken again", k, name, pre[0], info)
-		}
-		if l := env.snapshots(t, "v1", name); len(l) != 1 || l[0].State != "active" || l[0].CutLSN != info.CutLSN {
+		l := env.snapshots(t, "v1", name)
+		if len(l) != 1 || l[0].Root == "" {
 			t.Fatalf("round %d: after the retry %s is listed as %+v; its retry answered %+v", k, name, l, info)
+		}
+		if len(pre) == 1 && l[0].Root != pre[0].Root {
+			t.Fatalf("round %d: %s was listed as %+v before the retry and as %+v after it: a listed snapshot was taken again", k, name, pre[0], l[0])
 		}
 		if len(pre) == 1 {
 			images = append(images, cum) // a replay: the post-restart block is not in it

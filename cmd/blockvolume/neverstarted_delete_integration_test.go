@@ -4,7 +4,6 @@ package main_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,11 +33,10 @@ func TestNeverAttachedRestoreTargetIsDeletable(t *testing.T) {
 
 	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC,
 		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v2-never-started")
-	var del struct{ Completed bool }
-	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
+	if code != 0 || !handoffDeleteCompleted(out) {
 		t.Fatalf("volume-delete of a never-attached target must complete; exit %d:\n%s\n%s", code, out, errOut)
 	}
-	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	shown := env.headOf(t, "v2")
 	if !strings.Contains(shown, `"state":"deleted"`) {
 		t.Fatalf("the deleted target's HEAD is not a deleted tombstone:\n%s", shown)
 	}
@@ -73,7 +71,7 @@ func TestNeverStartedDeleteFencesALateStart(t *testing.T) {
 	late := env.h.start(t, "blockvolume-v2-late", env.h.volume, env.volArgsFor(b)...)
 	err := late.wait(60 * time.Second)
 	served := late.has("durable: HEAD claim for volume=v2 done") || volumeFrontendReady(b.status, "v2")
-	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	shown := env.headOf(t, "v2")
 	t.Logf("late start after the delete: exit %v, served %v, HEAD %s", err, served, firstLine(shown))
 	if served || err == nil || strings.Contains(fmt.Sprint(err), "still running") || !strings.Contains(shown, `"state":"deleted"`) {
 		t.Fatalf("1.0.1: a start after the delete must exit without claiming or serving and leave the volume deleted; exit %v, served %v, HEAD:\n%s", err, served, shown)
@@ -118,7 +116,7 @@ func TestNeverStartedDeleteRacesAStart(t *testing.T) {
 		// claim) or its frontend became ready; adopting the assignment comes
 		// before the claim and is not serving.
 		served := d.has("durable: HEAD claim for volume="+v+" done") || volumeFrontendReady(b.status, v)
-		shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+		shown := env.headOf(t, v)
 		isDeleted := strings.Contains(shown, `"state":"deleted"`)
 		t.Logf("%s: delete exit %d, served %v, HEAD deleted %v: %s", v, r.code, served, isDeleted, firstLine(r.out))
 		switch {
@@ -253,8 +251,7 @@ func TestNeverStartedLineIsDeletableWithoutARevoke(t *testing.T) {
 		t.Helper()
 		before := env.workspaceShow(t, v)
 		out, code := env.deleteNoRevoke(context.Background(), v, request)
-		var del struct{ Completed bool }
-		completed := code == 0 && json.Unmarshal([]byte(firstLine(out)), &del) == nil && del.Completed
+		completed := code == 0 && handoffDeleteCompleted(out)
 		head, after := env.headOf(t, v), env.workspaceShow(t, v)
 		t.Logf("delete exit %d, completed %v, HEAD %s\nworkspace show before:\n%s\nafter:\n%s\ndelete output:\n%s", code, completed, head, before, after, out)
 		if !completed {

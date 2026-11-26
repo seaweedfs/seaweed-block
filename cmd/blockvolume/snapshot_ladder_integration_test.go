@@ -205,9 +205,17 @@ func (env *handoffEnv) snapshot(t *testing.T, hostID, vol, name string) snapshot
 	return info
 }
 
+// snapshotEntry is one entry of `sw-block ops chunk snapshots`: a published
+// snapshot, its root and the restore targets that depend on it.
+type snapshotEntry struct {
+	Name       string   `json:"name"`
+	Root       string   `json:"root"`
+	Dependents []string `json:"dependents"`
+}
+
 // listSnapshots lists vol's snapshots (with a name prefix when given) under
 // ctx, without failing the test.
-func (env *handoffEnv) listSnapshots(ctx context.Context, vol, prefix string) ([]snapshotInfo, error) {
+func (env *handoffEnv) listSnapshots(ctx context.Context, vol, prefix string) ([]snapshotEntry, error) {
 	args := []string{"ops", "chunk", "snapshots", "--master", env.h.masterAddr, "--volume", vol, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 	if prefix != "" {
 		args = append(args, "--prefix", prefix)
@@ -216,30 +224,26 @@ func (env *handoffEnv) listSnapshots(ctx context.Context, vol, prefix string) ([
 	if err != nil {
 		return nil, err
 	}
-	var body struct {
-		Snapshots []snapshotInfo `json:"snapshots"`
-	}
-	if code != 0 || json.Unmarshal([]byte(out), &body) != nil {
+	var list []snapshotEntry
+	if code != 0 || json.Unmarshal([]byte(out), &list) != nil {
 		return nil, fmt.Errorf("snapshots of %s: exit %d: %s %s", vol, code, out, errOut)
 	}
-	return body.Snapshots, nil
+	return list, nil
 }
 
 // snapshots lists vol's snapshots (with a name prefix when given).
-func (env *handoffEnv) snapshots(t *testing.T, vol, prefix string) []snapshotInfo {
+func (env *handoffEnv) snapshots(t *testing.T, vol, prefix string) []snapshotEntry {
 	t.Helper()
 	args := []string{"ops", "chunk", "snapshots", "--master", env.h.masterAddr, "--volume", vol, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 	if prefix != "" {
 		args = append(args, "--prefix", prefix)
 	}
 	out, _ := env.h.command(t, args...)
-	var body struct {
-		Snapshots []snapshotInfo `json:"snapshots"`
-	}
-	if err := json.Unmarshal([]byte(out), &body); err != nil {
+	var list []snapshotEntry
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
 		t.Fatalf("snapshots of %s: %v\n%s", vol, err, out)
 	}
-	return body.Snapshots
+	return list
 }
 
 // restoreAttached creates target from snapshot snap of src and starts its
@@ -258,15 +262,15 @@ func (env *handoffEnv) restoreAttached(t *testing.T, src, snap, target string) {
 }
 
 // TestSnapshotLadderB1SnapshotQuery: three snapshots with writes between
-// them. The list is exactly the committed snapshots, in order, each active,
-// with the point (cut LSN), HEAD generation and size (chunk count) its
-// creation answered; a prefix shows one. A snapshot being taken appears in
-// the list only committed, with the fields its creation answers, and stays;
-// the test fails as inconclusive unless at least one listing ran while the
-// snapshot was in flight and did not show it. A snapshot request that is refused
-// (a restore volume not yet independent) leaves no name in the list.
+// them. The list is exactly the published snapshots, in name order, each
+// with its own root; a prefix shows one. A snapshot being taken appears in
+// the list only once published, and then stays with the same root; the test
+// fails as inconclusive unless at least one listing ran while the snapshot
+// was in flight and did not show it. A snapshot of a restore target that is
+// not fully local is taken, and a restore from it is refused: it names the
+// source's chunks.
 func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
-	env := startLadderEnv(t, "v2")
+	env := startLadderEnv(t, "v2", "v3")
 	var made []snapshotInfo
 	for i, w := range []struct {
 		lba  uint64
@@ -277,23 +281,17 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	}
 	list := env.snapshots(t, "v1", "")
 	if len(list) != len(made) {
-		t.Fatalf("list has %d snapshots; want exactly the %d committed: %+v", len(list), len(made), list)
+		t.Fatalf("list has %d snapshots; want exactly the %d published: %+v", len(list), len(made), list)
 	}
-	wantChunks := []int{1, 2, 2}
+	roots := map[string]bool{}
 	for i, got := range list {
-		m := made[i]
-		if got.Name != m.Name || got.State != "active" || got.CutLSN != m.CutLSN || got.HeadGen != m.HeadGen || got.ChunkCount != m.ChunkCount {
-			t.Fatalf("list entry %d %+v; want %+v, active", i, got, m)
+		if got.Name != made[i].Name || got.Root == "" || roots[got.Root] {
+			t.Fatalf("list entry %d %+v; want %s with a root of its own (list %+v)", i, got, made[i].Name, list)
 		}
-		if got.ChunkCount != wantChunks[i] {
-			t.Fatalf("%s holds %d chunks; want %d", got.Name, got.ChunkCount, wantChunks[i])
-		}
-		if i > 0 && (got.CutLSN <= list[i-1].CutLSN || got.HeadGen <= list[i-1].HeadGen) {
-			t.Fatalf("list not in order of points: %+v after %+v", got, list[i-1])
-		}
+		roots[got.Root] = true
 	}
-	if one := env.snapshots(t, "v1", "s2"); len(one) != 1 || one[0].Name != "s2" || one[0].CutLSN != made[1].CutLSN {
-		t.Fatalf("show s2: %+v", one)
+	if one := env.snapshots(t, "v1", "s2"); len(one) != 1 || one[0].Name != "s2" || one[0].Root != list[1].Root {
+		t.Fatalf("show s2: %+v; want %+v", one, list[1])
 	}
 
 	// A snapshot being taken: listed only committed, and then it stays. The
@@ -324,7 +322,7 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 		done <- result{out, errOut, code, err}
 	}()
 	env.writeBlock(t, "s1", 4, pattern("ladder-b1-blk-E!"))
-	var observed []snapshotInfo
+	var observed []snapshotEntry
 	var r result
 	inFlightUnlisted := 0 // listings begun before s4 answered that did not show it
 	// The observation bound: every list probe runs within what is left of it,
@@ -345,7 +343,7 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 		if err != nil || time.Now().After(deadline) {
 			t.Fatalf("listing s4 within the observation bound: %v", err)
 		}
-		var s4 *snapshotInfo
+		var s4 *snapshotEntry
 		for _, e := range list {
 			e := e
 			s4 = &e
@@ -356,8 +354,8 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 		switch {
 		case s4 == nil && len(observed) > 0:
 			t.Fatal("s4 was listed, then disappeared")
-		case s4 != nil && (s4.State != "active" || s4.CutLSN <= made[2].CutLSN || s4.HeadGen <= made[2].HeadGen):
-			t.Fatalf("s4 listed before it was committed: %+v", *s4)
+		case s4 != nil && (s4.Root == "" || roots[s4.Root]):
+			t.Fatalf("s4 listed without a root of its own: %+v", *s4)
 		case s4 != nil:
 			observed = append(observed, *s4)
 		}
@@ -368,7 +366,7 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	if inFlightUnlisted == 0 {
 		t.Fatalf("inconclusive: no listing ran while s4 was in flight and unlisted (%d listings saw it committed)", len(observed))
 	}
-	t.Logf("s4: %d listings while in flight did not show it; %d showed it committed", inFlightUnlisted, len(observed))
+	t.Logf("s4: %d listings while in flight did not show it; %d showed it published", inFlightUnlisted, len(observed))
 	var created snapshotInfo
 	if err := json.Unmarshal([]byte(r.out), &created); err != nil || created.Name != "s4" {
 		t.Fatalf("snapshot s4 answer: %v\n%s", err, r.out)
@@ -377,20 +375,26 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	if len(final) != 1 {
 		t.Fatalf("s4 not listed after its snapshot returned: %+v", final)
 	}
-	for _, o := range append(observed, final[0]) {
-		if o.State != "active" || o.CutLSN != created.CutLSN || o.HeadGen != created.HeadGen || o.ChunkCount != created.ChunkCount {
-			t.Fatalf("s4 listed as %+v; its creation answered %+v", o, created)
+	for _, o := range observed {
+		if o.Root != final[0].Root {
+			t.Fatalf("s4 listed as %+v while in flight, then as %+v: a listed snapshot changed", o, final[0])
 		}
 	}
 
-	// A refused snapshot is not a snapshot.
+	// A snapshot of a restore target that is not fully local is taken, and
+	// names the source's chunks, so a restore from it is refused.
 	env.restoreAttached(t, "v1", "s1", "v2")
-	out, errOut, code := env.h.run(t, "ops", "chunk", "snapshot", "--volume", "v2", "--status-addr", env.hosts["n-v2"].status, "--name", "x")
-	if code == 0 || !strings.Contains(out+errOut, "restore_incomplete") {
-		t.Fatalf("snapshot of a restore volume not yet independent: exit %d, want restore_incomplete\n%s\n%s", code, out, errOut)
+	if st := kzReadStats(t, env.hosts["n-v2"]); st.AbsentChunks == 0 {
+		t.Fatalf("setup: v2 holds every chunk already; want a restore target not fully local")
 	}
-	if l := env.snapshots(t, "v2", ""); len(l) != 0 {
-		t.Fatalf("a refused snapshot left %+v in the list", l)
+	env.snapshot(t, "n-v2", "v2", "x")
+	if l := env.snapshots(t, "v2", ""); len(l) != 1 || l[0].Name != "x" {
+		t.Fatalf("v2's snapshot x is not listed: %+v", l)
+	}
+	out, errOut, code := env.h.run(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v2", "--snapshot", "x", "--target", "v3",
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	if code == 0 || !strings.Contains(out+errOut, "restore_source_not_own") {
+		t.Fatalf("restore from a restore target's snapshot: exit %d, want restore_source_not_own\n%s\n%s", code, out, errOut)
 	}
 }
 

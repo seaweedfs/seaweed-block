@@ -75,10 +75,10 @@ func (env *handoffEnv) requireSnapshotNames(t *testing.T, vol string, names ...s
 	list := env.snapshots(t, vol, "")
 	ok := len(list) == len(names)
 	for i := 0; ok && i < len(list); i++ {
-		ok = list[i].Name == names[i] && list[i].State == "active"
+		ok = list[i].Name == names[i]
 	}
 	if !ok {
-		t.Fatalf("snapshots of %s: %+v; want exactly %v, active", vol, list, names)
+		t.Fatalf("snapshots of %s: %+v; want exactly %v", vol, list, names)
 	}
 }
 
