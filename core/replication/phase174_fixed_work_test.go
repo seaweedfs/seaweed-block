@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -213,7 +214,14 @@ func TestPhase174FixedWorkPipeline(t *testing.T) {
 		t.Fatalf("%s must be 1 or 2", phase174SetEnv)
 	}
 	if os.Getenv(phase174RemoteReplicasEnv) != "" {
-		peerSessionIDCounter.Store(phase174RemoteSessionBase(set, run, writers))
+		base := phase174RemoteSessionBase(set, run, writers)
+		prev := newReplicaSessionIDs
+		newReplicaSessionIDs = func() *adapter.SessionIDs {
+			ids := &adapter.SessionIDs{}
+			ids.NextAfter(base)
+			return ids
+		}
+		t.Cleanup(func() { newReplicaSessionIDs = prev })
 	}
 
 	oldLogWriter := log.Writer()

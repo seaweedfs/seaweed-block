@@ -1,7 +1,7 @@
 # RF=1 workspace moves
 
 The opt-in master surface is `WorkspaceService` in `workspace.proto`. Enable it
-with `blockmaster --workspace-rpc --workspace-head-base-url <filer directory URL>`
+with `blockmaster --workspace-rpc --chunk-filer <filer gRPC address>`
 and a lifecycle store. Other volumes continue using the existing assignment
 protocol. Workspace operations require an existing RF=1 volume. The target node
 must be registered; explicit volumes use their prepared per-volume endpoints,

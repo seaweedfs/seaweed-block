@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
@@ -80,6 +81,10 @@ type RuntimeRecoveryStatus struct {
 // Lifecycle: borrowed LogicalStorage — Provider owns the engine;
 // ReplicationVolume must NEVER call store.Close() (BUG-005 discipline).
 // Executors created by newExec/newDualExec are owned and stopped here.
+// newReplicaSessionIDs starts a replica's session order (a test seam: a
+// run against long-lived remote replicas starts it above earlier runs).
+var newReplicaSessionIDs = func() *adapter.SessionIDs { return &adapter.SessionIDs{} }
+
 type ReplicationVolume struct {
 	volumeID    string
 	store       storage.LogicalStorage  // borrowed, NEVER closed by us
@@ -90,12 +95,15 @@ type ReplicationVolume struct {
 	// is in sync with this table; an entry's identity is (epoch, LSN).
 	epochs *transport.EpochTable
 
-	updateMu              sync.Mutex // serializes membership replacement with Close
-	mu                    sync.Mutex // protects membership, lineage, and lifecycle snapshots
-	peers                 map[string]*ReplicaPeer
+	updateMu sync.Mutex // serializes membership replacement with Close
+	mu       sync.Mutex // protects membership, lineage, and lifecycle snapshots
+	peers    map[string]*ReplicaPeer
+	// sessionIDs is each replica's session order, kept across its peers
+	// and executors: a peer re-added (a lineage change) continues it.
+	sessionIDs map[string]*adapter.SessionIDs
 	// requireAttest: peers count toward write ACKs only while their barrier
 	// store is the one the master recorded (RequireAttestedStores).
-	requireAttest bool
+	requireAttest         bool
 	executors             map[string]*transport.BlockExecutor
 	peerQueues            map[string]*peerWorkQueue
 	peerQueueDepth        int
@@ -184,6 +192,7 @@ func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *Replic
 		store:          store,
 		newExec:        transport.NewBlockExecutor,
 		peers:          make(map[string]*ReplicaPeer),
+		sessionIDs:     make(map[string]*adapter.SessionIDs),
 		executors:      make(map[string]*transport.BlockExecutor),
 		peerQueues:     make(map[string]*peerWorkQueue),
 		peerQueueDepth: defaultPeerWorkQueueDepth,
@@ -491,6 +500,12 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		} else {
 			executor = v.newExec(v.store, t.DataAddr)
 		}
+		ids, ok := v.sessionIDs[id]
+		if !ok {
+			ids = newReplicaSessionIDs()
+			v.sessionIDs[id] = ids
+		}
+		executor.UseSessionIDs(ids)
 		peer, err := NewReplicaPeer(t, executor)
 		if err != nil {
 			v.mu.Unlock()

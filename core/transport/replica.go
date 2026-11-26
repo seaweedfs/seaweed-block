@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -65,6 +66,11 @@ type ApplyHook interface {
 // WAL shipping, probe requests, and rebuild streams against a
 // replica-side LogicalStorage.
 type ReplicaListener struct {
+	// retainedBase: the last rebuild was refused because this store still
+	// holds an installed BASE (storage.ErrRebuildRetainedBase); cleared by
+	// a completed rebuild.
+	retainedBase atomic.Bool
+
 	store     storage.LogicalStorage
 	listener  net.Listener
 	stopCh    chan struct{}
@@ -492,6 +498,20 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						log.Printf("replica: live entry of new epoch %d at lsn %d, this store's next lsn is %d: refused", entry.Lineage.Epoch, entry.LSN, r.store.NextLSN())
 						return true
 					}
+					// Inside an epoch an entry is applied only at the position
+					// its LSN names, the next one: an entry above it (an LSN
+					// skipped) would be held at another position while the
+					// replica reports it does not hold it, and the missing LSN
+					// could never land below it. Refused and the connection
+					// closed; the primary catches up from the replica's
+					// barrier end. (A lower LSN is a stale re-ship, handled
+					// below.) This holds with the apply gate too: it checks
+					// each block's staleness, not the position, and no live
+					// entry lands while a recovery owns the store.
+					if entry.LSN > r.store.NextLSN() {
+						log.Printf("replica: live entry at lsn %d skips ahead of this store's next lsn %d (epoch %d): refused", entry.LSN, r.store.NextLSN(), entry.Lineage.Epoch)
+						return true
+					}
 					if err := r.epochs.Note(entry.Lineage.Epoch, entry.LSN); err != nil {
 						log.Printf("replica: epoch table lsn=%d epoch=%d: %v", entry.LSN, entry.Lineage.Epoch, err)
 						return true
@@ -576,6 +596,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// frontier is reconciled once, at MsgRebuildDone.
 				if err := beginInstall(lineage.EffectiveFrontierHint()); err != nil {
 					log.Printf("replica: begin rebuild base: %v", err)
+					r.noteRebuildRefusal(err)
 					return true
 				}
 				if err := r.epochs.ApplyUnder(recoveryToken, func() error { return install.WriteBase(lba, data) }); err != nil {
@@ -601,6 +622,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				// primary never sees an AchievedLSN from a failed call.
 				if err := beginInstall(lineage.EffectiveFrontierHint()); err != nil {
 					log.Printf("replica: begin rebuild base at done: %v", err)
+					r.noteRebuildRefusal(err)
 					return true
 				}
 				if err := r.epochs.ApplyUnder(recoveryToken, install.MarkBaseComplete); err != nil {
@@ -631,6 +653,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				}
 				// A completed full BASE supplies the covered starting image.
 				r.markPrefixEligibility(lineage, true)
+				r.retainedBase.Store(false) // healed: no longer refused
 				// Echo the request's full lineage in the rebuild-done ack
 				// so primary-side validators can consume it.
 				resp := EncodeBarrierResp(BarrierResponse{
@@ -1107,4 +1130,26 @@ func (r *ReplicaListener) closeSettledSessions() {
 		}
 	}
 	r.retiringSessions = nil
+}
+
+// RebuildRetainedBase is the typed reason this replica cannot heal: its
+// last rebuild was refused because the store still holds an installed BASE
+// (a replica removed and added back with its older store, a v1 limit).
+// "" otherwise.
+func (r *ReplicaListener) RebuildRetainedBase() string {
+	if r != nil && r.retainedBase.Load() {
+		return RebuildRetainedBaseReason
+	}
+	return ""
+}
+
+// RebuildRetainedBaseReason is the typed reason RebuildRetainedBase reports.
+const RebuildRetainedBaseReason = "rebuild_retained_base"
+
+func (r *ReplicaListener) noteRebuildRefusal(err error) {
+	if errors.Is(err, storage.ErrRebuildRetainedBase) {
+		if !r.retainedBase.Swap(true) {
+			log.Printf("replica: %s: %v", RebuildRetainedBaseReason, storage.ErrRebuildRetainedBase)
+		}
+	}
 }

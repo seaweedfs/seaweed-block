@@ -185,8 +185,9 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 	d := v.pub.current()
 	switch d.BaseState {
 	case BaseInstalled:
-		// installed -> installing is not an 8.5 edge: retire first.
-		return nil, fmt.Errorf("%w: begin while installed (retire first)", errDescriptorTransition)
+		// installed -> installing is not an 8.5 edge: retire first. A
+		// replica re-added with its older store meets this (v1 limit).
+		return nil, fmt.Errorf("%w: begin while installed (retire first): %w", errDescriptorTransition, ErrRebuildRetainedBase)
 	case BaseInstalling:
 		if d.BaseInstallID == id {
 			return nil, fmt.Errorf("%w: begin with the installing ID", errDescriptorTransition)
@@ -657,6 +658,12 @@ func (s *WALStore) InstalledBaseLSN() (uint64, bool) {
 
 // Caller holds installMu exclusively and no lower lock. The returned release
 // must be deferred before acquiring captureMu, so it runs after lower unlocks.
+// ErrRebuildRetainedBase: a rebuild began on a store whose earlier BASE is
+// still installed (a replica removed and added back with its older store).
+// v1 does not retire it for a new rebuild; the operator wipes the replica's
+// data directory and adds it back as a new replica.
+var ErrRebuildRetainedBase = errors.New("re-add with a retained base is not supported in v1: wipe the replica's data directory and re-add")
+
 func holdChunkBaseTransitionV3(h *chunkHooks) (func(), error) {
 	if h == nil {
 		return func() {}, nil

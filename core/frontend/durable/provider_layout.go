@@ -146,20 +146,23 @@ func settleLayoutStop(ctx context.Context, remote layoutStopRemote, me layout.Ho
 	if err != nil {
 		return 0, storage.ChunkCutResult{}, err
 	}
-	switch outcome {
-	case "aborted", "idle":
+	if outcome != "aborted" && outcome != "idle" && outcome != "detached" {
+		return 0, storage.ChunkCutResult{}, ErrDetachOutcomeUnknown
+	}
+	// Even a successful conditional abort needs a fresh HEAD read: a commit
+	// delivered just before that abort may have detached the volume instead.
+	h, err := remote.ReadHead(ctx)
+	if err != nil {
+		return 0, storage.ChunkCutResult{}, err
+	}
+	if h.Epoch != me.Epoch || h.Holder != me.Holder || h.ClaimID != me.ClaimID {
+		return storage.DetachFenced, storage.ChunkCutResult{}, nil
+	}
+	if h.State == layout.StateDetached {
+		return storage.DetachApplied, layoutDetachResult(h), nil
+	}
+	if h.State == layout.StateLive && h.Activity.Kind == layout.ActIdle && outcome != "detached" {
 		return storage.DetachNotPublished, storage.ChunkCutResult{}, nil
-	case "detached":
-		h, err := remote.ReadHead(ctx)
-		if err != nil {
-			return 0, storage.ChunkCutResult{}, err
-		}
-		if h.Epoch != me.Epoch || h.Holder != me.Holder || h.ClaimID != me.ClaimID {
-			return storage.DetachFenced, storage.ChunkCutResult{}, nil
-		}
-		if h.State == layout.StateDetached {
-			return storage.DetachApplied, layoutDetachResult(h), nil
-		}
 	}
 	return 0, storage.ChunkCutResult{}, ErrDetachOutcomeUnknown
 }

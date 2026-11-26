@@ -19,38 +19,40 @@ import (
 )
 
 // headReaders is every function outside tests that reads a volume's HEAD
-// (ReadHead, GetHead, GetHeadRoot, getHeadRoot, headExists, or a LookupEntry
+// (ReadHead, ReadHeadObserved, GetHead, GetHeadRoot, getHeadRoot, headExists, or a LookupEntry
 // of HEAD), with what it does when HEAD is absent and the probe below that
 // pins it. "GAP" marks a reader that takes an absent HEAD for an empty
 // one; a change that treats an absent HEAD as unknown flips those probes.
 var headReaders = map[string]string{
-	"core/frontend/durable/provider_seal_replay.go readLayoutSeal -> ReadHead":                        "absent, unreadable and foreign layout proof refuse without cached success (TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory)",
-	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                           "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopAbortMustConfirmItsOutcome)",
-	"core/frontend/durable/provider_layout.go startLayoutRoot -> ReadHead":                            "the diagnostic re-read after Start refusal cannot turn an absent HEAD into a claim; Start already refused it (probe TestLayoutStoreMissingHEADRefusesStart)",
-	"cmd/blockvolume/workspace_lease.go workspaceLayoutDetachedGeneration -> ReadHead":                "absent refuses ACK (probe TestWorkspaceLayoutDetachedProof)",
-	"cmd/blockvolume/chunk_remote.go chunkAttachCheck -> ReadHead":                                    "absent refuses attach without creating VOLUME or HEAD (TestChunkAttachCheckAppliesVolumeRules)",
-	"core/frontend/chunkstore/layout_store.go ReadHead -> DecodeLayoutHeadEntry":                      "shared canonical entry decoder; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",
-	"core/host/master/workspace_layout_head.go NewLayoutWorkspaceHEADReader -> DecodeLayoutHeadEntry": "any missing/failed metadata refuses; identity comes from master intent (TestWorkspaceLayoutHEADRefusalsAndStates)",
-	"cmd/blockmaster/layout_create.go layoutHeadReader -> ReadHead":                                   "absent refuses restore before target persistence (TestMasterLayoutHeadReaderRefusesAbsentHead)",
-	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":                                     "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",
-	"core/frontend/chunkstore/layout_store.go ReadHead -> LookupEntry":                                "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
-	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead":                  "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
-	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                                      "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
-	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":                         "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
-	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":                        "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
-	"core/frontend/chunkstore/catalog_b.go DeleteVolume -> ReadHead":                                  "refuses ErrHeadAbsent before any write (probe BCatalog)",
-	"core/frontend/chunkstore/catalog_b.go ReadHead -> ReadHead":                                      "found=false to the caller, which reports no HEAD (probe BCatalog)",
-	"core/frontend/chunkstore/retain_b.go Retain -> ReadHead":                                         "refuses ErrHeadAbsent, deletes nothing (probe BCatalog)",
-	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                                   "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
-	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                                         "refuses ErrHeadAbsent (probe BCatalog)",
-	"core/frontend/chunkstore/layout_remote.go AbortOpenSession -> ReadHead":                          "refuses ErrHeadAbsent, aborts nothing (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout_remote.go CommitPendingSnapshot -> ReadHead":                     "refuses ErrHeadAbsent, commits nothing (probe LayoutRemote)",
-	"core/frontend/durable/provider_layout_snapshot.go SnapshotVolume -> ReadHead":                    "the layout remote's HEAD read: refuses ErrHeadAbsent, names nothing (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                                   "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                                  "refuses ErrHeadAbsent (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":                            "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
-	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":                              "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
-	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":                               "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
+	"core/frontend/durable/provider_seal_replay.go readLayoutSeal -> ReadHead":                   "absent, unreadable and foreign layout proof refuse without cached success (TestLayoutPlainDetachReplayAfterRestartNeedsNoLegacyFactory)",
+	"core/frontend/durable/provider_layout.go settleLayoutStop -> ReadHead":                      "absent refuses unknown stop outcome, never resumes (probe TestLayoutStopAbortMustConfirmItsOutcome)",
+	"core/frontend/durable/provider_layout.go startLayoutRoot -> ReadHead":                       "the diagnostic re-read after Start refusal cannot turn an absent HEAD into a claim; Start already refused it (probe TestLayoutStoreMissingHEADRefusesStart)",
+	"cmd/blockvolume/workspace_lease.go workspaceLayoutDetachedGeneration -> ReadHead":           "absent refuses ACK (probe TestWorkspaceLayoutDetachedProof)",
+	"cmd/blockvolume/chunk_remote.go chunkAttachCheck -> ReadHead":                               "absent refuses attach without creating VOLUME or HEAD (TestChunkAttachCheckAppliesVolumeRules)",
+	"core/frontend/chunkstore/layout_store.go ReadHead -> ReadHeadObserved":                      "found=false passes through; no missing HEAD is invented (TestLayoutStoreMissingHEADRefusesStart)",
+	"core/frontend/chunkstore/layout_store.go ReadHeadObserved -> LookupEntry":                   "found=false; Start refuses without writing (probe TestLayoutStoreMissingHEADRefusesStart)",
+	"core/frontend/chunkstore/layout_store.go ReadHeadObserved -> DecodeLayoutHeadEntry":         "shared canonical entry decoder for every HEAD reader (TestLayoutStoreMissingHEADRefusesStart)",
+	"core/frontend/chunkstore/catalog_b.go ReadHeadObserved -> ReadHeadObserved":                 "found=false to the caller (probe BCatalog)",
+	"core/host/master/workspace_layout_head.go NewLayoutWorkspaceHEADReader -> ReadHeadObserved": "absent refuses ErrHeadAbsent, any failed read refuses; identity comes from master intent (TestWorkspaceLayoutHEADRefusalsAndStates)",
+	"cmd/blockmaster/layout_create.go layoutHeadReader -> ReadHead":                              "absent refuses restore before target persistence (TestMasterLayoutHeadReaderRefusesAbsentHead)",
+	"core/host/volume/chunk_control.go ListSnapshots -> ReadHead":                                "refuses ErrHeadAbsent without creating HEAD (TestChunkControlUsesTheBoundLayoutIdentity)",
+	"core/frontend/chunkstore/layout/delete.go OperatorReleaseDependent -> ReadHead":             "reads the source's HEAD (absent: refuses ErrHeadAbsent) and the target's: a target without HEAD (never created, or a restore that died between its VOLUME and its HEAD) gets a deleted HEAD written exclusively before the release (probe LayoutOperatorRelease)",
+	"core/frontend/chunkstore/layout/start.go Start -> ReadHead":                                 "refuses ErrHeadAbsent and creates nothing (probe LayoutStart)",
+	"core/frontend/chunkstore/layout/remove.go RemoveUnreachable -> ReadHead":                    "refuses ErrHeadAbsent and writes nothing to the objects (probe LayoutRemoval)",
+	"core/frontend/chunkstore/layout/snapshots.go RunAddDependent -> ReadHead":                   "refuses ErrHeadAbsent before reading any root and writes nothing (probe LayoutAddDependent)",
+	"core/frontend/chunkstore/catalog_b.go DeleteVolume -> ReadHead":                             "refuses ErrHeadAbsent before any write (probe BCatalog)",
+	"core/frontend/chunkstore/catalog_b.go ReadHead -> ReadHead":                                 "found=false to the caller, which reports no HEAD (probe BCatalog)",
+	"core/frontend/chunkstore/retain_b.go Retain -> ReadHead":                                    "refuses ErrHeadAbsent, deletes nothing (probe BCatalog)",
+	"core/frontend/chunkstore/retain_b.go SetRetention -> ReadHead":                              "refuses ErrHeadAbsent, writes no policy (probe BCatalog)",
+	"core/frontend/chunkstore/catalog_b.go Usage -> ReadHead":                                    "refuses ErrHeadAbsent (probe BCatalog)",
+	"core/frontend/chunkstore/layout_remote.go AbortOpenSession -> ReadHead":                     "refuses ErrHeadAbsent, aborts nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go CommitPendingSnapshot -> ReadHead":                "refuses ErrHeadAbsent, commits nothing (probe LayoutRemote)",
+	"core/frontend/durable/provider_layout_snapshot.go SnapshotVolume -> ReadHead":               "the layout remote's HEAD read: refuses ErrHeadAbsent, names nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                              "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                             "refuses ErrHeadAbsent (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":                       "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout/create.go createVolume -> ReadHead":                         "reads HEAD only after its exclusive create found one; absent then refuses ErrIdentity, writes nothing more (probe LayoutCreate)",
+	"core/frontend/chunkstore/layout/head.go runTransition -> ReadHead":                          "refuses ErrHeadAbsent and writes nothing; no layout transition creates a HEAD (probe LayoutTransition)",
 	// above the chunk store: they read through the layout remote's GetHead, so an
 	// absent HEAD reaches them as ErrHeadAbsent, never as a zero HEAD (probe LayoutRemote)
 	"cmd/sw-block/chunk_b.go chunkShow -> ReadHead":                      "found=false: prints a null head (probe TestOpsChunk_AbsentVolume)",
@@ -102,7 +104,7 @@ func TestHeadReaders_Enumeration(t *testing.T) {
 					case *ast.Ident:
 						name = x.Name
 					}
-					hit := name == "ReadHead" || name == "GetHead" || name == "GetHeadRoot" || name == "getHeadRoot" || name == "headExists" || name == "DecodeLayoutHeadEntry"
+					hit := name == "ReadHead" || name == "ReadHeadObserved" || name == "GetHead" || name == "GetHeadRoot" || name == "getHeadRoot" || name == "headExists" || name == "DecodeLayoutHeadEntry"
 					if name == "LookupEntry" {
 						for _, a := range call.Args {
 							if id, ok := a.(*ast.Ident); ok && id.Name == "headName" {

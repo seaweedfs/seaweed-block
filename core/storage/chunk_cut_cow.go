@@ -532,7 +532,7 @@ func (l *chunkLayerImpl) fillMissing(ctx context.Context, base map[uint64]chunkR
 		return nil, fmt.Errorf("storage: cut chunk %d HEAD fetch: %w", idx, err)
 	}
 	if sha256.Sum256(head) != ref.SHA256 || len(head) != int(l.chunkBlocks)*l.blockSize {
-		return nil, fmt.Errorf("storage: cut chunk %d HEAD fetch: content does not match HEAD", idx)
+		return nil, fmt.Errorf("storage: cut chunk %d HEAD fetch: %w", idx, errChunkContentMismatch)
 	}
 	out := append([]byte(nil), data...)
 	for _, i := range missing {

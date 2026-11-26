@@ -53,6 +53,11 @@ const (
 	UnhealthyRoleAdmission   = "role_admission_failed"
 	UnhealthyWALCorrupt      = "wal_corrupt"
 	UnhealthyIOError         = "io_error"
+	// UnhealthyRebuildRetainedBase: this replica's rebuild is refused
+	// because its store still holds an installed BASE (removed and added
+	// back with its older store: a v1 limit). Wipe the replica's data
+	// directory and re-add it.
+	UnhealthyRebuildRetainedBase = "rebuild_retained_base"
 
 	// DefaultRecoverTimeout matches blockmaster's default freshness
 	// window.
@@ -177,7 +182,13 @@ func (h *Host) UnhealthyReason() string {
 // unhealthyReason evaluates the watchdog with the promotion fact (its
 // epoch binds readiness to the watched assignment) and the G1 latch.
 func (h *Host) unhealthyReason(fact engine.PromotionReadyFact, ready bool) string {
-	if h == nil || h.wd == nil {
+	if h == nil {
+		return ""
+	}
+	if h.rebuildRetainedBase() {
+		return UnhealthyRebuildRetainedBase
+	}
+	if h.wd == nil {
 		return ""
 	}
 	failed, _ := h.RoleAdmissionFailure()
@@ -251,4 +262,17 @@ func (h *Host) ReportLocalRecoveryFailure(err error) string {
 		h.log.Printf("blockvolume: volume %s local durable open/recovery failed (%s): %v; a primary assignment reports it as unhealthy", h.cfg.VolumeID, reason, err)
 	}
 	return reason
+}
+
+// rebuildRetainedBase: this host's replica listener refused its last
+// rebuild for a retained BASE (it reports it until a rebuild completes).
+func (h *Host) rebuildRetainedBase() bool {
+	h.selfFenceMu.Lock()
+	f := h.selfFence
+	h.selfFenceMu.Unlock()
+	// The self-fence object is this host's replica listener
+	// (*transport.ReplicaListener, installed by SetSelfFence), which latches
+	// the refusal.
+	r, ok := f.(interface{ RebuildRetainedBase() string })
+	return ok && r.RebuildRetainedBase() != ""
 }

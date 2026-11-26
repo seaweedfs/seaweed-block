@@ -148,6 +148,40 @@ func TestPrecopyProviderPublishesExactDetachedImage(t *testing.T) {
 	}
 }
 
+// An admitted final freeze has a physical deadline, even when its forecast
+// fitted: a remote that never completes its final commit must not hold guest
+// I/O until the ordinary 20-second detach timeout.
+func TestPrecopyFinalFreezeDeadlineAbortsSlowRemote(t *testing.T) {
+	// Use the same layout remote that the provider actually attaches. The
+	// configured 20s timeout must be capped to the pre-copy 5s allowance.
+	p, b, remote := precopyLayoutTimeoutFixture(t, nil, 20*time.Second)
+	remote.hold = true
+	var cutDeadline time.Time
+	durable.SetTestDetachTrace(p, func(stage string, deadline time.Time) {
+		if stage == "cut" {
+			cutDeadline = deadline
+		}
+	})
+	started := time.Now()
+	_, _, err := p.DetachVolume(context.Background(), "v1")
+	elapsed := time.Since(started)
+	if !remote.pending || remote.abortCalls.Load() == 0 {
+		t.Fatal("fixture did not hold the real layout commit and settle its session")
+	}
+	if !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(remote.cutCause, context.DeadlineExceeded) {
+		t.Fatalf("held final commit: %v; want aborted stop at the deadline", err)
+	}
+	if cutDeadline.IsZero() || cutDeadline.Sub(started) > 4*time.Second {
+		t.Fatalf("final pre-copy cut deadline is %s after call start; want <=4s of the 5s freeze bound", cutDeadline.Sub(started))
+	}
+	if elapsed > 6*time.Second {
+		t.Fatalf("guest freeze held for %s; want the 5-second bound with 1-second test slack", elapsed)
+	}
+	if _, err := b.Write(context.Background(), 8192, block(0x9a)); err != nil {
+		t.Fatalf("guest did not resume after the stop was refused: %v", err)
+	}
+}
+
 type precopyFixedSampleRemote struct {
 	*storage.MemChunkRemote
 	nextDelay atomic.Int64

@@ -35,19 +35,22 @@ func TestLayoutStopAbortMustConfirmItsOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name, outcome string
 		err           error
+		state         string
 		want          storage.DetachSettlement
 		bad           bool
 	}{
-		{"aborted", "aborted", nil, storage.DetachNotPublished, false},
-		{"idle", "idle", nil, storage.DetachNotPublished, false},
-		{"detached", "detached", nil, storage.DetachApplied, false},
-		{"fenced", "", storage.ErrChunkLayerFenced, storage.DetachFenced, false},
-		{"absent", "", layout.ErrHeadAbsent, 0, true},
-		{"unknown abort", "", errors.New("reply lost"), 0, true},
-		{"unknown outcome", "unexpected", nil, 0, true},
+		{"aborted", "aborted", nil, layout.StateLive, storage.DetachNotPublished, false},
+		{"idle", "idle", nil, layout.StateLive, storage.DetachNotPublished, false},
+		{"late commit after abort reply", "aborted", nil, layout.StateDetached, storage.DetachApplied, false},
+		{"late commit after idle reply", "idle", nil, layout.StateDetached, storage.DetachApplied, false},
+		{"detached", "detached", nil, layout.StateDetached, storage.DetachApplied, false},
+		{"fenced", "", storage.ErrChunkLayerFenced, "", storage.DetachFenced, false},
+		{"absent", "", layout.ErrHeadAbsent, "", 0, true},
+		{"unknown abort", "", errors.New("reply lost"), "", 0, true},
+		{"unknown outcome", "unexpected", nil, "", 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &stopRemoteProbe{outcome: tc.outcome, err: tc.err, head: layout.Head{Gen: 7, Epoch: 1, Holder: "s/r", ClaimID: "k", State: layout.StateDetached, Position: 11}}
+			r := &stopRemoteProbe{outcome: tc.outcome, err: tc.err, head: layout.Head{Gen: 7, Epoch: 1, Holder: "s/r", ClaimID: "k", State: tc.state, Activity: layout.Activity{Kind: layout.ActIdle}, Position: 11}}
 			got, result, err := settleLayoutStop(context.Background(), r, me)
 			if !r.aborted || (err != nil) != tc.bad || (!tc.bad && got != tc.want) {
 				t.Fatalf("got=%v err=%v aborted=%v", got, err, r.aborted)

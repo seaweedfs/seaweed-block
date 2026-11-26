@@ -74,6 +74,11 @@ type AssignmentAsk struct {
 	// target (a bind is always a bootstrap); see adapter.PrimaryEvidence. It
 	// is a probe fact about the target, never an authority fact.
 	Evidence adapter.PrimaryEvidence
+	// Incarnation is the target's reported process incarnation in the facts
+	// the decision used ("" = not reported). A refresh whose incarnation
+	// differs from the line's is a restarted primary: a new endpoint version
+	// even at the same addresses.
+	Incarnation string
 	// ExpectCurrent, when set, makes a reassign conditional on the volume's
 	// line being exactly this replica at this epoch when the publisher mints
 	// (under its lock): an operator's move never lands on a line it did not

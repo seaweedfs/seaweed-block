@@ -38,6 +38,11 @@ type AssignmentInfo struct {
 	// evidence the master probed on the target; the target checks it before
 	// adopting the role. The zero value is a line without a kind.
 	Primary PrimaryEvidence
+	// Incarnation is the primary process this line was issued for (its
+	// reported incarnation when the line was minted; "" = not known). It is
+	// compared only for equality: a primary that finds another one on its
+	// line is a restarted process the master has not re-issued yet.
+	Incarnation string
 }
 
 // PrimaryKind is how a line made its primary the primary.

@@ -235,7 +235,7 @@ func headSzStartCluster(t *testing.T, prefix string, vols []headSzVol) (*handoff
 	mstate := filepath.Join(h.dir, "master")
 	margs := []string{"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", specPath, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://" + env.cluster.filerHTTP + env.chunkPath}
+		"--workspace-rpc", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 	if testListenHost() != "127.0.0.1" {
 		// a lab run spanning two hosts: blockmaster refuses a non-loopback listen without this
 		margs = append(margs, "--insecure-external-bind")

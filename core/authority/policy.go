@@ -39,6 +39,9 @@ type AuthorityBasis struct {
 	EndpointVersion uint64
 	DataAddr        string
 	CtrlAddr        string
+	// Incarnation is the primary process the line was issued for ("" = not
+	// known); see adapter.AssignmentInfo.Incarnation.
+	Incarnation string
 }
 
 // AuthorityBasisReader exposes read-only views of the publisher's
@@ -74,6 +77,7 @@ func (p *Publisher) LastAuthorityBasis(volumeID, replicaID string) (AuthorityBas
 		EndpointVersion: info.EndpointVersion,
 		DataAddr:        info.DataAddr,
 		CtrlAddr:        info.CtrlAddr,
+		Incarnation:     info.Incarnation,
 	}, true
 }
 
@@ -107,6 +111,7 @@ func (p *Publisher) volumeLineLocked(volumeID string) (AuthorityBasis, bool) {
 				EndpointVersion: st.info.EndpointVersion,
 				DataAddr:        st.info.DataAddr,
 				CtrlAddr:        st.info.CtrlAddr,
+				Incarnation:     st.info.Incarnation,
 			}
 			any = true
 		}

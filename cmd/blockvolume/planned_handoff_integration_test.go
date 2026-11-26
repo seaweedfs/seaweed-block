@@ -284,7 +284,7 @@ func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfte
 	env.masterArgs = append([]string{
 		"--authority-store", filepath.Join(mstate, "authority"), "--lifecycle-store", filepath.Join(mstate, "lifecycle"),
 		"--cluster-spec", spec, "--expected-slots-per-volume", "1", "--listen", h.masterAddr,
-		"--workspace-rpc", "--workspace-head-base-url", "http://" + cluster.filerHTTP + chunkPath}, masterArgs...)
+		"--workspace-rpc"}, masterArgs...)
 	env.masterArgs = append(env.masterArgs, "--chunk-filer", cluster.filerGRPC, "--chunk-path", chunkPath)
 	master := h.start(t, "blockmaster", h.master, env.masterArgs...)
 	env.masterProcess = master
@@ -555,6 +555,7 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 		}
 		_ = log.Close()
 		if t.Failed() {
+			keepFullLog(t, d)
 			data, _ := os.ReadFile(d.log)
 			if len(data) > 16000 {
 				data = data[len(data)-16000:]
@@ -569,6 +570,16 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 	d.proc = cmd.Process
 	go func() { d.err = cmd.Wait(); close(d.done) }()
 	return d
+}
+
+// keepFullLog copies a failed test's daemon log, whole, into
+// $SWBLOCK_TEST_LOG_DIR when that is set (a gate run collects it): the
+// test's own output keeps only the log's tail, and a bring-up decision is
+// at its head.
+func keepFullLog(t *testing.T, d *daemon) {
+	if err := keepLogCopy(t.Name(), d.name, d.log); err != nil {
+		t.Logf("%s: full log not kept: %v", d.name, err)
+	}
 }
 
 // wait waits up to timeout for the child to exit by itself and returns its

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: spec-trace-check.sh BODY_FILE [BLOBS] < changes
+# Usage: spec-trace-check.sh BODY_FILE [BLOBS] [MODEL_MAP] < changes
 #
 # Checks the spec trace in a PR description. changes are NUL-separated
 # STATUS, PATH pairs (post-merge-review-changed.sh).
@@ -25,6 +25,7 @@ set -euo pipefail
 
 body_file=${1:?usage: spec-trace-check.sh BODY_FILE [BLOBS] < changes}
 blobs=${2-}
+model_map=${3-}
 here=$(cd "$(dirname "$0")" && pwd)
 [[ -f $body_file ]] || { echo "spec-trace: body file $body_file missing" >&2; exit 2; }
 body=$(tr -d '\r' <"$body_file")
@@ -99,6 +100,16 @@ while IFS= read -r -d '' status; do
 done
 # A record cut off before its NUL is malformed, not skipped.
 [[ -z ${status-} ]] || { echo "spec-trace: malformed change list: unterminated record" >&2; exit 2; }
+if [[ -n $model_map ]]; then
+	model_status=0
+	{ if ((${#paths[@]})); then printf '%s\0' "${paths[@]}"; fi; } |
+		"${PYTHON:-python3}" -B "$here/model-trace-check.py" "$model_map" "$(value Model:)" || model_status=$?
+	case $model_status in
+	0) ;;
+	1) bad=1 ;;
+	*) exit "$model_status" ;;
+	esac
+fi
 if ((core)); then
 	s=$(value Simplest:)
 	if ((${#s} < 20)) || [[ $s == '<'* ]]; then

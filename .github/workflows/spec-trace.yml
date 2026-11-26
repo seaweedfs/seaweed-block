@@ -47,6 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           bash .github/scripts/spec-trace-check-test.sh
+          python3 -B .github/scripts/model-trace-check-test.py
           git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
           printf '%s' "$BODY" >body.txt
           bash .github/scripts/post-merge-review-changed.sh "$BASE" "$HEAD" >changed.bin
@@ -60,7 +61,8 @@ jobs:
               git show "$HEAD:$p" >"blobs/new/$p" 2>/dev/null || rm -f "blobs/new/$p"
             done
           mkdir -p blobs
-          bash .github/scripts/spec-trace-check.sh body.txt blobs <changed.bin
+          # Mapping and validator come from the trusted base checkout above.
+          bash .github/scripts/spec-trace-check.sh body.txt blobs .github/model-code-trace.tsv <changed.bin
           # Internal names stay out of this public repository: added lines,
           # commit messages, title and description (no PR code is run).
           bash .github/scripts/public-text-check-test.sh

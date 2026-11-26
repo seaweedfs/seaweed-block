@@ -95,6 +95,20 @@ func (s *ObservationStore) SupersededSlotCount(serverID, volumeID, replicaID str
 //
 // NOT authority input. Read-only; safe to call concurrently.
 func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool) {
+	return s.slotFactWhere(volumeID, replicaID, nil)
+}
+
+// SlotFactAt is SlotFact restricted to the reports of the slot at dataAddr
+// and ctrlAddr: the process serving those endpoints, never the same
+// replica id reported by another host (a workspace move keeps the replica
+// id across hosts).
+func (s *ObservationStore) SlotFactAt(volumeID, replicaID, dataAddr, ctrlAddr string) (SlotFact, bool) {
+	return s.slotFactWhere(volumeID, replicaID, func(slot SlotFact) bool {
+		return slot.DataAddr == dataAddr && slot.CtrlAddr == ctrlAddr
+	})
+}
+
+func (s *ObservationStore) slotFactWhere(volumeID, replicaID string, match func(SlotFact) bool) (SlotFact, bool) {
 	if volumeID == "" || replicaID == "" {
 		return SlotFact{}, false
 	}
@@ -117,6 +131,9 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 		}
 		for _, slot := range obs.Slots {
 			if slot.VolumeID != volumeID || slot.ReplicaID != replicaID {
+				continue
+			}
+			if match != nil && !match(slot) {
 				continue
 			}
 			if slotExpired(slot, obs, now) {

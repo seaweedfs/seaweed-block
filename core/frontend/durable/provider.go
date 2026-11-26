@@ -335,12 +335,15 @@ type volHandle struct {
 	chunkLineage      chunkLineage        // immutable authority captured by this attachment
 	// Private until the owner commit succeeds; retained for attach retry.
 	chunkPending storage.ChunkLayer
-	// chunkDetach is set (under attachMu) when DetachVolume starts and
-	// never cleared in this process: frontend I/O stays stopped, through
-	// any later RecoverVolume, until a new lifetime attaches the volume.
+	// chunkDetach is set (under attachMu) at the final stop. It is cleared
+	// only after settlement proves the stop was not published; an applied,
+	// fenced or unknown outcome keeps frontend I/O stopped.
 	chunkDetach bool
-	chunkStop   context.CancelFunc
-	chunkDone   chan struct{}
+	// settling is the single automatic retry of an unknown stop outcome.
+	// It is guarded by attachMu; no second stop may race its HEAD decision.
+	settling  bool
+	chunkStop context.CancelFunc
+	chunkDone chan struct{}
 	// snapshots is the scheduled-snapshot state of the running loop, nil
 	// when the schedule is off.
 	snapshots *snapshotSlot

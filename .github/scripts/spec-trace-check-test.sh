@@ -124,35 +124,28 @@ expect_kind 0 "CI: workflow" CI - - M .github/workflows/w.yml
 expect_kind 1 "CI: scripts/ is shipped" CI - - A scripts/install.sh
 expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" - - M docs/a.md
 
-[[ $fail == 0 ]] && echo "spec-trace self-test: ok"
-exit $fail
-
-import (
-	"C"
-)
-' "${P}// #include <b.h>" DOCS - - M core/x/s.go
-expect_kind 1 "DOCS: a model under docs/spec" DOCS - - M docs/spec/X.tla
-expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS - - M deploy/x.env
-expect_kind 0 "TEST: tests and testdata" TEST - - M core/x/s_test.go A core/x/testdata/in.bin
-expect_kind 1 "TEST: production Go" TEST - - M core/x/s.go
-expect_kind 0 "CI: workflow" CI - - M .github/workflows/w.yml
-expect_kind 1 "CI: scripts/ is shipped" CI - - A scripts/install.sh
-expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" - - M docs/a.md
-
-[[ $fail == 0 ]] && echo "spec-trace self-test: ok"
-exit $fail
-
-import (
-	"C"
-)
-' M core/x/s.go
-expect_kind 1 "DOCS: a model under docs/spec" DOCS - - M docs/spec/X.tla
-expect_kind 1 "DOCS: a non-docs, non-Go file" DOCS - - M deploy/x.env
-expect_kind 0 "TEST: tests and testdata" TEST - - M core/x/s_test.go A core/x/testdata/in.bin
-expect_kind 1 "TEST: production Go" TEST - - M core/x/s.go
-expect_kind 0 "CI: workflow" CI - - M .github/workflows/w.yml
-expect_kind 1 "CI: scripts/ is shipped" CI - - A scripts/install.sh
-expect_kind 1 "DOCS next to another kind" "DOCS FIX INV-X-001" - - M docs/a.md
+# The workflow supplies its base-owned map as the third argument.
+expect_map() {
+	local want=$1 name=$2 model=$3 got=0
+	shift 3
+	printf '%s\n%s\n' "${ok/Model: docs\/spec\/MaintenanceOwner.tla, exhausted/Model: $model}" "$simplest" >"$tmp/body"
+	if (($#)); then printf '%s\0' "$@"; fi |
+		bash "$check" "$tmp/body" "" "$tmp/map.tsv" >/dev/null 2>&1 || got=$?
+	if [[ $got != "$want" ]]; then
+		echo "FAIL $name: exit $got, want $want"
+		fail=1
+	fi
+}
+printf 'core/x/s.go\tEngineAdapter.Begin\ncore/y/s.go\tMoveAdmission.Revoke\n' >"$tmp/map.tsv"
+expect_map 0 "mapped action" "EngineAdapter.Begin" M core/x/s.go
+expect_map 0 "mapped pure function" "NONE (pure function of EngineAdapter)" M core/x/s.go
+expect_map 0 "all mapped modules cited" "EngineAdapter.Begin; MoveAdmission.Revoke" M core/x/s.go M core/y/s.go
+expect_map 1 "mapped file rejects old prose" "docs/spec/EngineAdapter.tla, exhausted" M core/x/s.go
+expect_map 1 "deleted mapped file still needs model" "NONE: deletion has no new code" D core/x/s.go
+expect_map 1 "one citation cannot cover another module" "EngineAdapter.Begin" M core/x/s.go M core/y/s.go
+expect_map 0 "unmapped file keeps old policy" "docs/spec/EngineAdapter.tla, exhausted" M core/z/s.go
+printf '# no canonical rows yet\n' >"$tmp/map.tsv"
+expect_map 2 "empty map is not silently disabled" "EngineAdapter.Begin" M core/x/s.go
 
 [[ $fail == 0 ]] && echo "spec-trace self-test: ok"
 exit $fail

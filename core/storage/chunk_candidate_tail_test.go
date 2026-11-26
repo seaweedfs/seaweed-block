@@ -39,10 +39,11 @@ func TestCheckpointTailMeasuresWritesAfterItsCut(t *testing.T) {
 func TestCheckpointTailUnknownRateIsNotZeroCost(t *testing.T) {
 	s, _, l, w := precopyLayer(t, 1024, 0)
 	w.write(t, s, 1, 0x44)
-	l.precopySamples = []precopySample{{at: time.Now(), fixed: time.Millisecond, rate: 100}}
+	// Fixed work alone is not a measured upload rate for a non-empty tail.
+	l.precopySamples = []precopySample{{at: time.Now(), fixed: time.Millisecond}}
 	tail := l.candidateTail()
-	if tail.Bytes == 0 || tail.Known || tail.RateSamples != 1 {
-		t.Fatalf("partial rate window misreported ready: %+v", tail)
+	if tail.Bytes == 0 || tail.Known || tail.RateSamples != 0 {
+		t.Fatalf("unmeasured rate misreported ready: %+v", tail)
 	}
 }
 

@@ -24,7 +24,6 @@ ExecStart=/usr/local/bin/blockmaster \
   --freshness-window=${SWB_MASTER_FRESHNESS_WINDOW} \
   --pending-grace=${SWB_MASTER_PENDING_GRACE} \
   --workspace-rpc=${SWB_MASTER_WORKSPACE_RPC} \
-  --workspace-head-base-url=${SWB_MASTER_WORKSPACE_HEAD_BASE_URL} \
   --workspace-max-clock-skew=${SWB_MASTER_WORKSPACE_MAX_CLOCK_SKEW} \
   $SWB_MASTER_EXTRA_ARGS
 # blockmaster stops on SIGTERM.

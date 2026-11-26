@@ -56,8 +56,11 @@ func g1Lineage(sess, epoch uint64) RecoveryLineage {
 // g1Ship sends one ship on a fresh connection and reports whether it was
 // applied or refused (g2Refused's probe handshake: an accepted ship is applied
 // before the probe is answered), and checks the effect agrees.
-func g1Ship(t *testing.T, ln *ReplicaListener, store storage.LogicalStorage, l RecoveryLineage, lsn uint64, fill byte) bool {
+// It ships at the store's next LSN, the only one a replica applies inside
+// an epoch.
+func g1Ship(t *testing.T, ln *ReplicaListener, store storage.LogicalStorage, l RecoveryLineage, fill byte) bool {
 	t.Helper()
+	lsn := store.NextLSN()
 	want := bytes.Repeat([]byte{fill}, 4096)
 	refused := g2Refused(t, ln.Addr(), MsgShipEntry, EncodeShipEntry(ShipEntry{Lineage: l, LBA: 0, LSN: lsn, Data: want}))
 	applied := bytes.Equal(g1Block(t, store), want)
@@ -127,7 +130,7 @@ func TestG1_RestartedReplicaRefusesShipBelowItsAcknowledgedEpoch(t *testing.T) {
 	if err := first.AdmitAsReplica(1); err != nil {
 		t.Fatal(err)
 	}
-	if !g1Ship(t, first, store, g1Lineage(1, 2), 1, '2') {
+	if !g1Ship(t, first, store, g1Lineage(1, 2), '2') {
 		t.Fatal("fixture: the epoch-2 ship was refused before the restart")
 	}
 	if !g1Barrier(t, first, g1Lineage(1, 2)) {
@@ -136,20 +139,20 @@ func TestG1_RestartedReplicaRefusesShipBelowItsAcknowledgedEpoch(t *testing.T) {
 	first.StopHard() // restart: the process dies with connections open
 
 	second := g1Listener(t, store, floor) // restart, no assignment yet
-	if g1Ship(t, second, store, g1Lineage(2, 2), 2, 'u') || g1Barrier(t, second, g1Lineage(2, 2)) || g1Rebuild(t, second, store, g1Lineage(2, 2), 'r') {
+	if g1Ship(t, second, store, g1Lineage(2, 2), 'u') || g1Barrier(t, second, g1Lineage(2, 2)) || g1Rebuild(t, second, store, g1Lineage(2, 2), 'r') {
 		t.Fatal("G1: a restarted replica accepted a mutation before its assignment was known")
 	}
 
 	if err := second.AdmitAsReplica(1); err != nil { // a stale assignment
 		t.Fatal(err)
 	}
-	if g1Ship(t, second, store, g1Lineage(3, 1), 3, '1') {
+	if g1Ship(t, second, store, g1Lineage(3, 1), '1') {
 		t.Fatal("G1: after a restart the replica applied an epoch-1 ship below the epoch 2 it had acknowledged")
 	}
 	if g1Barrier(t, second, g1Lineage(3, 1)) {
 		t.Fatal("G1: after a restart the replica ACKed an epoch-1 barrier below its acknowledged epoch 2")
 	}
-	if !g1Ship(t, second, store, g1Lineage(4, 2), 4, 'c') || !g1Barrier(t, second, g1Lineage(4, 2)) {
+	if !g1Ship(t, second, store, g1Lineage(4, 2), 'c') || !g1Barrier(t, second, g1Lineage(4, 2)) {
 		t.Fatal("the current epoch-2 ship/barrier was refused after the role was known")
 	}
 }
@@ -174,7 +177,7 @@ func TestG1_BarrierOnlyEpochSurvivesRestart(t *testing.T) {
 	if err := second.AdmitAsReplica(1); err != nil {
 		t.Fatal(err)
 	}
-	if g1Ship(t, second, store, g1Lineage(2, 1), 1, '1') {
+	if g1Ship(t, second, store, g1Lineage(2, 1), '1') {
 		t.Fatal("an epoch-1 ship was applied below a barrier-acknowledged epoch 2 after restart")
 	}
 }
@@ -189,13 +192,13 @@ func TestG1_FreshVolumeRestartBeforeAssignment(t *testing.T) {
 		t.Fatalf("bootstrap floor = %d, want 0", got)
 	}
 	ln := g1Listener(t, store, floor) // restart right after creation
-	if g1Ship(t, ln, store, g1Lineage(1, 1), 1, 'x') || g1Barrier(t, ln, g1Lineage(1, 1)) {
+	if g1Ship(t, ln, store, g1Lineage(1, 1), 'x') || g1Barrier(t, ln, g1Lineage(1, 1)) {
 		t.Fatal("an unassigned listener on a fresh volume accepted a mutation")
 	}
 	if err := ln.AdmitAsReplica(1); err != nil {
 		t.Fatal(err)
 	}
-	if !g1Ship(t, ln, store, g1Lineage(1, 1), 2, 'a') || !g1Barrier(t, ln, g1Lineage(1, 1)) {
+	if !g1Ship(t, ln, store, g1Lineage(1, 1), 'a') || !g1Barrier(t, ln, g1Lineage(1, 1)) {
 		t.Fatal("the current assignment did not admit valid traffic")
 	}
 }
@@ -311,7 +314,7 @@ func TestG1_PersistFailureRefusesTheRaisingMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 			failAt(t, ln, step)
-			if g1Ship(t, ln, store, g1Lineage(1, 2), 1, 's') {
+			if g1Ship(t, ln, store, g1Lineage(1, 2), 's') {
 				t.Fatal("a ship raising the floor was applied though the floor write failed")
 			}
 			if g1Barrier(t, ln, g1Lineage(2, 2)) {
@@ -321,7 +324,7 @@ func TestG1_PersistFailureRefusesTheRaisingMutation(t *testing.T) {
 				t.Fatal("a rebuild raising the floor was written though the floor write failed")
 			}
 			// A current-floor ship does not persist: keep the fault armed until handlers join.
-			if !g1Ship(t, ln, store, g1Lineage(4, 1), 2, 'o') {
+			if !g1Ship(t, ln, store, g1Lineage(4, 1), 'o') {
 				t.Fatal("a ship at the current floor was refused")
 			}
 		})
@@ -347,7 +350,7 @@ func TestG1_SlowPersistFailureIsStillARefusal(t *testing.T) {
 	t.Cleanup(func() { floorFS = osFloorOps })
 	// A refusal/probe reply is not a join of the connection handler.
 	t.Cleanup(ln.StopHard)
-	if g1Ship(t, ln, store, g1Lineage(1, 2), 1, 's') {
+	if g1Ship(t, ln, store, g1Lineage(1, 2), 's') {
 		t.Fatal("a slow refused ship was classified as applied")
 	}
 }
@@ -362,10 +365,10 @@ func TestG1_ProbeHandshakeClassifiesByEffect(t *testing.T) {
 	if err := ln.AdmitAsReplica(3); err != nil {
 		t.Fatal(err)
 	}
-	if !g1Ship(t, ln, store, g1Lineage(1, 3), 1, 'a') {
+	if !g1Ship(t, ln, store, g1Lineage(1, 3), 'a') {
 		t.Fatal("an epoch-3 ship at the admitted epoch was classified refused")
 	}
-	if g1Ship(t, ln, store, g1Lineage(2, 2), 2, 'b') {
+	if g1Ship(t, ln, store, g1Lineage(2, 2), 'b') {
 		t.Fatal("an epoch-2 ship below the admitted epoch was classified accepted")
 	}
 	if !bytes.Equal(g1Block(t, store), bytes.Repeat([]byte{'a'}, 4096)) {
@@ -405,7 +408,7 @@ func TestG1_RoleCallsPersistBeforeReturning(t *testing.T) {
 	if err := again.AdmitAsReplica(2); err != nil {
 		t.Fatal(err)
 	}
-	if g1Ship(t, again, store, g1Lineage(1, 2), 1, 'z') {
+	if g1Ship(t, again, store, g1Lineage(1, 2), 'z') {
 		t.Fatal("an epoch-2 ship was applied below the fenced epoch 3 after restart")
 	}
 }

@@ -785,6 +785,23 @@ ops-status-unavailable: no volume id/status address reached
 Then attach the install/demo artifact directory anyway. The failure is then in
 install, PVC binding, or blockvolume generation rather than replica status.
 
+### Replacing A Replica
+
+A brand-new replica added to a volume that holds data (a lost node replaced)
+is rebuilt from the primary and heals.
+
+A replica removed and added back with its older data directory does not heal
+in v1: its store still holds the earlier rebuild's base, and the next rebuild
+is refused. The replica reports it on its heartbeat slot, named, and stays
+ineligible:
+
+```text
+unhealthy_reason=rebuild_retained_base
+```
+
+To recover it: stop that replica, wipe its data directory, and add it back as
+a new replica. It is then rebuilt from the primary.
+
 ## 9. Retry After Interruption
 
 If a run is interrupted, use the alpha uninstall before retrying:

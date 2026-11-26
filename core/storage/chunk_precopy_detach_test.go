@@ -422,7 +422,7 @@ func precopyAppliedDetachRetryControl(t *testing.T, slow bool) {
 	}
 }
 
-func TestPrecopyDetachColdNoopRequiresMeasuredCASCost(t *testing.T) {
+func TestPrecopyDetachColdNoopUsesEmptyTailFact(t *testing.T) {
 	s, _ := newChunkTestStore(t)
 	f := newFakeChunkRemote()
 	f.seedHead(t, make([]byte, ctNumBlocks*ctBlockSize), 0, 1)
@@ -431,22 +431,12 @@ func TestPrecopyDetachColdNoopRequiresMeasuredCASCost(t *testing.T) {
 	cfg.FreshFromHead = true
 	l := mustAttach(t, s, f, cfg).(*chunkLayerImpl)
 	stopped := 0
-	_, err := l.PrecopyDetach(ctTimeout(t), func() bool { stopped++; return true })
-	if !errors.Is(err, ErrPrecopyUnknown) || stopped != 0 {
-		t.Fatalf("no-op read treated as measured CAS cost: stopped=%d err=%v", stopped, err)
-	}
-	if f.stats().head.Gen != 1 {
-		t.Fatal("unknown cost published a final detached HEAD")
-	}
-	if _, err := s.Write(1, makeBlock(ctBlockSize, 0x61)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := l.Cut(ctTimeout(t)); err != nil {
-		t.Fatal(err)
-	}
 	r, err := l.PrecopyDetach(ctTimeout(t), func() bool { stopped++; return true })
-	if err != nil || !r.Precopy.Frozen || stopped != 1 {
-		t.Fatalf("measured CAS did not enable empty-tail freeze: report=%+v stopped=%d err=%v", r.Precopy, stopped, err)
+	if err != nil || !r.Precopy.Frozen || stopped != 1 || r.Precopy.TailBytes != 0 || r.Precopy.RateSamples != 0 {
+		t.Fatalf("empty tail needed a rate sample: report=%+v stopped=%d err=%v", r.Precopy, stopped, err)
+	}
+	if f.stats().head.State != ChunkHeadDetached {
+		t.Fatal("empty-tail detach did not publish")
 	}
 }
 
