@@ -93,23 +93,6 @@ func (s ReplicaState) String() string {
 // come from engine-frozen recovery contracts.
 const liveShipTargetLSN uint64 = 1
 
-// peerSessionIDCounter mints unique SessionIDs for live steady-state
-// sessions. Recovery-bound sessions carry engine-minted SessionIDs.
-var peerSessionIDCounter atomic.Uint64
-
-func mintPeerSessionIDAfter(after uint64) uint64 {
-	for {
-		cur := peerSessionIDCounter.Load()
-		next := cur + 1
-		if next <= after {
-			next = after + 1
-		}
-		if peerSessionIDCounter.CompareAndSwap(cur, next) {
-			return next
-		}
-	}
-}
-
 // PeerProbeCooldown holds the per-peer backoff parameters used by
 // ProbeIfDegraded / OnProbeAttempt.
 //
@@ -231,7 +214,7 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 			"replication: NewReplicaPeer: target needs nonzero epoch (got %d) and endpointVersion (got %d)",
 			target.Epoch, target.EndpointVersion)
 	}
-	sessionID := mintPeerSessionIDAfter(0)
+	sessionID := executor.SessionIDs().Next()
 	lineage := transport.RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           target.Epoch,
@@ -269,7 +252,7 @@ func (p *ReplicaPeer) RefreshLiveShipSessionAfter(completedSessionID, achievedLS
 	}
 
 	oldSessionID := p.sessionID
-	newSessionID := mintPeerSessionIDAfter(completedSessionID)
+	newSessionID := p.executor.SessionIDs().NextAfter(completedSessionID)
 	newLineage := transport.RecoveryLineage{
 		SessionID:       newSessionID,
 		Epoch:           p.target.Epoch,
@@ -541,32 +524,12 @@ func (p *ReplicaPeer) runtimeRecoveryTarget(req RuntimeRecoveryRequest) (Replica
 	return target, executor, nil
 }
 
-// probeSessionIDCounter mints SessionIDs for runtime-driven probes —
-// one of three independent SessionID counters:
-//
-//  1. peerSessionIDCounter (peer.go) — live-ship sessions; one per
-//     *ReplicaPeer; lifetime = peer lifetime; carried in
-//     RecoveryLineage.SessionID for ShipEntry / Barrier wire frames
-//     so the replica's acceptMutationLineage gate can pin
-//     "same-authority ⇒ same SessionID" within a peer.
-//
-//  2. adapter probe counter (core/adapter/adapter.go probeSessionID
-//     local) — engine-emitted ProbeReplica command sessions; minted
-//     when the adapter consumes engine.ProbeReplica; not registered
-//     in any executor session table; transient probe sessions for
-//     the symmetric ProbeReq/ProbeResp pair.
-//
-//  3. probeSessionIDCounter (this file) — primary-side runtime-driven
-//     probes; minted when the probe loop dispatches a fresh probe
-//     against a ReplicaDegraded peer; same role as (2) except the
-//     *trigger* is the loop, not engine command emission.
-//
-// All three are uint64 atomics, all three are >0 (Add(1) starts at
-// 1), and none of the three SessionIDs ever cross paths because the
-// replica's acceptMutationLineage rules each see them in
-// non-overlapping wire contexts. Conflating any two would either
-// leak runtime state into engine truth or vice versa — keep them
-// separate.
+// probeSessionIDCounter mints SessionIDs for runtime-driven probes (the
+// probe loop's fresh probe against a degraded peer). A probe is
+// non-mutating: the replica checks its lineage without comparing it to the
+// mutation lineage it holds, so its ids need no order with the replica's
+// sessions. Live and recovery sessions take theirs from the replica's
+// session order (adapter.SessionIDs on the peer's executor).
 var probeSessionIDCounter atomic.Uint64
 
 // MintProbeSessionID returns a fresh SessionID for use in a

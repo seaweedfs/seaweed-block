@@ -39,6 +39,9 @@ type BlockExecutor struct {
 	// the image it now holds.
 	epochs *EpochTable
 
+	// sessionIDs is the replica's session order (see SessionIDs).
+	sessionIDs *adapter.SessionIDs
+
 	mu              sync.Mutex
 	onSessionStart  adapter.OnSessionStart
 	onSessionClose  adapter.OnSessionClose
@@ -210,6 +213,19 @@ func NewBlockExecutor(primaryStore storage.LogicalStorage, replicaAddr string) *
 		replicaAddr:    replicaAddr,
 		sessions:       make(map[uint64]*activeSession),
 		sessionResults: make(map[uint64]RecoverySessionStatus),
+		sessionIDs:     &adapter.SessionIDs{},
+	}
+}
+
+// SessionIDs is the replica's session order: the live lane and the
+// recovery commands both take their ids here (adapter.SessionIDSource).
+func (e *BlockExecutor) SessionIDs() *adapter.SessionIDs { return e.sessionIDs }
+
+// UseSessionIDs makes this executor take its ids from ids, the order the
+// volume keeps for the replica across executors (set before any session).
+func (e *BlockExecutor) UseSessionIDs(ids *adapter.SessionIDs) {
+	if ids != nil {
+		e.sessionIDs = ids
 	}
 }
 

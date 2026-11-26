@@ -5,7 +5,7 @@ import (
 	stdlog "log"
 	"strings"
 	"sync"
-	"sync/atomic"
+
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
@@ -60,6 +60,10 @@ type VolumeReplicaAdapter struct {
 	// same (epoch, endpointVersion) on a later probe while the
 	// first attempt is still pending) are dropped by the slot check.
 	fenceInFlight map[fenceKey]uint64
+
+	// sessionIDs is the replica's session order, shared with the live
+	// lane when the executor carries it (SessionIDSource).
+	sessionIDs *SessionIDs
 }
 
 // fenceKey is the lineage key for fence dedupe. Two fence attempts
@@ -71,8 +75,6 @@ type fenceKey struct {
 	epoch           uint64
 	endpointVersion uint64
 }
-
-var sessionIDCounter atomic.Uint64
 
 const defaultSessionStartTimeout = 5 * time.Second
 const defaultFenceTimeout = 15 * time.Second
@@ -93,6 +95,10 @@ func NewVolumeReplicaAdapter(exec CommandExecutor) *VolumeReplicaAdapter {
 		fenceTimeout:   defaultFenceTimeout,
 		fenceWatchdogs: make(map[fenceKey]*time.Timer),
 		fenceInFlight:  make(map[fenceKey]uint64),
+		sessionIDs:     &SessionIDs{},
+	}
+	if src, ok := exec.(SessionIDSource); ok && src.SessionIDs() != nil {
+		a.sessionIDs = src.SessionIDs()
 	}
 	exec.SetOnSessionStart(func(result SessionStartResult) {
 		a.OnSessionStart(result)
@@ -453,13 +459,13 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 	for _, cmd := range cmds {
 		switch c := cmd.(type) {
 		case engine.StartCatchUp:
-			sid := sessionIDCounter.Add(1)
+			sid := a.sessionIDs.Next()
 			events = append(events,
 				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionCatchUp, c.EffectiveFrontierHint()),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.StartRebuild:
-			sid := sessionIDCounter.Add(1)
+			sid := a.sessionIDs.Next()
 			events = append(events,
 				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionRebuild, c.EffectiveFrontierHint()),
 			)
@@ -477,7 +483,7 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 			//   wal_delta   → SessionCatchUp
 			//   full_extent → SessionRebuild
 			//   partial_lba → SessionRebuild (Stage 2 placeholder)
-			sid := sessionIDCounter.Add(1)
+			sid := a.sessionIDs.Next()
 			sessionKind := engine.SessionCatchUp
 			if c.ContentKind != engine.RecoveryContentWALDelta {
 				sessionKind = engine.SessionRebuild
@@ -492,7 +498,7 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 			// fence does NOT go through the session lifecycle
 			// (no Starting/Running/Completed phases), it's a
 			// command + event pair.
-			sid := sessionIDCounter.Add(1)
+			sid := a.sessionIDs.Next()
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.ProbeReplica:
 			// T4c-1 (architect Option D): probe mints a transient
@@ -502,7 +508,7 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 			// registration, no OnSessionStart / OnSessionClose. The
 			// sessionID is consumed only by `executor.Probe` to
 			// construct the ProbeReq's RecoveryLineage.
-			sid := sessionIDCounter.Add(1)
+			sid := a.sessionIDs.Next()
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		default:
 			queued = append(queued, queuedCommand{cmd: cmd})

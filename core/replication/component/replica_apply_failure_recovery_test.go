@@ -83,6 +83,22 @@ func waitPeerState(c *Cluster, want string, timeout time.Duration) (string, bool
 // and acked the barrier, so the peer was never degraded and the block stayed
 // missing on the replica.
 func TestReplicaApplyFailure_PrimaryDegradesRecoversAndReplaysFailedLSN(t *testing.T) {
+	runApplyFailureRecovery(t, 0)
+}
+
+// The replica's session order is one per replica, shared by the live lane
+// and the recovery lane: the peer removed and re-added ten times (each
+// re-add opens a live session, no recovery), and the recovery after the
+// failed apply still starts above the live session the replica holds, is
+// admitted, and the peer converges to healthy.
+func TestRecoveryStartsAfterThePeerWasReAdded(t *testing.T) {
+	runApplyFailureRecovery(t, 10)
+}
+
+// runApplyFailureRecovery is the closed loop above, with the peer removed
+// and re-added readds times (same epoch and endpoint version) once the
+// volume is healthy.
+func runApplyFailureRecovery(t *testing.T, readds int) {
 	var replica *transientApplyFailStore
 	factory := func(t *testing.T, dir, label string, blocks uint32, blockSize int) (storage.LogicalStorage, func()) {
 		st, cleanup := Walstore(t, dir, label, blocks, blockSize)
@@ -125,6 +141,27 @@ func TestReplicaApplyFailure_PrimaryDegradesRecoversAndReplaysFailedLSN(t *testi
 	c.WaitForConverge(2 * time.Second)
 	if st, ok := waitPeerState(c, "healthy", time.Second); !ok {
 		t.Fatalf("baseline peer state %q, want healthy", st)
+	}
+
+	if readds > 0 {
+		target := replication.ReplicaTarget{ReplicaID: "replica-0", DataAddr: c.Replica(0).Addr, ControlAddr: c.Replica(0).Addr, Epoch: 1, EndpointVersion: 1}
+		for i := 0; i < readds; i++ {
+			gen := uint64(2 + 2*i)
+			if err := c.primary.RepVol.UpdateReplicaSet(gen, nil); err != nil {
+				t.Fatalf("remove the peer: %v", err)
+			}
+			if err := c.primary.RepVol.UpdateReplicaSet(gen+1, []replication.ReplicaTarget{target}); err != nil {
+				t.Fatalf("re-add the peer: %v", err)
+			}
+		}
+		waitRegisteredIdle(t, registry)
+		_, _, head = c.primary.Store.Boundaries()
+		if err := c.primary.RepVol.Sync(ctx, head); err != nil {
+			t.Fatalf("Sync after the re-adds: %v", err)
+		}
+		if st, ok := waitPeerState(c, "healthy", time.Second); !ok {
+			t.Fatalf("peer state %q after the re-adds, want healthy", st)
+		}
 	}
 
 	// The next replica apply fails once. Three writes ship behind it, then a

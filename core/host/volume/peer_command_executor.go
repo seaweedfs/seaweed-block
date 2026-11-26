@@ -51,6 +51,10 @@ func NewPeerCommandExecutor(peer *replication.ReplicaPeer) *PeerCommandExecutor 
 	}
 }
 
+// SessionIDs is the peer's session order (adapter.SessionIDSource): the
+// adapter's recovery sessions and the peer's live session share it.
+func (p *PeerCommandExecutor) SessionIDs() *adapter.SessionIDs { return p.inner.SessionIDs() }
+
 // --- Session-lifecycle callback interceptors (peer state translation) ---
 
 // SetOnSessionStart wraps the adapter-supplied callback so a session
