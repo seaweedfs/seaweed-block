@@ -301,6 +301,7 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 	}
 	next.Initial = cur.Initial                       // cleared only by awaited
 	next.AwaitingFirstReady = cur.AwaitingFirstReady // cleared only by noteFirstReady
+	next.DeleteWithoutAck = cur.DeleteWithoutAck     // set only by markDeleteWithoutAck, never cleared
 	if had && sameAttestation(cur, next) {
 		return nil
 	}
@@ -318,7 +319,7 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 }
 
 func sameAttestation(a, b attestedStores) bool {
-	if a.Primary != b.Primary || a.Epoch != b.Epoch || len(a.Stores) != len(b.Stores) || len(a.Initial) != len(b.Initial) || a.AwaitingFirstReady != b.AwaitingFirstReady {
+	if a.Primary != b.Primary || a.Epoch != b.Epoch || len(a.Stores) != len(b.Stores) || len(a.Initial) != len(b.Initial) || a.AwaitingFirstReady != b.AwaitingFirstReady || a.DeleteWithoutAck != b.DeleteWithoutAck {
 		return false
 	}
 	for k, v := range a.Stores {
