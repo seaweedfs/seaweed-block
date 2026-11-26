@@ -29,13 +29,22 @@ func (a *volumeDeleteAuthority) Reserve(ctx context.Context) error {
 	if h.lifecycle == nil {
 		return errors.New("workspace delete: lifecycle store unavailable")
 	}
-	return h.Publisher().ReserveWorkspaceDeletion(ctx, a.volume, func() error {
+	persist := func() error {
 		if _, err := h.lifecycle.Deletions.Admit(a.volume, a.token); err != nil {
 			return err
 		}
 		_, err := h.lifecycle.Deletions.Commit(a.volume, a.token)
 		return err
-	})
+	}
+	// A volume whose creation never completed (the master's durable record
+	// still awaits a replica store) is deleted without its holder: a live
+	// lease does not refuse the reservation, which stops every grant; the
+	// HEAD update still waits for no live lease. A volume that ever completed
+	// creation keeps the live-lease refusal.
+	if h.inCreationPhase(a.volume, authority.AuthorityBasis{}, nil) != "" {
+		return h.Publisher().ReserveNeverCreatedWorkspaceDeletion(ctx, a.volume, persist)
+	}
+	return h.Publisher().ReserveWorkspaceDeletion(ctx, a.volume, persist)
 }
 
 func (a *volumeDeleteAuthority) NoLiveLease(ctx context.Context) error {
