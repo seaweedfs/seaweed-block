@@ -37,11 +37,30 @@ func testListenHost() string {
 	return "127.0.0.1"
 }
 
+// ephemeralPorts is the host's range for outgoing connections' source ports
+// (Linux ip_local_port_range; the Linux default when unreadable). A port in it
+// can be taken by any outgoing connection between the free check and weed's
+// bind, so a port pair never uses it.
+func ephemeralPorts() (int, int) {
+	lo, hi := 32768, 60999
+	if b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
+		var a, z int
+		if n, _ := fmt.Sscan(string(b), &a, &z); n == 2 && a > 0 && z >= a {
+			lo, hi = a, z
+		}
+	}
+	return lo, hi
+}
+
 func w4FreePortPair(t *testing.T, used map[int]bool) int {
 	t.Helper()
+	lo, hi := ephemeralPorts()
 	for i := 0; i < 200; i++ {
 		p := 20000 + rand.Intn(20000)
 		if used[p] || used[p+10000] {
+			continue
+		}
+		if (p >= lo && p <= hi) || (p+10000 >= lo && p+10000 <= hi) {
 			continue
 		}
 		ok := true
