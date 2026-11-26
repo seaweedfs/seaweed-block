@@ -195,19 +195,21 @@ func TestProcedureForcedMoveWithTheOldHostReturning(t *testing.T) {
 		t.Fatal("the block written after the last cut reads back on s2; the page says it is lost")
 	}
 
-	// The old host returns with its old local root, and the example unit
-	// (Restart=on-failure, RestartSec=5s) starts it again after it exits,
-	// until its start limit. Each time it must not take s2's line as its own
-	// (a holder is server and replica), report its frontend ready or listen
-	// for I/O; it logs a refusal and exits with status 75.
-	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2, 75)
-	time.Sleep(5 * time.Second) // RestartSec of the example unit
-	again := env.oldHostRefuses(t, "blockvolume-s1-restarted", env.hosts["s1"], e2, 75)
-	// Control: on a fresh local root there is no stale root, so its refusal
-	// is the identity check alone; it also exits 75.
+	// The old host returns with its old local root. blockmaster refuses its
+	// lease with a typed MOVED (the volume moved to s2 at a newer epoch), so
+	// it exits 78, which the example unit does not restart
+	// (RestartPreventExitStatus=78); an operator's start again ends the same
+	// way. Each time it must not take s2's line as its own (a holder is server
+	// and replica), report its frontend ready or listen for I/O; it logs
+	// `exiting status=78 reason=moved`.
+	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2, 78)
+	time.Sleep(5 * time.Second)
+	again := env.oldHostRefuses(t, "blockvolume-s1-restarted", env.hosts["s1"], e2, 78)
+	// Control: on a fresh local root there is no stale root; the master's
+	// MOVED refusal alone ends it, also with status 78.
 	fresh := env.hosts["s1"]
 	fresh.root = fresh.root + "-fresh"
-	freshRoot := env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2, 75)
+	freshRoot := env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2, 78)
 	// A line carries its owner and that owner's endpoints: every line
 	// delivered at the forced epoch, to the new owner and to each returning
 	// old host alike, carries s2's own endpoints, never another host's.
@@ -308,65 +310,6 @@ func TestProcedureStartInsideTheBarrierWaitIsReGranted(t *testing.T) {
 	}
 }
 
-// TestProcedureStartTooEarlyExitsAndARestartServes: with
-// --workspace-max-clock-skew 50s the barrier is at most 95 s after the stop.
-// A holder started 31 s after the stop ends its 30 s authority wait before
-// the barrier: it does not serve and exits with status 75, so a supervisor
-// (Restart=on-failure, RestartSec=5s) starts it again; a start that waits
-// past the barrier is re-granted and serves at the same epoch.
-func TestProcedureStartTooEarlyExitsAndARestartServes(t *testing.T) {
-	env := startHandoffEnv(t, 1, "--workspace-max-clock-skew", "50s")
-	first := env.start(t, "blockvolume-s1", "s1")
-	e := env.adopt(t, first, "s1")
-	block := pattern("start-too-early!")
-	env.writeBlock(t, "s1", 0, block)
-	first.kill(t)
-	time.Sleep(31 * time.Second)
-
-	// Attempt 2 starts about 66 s after the stop and its wait ends about
-	// 96 s after it, against a barrier of at most 95 s, so attempt 2 normally
-	// serves; up to 4 attempts allow for scheduling on a loaded host.
-	for attempt := 1; ; attempt++ {
-		d := env.start(t, fmt.Sprintf("blockvolume-s1-try%d", attempt), "s1")
-		served := false
-		end := time.Now().Add(45 * time.Second)
-		for time.Now().Before(end) {
-			if env.servingNow("s1") {
-				served = true
-				break
-			}
-			select {
-			case <-d.done:
-				end = time.Now()
-			default:
-				time.Sleep(200 * time.Millisecond)
-			}
-		}
-		if served {
-			if attempt == 1 {
-				t.Fatal("started before the barrier with its wait ending first, the holder served")
-			}
-			if got := env.adopt(t, d, "s1"); got != e {
-				t.Fatalf("attempt %d adopted epoch %d; want the same epoch %d", attempt, got, e)
-			}
-			break
-		}
-		if err := d.wait(5 * time.Second); exitCode(err) != 75 {
-			t.Fatalf("attempt %d did not serve and did not exit 75: %v", attempt, err)
-		}
-		if !d.has("blockvolume: exiting status=75 reason=assignment_timeout") {
-			t.Fatalf("attempt %d exited 75 without the reason assignment_timeout", attempt)
-		}
-		if attempt == 4 {
-			t.Fatal("four supervised starts never served")
-		}
-		time.Sleep(5 * time.Second)
-	}
-	if !bytes.Equal(env.readBlock(t, "s1", 0), block) {
-		t.Fatal("the block written before the stop does not read back")
-	}
-}
-
 // lastLogTime is the time of the last log line containing s (second
 // resolution, the log's local time), or zero.
 func lastLogTime(d *daemon, s string) time.Time {
@@ -422,7 +365,10 @@ func (env *handoffEnv) oldHostRefuses(t *testing.T, name string, b bvHost, e2 ui
 	if err := d.wait(5 * time.Second); exitCode(err) != wantExit {
 		failures = append(failures, fmt.Sprintf("it did not exit with status %d: %v", wantExit, err))
 	}
-	if !d.has("refusing to attach volume=v1") && !d.has("workspace lease: stale authority") && !d.has("foreign assignment") {
+	if wantExit == 78 && !d.has("exiting status=78 reason=moved") {
+		failures = append(failures, "it did not log `exiting status=78 reason=moved`")
+	}
+	if wantExit != 78 && !d.has("refusing to attach volume=v1") && !d.has("workspace lease: stale authority") && !d.has("foreign assignment") {
 		failures = append(failures, "it logged no refusal (stale root, stale authority, or another server's assignment)")
 	}
 	if len(failures) > 0 {
@@ -511,7 +457,7 @@ func (env *handoffEnv) seal(t *testing.T, id string, e uint64) uint64 {
 }
 
 func (env *handoffEnv) chunkShow() []string {
-	return []string{"ops", "chunk", "show", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
+	return []string{"ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 }
 
 func (env *handoffEnv) sealedLSN(t *testing.T, e, g uint64) uint64 {

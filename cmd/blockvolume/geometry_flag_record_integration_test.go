@@ -21,7 +21,7 @@ import (
 // a right-flag start on the same root then fails on the leftover store.
 func TestWrongGeometryFlagIsRefusedBeforeTheStoreIsCreated(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	b := env.hosts["n-v2"]
 	args := append([]string{}, env.volArgsFor(b)...)
@@ -70,7 +70,7 @@ func TestWrongGeometryFlagIsRefusedBeforeTheStoreIsCreated(t *testing.T) {
 // cannot deliver the record is the retryable case, 75: the unit test.)
 func TestCorruptRecordIsRefusedBeforeTheStoreIsCreated(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	b := env.hosts["n-v2"]
 	right := append([]string{}, env.volArgsFor(b)...)
@@ -121,7 +121,7 @@ func TestCorruptRecordIsRefusedBeforeTheStoreIsCreated(t *testing.T) {
 // check (exit 1) before the record check and before any store exists.
 func TestFirstStartWithTheFilerDownCreatesNoStore(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	b := env.hosts["n-v2"]
 	env.cluster.stopProc(t, "filer")
