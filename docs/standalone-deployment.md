@@ -630,7 +630,7 @@ A restore makes a new volume from a snapshot. The new volume reads every chunk i
 #### Lifetime of a restore target
 
 - **The source snapshot cannot be deleted** while v2 exists: `ops chunk snapshot-delete` is refused with `snapshot_has_dependents`. Delete v2 first (see [Delete a volume](volume-lifecycle.md#delete-a-volume)); the snapshot can be deleted after that.
-- **A snapshot of v2 cannot be restored:** it names the source's chunks, and the restore is refused with `restore_source_not_own`. Restore from the source's snapshot instead.
+- **A snapshot of v2 cannot be restored:** it names the source's chunks. The restore exits 1 with `"code":"not_admitted"` and a message ending in `snapshot names another volume's chunks: "<snapshot>"`. The refused request still leaves the target's name bound to it, so a later restore under that name from another snapshot is refused with `target_exists`: restore from the source's snapshot under a new target name.
 - **v2's own writes stay in v2:** the source's snapshot never changes.
 - **Deleting v2 releases the source snapshot:** `ops chunk volume-delete` of v2 removes it from the snapshot's dependents.
 - **`ops chunk release` is a repair step, not part of this procedure.** `sw-block ops chunk release --master MASTER --source v1 --target v2 --chunk-filer FILER` removes a restore target from its source snapshot's dependents. It works only when the target no longer names the source's chunks (it was deleted), or when the target never got its first HEAD (an interrupted restore). In the second case it first tombstones the target's name, so that name can never be created. A live target is refused with `target_live`.
