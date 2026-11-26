@@ -67,25 +67,19 @@ func TestOfflineSealUsesCallerDeadline(t *testing.T) {
 
 // Caller cancellation ends an offline upload; the closed backend stays closed,
 // and a new caller can retry the seal without losing acknowledged bytes.
+// Embed the layout remote so cancellation still exercises real stop settlement.
 type cancelSealRemote struct {
-	storage.ChunkRemote
-	keyer   storage.ChunkKeyer
-	aborter storage.ChunkRemote
-	once    sync.Once
-	cancel  context.CancelFunc
+	*chunkstore.LayoutRemote
+	once   sync.Once
+	cancel context.CancelFunc
 }
-
-func (r *cancelSealRemote) ChunkKey(idx uint64, sum [32]byte) string {
-	return r.keyer.ChunkKey(idx, sum)
-}
-func (r *cancelSealRemote) Abort() { r.aborter.Abort() }
 
 func (r *cancelSealRemote) Put(ctx context.Context, key string, b []byte) error {
 	r.once.Do(r.cancel)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return r.ChunkRemote.Put(ctx, key, b)
+	return r.LayoutRemote.Put(ctx, key, b)
 }
 func TestOfflineSealCallerCancelCanRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,9 +92,7 @@ func TestOfflineSealCallerCancelCanRetry(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			remote.ChunkRemote = r
-			remote.keyer = r
-			remote.aborter = r
+			remote.LayoutRemote = r
 			return remote, nil
 		}
 	})
