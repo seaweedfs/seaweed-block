@@ -525,6 +525,8 @@ sw-block ops chunk snapshots --master MASTER --volume v1 --chunk-filer FILER    
 sw-block ops chunk snapshot --volume v1 --name before-upgrade --status-addr STATUS   # take one now
 ```
 
+The list is a JSON array, one entry per published snapshot in name order: `[{"name":"sched-20261120T031204Z","root":"<64 hex>"}]`, with `"dependents":["v2-<id8>"]` on a snapshot that restore targets depend on.
+
 ### Deleting snapshots and getting space back
 
 Space comes back in two steps. Neither is immediate.

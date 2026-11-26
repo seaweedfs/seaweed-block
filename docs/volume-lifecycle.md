@@ -420,7 +420,12 @@ sw-block ops chunk snapshots       --master MASTER --volume v1 --chunk-filer FIL
 sw-block ops chunk snapshot-delete --master MASTER --volume v1 --chunk-filer FILER --name s1
 ```
 
-Each delete answers `{"volumeID":"v1","name":"s1","state":"deleting"}`.
+`snapshots` answers a JSON array with one entry per published snapshot, in name
+order: `[{"name":"s1","root":"<64 hex>"}]`. An entry also lists
+`"dependents":["v2-<id8>"]` while restore targets depend on that snapshot. An
+entry has no state or cut position: a listed snapshot is published. Each delete
+answers `{"volume":"v1-<id8>","name":"s1","state":"absent"}`. Here `v1-<id8>` is
+the volume's store directory: its name and the first 8 hex digits of its layout id.
 
 **4. Delete the volume:**
 
