@@ -161,7 +161,8 @@ sequenceDiagram
   M->>R3: probe /status and /status/durable
   M->>M: pick the ready candidate with the highest durable LSN
   M->>M: Publisher mints epoch N+1 and persists it
-  M->>R2: AssignmentFact: primary at epoch N+1, peers
+  M->>R2: AssignmentFact: primary at epoch N+1, peers, master's ack profile
+  R2->>R2: own --replication-ack is the fact's profile? else not Healthy, status names both
   R2->>R2: fence own listener, persist epoch floor, open frontend
   M->>R3: AssignmentFact: replica at epoch N+1
   R3->>R3: raise epoch floor to N+1
