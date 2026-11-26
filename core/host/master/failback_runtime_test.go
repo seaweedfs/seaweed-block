@@ -74,6 +74,7 @@ func TestHostFrontendPublicationRuntimeHTTPConfirmsPostFailbackAuthorityLine(t *
 		t.Fatalf("product tick: %v", err)
 	}
 	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	establishVolume(t, h, "vol-a")
 	if _, err := h.FailbackAuthorityRuntime().ExecuteFailback(context.Background(), authority.FailbackRuntimeRequest{
 		VolumeID:                     "vol-a",
 		ReplicaID:                    "r1",
@@ -205,6 +206,7 @@ func TestFailbackServiceEnabledUsesHostRuntime(t *testing.T) {
 		t.Fatalf("product tick: %v", err)
 	}
 	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	establishVolume(t, h, "vol-a")
 
 	resp, err := newServices(h).ExecuteFailback(context.Background(), &control.FailbackRequest{
 		VolumeId:                     "vol-a",
@@ -248,6 +250,7 @@ func TestFailbackExecutorGRPCRuntimeUsesRealMasterService(t *testing.T) {
 		t.Fatalf("product tick: %v", err)
 	}
 	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	establishVolume(t, h, "vol-a")
 	if current.ReplicaID != "r2" {
 		t.Fatalf("current line=%+v want r2", current)
 	}

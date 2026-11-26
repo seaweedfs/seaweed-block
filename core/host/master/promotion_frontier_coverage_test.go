@@ -266,6 +266,7 @@ func TestMountedFailover_ProductLoopRF2DecidesOnThePromotionGate(t *testing.T) {
 			if initial := waitAuthorityLine(t, h.Publisher(), "vol-rf2"); initial.ReplicaID != "r1" {
 				t.Fatalf("initial line=%+v want r1", initial)
 			}
+			establishVolume(t, h, "vol-rf2")
 			ingestRF2Observation(t, h, false, true)
 			result, err := h.RunLifecycleProductTick()
 			if err != nil {

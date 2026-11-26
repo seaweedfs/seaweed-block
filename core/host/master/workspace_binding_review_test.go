@@ -314,6 +314,7 @@ func TestWorkspaceBindingRemoteReadDoesNotBlockAck(t *testing.T) {
 					t.Fatal(e)
 				}
 				waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+				establishVolume(t, h, "vol-rf3")
 				ingestRF3Observation(t, h, false, true, true)
 				h.SetPromotionEvidenceProvider(reviewHeldPromotion{arrived, release})
 				launch(func() error { _, e := h.RunLifecycleProductTick(); return e })

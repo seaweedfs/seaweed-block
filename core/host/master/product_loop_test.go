@@ -243,6 +243,7 @@ func TestMountedFailover_ProductLoopRF3BlocksHealthyCurrentRebalanceWithoutProbe
 	initialA := waitAuthorityLine(t, h.Publisher(), "vol-rf3-a")
 	establishVolume(t, h, "vol-rf3-a")
 	initialB := waitAuthorityLine(t, h.Publisher(), "vol-rf3-b")
+	establishVolume(t, h, "vol-rf3-b")
 	if initialA.ReplicaID != "r1" || initialB.ReplicaID != "r1" {
 		t.Fatalf("initial lines=%+v %+v want both r1", initialA, initialB)
 	}
