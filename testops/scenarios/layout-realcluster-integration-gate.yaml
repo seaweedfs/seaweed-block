@@ -194,7 +194,8 @@ phases:
               *) echo "unknown entry: $t" >&2; exit 2 ;;
             esac
             log="$d/evidence/$t.log"
-            (cd "$d/source/$pkg" && env $extra "$d/bin/$bin" -test.run "^$name\$" -test.v -test.count 1 -test.timeout "$to") > "$log" 2>&1
+            # A failed test keeps its daemons' whole logs here (collected).
+            (cd "$d/source/$pkg" && env $extra SWBLOCK_TEST_LOG_DIR="$d/evidence/$t-daemons" "$d/bin/$bin" -test.run "^$name\$" -test.v -test.count 1 -test.timeout "$to") > "$log" 2>&1
             rc=$?
             if [ "$rc" -eq 0 ] && grep -qE "^--- PASS: $name \(" "$log"; then
               echo "PASS $t $name" >> "$d/evidence/verdicts.txt"
