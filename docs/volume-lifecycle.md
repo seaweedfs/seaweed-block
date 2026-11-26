@@ -161,10 +161,16 @@ These are rules for the operator. The product does not detect every breach.
   on a fresh one.
 - **Never revoke before the seal is confirmed** (see the hand-over steps): a revoke
   without an ACK cannot be undone on one node.
-- **Never restore blockmaster's `--authority-store` or `--lifecycle-store` from a copy.**
-  They decide who may write each volume. An older copy hands out epochs the volumes have
-  already passed, and every start is then refused. A lost store needs a recovery
-  procedure, not a restore.
+- **Never restore blockmaster's directory from an older copy** (its `--authority-store`
+  and `--lifecycle-store`). They decide who may write each volume. An older copy hands out
+  epochs the volumes have already passed, and every start is then refused. A lost store
+  needs a recovery procedure, not a restore.
+- **Run exactly one blockmaster per cluster.** It alone issues each volume's epochs and
+  leases; there is no second or standby blockmaster in this release.
+- **A deleted volume's name cannot be created again.** Its record stays, deleted, and a
+  create under that name is refused. To start over, create the new volume under another
+  name. (A snapshot name is different: once its delete has finished, the name can be
+  taken again.)
 
 ## Which procedures run end to end
 

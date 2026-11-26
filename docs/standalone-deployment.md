@@ -607,10 +607,13 @@ A restore makes a new volume from a snapshot. The new volume reads every chunk i
 4. **Reads fill v2.** A block in a chunk that v2 does not hold yet is read from the source's snapshot; the read waits for that chunk, which is then kept locally. There is no background copy: a chunk that is never read stays in the source's snapshot.
    - Progress is the volume's count of chunks still absent: `Chunk.Stats.AbsentChunks` in `GET http://STATUS_OF_V2/status/durable?volume=v2` (0 means every chunk is local).
    - To make every chunk local, read the whole device once (for example with `dd` to `/dev/null`).
-   - While any chunk is absent, v2's scheduled snapshots are skipped and counted as `restoring`.
+   - **A restored volume takes no scheduled snapshot until its whole device has been read once**: while any chunk is absent, each scheduled snapshot is skipped and counted as `restoring`.
+   - A manual snapshot (`ops chunk snapshot`) is taken in that state too. It names the source's chunks for every chunk v2 has not made local, so, like any snapshot of v2, it cannot be restored (below).
 
 #### Lifetime of a restore target
 
 - **The source snapshot cannot be deleted** while v2 exists: `ops chunk snapshot-delete` is refused with `snapshot_has_dependents`. Delete v2 first (see [Delete a volume](volume-lifecycle.md#delete-a-volume)); the snapshot can be deleted after that.
 - **A snapshot of v2 cannot be restored:** it names the source's chunks, and the restore is refused with `restore_source_not_own`. Restore from the source's snapshot instead.
 - **v2's own writes stay in v2:** the source's snapshot never changes.
+- **Deleting v2 releases the source snapshot:** `ops chunk volume-delete` of v2 removes it from the snapshot's dependents.
+- **`ops chunk release` is a repair step, not part of this procedure.** `sw-block ops chunk release --master MASTER --source v1 --target v2 --chunk-filer FILER` removes a restore target from its source snapshot's dependents. It works only when the target no longer names the source's chunks (it was deleted), or when the target never got its first HEAD (an interrupted restore). In the second case it first tombstones the target's name, so that name can never be created. A live target is refused with `target_live`.
