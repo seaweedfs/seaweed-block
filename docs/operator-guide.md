@@ -218,6 +218,10 @@ measured up to 15 s at 32 volumes with the default 3 slots.
 
 ## When a host is lost
 
+The steps below are for a single-replica volume. For a replicated volume, see
+[replicated volumes in this release](standalone-deployment.md): one replicated
+factor per cluster, and when a replicated volume fails over by itself.
+
 1. Make sure the lost host stays down for this volume. The product does not power off an old holder.
    - If it comes back after the move, blockmaster refuses its lease: it does not serve, logs `exiting status=78
      reason=moved` and exits 78, and the example unit does not start it again

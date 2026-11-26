@@ -146,6 +146,26 @@ Do these steps before you start blockvolume:
      --lifecycle-product-loop-interval 100ms --listen 127.0.0.1:9180
    ```
 
+   **Replicated volumes in this release:**
+   - **One replicated factor per cluster.** `--expected-slots-per-volume` is one
+     number for the whole cluster, and blockmaster checks every replicated
+     volume against it. One volume with another slot count stops assignment
+     for all of them; it shows only as a controller error on every tick.
+     - Under `--cluster-spec`, single-replica volumes can share a cluster with
+       3-replica volumes (`--expected-slots-per-volume 3`).
+     - 2-replica and 3-replica volumes cannot share a cluster.
+     - A static `--topology` holds one factor only.
+   - **Failover.** blockmaster fails a replicated volume over by itself only
+     under `--cluster-spec` with the lifecycle loop on. The same loop also
+     continues a fencing round that did not complete.
+     - On a static `--topology` nothing fails over by itself: run
+       `sw-block ops failover`.
+     - It needs blockmaster started with `--failback-runtime-rpc` and an admin
+       client certificate (`SW_BLOCK_TLS_CERT`, `SW_BLOCK_TLS_KEY`,
+       `SW_BLOCK_TLS_CA`).
+     - If its fencing round is refused, run the command again.
+       `sw-block ops failover -h` describes the round and its exit codes.
+
 3. **Start blockvolume with the identity of one slot.** `--volume-id`,
    `--replica-id` and `--server-id` (`SWB_VOLUME_ID`, `SWB_REPLICA_ID`,
    `SWB_SERVER_ID`) must equal one slot of the file: `v1`, `r1`, `s1` here.
