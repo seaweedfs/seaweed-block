@@ -75,9 +75,9 @@ func TestReplicaStoresWaitOnlyWhereStoresAreRequired(t *testing.T) {
 	}
 }
 
-// The probe answer says the primary awaits replica stores, with the epoch
-// of the assignment that awaits them, only while that wait holds; once the
-// assignment carries every store it says nothing.
+// The probe answer says the primary awaits replica stores with the epoch
+// of the line whose assignment awaits them; a new line (another epoch) that
+// never waited says nothing.
 func TestProbeAnswerNamesTheLineAwaitingReplicaStores(t *testing.T) {
 	h, _, rep := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
 	h.replicationMu.Lock()
@@ -89,8 +89,38 @@ func TestProbeAnswerNamesTheLineAwaitingReplicaStores(t *testing.T) {
 	if got := h.probeAnswer(1).GetAwaitingReplicaStoresEpoch(); got != 3 {
 		t.Fatalf("awaiting epoch %d inside the wait; want 3 (the line's epoch)", got)
 	}
-	h.noteReplicaStores(selfFact(3)) // the re-sent assignment carries every store
+	h.noteReplicaStores(selfFact(4)) // a new line, which never waited
 	if got := h.probeAnswer(2).GetAwaitingReplicaStoresEpoch(); got != 0 {
-		t.Fatalf("awaiting epoch %d after the wait; want 0", got)
+		t.Fatalf("awaiting epoch %d on a line that never waited; want 0", got)
+	}
+}
+
+// The stores-complete assignment arrives before the frontend opens (it opens
+// only after): a probe in between must still say the line awaits replica
+// stores, or the master takes the not-ready answer for a failure. Once the
+// frontend has opened on the line the report ends for good: a later
+// not-ready answer is a real one.
+func TestProbeAnswerKeepsAwaitingUntilTheFrontendOpens(t *testing.T) {
+	h, _, rep := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	h.replicationMu.Lock()
+	h.setReplicationLocked(requiringReplication{rep})
+	h.replicationMu.Unlock()
+	open := false
+	h.SetProbeRoleSource(func() (bool, bool) { return false, open })
+
+	fact := selfFact(3)
+	fact.ReplicaStoresAwaited, fact.ReplicaStoresInitial = 1, 3
+	h.noteReplicaStores(fact)
+	h.noteReplicaStores(selfFact(3)) // the stores-complete assignment, at the same epoch
+	if got := h.probeAnswer(1).GetAwaitingReplicaStoresEpoch(); got != 3 {
+		t.Fatalf("probe between the stores-complete assignment and the frontend: awaiting epoch %d; want 3", got)
+	}
+	open = true
+	if a := h.probeAnswer(2); !a.GetPrimaryReady() || a.GetAwaitingReplicaStoresEpoch() != 0 {
+		t.Fatalf("frontend open: ready=%t awaiting=%d; want ready, 0", a.GetPrimaryReady(), a.GetAwaitingReplicaStoresEpoch())
+	}
+	open = false
+	if got := h.probeAnswer(3).GetAwaitingReplicaStoresEpoch(); got != 0 {
+		t.Fatalf("not ready after the frontend opened on the line: awaiting epoch %d; want 0 (a real not-ready)", got)
 	}
 }

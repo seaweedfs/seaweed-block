@@ -154,8 +154,6 @@ func (h *Host) probeAnswer(round uint64) *control.ProbeAnswer {
 	// Not serving only because the creation wait of this line still holds:
 	// said so, with the line's epoch, so the master does not take the
 	// not-ready answer for a failure (and no other line can borrow it).
-	if !a.PrimaryReady {
-		a.AwaitingReplicaStoresEpoch = h.replicaStoresAwaitedEpoch()
-	}
+	a.AwaitingReplicaStoresEpoch = h.replicaStoresAwaitedEpoch(a.PrimaryReady)
 	return a
 }

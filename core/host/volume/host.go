@@ -168,12 +168,9 @@ type Host struct {
 	// even on a host that was healthy at its prior epoch; only a later
 	// successful role call for the current role and epoch clears it.
 	roleAdmissionFailed atomic.Value // string reason; "" = not failed
-	// storesAwaited: the primary fact's (awaited<<32 | initial) replica
-	// store count (ReplicaStoresAwaited).
-	storesAwaited atomic.Uint64
-	// storesAwaitedEpoch: the epoch of the primary fact storesAwaited came
-	// from.
-	storesAwaitedEpoch atomic.Uint64
+	// storeWait: the primary fact's replica-store wait (ReplicaStoresAwaited,
+	// replicaStoresAwaitedEpoch), one value under its own lock.
+	storeWait storeWait
 	// roleRetry: the last replica role call failed with an error a retry
 	// may outlast (a floor that could not be persisted); runRoleRetry
 	// re-applies the current role until it succeeds or is refused for good.
@@ -778,6 +775,7 @@ func (h *Host) runHeartbeat(ctx context.Context) {
 	send := func() {
 		rpcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
+		h.noteFrontendServing()
 		_, err := h.obsCli.ReportHeartbeat(rpcCtx, h.buildReport())
 		if ctx.Err() == nil {
 			h.mw.call(err)
