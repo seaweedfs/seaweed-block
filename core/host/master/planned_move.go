@@ -139,11 +139,14 @@ func (h *Host) fencedMoveEvidence(volumeID, target, profile string, slots []life
 	if plain.AckProfile == "" {
 		plain.AckProfile = profile
 	}
+	// Pending from the attempt on: the round may fence survivors above the
+	// line whatever it decides, and an allowed decision may still fail to
+	// publish. It is forgotten once a line reaches that epoch.
+	h.noteFencePending(volumeID, current.Epoch+1)
 	fenced, allowed := h.fencedDecision(volumeID, current, plain, len(candidates))
 	if allowed[target] {
 		return promotionEvidenceFor(fenced, target), nil
 	}
-	h.noteFencePending(volumeID, current.Epoch+1)
 	others := make([]string, 0, len(allowed))
 	for r := range allowed {
 		others = append(others, r)
