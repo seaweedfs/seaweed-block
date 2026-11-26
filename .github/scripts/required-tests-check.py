@@ -1,13 +1,18 @@
 """Every named test must have run and passed.
 
-Usage: required-tests-check.py NAMES_FILE EVENTS_FILE...
+Usage: required-tests-check.py [--status STATUS_FILE] NAMES_FILE EVENTS_FILE...
 
 NAMES_FILE holds one top-level test name per line (# starts a comment).
 EVENTS_FILE is `go test -json` (or `go tool test2json`) output. A named test
 that skipped, failed, never started or never ended is a failure: a test that
 cannot start proves nothing, so it is not allowed to read as a pass. A name
 listed twice, or a test that passed in one stream and failed in another, is a
-failure too. Prints one line per named test with its outcome and elapsed
+failure too. A package-level failure event fails the run.
+
+STATUS_FILE (run-named-tests.sh) holds one line per named test, NAME and the
+exit status of the process that ran it. With it, a named test passes only if it
+also has exactly one line and that status is 0: a test that reports PASS and
+then fails, panics or hangs on its way out is not a pass. Prints one line per named test with its outcome and elapsed
 seconds, then the total.
 
 Exit 0: every named test passed. 1: at least one did not. 2: usage or an
@@ -35,10 +40,25 @@ def names_of(path):
     return names
 
 
+def statuses_of(path):
+    """Test name -> list of exit statuses."""
+    out = {}
+    with open(path, encoding='utf-8') as f:
+        for n, raw in enumerate(f, 1):
+            parts = raw.split()
+            if not parts:
+                continue
+            if len(parts) != 2 or not parts[1].lstrip('-').isdigit():
+                raise ValueError('%s:%d: %r is not NAME EXIT_STATUS' % (path, n, raw.strip()))
+            out.setdefault(parts[0], []).append(int(parts[1]))
+    return out
+
+
 def outcomes(paths):
-    """Test name -> list of (action, elapsed) for its terminal events, and the
-    names that started (action run)."""
-    ends, started = {}, set()
+    """Test name -> list of (action, elapsed) for its terminal events, the
+    names that started (action run), and the number of package-level
+    failure events."""
+    ends, started, pkg_fail = {}, set(), 0
     for path in paths:
         with open(path, encoding='utf-8', errors='replace') as f:
             for raw in f:
@@ -51,22 +71,32 @@ def outcomes(paths):
                     continue
                 test = ev.get('Test')
                 if not test:
-                    continue  # package events (a subtest's name never matches a top-level one)
+                    if ev.get('Action') == 'fail':
+                        pkg_fail += 1  # the binary failed outside any test (or after one)
+                    continue  # other package events; a subtest's name never matches a top-level one
                 action = ev.get('Action')
                 if action == 'run':
                     started.add(test)
                 elif action in ('pass', 'fail', 'skip'):
                     ends.setdefault(test, []).append((action, ev.get('Elapsed')))
-    return ends, started
+    return ends, started, pkg_fail
 
 
 def main(argv):
-    if len(argv) < 3:
+    args = argv[1:]
+    status_file = None
+    if args[:1] == ['--status']:
+        if len(args) < 2:
+            print(__doc__.strip().splitlines()[2], file=sys.stderr)
+            return 2
+        status_file, args = args[1], args[2:]
+    if len(args) < 2:
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
     try:
-        names = names_of(argv[1])
-        ends, started = outcomes(argv[2:])
+        names = names_of(args[0])
+        ends, started, pkg_fail = outcomes(args[1:])
+        statuses = statuses_of(status_file) if status_file else None
     except (OSError, ValueError) as e:
         print('required-tests: %s' % e, file=sys.stderr)
         return 2
@@ -76,19 +106,25 @@ def main(argv):
         actions = {a for a, _ in got}
         secs = sum(e for _, e in got if isinstance(e, (int, float)))
         total += secs
-        if actions == {'pass'} and len(got) == 1:
+        rcs = statuses.get(name, []) if statuses is not None else [0]
+        if actions == {'pass'} and len(got) == 1 and rcs == [0]:
             print('PASS     %-70s %7.1fs' % (name, secs))
             continue
         bad += 1
-        if not got:
+        if actions == {'pass'} and len(got) == 1:
+            why = ('NO EXIT STATUS' if not rcs else
+                   'PASSED, THEN EXIT %s' % ','.join(str(r) for r in rcs))
+        elif not got:
             why = 'STARTED, NEVER ENDED' if name in started else 'NEVER RAN'
         elif len(got) > 1:
             why = 'RAN %d TIMES (%s)' % (len(got), ', '.join(a for a, _ in got))
         else:
             why = got[0][0].upper()
         print('%-8s %-70s %7.1fs' % ('FAIL', name, secs) + '  ' + why)
+    if pkg_fail:
+        print('FAIL     the test binary reported %d package-level failure(s)' % pkg_fail)
     print('required-tests: %d named, %d not passed, %.1fs in named tests' % (len(names), bad, total))
-    return 1 if bad else 0
+    return 1 if bad or pkg_fail else 0
 
 
 if __name__ == '__main__':

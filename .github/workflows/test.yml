@@ -115,9 +115,12 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Self-test of the required-tests gate
-        # The gate must fail on a skip, a failure, a test that never ran and
-        # one cut off mid-run; this proves it before it judges the real run.
-        run: python3 -I .github/scripts/required-tests-check-test.py
+        # The gate must fail on a skip, a failure, a test that never ran, one
+        # cut off mid-run, and one that reports PASS and then exits nonzero or
+        # hangs; this proves it before it judges the real run.
+        run: |
+          python3 -I .github/scripts/required-tests-check-test.py
+          bash .github/scripts/run-named-tests-test.sh
 
       - name: Pinned SeaweedFS
         # The release archive is checked against its sha256 before every use,
@@ -158,7 +161,8 @@ jobs:
       - name: Run the named process-level tests
         # Each named test in its own process of the one test binary, in
         # sequence, so a panic or a hang in one cannot hide the others; each
-        # is bounded (TEST_TIMEOUT, then killed). The known-zero acceptance
+        # is bounded (TEST_TIMEOUT, then killed) and its exit status is kept:
+        # the gate needs a PASS event AND exit 0 for every named test. The known-zero acceptance
         # runs its small shape (1 GiB, user-space client, no device); the
         # 1 TiB run is lab only.
         env:
@@ -169,14 +173,7 @@ jobs:
         run: |
           set -euo pipefail
           names=.github/process-level-tests.txt
-          out="$RUNNER_TEMP/process-level.json"
-          : >"$out"
-          sed 's/#.*//' "$names" | tr -d ' \t' | grep . | while read -r name; do
-            start=$(date +%s)
-            rc=0
-            (cd cmd/blockvolume && timeout -k 30 "$TEST_TIMEOUT" "$SWBLOCK_TEST_BINS/blockvolume.test" \
-              -test.v=test2json -test.count=1 -test.timeout "$TEST_TIMEOUT" -test.run "^${name}\$" 2>&1) |
-              go tool test2json -t -p github.com/seaweedfs/seaweed-block/cmd/blockvolume >>"$out" || rc=$?
-            echo "$name: exit $rc, $(( $(date +%s) - start ))s"
-          done
-          python3 -I .github/scripts/required-tests-check.py "$names" "$out"
+          bash .github/scripts/run-named-tests.sh "$SWBLOCK_TEST_BINS/blockvolume.test" "$names" \
+            "$RUNNER_TEMP/process-level.json" "$RUNNER_TEMP/process-level.status" "$TEST_TIMEOUT" cmd/blockvolume
+          python3 -I .github/scripts/required-tests-check.py --status "$RUNNER_TEMP/process-level.status" \
+            "$names" "$RUNNER_TEMP/process-level.json"
