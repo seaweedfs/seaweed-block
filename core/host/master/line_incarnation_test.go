@@ -54,7 +54,7 @@ func TestLineForTheTargetsEndpointsNamesTheTargetsProcess(t *testing.T) {
 		server, data, ctrl, incarnation string
 		at                              time.Time
 	}{
-		{"node-d", "127.0.0.1:19401", "127.0.0.1:19402", "r2-target", now.Add(-time.Second)},
+		{"node-d", "127.0.0.1:19401", "127.0.0.1:19402", "r2-target", now.Add(-50 * time.Millisecond)}, // fresh (window 1s), older than the source's
 		{"node-b", "127.0.0.1:19201", "127.0.0.1:19202", "r2-source", now},
 	} {
 		if err := h.ObservationHost().Ingest(authority.Observation{ServerID: r.server, ObservedAt: r.at,
