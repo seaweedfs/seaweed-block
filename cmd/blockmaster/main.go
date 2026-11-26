@@ -227,6 +227,10 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 2
 	}
+	if err := requireProductLoop(f.lifecycleLoop, clusterImport); err != nil {
+		fmt.Fprintln(os.Stderr, "blockmaster:", err)
+		return 2
+	}
 	if len(topo.Volumes) == 0 && len(clusterImport.Nodes) == 0 {
 		// Without a topology the observation host classifies every
 		// volume UnknownReplicaClaim; controller can never mint.
