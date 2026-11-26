@@ -299,6 +299,11 @@ func TestRunCommit_RefusesAnAddedForeignReference(t *testing.T) {
 		"another chunk at a held index":   func(next map[uint64]Ref) { next[7] = ref("src", 7, "d2") },
 		"a third volume at a held index":  func(next map[uint64]Ref) { next[7] = ref("other", 7, "d") },
 		"over an own chunk at that index": func(next map[uint64]Ref) { next[3] = ref("src", 3, "b") },
+		"this name, another volume id": func(next map[uint64]Ref) {
+			r := ref("v1", 20, "e")
+			r.OwnerID = idFor("v1 re-created")
+			next[20] = r
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, h, req := commitFixture(t)

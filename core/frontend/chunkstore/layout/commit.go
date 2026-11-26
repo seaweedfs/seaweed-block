@@ -72,12 +72,14 @@ func newOwn(vol string, prev, next map[uint64]Ref) map[uint64]Ref {
 
 // addedForeign returns an index of next holding another volume's chunk
 // that prev does not hold at that index (the smallest, for a stable
-// refusal).
-func addedForeign(vol string, prev, next map[uint64]Ref) (uint64, bool) {
+// refusal). Another volume is told by identity, name and id: a volume
+// re-created under this name is another volume.
+func addedForeign(vol string, id VolumeID, prev, next map[uint64]Ref) (uint64, bool) {
 	var found bool
 	var at uint64
 	for i, r := range next {
-		if r.Owner != vol && prev[i] != r && (!found || i < at) {
+		own := r.Owner == vol && r.OwnerID == id
+		if !own && prev[i] != r && (!found || i < at) {
 			found, at = true, i
 		}
 	}
@@ -184,7 +186,7 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 				return Head{}, false, ErrStaleBase
 			}
 		}
-		if i, ok := addedForeign(vol, req.Prev, req.Next); ok {
+		if i, ok := addedForeign(vol, h.VolumeID, req.Prev, req.Next); ok {
 			return Head{}, false, fmt.Errorf("%w: index %d names %s's chunk", ErrForeignRefAdded, i, req.Next[i].Owner)
 		}
 		var rels []string
