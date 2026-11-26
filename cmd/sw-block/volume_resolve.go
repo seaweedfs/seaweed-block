@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/ops"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // runOpsVolume exposes the same master name binding used by ops chunk.
@@ -34,7 +36,15 @@ func runOpsVolume(args []string, stdout, stderr io.Writer) int {
 	id, err := resolveVolumeID(ctx, *master, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "sw-block ops volume resolve: %v\n", err)
-		return ops.VolumeStatusExitInvalid
+		// Match blockvolume: an unavailable or unknown master answer is retryable;
+		// a definite refusal or invalid local configuration needs correction.
+		if s, ok := status.FromError(err); ok {
+			switch s.Code() {
+			case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Unknown, codes.Internal:
+				return 75
+			}
+		}
+		return 78
 	}
 	fmt.Fprintln(stdout, id.String())
 	return ops.VolumeStatusExitOK

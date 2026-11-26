@@ -197,8 +197,10 @@ TLS and token environment settings as `ops chunk`. For a replicated installation
 using mutual TLS, set all three file paths: `SW_BLOCK_TLS_CERT` (client
 certificate), `SW_BLOCK_TLS_KEY` (client private key) and `SW_BLOCK_TLS_CA`
 (CA that verifies the master). A missing volume, an
-invalid identity or an unreachable master returns nonzero and prints no id;
-fix that error before starting blockvolume. The query does not create a
+invalid identity or an unreachable master prints no id. Exit 75 means the
+master answer is unavailable or unknown: retry the query. Exit 78 means a
+definite refusal (including not found or an invalid identity): correct it
+before starting blockvolume. Invalid command arguments return 2. The query does not create a
 volume or prove frontend readiness.
 
 ## blockmaster settings

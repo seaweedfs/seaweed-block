@@ -29,6 +29,9 @@ func (s *volumeResolveServer) GetVolume(_ context.Context, q *control.GetLifecyc
 }
 func serveVolumeResolver(t *testing.T, s *volumeResolveServer) string {
 	t.Helper()
+	for _, key := range []string{"SW_BLOCK_TLS_CERT", "SW_BLOCK_TLS_KEY", "SW_BLOCK_TLS_CA"} {
+		t.Setenv(key, "")
+	}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -59,18 +62,20 @@ func TestOpsVolumeResolveRefusesMissingOrForeignIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name, volume, id string
 		err              error
+		exit             int
 	}{
-		{"missing", "", "", status.Error(codes.NotFound, "no such volume")},
-		{"unavailable", "", "", status.Error(codes.Unavailable, "master unavailable")},
-		{"invalid-id", "v1", "bad", nil},
-		{"wrong-name", "v2", "1234567890abcdef1234567890abcdef", nil},
+		{"missing", "", "", status.Error(codes.NotFound, "no such volume"), 78},
+		{"unavailable", "", "", status.Error(codes.Unavailable, "master unavailable"), 75},
+		{"deadline", "", "", status.Error(codes.DeadlineExceeded, "query timed out"), 75},
+		{"invalid-id", "v1", "bad", nil, 78},
+		{"wrong-name", "v2", "1234567890abcdef1234567890abcdef", nil, 78},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &volumeResolveServer{reply: &control.CreateVolumeResponse{VolumeId: tc.volume, LayoutId: tc.id}, err: tc.err}
 			addr := serveVolumeResolver(t, s)
 			var out, errout bytes.Buffer
 			code := run([]string{"ops", "volume", "resolve", "--master", addr, "v1"}, &out, &errout)
-			if code != 2 || out.Len() != 0 || errout.Len() == 0 {
+			if code != tc.exit || out.Len() != 0 || errout.Len() == 0 {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, &out, &errout)
 			}
 		})
