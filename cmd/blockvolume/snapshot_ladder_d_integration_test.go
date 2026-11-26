@@ -40,17 +40,28 @@ func (env *handoffEnv) deleteSnapshot(t *testing.T, vol, name string) {
 // control route (POST /chunk/snapshot/delete on hostID's status listener),
 // which runs the holder's cleaning pass right after the delete. It returns
 // the HTTP status and body.
+//
+// A snapshot delete is one conditional update of HEAD. The holder's
+// cleaning (kicked by the previous delete) also updates HEAD, so a delete
+// that read HEAD just before can lose its update ("HEAD generation moved")
+// and change nothing; ops chunk snapshot-delete reports that as a retryable
+// conflict. Only that answer is retried, within 30 s; any other is returned.
 func (env *handoffEnv) holderDeleteSnapshot(t *testing.T, hostID, vol, name string) (int, string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"volumeID": vol, "name": name})
 	c := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := c.Post("http://"+env.hosts[hostID].status+"/chunk/snapshot/delete", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatal(err)
+	for end := time.Now().Add(30 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		resp, err := c.Post("http://"+env.hosts[hostID].status+"/chunk/snapshot/delete", "application/json", strings.NewReader(string(body)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK || !strings.Contains(string(out), "HEAD generation moved") || time.Now().After(end) {
+			return resp.StatusCode, string(out)
+		}
+		t.Logf("holder delete of %s lost its HEAD update to a concurrent change; retrying: %s", name, out)
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return resp.StatusCode, string(out)
 }
 
 // poolObjects counts the chunk objects in vol's pool (every shard
