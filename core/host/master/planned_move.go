@@ -3,10 +3,12 @@ package master
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
 // ErrPlannedMoveNeedsSeal: under this ack profile and replica count a write
@@ -71,7 +73,16 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 			targetServer = s.ServerID
 		}
 	}
-	if err := plannedMoveAllowed(profile, len(placement.Slots)); err != nil {
+	// The primary is unreachable (a lost host stops heartbeating): the move
+	// is the operator's failover, not a planned move from a live primary, and
+	// it is decided on the fencing round at every replica count, where the
+	// planned guard refuses only for want of a seal. A reachable primary's
+	// move stays a planned move under its guard.
+	if err := plannedMoveAllowed(profile, len(placement.Slots)); err != nil && !errors.Is(err, ErrPlannedMoveNeedsSeal) {
+		return adapter.PrimaryEvidence{}, err
+	} else if h.primaryUnreachable(volumeID) {
+		return h.fencedMoveEvidence(volumeID, target, profile, placement.Slots)
+	} else if err != nil {
 		return adapter.PrimaryEvidence{}, err
 	}
 	result, err := prober.ProbePromotionCandidates(volumeID, authority.AuthorityBasis{}, []authority.ReplicaCandidate{{ReplicaID: target, ServerID: targetServer}})
@@ -86,4 +97,60 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 		}
 	}
 	return adapter.PrimaryEvidence{}, fmt.Errorf("planned move: replica %s did not answer the probe round ready (caught up, epoch table valid)", target)
+}
+
+// primaryUnreachable: the line's primary has no fresh, reachable heartbeat
+// slot. A volume without a line has no primary to lose.
+func (h *Host) primaryUnreachable(volumeID string) bool {
+	current, ok := h.Publisher().VolumeAuthorityLine(volumeID)
+	if !ok {
+		return false
+	}
+	slot, fresh := h.freshCurrentSlot(volumeID, current.ReplicaID)
+	return !fresh || !slot.Reachable
+}
+
+// fencedMoveEvidence is the operator's failover of an unreachable primary,
+// at any replica count. The fencing round seals the old primary: every other replica is fenced at the line's
+// next epoch, so the old primary, dead or alive, can no longer collect an
+// acknowledgement, and the decision is read from the round alone
+// (fencedDecision: enough counted answers, the target holds the highest
+// fenced end and is ready). A round that does not allow the target publishes
+// nothing and leaves the fence pending, so a primary that answers again is
+// continued at e+1 (healAfterFailedFence) by the product loop.
+func (h *Host) fencedMoveEvidence(volumeID, target, profile string, slots []lifecycle.PlacementSlotIntent) (adapter.PrimaryEvidence, error) {
+	current, ok := h.Publisher().VolumeAuthorityLine(volumeID)
+	if !ok {
+		return adapter.PrimaryEvidence{}, fmt.Errorf("fenced move: volume %s has no authority line", volumeID)
+	}
+	h.promotionMu.RLock()
+	prober := h.promotionProber
+	h.promotionMu.RUnlock()
+	var candidates []authority.ReplicaCandidate
+	for _, s := range slots {
+		if s.ReplicaID != current.ReplicaID {
+			candidates = append(candidates, authority.ReplicaCandidate{ReplicaID: s.ReplicaID, ServerID: s.ServerID})
+		}
+	}
+	plain, err := prober.ProbePromotionCandidates(volumeID, current, candidates)
+	if err != nil {
+		return adapter.PrimaryEvidence{}, fmt.Errorf("fenced move: probe round: %w", err)
+	}
+	if plain.AckProfile == "" {
+		plain.AckProfile = profile
+	}
+	// Pending from the attempt on: the round may fence survivors above the
+	// line whatever it decides, and an allowed decision may still fail to
+	// publish. It is forgotten once a line reaches that epoch.
+	h.noteFencePending(volumeID, current.Epoch+1)
+	fenced, allowed := h.fencedDecision(volumeID, current, plain, len(candidates))
+	if allowed[target] {
+		return promotionEvidenceFor(fenced, target), nil
+	}
+	others := make([]string, 0, len(allowed))
+	for r := range allowed {
+		others = append(others, r)
+	}
+	sort.Strings(others)
+	return adapter.PrimaryEvidence{}, fmt.Errorf("fenced move: the fencing round at epoch %d does not allow %s (allowed: %v): it must hold the highest fenced end and be ready, with enough fenced survivors", current.Epoch+1, target, others)
 }

@@ -75,6 +75,9 @@ type switchProbe struct {
 	// empty: a new volume, never written: every end is zero and no frontier
 	// is required.
 	empty bool
+	// awaitingEpoch: the current primary answers that it is not ready only
+	// because its assignment at this epoch awaits replica stores (0: no).
+	awaitingEpoch uint64
 	// When hold is set, a probe signals entered and then blocks until
 	// release is closed.
 	hold    bool
@@ -109,7 +112,7 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 		return PromotionProbeResult{
 			AckProfile:   "sync-quorum",
 			CurrentKnown: !p.currentUnknown,
-			Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady},
+			Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, AwaitingReplicaStoresEpoch: p.awaitingEpoch},
 			Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true}, {ReplicaID: "r3"}},
 		}, nil
 	}
@@ -119,7 +122,7 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 		// covers (#181); r3 answers but lags. A fencing round counts both.
 		SyncAckLSN:   70,
 		CurrentKnown: !p.currentUnknown,
-		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, DurableLSN: 70},
+		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, AwaitingReplicaStoresEpoch: p.awaitingEpoch, DurableLSN: 70},
 		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}, {ReplicaID: "r3", DurableLSN: p.lagEnd()}},
 	}, nil
 }
@@ -171,8 +174,12 @@ func newBootGraceMaster(t *testing.T, cfg Config) *Host {
 // creation wait (no store attested).
 func newBootGraceMasterCreating(t *testing.T, cfg Config) *Host {
 	t.Helper()
-	cfg.AuthorityStoreDir = t.TempDir()
-	cfg.LifecycleStoreDir = t.TempDir()
+	if cfg.AuthorityStoreDir == "" {
+		cfg.AuthorityStoreDir = t.TempDir()
+	}
+	if cfg.LifecycleStoreDir == "" {
+		cfg.LifecycleStoreDir = t.TempDir()
+	}
 	cfg.Listen = "127.0.0.1:0"
 	cfg.ControllerConfig.ExpectedSlotsPerVolume = 3
 	if cfg.Freshness.FreshnessWindow == 0 {
@@ -205,7 +212,7 @@ func attestAllStores(t *testing.T, h *Host) {
 	if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", line.Epoch, map[string]storage.StoreID{"r1": testStoreID, "r2": testStoreID, "r3": testStoreID})); err != nil {
 		t.Fatal(err)
 	}
-	if h.inCreationWait("vol-rf3") {
+	if inCreationWait(h) {
 		t.Fatal("fixture: still in the creation wait after the attestation")
 	}
 }

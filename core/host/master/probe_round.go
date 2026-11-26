@@ -227,7 +227,7 @@ done:
 			}
 			// The current primary's own evidence (a heal continues it on it):
 			// ready as a serving primary, on a valid table.
-			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, Ready: a.GetPrimaryReady(), DurableLSN: a.GetDurableEnd(),
+			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, Ready: a.GetPrimaryReady(), AwaitingReplicaStoresEpoch: a.GetAwaitingReplicaStoresEpoch(), DurableLSN: a.GetDurableEnd(),
 				LastDataEpoch: a.GetLastDataEpoch(), LastDataFirstLSN: a.GetLastDataFirstLsn(), TableInvalid: a.GetTablePresent() && !a.GetTableValid(), TableValid: a.GetTablePresent() && a.GetTableValid(),
 				StoreID: store, Floor: a.GetFloor()}
 		} else {

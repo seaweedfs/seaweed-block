@@ -27,6 +27,10 @@ type LifecycleProductTickResult struct {
 type PromotionCandidateEvidence struct {
 	ReplicaID  string
 	Ready      bool
+	// AwaitingReplicaStoresEpoch: the primary answered not ready only because
+	// its assignment at this epoch still awaits replica stores (its own
+	// report); 0: not awaiting.
+	AwaitingReplicaStoresEpoch uint64
 	DurableLSN uint64
 	ProbeAddr  string
 	// LastDataEpoch and LastDataFirstLSN are the candidate's epoch-table row
@@ -525,6 +529,17 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		// and every start counts toward flap history (#128). The
 		// promotion rules below are unchanged.
 		h.recordCurrentBootFact(placement.VolumeID)
+		// A fencing round fenced survivors above this line and nothing was
+		// published (e.g. the operator's refused failover): continue the
+		// line's own primary at e+1 when it is back and answers ready,
+		// before any candidate check, as the supported gate does.
+		if line, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID); ok && line.Assigned &&
+			h.pendingFence(placement.VolumeID, line.Epoch) && h.freshPrimaryAcceptable(placement.VolumeID, line.ReplicaID) {
+			if heal, healed := h.healAfterFailedFence(placement.VolumeID, line); healed {
+				directAsks = append(directAsks, heal)
+				continue
+			}
+		}
 		if len(placement.Slots) < 2 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
 			continue
 		}
@@ -800,23 +815,21 @@ func (h *Host) probePromotionCandidates(volumeID string, current authority.Autho
 // legitimate failover.
 func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authority.AuthorityBasis, candidates []authority.ReplicaCandidate) (PromotionProbeResult, bool) {
 	before, beforeOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
-	// Read before the probe: the state the primary's answer is given in. If
-	// the wait clears while the probe runs, the not-ready answer still
-	// belongs to the wait; the next round judges the established volume.
-	creating := h.inCreationWait(volumeID)
 	result, ok := h.probePromotionCandidates(volumeID, current, candidates)
 	if !ok || (result.CurrentKnown && result.Current.Ready) {
 		return result, ok
 	}
 	after, afterOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
-	// A new volume's primary hides its frontend until the master has
-	// recorded every replica's store (the creation wait), so it answers "not
-	// primary-ready" by design. That answer is the wait, not a failure: the
-	// primary is judged ready for this decision, but only while its own fresh
-	// slot is acceptable. One that is unreachable, ineligible (an unhealthy
-	// heartbeat) or withdrawn is replaced as for an established volume.
-	if result.CurrentKnown && afterOK && after.Reachable && after.Eligible && !after.Withdrawn && creating {
-		h.log.Printf("blockmaster: promotion gate volume=%s current=%s not frontend-ready inside the creation wait; judged ready", volumeID, current.ReplicaID)
+	// A new volume's primary serves nothing until its assignment carries
+	// every replica's store (the creation wait), and it says so in its
+	// answer. That not-ready answer is the wait, not a failure: the primary
+	// is judged ready for this decision, but only while its own fresh slot is
+	// acceptable. One that is unreachable, ineligible (an unhealthy
+	// heartbeat) or withdrawn is replaced as for an established volume. The
+	// primary owns this fact; the master keeps no state for it.
+	if result.CurrentKnown && current.Epoch != 0 && result.Current.AwaitingReplicaStoresEpoch == current.Epoch &&
+		afterOK && after.Reachable && after.Eligible && !after.Withdrawn {
+		h.log.Printf("blockmaster: promotion gate volume=%s current=%s not ready, awaiting replica stores (its own answer); judged ready", volumeID, current.ReplicaID)
 		result.Current.Ready = true
 		return result, ok
 	}
@@ -1028,16 +1041,6 @@ func (h *Host) assignmentAskAlreadyCurrent(volumeID, replicaID, dataAddr, ctrlAd
 // fresh heartbeat slot read now: placeable by that report and inside its
 // boot grace (#128). No fresh slot, or an explicit unhealthy report
 // (unreachable, ineligible, withdrawn), never holds.
-// inCreationWait reports whether the master still awaits the stores of a
-// new volume's replicas (its primary serves nothing until then).
-func (h *Host) inCreationWait(volumeID string) bool {
-	if h.attest == nil {
-		return false
-	}
-	waiting, _ := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID))
-	return waiting > 0
-}
-
 func (h *Host) primaryBootGraceHoldsNow(volumeID, replicaID string) bool {
 	if h.ctrl == nil {
 		return false
@@ -1066,6 +1069,13 @@ func (h *Host) recordCurrentBootFact(volumeID string) {
 
 // freshCurrentSlot returns the replica's own fresh heartbeat slot from
 // the observation store (server facts folded in).
+// freshPrimaryAcceptable: the replica has a fresh heartbeat slot that is
+// reachable, eligible and not withdrawn.
+func (h *Host) freshPrimaryAcceptable(volumeID, replicaID string) bool {
+	s, ok := h.freshCurrentSlot(volumeID, replicaID)
+	return ok && s.Reachable && s.Eligible && !s.Withdrawn
+}
+
 func (h *Host) freshCurrentSlot(volumeID, replicaID string) (authority.ReplicaCandidate, bool) {
 	if h.obs == nil {
 		return authority.ReplicaCandidate{}, false

@@ -141,3 +141,26 @@ func TestProbeRound_ALateAnswerAfterTheRoundClosedIsDropped(t *testing.T) {
 		t.Fatal("an answer after its round closed was delivered")
 	}
 }
+
+// The primary's own report crosses the wire into the gate's evidence: a
+// current primary that answers not ready because its assignment at epoch 3
+// awaits replica stores is carried as such (and only from this round's
+// answer of the asked node).
+func TestProbeRound_CarriesThePrimarysAwaitingStoresEpoch(t *testing.T) {
+	hub := newProbeHub()
+	servers := map[string]string{"r1": "s1", "r2": "s2"}
+	p := &roundEvidenceProvider{hub: hub, serverOf: func(_, r string) string { return servers[r] }, ackProfile: "sync-quorum", wait: 300 * time.Millisecond, attested: attestedAs}
+	roundNode(t, hub, "s1", func(r *control.ProbeRound) *control.ProbeAnswer {
+		a := readyAnswer("s1")(r)
+		a.ReplicaReady, a.PrimaryReady, a.AwaitingReplicaStoresEpoch = false, false, 3
+		return a
+	})
+	roundNode(t, hub, "s2", readyAnswer("s2"))
+	res, err := p.ProbePromotionCandidates("v1", authority.AuthorityBasis{ReplicaID: "r1", Epoch: 3}, []authority.ReplicaCandidate{{ReplicaID: "r2", ServerID: "s2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.CurrentKnown || res.Current.Ready || res.Current.AwaitingReplicaStoresEpoch != 3 {
+		t.Fatalf("current %+v known=%t; want not ready, awaiting replica stores at epoch 3", res.Current, res.CurrentKnown)
+	}
+}
