@@ -209,17 +209,29 @@ func startHandoffEnv(t *testing.T, n int, masterArgs ...string) *handoffEnv {
 	return startHandoffEnvWith(t, n, nil, masterArgs...)
 }
 
-// startHandoffEnvWith is startHandoffEnv with more volume records in the
-// cluster spec: each of targets (a volume id) is placed on a node of its
-// own, named after it, with its own endpoints and local root (a restore
-// target, for example).
+// startHandoffEnvWith is startHandoffEnv with restore targets: each of
+// targets (a volume id) is placed on a node of its own, named after it, with
+// its own endpoints and local root. A target has placement only, no volume
+// record: its restore creates it.
 func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...string) *handoffEnv {
 	t.Helper()
-	var tlsCfg map[string]time.Time
+	return startHandoffEnvConfigured(t, n, targets, procedureTLSConfig(), false, masterArgs...)
+}
+
+// startHandoffEnvVolumes is startHandoffEnvWith with ordinary volumes: each
+// of volumes gets a volume record from the cluster spec, so it starts
+// without a restore.
+func startHandoffEnvVolumes(t *testing.T, n int, volumes []string, masterArgs ...string) *handoffEnv {
+	t.Helper()
+	return startHandoffEnvConfigured(t, n, volumes, procedureTLSConfig(), true, masterArgs...)
+}
+
+// procedureTLSConfig is nil without mutual TLS, else an empty expiry map.
+func procedureTLSConfig() map[string]time.Time {
 	if procedureTLSOn() {
-		tlsCfg = map[string]time.Time{}
+		return map[string]time.Time{}
 	}
-	return startHandoffEnvTLS(t, n, targets, tlsCfg, masterArgs...)
+	return nil
 }
 
 // startHandoffEnvTLS is startHandoffEnvWith with mutual TLS when tlsNotAfter

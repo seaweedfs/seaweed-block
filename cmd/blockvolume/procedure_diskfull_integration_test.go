@@ -62,7 +62,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	for _, m := range []string{root, limit} {
 		requireSmallDedicatedMount(t, m)
 	}
-	env := startHandoffEnvWith(t, 1, []string{"v2"})
+	env := startHandoffEnvVolumes(t, 1, []string{"v2"})
 	if d := os.Getenv("SWBLOCK_REPLAY_LOGS"); d != "" {
 		t.Cleanup(func() { copyLogs(t, env.h.dir, d) })
 	}

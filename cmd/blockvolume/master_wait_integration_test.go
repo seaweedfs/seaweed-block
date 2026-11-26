@@ -306,7 +306,7 @@ func TestManyVolumesServeTogetherAfterMasterRestart(t *testing.T) {
 	for i := 2; i <= n; i++ {
 		targets = append(targets, fmt.Sprintf("v%d", i))
 	}
-	env := startHandoffEnvWith(t, 1, targets)
+	env := startHandoffEnvVolumes(t, 1, targets)
 	hosts := []bvHost{env.hosts["s1"]}
 	hosts[0].volume = "v1"
 	for _, v := range targets {
