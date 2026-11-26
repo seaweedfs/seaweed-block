@@ -86,14 +86,43 @@ jobs:
           # (2026-11-22), past the old 10m, so any PR touching it failed.
           go test -p=1 -short -count=1 -timeout 20m $pkgs
 
-      - name: Test planned hand-over (real binaries)
-        # The documented standalone planned hand-over and its refused clean
-        # move without the ACK (cmd/blockvolume TestStandalone*, build tags
-        # subprocess and chunkstore_integration, so the default pass above is
-        # unchanged) run real blockmaster, blockvolume and sw-block against a
-        # pinned SeaweedFS release. The release archive is checked against its
-        # sha256 before every use, also when taken from the runner's cache; a
-        # mismatch fails the step. Nothing else is fetched.
+  process-level:
+    name: process-level tests (real binaries)
+    # The release's process-level evidence (cmd/blockvolume, build tags
+    # subprocess and chunkstore_integration): real blockmaster, blockvolume and
+    # sw-block against a pinned SeaweedFS release. The tests are named in
+    # .github/process-level-tests.txt; every one must PASS, so a test that
+    # skips, fails, never starts or is cut off by the timeout fails the job.
+    # Tests that need root or systemd are not in the list (see its header).
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
+    # 44 tests in sequence; measured at about 30 s each on a 4-core test host,
+    # with the lease-horizon tests near 100 s.
+    timeout-minutes: 90
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: go.sum
+
+      - name: Self-test of the required-tests gate
+        # The gate must fail on a skip, a failure, a test that never ran and
+        # one cut off mid-run; this proves it before it judges the real run.
+        run: python3 -I .github/scripts/required-tests-check-test.py
+
+      - name: Pinned SeaweedFS
+        # The release archive is checked against its sha256 before every use,
+        # also when taken from the runner's cache; a mismatch fails the step.
+        # Nothing else is fetched.
         env:
           WEED_VERSION: "4.53"
           WEED_SHA256: d1a7dec9f48d8b33895a0ea8951971defc2dc5312906dcc76fa5a5f74a6ee90d
@@ -111,4 +140,39 @@ jobs:
           bin="$RUNNER_TEMP/weed-$WEED_VERSION"
           mkdir -p "$bin"
           tar -xzf "$tgz" -C "$bin" weed
-          CHUNKSTORE_WEED="$bin/weed" go test -tags 'subprocess chunkstore_integration' -count=1 -timeout 10m -run '^TestStandalone(PlannedHandoffToTheSameHost|CleanMoveWithoutTheACKIsRefused)$' ./cmd/blockvolume/
+          echo "CHUNKSTORE_WEED=$bin/weed" >>"$GITHUB_ENV"
+
+      - name: Build the binaries and the test binary once
+        run: |
+          set -euo pipefail
+          bins="$RUNNER_TEMP/swblock-bins"
+          mkdir -p "$bins"
+          for b in blockmaster blockvolume sw-block; do go build -o "$bins/$b" "./cmd/$b"; done
+          go test -c -tags 'subprocess chunkstore_integration' -o "$bins/blockvolume.test" ./cmd/blockvolume
+          echo "SWBLOCK_TEST_BINS=$bins" >>"$GITHUB_ENV"
+
+      - name: Run the named process-level tests
+        # Each named test in its own process of the one test binary, in
+        # sequence, so a panic or a hang in one cannot hide the others; each
+        # is bounded (TEST_TIMEOUT, then killed). The known-zero acceptance
+        # runs its small shape (1 GiB, user-space client, no device); the
+        # 1 TiB run is lab only.
+        env:
+          KZ_RUN: "1"
+          KZ_SIZE: 1G
+          F1_RUN: "1"
+          TEST_TIMEOUT: 15m
+        run: |
+          set -euo pipefail
+          names=.github/process-level-tests.txt
+          out="$RUNNER_TEMP/process-level.json"
+          : >"$out"
+          sed 's/#.*//' "$names" | tr -d ' \t' | grep . | while read -r name; do
+            start=$(date +%s)
+            rc=0
+            (cd cmd/blockvolume && timeout -k 30 "$TEST_TIMEOUT" "$SWBLOCK_TEST_BINS/blockvolume.test" \
+              -test.v=test2json -test.count=1 -test.timeout "$TEST_TIMEOUT" -test.run "^${name}\$" 2>&1) |
+              go tool test2json -t -p github.com/seaweedfs/seaweed-block/cmd/blockvolume >>"$out" || rc=$?
+            echo "$name: exit $rc, $(( $(date +%s) - start ))s"
+          done
+          python3 -I .github/scripts/required-tests-check.py "$names" "$out"
