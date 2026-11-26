@@ -20,10 +20,10 @@ func TestCandidateTailReportsCompleteFrozenBudget(t *testing.T) {
 		{"d05_fixed_does_not_fit", 5370 * time.Millisecond, 3, 1000, 5570000000, 0, true},
 		{"small_complete_estimate", 200 * time.Millisecond, 3, 1000, 400000000, 4600000000, true},
 		{"known_zero_tail", 200 * time.Millisecond, 1, 0, 300000000, 4700000000, true},
-		{"zero_tail_without_fixed_sample", 0, 0, 0, 0, 0, false},
+		{"zero_tail_without_fixed_sample", 0, 0, 0, 1200000000, 3800000000, true},
 		{"ceiling_boundary_is_complete", 200 * time.Millisecond, 3, 600000, 60300000000, 0, true},
 		{"saturated_tail_is_non_actionable", 200 * time.Millisecond, 3, 610000, 60000000000, 0, true},
-		{"partial_unknown_rate", 200 * time.Millisecond, 1, 1000, 300000000, 0, false},
+		{"single_measured_rate", 200 * time.Millisecond, 1, 1000, 400000000, 4600000000, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := &chunkLayerImpl{}
@@ -58,7 +58,7 @@ func TestCandidateTailReportsCompleteFrozenBudget(t *testing.T) {
 }
 
 func TestFrozenRefusalRetainsUnknownCompleteEstimate(t *testing.T) {
-	l := &chunkLayerImpl{precopySamples: []precopySample{{at: time.Now(), fixed: 200 * time.Millisecond, rate: 20000}}}
+	l := &chunkLayerImpl{precopySamples: []precopySample{{at: time.Now(), fixed: 200 * time.Millisecond}}}
 	r := l.precopyEstimate(1000, 0)
 	now := time.Now()
 	if r.admitFrozenAt(FrozenDetachOptions{StartedAt: now}, now) {

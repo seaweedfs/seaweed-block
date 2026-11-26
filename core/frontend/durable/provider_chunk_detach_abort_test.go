@@ -568,9 +568,8 @@ func TestWALStoreChunk_RepeatDetachWithCancelledContextNeverResumes(t *testing.T
 	}
 }
 
-// P1 (review): after an undecidable detach, a retry whose StopIO fails (a
-// cancelled context) settles first and stays stopped while the outcome is
-// still unknown.
+// After an undecidable detach, automatic settlement owns the stop. A second
+// command cannot start another drain or resume while that outcome is unknown.
 func TestWALStoreChunk_RetryAfterUndecidableDetachNeverResumes(t *testing.T) {
 	remote, p, b := detachFixture(t)
 	remote.set(func(r *faultRemote) { r.casMode = "lost"; r.getHeadErr = errInjected })
@@ -580,8 +579,8 @@ func TestWALStoreChunk_RetryAfterUndecidableDetachNeverResumes(t *testing.T) {
 	forced := false
 	durable.SetTestDetachStopIO(p, func(context.Context) error { forced = true; return context.Canceled }) // the drain fails
 	_, _, err := p.DetachVolume(context.Background(), "v1")
-	if !forced {
-		t.Fatal("the failed-drain branch was not taken")
+	if forced {
+		t.Fatal("a second command drained I/O during automatic settlement")
 	}
 	if !errors.Is(err, durable.ErrDetachOutcomeUnknown) || errors.Is(err, durable.ErrDetachAborted) {
 		t.Fatalf("retry over an unresolved detach CAS: %v; want still unknown, never aborted", err)
