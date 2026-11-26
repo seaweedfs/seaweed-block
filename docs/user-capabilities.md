@@ -5,7 +5,7 @@ does today, which read-only operations commands exist, and what its status
 vocabulary means.
 
 This page covers Kubernetes block volumes. Agent workspace disks (chunk
-snapshots, forks and host moves, a proof of concept) are described in the
+snapshots, restores and host moves, a proof of concept) are described in the
 [README](../README.md#agent-workspace-disks-chunk-lifecycle) and the
 [standalone deployment](standalone-deployment.md) guide. Feature status is in
 [Kubernetes status](kubernetes-status.md); the exact release evidence is in

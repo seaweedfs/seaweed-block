@@ -46,7 +46,8 @@ their invariants, the tests behind them and the known issues.
 - **Incremental snapshots.** A cut uploads only the changed 4 MiB chunks.
   Chunks are immutable; the volume's state is a HEAD root of about 2 KB, and
   every publish is a conditional update on `{gen, epoch}`.
-- **Cheap snapshot and fork.** Both copy only the HEAD root; chunks are shared.
+- **Cheap snapshot and restore.** A snapshot copies only the HEAD root; chunks
+  are shared. A restore makes a new volume that reads the snapshot's chunks.
   A two-phase, graced GC reclaims unreferenced chunks.
 - **Move to any host.** Another host takes over with a higher epoch and fetches
   chunks lazily on first read. A stale holder cannot publish.
@@ -66,7 +67,7 @@ file-backed disk. The two `fsync` rows marked "ublk" come from a later run on
 the same host with the ublk frontend, after the group-commit fix
 ([#173](https://github.com/seaweedfs/seaweed-block/pull/173)). Snapshot and
 fork: a host-side proxy without network latency, guest `fsync` or the block
-frontend.
+frontend. Fork was measured before it was removed from this release.
 
 | Measurement | Seaweed Block | Local disk |
 |---|---|---|
@@ -126,10 +127,8 @@ cluster. The `sw-block ops chunk` commands drive the lifecycle:
 ```bash
 sw-block ops chunk cut       --volume v1 --status-addr <status>  # publish changed chunks, advance HEAD
 sw-block ops chunk snapshot  --volume v1 --status-addr <status> --name s1   # name a snapshot
-sw-block ops chunk snapshots --volume v1 --chunk-filer <filer>   # list snapshots
-sw-block ops chunk fork      --chunk-filer <filer> --source v1 --snapshot s1 --target v2  # root copy only
-sw-block ops chunk restore   --chunk-filer <filer> --source v1 --snapshot s1 --target v3 --status-addr <v3's status>  # independent copy
-sw-block ops chunk restore   --volume v3 --status-addr <status> --status  # restore progress
+sw-block ops chunk snapshots --master <blockmaster> --volume v1 --chunk-filer <filer>   # list snapshots
+sw-block ops chunk restore   --master <blockmaster> --chunk-filer <filer> --source v1 --snapshot s1 --target v3  # new volume from a snapshot
 sw-block ops chunk detach    --volume v1 --status-addr <status>  # final cut (seal); moving needs revoke + move, see docs/volume-lifecycle.md
 sw-block ops chunk volume-delete --volume v2 --chunk-filer <filer> --master <blockmaster> --request-id del-v2
 sw-block ops chunk verify    --volume v1 --chunk-filer <filer>   # read-only check of the remote image
@@ -142,12 +141,11 @@ Frozen detach and the pre-copy detach are not supported in this release: a
 detach with `--frozen` (`frozen:true` on `POST /chunk/detach`) is refused with
 409 `frozen_detach_unsupported`, and `blockvolume` refuses to start with
 `--chunk-detach-precopy`.
-`restore` creates the target from the snapshot and, with `--status-addr` naming
-the blockvolume that serves the target, starts the background restore there:
-the target serves at once, copies every chunk under its own keys and becomes
-independent of the source (snapshots of it are refused until then). Without
-`--status-addr` it only creates the target and prints the command that starts
-the restore once the target is attached.
+`restore` creates the target from the snapshot; its blockvolume serves at
+once and reads every chunk it has not made local from the source's snapshot
+(there is no background copy). The source snapshot cannot be deleted while the
+target exists. Fork is not supported in this release; the command is removed.
+See [Restoring a snapshot](docs/standalone-deployment.md#restoring-a-snapshot-into-a-new-volume).
 The chunk path (`walstore-chunk`) is a proof of concept. It is not yet a
 default, a release claim or a production path.
 
