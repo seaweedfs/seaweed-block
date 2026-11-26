@@ -149,7 +149,11 @@ jobs:
           mkdir -p "$bins"
           for b in blockmaster blockvolume sw-block; do go build -o "$bins/$b" "./cmd/$b"; done
           go test -c -tags 'subprocess chunkstore_integration' -o "$bins/blockvolume.test" ./cmd/blockvolume
+          # The known-zero acceptance's first-start crash step holds a test-only
+          # blockvolume (build tag kzhold, never released) at a chosen point.
+          go build -tags kzhold -o "$RUNNER_TEMP/blockvolume-kzhold" ./cmd/blockvolume
           echo "SWBLOCK_TEST_BINS=$bins" >>"$GITHUB_ENV"
+          echo "KZ_HOLD_BIN=$RUNNER_TEMP/blockvolume-kzhold" >>"$GITHUB_ENV"
 
       - name: Run the named process-level tests
         # Each named test in its own process of the one test binary, in
