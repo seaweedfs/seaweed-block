@@ -347,7 +347,7 @@ func TestReplicaPeer_PostRecoveryFirstLiveWrite_UsesRefreshedSession(t *testing.
 		SessionID:       recoverySessionID,
 		Epoch:           peer.target.Epoch,
 		EndpointVersion: peer.target.EndpointVersion,
-		TargetLSN:       6001,
+		TargetLSN:       1, // the recovery ended at the replica's end
 	}
 	if err := peer.executor.FenceSync(peer.target.ReplicaID, recoveryLineage); err != nil {
 		t.Fatalf("establish recovery lineage: %v", err)
@@ -361,7 +361,7 @@ func TestReplicaPeer_PostRecoveryFirstLiveWrite_UsesRefreshedSession(t *testing.
 	}
 
 	after := bytes.Repeat([]byte{0x22}, 4096)
-	if err := peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 3, 6002, after); err != nil {
+	if err := peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 3, 2, after); err != nil {
 		t.Fatalf("post-recovery ShipEntry: %v", err)
 	}
 	waitReplicaBlock(t, replica, 3, after)

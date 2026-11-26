@@ -87,8 +87,11 @@ func realFencingRound(id, fence uint64, ev *realEvidence) *control.ProbeRound {
 // whether the replica applied it (the probe handshake after the ship: an
 // accepted ship is applied before the probe is answered; a refused one
 // closes the connection).
-func realShip(t *testing.T, ln *transport.ReplicaListener, store storage.LogicalStorage, session, epoch, lsn uint64, fill byte) bool {
+// It ships at the store's next LSN, the only one a replica applies inside
+// an epoch.
+func realShip(t *testing.T, ln *transport.ReplicaListener, store storage.LogicalStorage, session, epoch uint64, fill byte) bool {
 	t.Helper()
+	lsn := store.NextLSN()
 	l := transport.RecoveryLineage{SessionID: session, Epoch: epoch, EndpointVersion: 1, TargetLSN: lsn}
 	data := bytes.Repeat([]byte{fill}, 4096)
 	conn, err := net.DialTimeout("tcp", ln.Addr(), 2*time.Second)
@@ -125,7 +128,7 @@ func TestFencingRoundOnTheRealListenerRefusesTheOldEpochAfterTheAnswer(t *testin
 	store := storage.NewBlockStore(16, 4096)
 	path := realFloorRecord(t)
 	h, ln, ev := realFenceHost(t, store, path, 3)
-	if !realShip(t, ln, store, 1, 3, 1, 'a') {
+	if !realShip(t, ln, store, 1, 3, 'a') {
 		t.Fatal("control: the epoch-3 primary's ship was refused before the fencing round")
 	}
 	a, ok := h.roundAnswer(realFencingRound(10, 4, ev))
@@ -138,19 +141,19 @@ func TestFencingRoundOnTheRealListenerRefusesTheOldEpochAfterTheAnswer(t *testin
 	if got, err := transport.LoadFloorRecord(path, realFenceVol); err != nil || got != 4 {
 		t.Fatalf("floor record after the answer: %d err=%v; want 4", got, err)
 	}
-	if realShip(t, ln, store, 2, 3, 2, 'b') || realShip(t, ln, store, 3, 2, 3, 'c') {
+	if realShip(t, ln, store, 2, 3, 'b') || realShip(t, ln, store, 3, 2, 'c') {
 		t.Fatal("after the answer at floor 4 the replica applied a ship at epoch 3 or 2")
 	}
 	ln.StopHard()
 
 	_, restarted, _ := realFenceHost(t, store, path, 3) // the stale line, again
-	if realShip(t, restarted, store, 4, 3, 4, 'd') {
+	if realShip(t, restarted, store, 4, 3, 'd') {
 		t.Fatal("after a restart the replica applied an epoch-3 ship below its answered floor 4")
 	}
 	if err := restarted.AdmitAsReplica(4); err != nil {
 		t.Fatal(err)
 	}
-	if !realShip(t, restarted, store, 5, 4, 5, 'e') {
+	if !realShip(t, restarted, store, 5, 4, 'e') {
 		t.Fatal("the line re-issued at the fenced epoch 4 was refused")
 	}
 }
@@ -173,7 +176,7 @@ func TestFencingRoundOnTheRealListenerAnswersASupersededFloor(t *testing.T) {
 	if got, err := transport.LoadFloorRecord(path, realFenceVol); err != nil || got != 5 {
 		t.Fatalf("floor record after a superseded round: %d err=%v; want 5 (never lowered)", got, err)
 	}
-	if realShip(t, ln, store, 1, 4, 1, 'a') {
+	if realShip(t, ln, store, 1, 4, 'a') {
 		t.Fatal("after a superseded round at 4 the floor-5 replica applied an epoch-4 ship")
 	}
 }
@@ -211,14 +214,14 @@ func TestFencingRoundCrashBeforePersistIsNotAnsweredAndBindsNoRestart(t *testing
 		t.Fatalf("record after the crash: %d err=%v; want 3 (nothing was promised)", got, err)
 	}
 	h2, restarted, ev2 := realFenceHost(t, store, path, 3)
-	if !realShip(t, restarted, store, 1, 3, 1, 'a') {
+	if !realShip(t, restarted, store, 1, 3, 'a') {
 		t.Fatal("control: with no promise made, the restarted replica refused the epoch-3 ship")
 	}
 	a, ok := h2.roundAnswer(realFencingRound(13, 4, ev2))
 	if !ok || a.GetFloor() != 4 {
 		t.Fatalf("the round asked again after the crash: answered=%v floor=%d; want floor 4", ok, a.GetFloor())
 	}
-	if realShip(t, restarted, store, 2, 3, 2, 'b') {
+	if realShip(t, restarted, store, 2, 3, 'b') {
 		t.Fatal("after the re-asked round's answer an epoch-3 ship was applied")
 	}
 }
@@ -238,7 +241,7 @@ func TestFencingRoundCrashAfterPersistBeforeTheAnswer(t *testing.T) {
 		t.Fatalf("record after a crash after the persist: %d err=%v; want 4", got, err)
 	}
 	h, restarted, ev := realFenceHost(t, store, path, 3)
-	if realShip(t, restarted, store, 1, 3, 1, 'a') {
+	if realShip(t, restarted, store, 1, 3, 'a') {
 		t.Fatal("restarted on a durable floor 4, the replica applied an epoch-3 ship")
 	}
 	a, ok := h.roundAnswer(realFencingRound(14, 4, ev))

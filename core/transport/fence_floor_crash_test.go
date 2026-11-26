@@ -49,7 +49,7 @@ func TestFenceFloor_InterruptedAtEachPersistStepThenRestart(t *testing.T) {
 			if got := restarted.DurableFloor(); got != tc.afterCrash {
 				t.Fatalf("restarted durable floor %d, want %d", got, tc.afterCrash)
 			}
-			below := g1Ship(t, restarted, store, g1Lineage(1, 3), 1, 'a')
+			below := g1Ship(t, restarted, store, g1Lineage(1, 3), 'a')
 			if tc.afterCrash == 4 && below {
 				t.Fatal("restarted on a floor-4 record, the replica applied an epoch-3 ship")
 			}
@@ -63,7 +63,7 @@ func TestFenceFloor_InterruptedAtEachPersistStepThenRestart(t *testing.T) {
 			if got := restarted.DurableFloor(); got != 4 || g1Persisted(t, floor) != 4 {
 				t.Fatalf("re-asked fence: durable floor %d, record %d; want 4", got, g1Persisted(t, floor))
 			}
-			if g1Ship(t, restarted, store, g1Lineage(2, 3), 2, 'b') {
+			if g1Ship(t, restarted, store, g1Lineage(2, 3), 'b') {
 				t.Fatal("after the re-asked fence an epoch-3 ship was applied")
 			}
 		})
