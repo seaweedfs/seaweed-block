@@ -77,14 +77,12 @@ func blockvolumeUnderTest(t *testing.T) string {
 }
 
 // runProductLoop runs h's lifecycle product loop for the rest of the test,
-// as blockmaster runs it (--lifecycle-product-loop-interval): a line is
-// issued for the process at its endpoints, and a line minted before a
-// process reported itself (a hand-published initial line, a move's target)
-// is re-issued once it does. SWBLOCK_TEST_NO_PRODUCT_LOOP=1 leaves it off:
-// the holder then refuses a line that names no process (the control).
+// as blockmaster runs it (--lifecycle-product-loop-interval). The early-line
+// control (SWBLOCK_TEST_EARLY_LINE=1) runs without it, as the fixture did
+// before: a running loop could bind after the holder reported and mask it.
 func runProductLoop(t *testing.T, h *master.Host) {
 	t.Helper()
-	if os.Getenv("SWBLOCK_TEST_NO_PRODUCT_LOOP") == "1" {
+	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") == "1" {
 		return
 	}
 	stop, done := make(chan struct{}), make(chan struct{})
@@ -102,6 +100,44 @@ func runProductLoop(t *testing.T, h *master.Host) {
 		}
 	}()
 	t.Cleanup(func() { close(stop); <-done })
+}
+
+// A primary line is issued for the process at its endpoints: the bind
+// records the process the holder reports, and the holder (blockvolume sets
+// LinesNameTheirProcess) refuses a line that names no process. So, as in
+// production, the first line is minted only after the holder process has
+// reported its slot: tickAfterProcessReports waits for that report, then
+// runs the product tick that binds.
+//
+// SWBLOCK_TEST_EARLY_LINE=1 is the control: earlyLineControl mints the line
+// from a hand-ingested observation before the holder starts, so the line
+// names no process, the holder refuses it and never serves.
+func earlyLineControl(t *testing.T, h *master.Host, server, volume, replica, data, ctrl string) {
+	t.Helper()
+	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") != "1" {
+		return
+	}
+	if err := h.ObservationHost().Ingest(authority.Observation{ServerID: server, ObservedAt: time.Now().UTC(),
+		Slots: []authority.SlotFact{{VolumeID: volume, ReplicaID: replica, DataAddr: data, CtrlAddr: ctrl}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func tickAfterProcessReports(t *testing.T, h *master.Host, server, volume, replica string) {
+	t.Helper()
+	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") != "1" {
+		leaseBinaryPoll(t, "the holder never reported its process", func() bool {
+			s, ok := h.ObservationHost().Store().SlotFactOnServer(server, volume, replica)
+			return ok && s.Incarnation != ""
+		})
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	leaseBinaryPoll(t, "no initial authority", func() bool { line, ok := h.Publisher().VolumeAuthorityLine(volume); return ok && line.Epoch > 0 })
 }
 
 func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
@@ -147,14 +183,7 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 			if _, err = h.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "vol-a", DesiredRF: 1, Candidates: []lifecycle.PlacementCandidate{{VolumeID: "vol-a", ServerID: "node-a", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
 				t.Fatal(err)
 			}
-			if err = h.ObservationHost().Ingest(authority.Observation{ServerID: "node-a", ObservedAt: time.Now().UTC(), Slots: []authority.SlotFact{{VolumeID: "vol-a", ReplicaID: "r1", DataAddr: dataAddr, CtrlAddr: ctrlAddr}}}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err = h.RunLifecycleProductTick(); err != nil {
-				t.Fatal(err)
-			}
-			leaseBinaryPoll(t, "no initial authority", func() bool { line, ok := h.Publisher().VolumeAuthorityLine("vol-a"); return ok && line.Epoch > 0 })
-			line, _ := h.Publisher().VolumeAuthorityLine("vol-a")
+			earlyLineControl(t, h, "node-a", "vol-a", "r1", dataAddr, ctrlAddr)
 			logPath := filepath.Join(t.TempDir(), "volume.log")
 			log, err := os.Create(logPath)
 			if err != nil {
@@ -187,6 +216,8 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 					t.Logf("volume log: %s", b)
 				}
 			})
+			tickAfterProcessReports(t, h, "node-a", "vol-a", "r1")
+			line, _ := h.Publisher().VolumeAuthorityLine("vol-a")
 			client := &http.Client{Timeout: time.Second}
 			projection := func() (frontend.Projection, bool) {
 				resp, e := client.Get("http://" + statusAddr + "/status?volume=vol-a")
