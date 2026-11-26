@@ -270,6 +270,12 @@ func startHandoffEnvOnCluster(t *testing.T, n int, targets []string, tlsNotAfter
 		id := "n-" + v
 		env.hosts[id] = bvHost{id: id, data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t), root: filepath.Join(h.dir, "vol-"+id), volume: v}
 	}
+	// SWBLOCK_TEST_VOLUMES: sibling volumes beside v1 (multi_volume_harness_test.go), each on a node of its own.
+	siblings := siblingVolumes(t)
+	for _, v := range siblings {
+		id := "n-" + v
+		env.hosts[id] = bvHost{id: id, data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t), root: filepath.Join(h.dir, "vol-"+id), volume: v}
+	}
 	chunkPath := env.chunkPath
 	if tlsNotAfter != nil {
 		servers := make([]string, 0, len(env.hosts))
@@ -300,6 +306,10 @@ func startHandoffEnvOnCluster(t *testing.T, n int, targets []string, tlsNotAfter
 	for _, v := range targets {
 		node(env.hosts["n-"+v])
 		volume(v, "n-"+v, precreateTargets)
+	}
+	for _, v := range siblings {
+		node(env.hosts["n-"+v])
+		fmt.Fprintf(&volumes, "  - id: %s\n    size_bytes: %d\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: r1\n", v, siblingVolumeBytes(t), "n-"+v)
 	}
 	spec := filepath.Join(h.dir, "cluster-spec.yaml")
 	must(os.WriteFile(spec, []byte("nodes:\n"+nodes.String()+"volumes:\n"+volumes.String()), 0o644))
@@ -333,6 +343,10 @@ func startHandoffEnvOnCluster(t *testing.T, n int, targets []string, tlsNotAfter
 			env.layoutID(v)
 		}
 	}
+	for _, v := range siblings {
+		env.layoutID(v)
+	}
+	env.startSiblings(t, siblings)
 	return env
 }
 
@@ -779,7 +793,7 @@ type nvmeInitiator struct {
 	cid       uint16
 }
 
-func dialNVMe(t *testing.T, addr, subNQN string) *nvmeInitiator {
+func dialNVMe(t testing.TB, addr, subNQN string) *nvmeInitiator {
 	t.Helper()
 	c := &nvmeInitiator{}
 	cd := nvme.ConnectData{HostID: [16]byte{0x5e, 0xa1}, SubNQN: subNQN, HostNQN: "nqn.2026-11.io.seaweedfs:handoff-test"}
@@ -825,7 +839,7 @@ func dialNVMe(t *testing.T, addr, subNQN string) *nvmeInitiator {
 	return c
 }
 
-func nvmeResponse(t *testing.T, r *nvme.Reader) nvme.CapsuleResponse {
+func nvmeResponse(t testing.TB, r *nvme.Reader) nvme.CapsuleResponse {
 	t.Helper()
 	ch, err := r.Dequeue()
 	if err != nil || ch.Type != 0x5 {
@@ -847,7 +861,7 @@ func (c *nvmeInitiator) ioCmd(op uint8, lba uint64, blocks int) nvme.CapsuleComm
 	return cmd
 }
 
-func (c *nvmeInitiator) write(t *testing.T, lba uint64, data []byte) {
+func (c *nvmeInitiator) write(t testing.TB, lba uint64, data []byte) {
 	t.Helper()
 	cmd := c.ioCmd(0x01, lba, len(data)/4096)
 	if err := c.w.SendHeaderOnly(0x4, &cmd, 64); err != nil {
@@ -870,7 +884,7 @@ func (c *nvmeInitiator) write(t *testing.T, lba uint64, data []byte) {
 	}
 }
 
-func (c *nvmeInitiator) flush(t *testing.T) {
+func (c *nvmeInitiator) flush(t testing.TB) {
 	t.Helper()
 	cmd := c.ioCmd(0x00, 0, 0)
 	if err := c.w.SendHeaderOnly(0x4, &cmd, 64); err != nil {
@@ -881,7 +895,7 @@ func (c *nvmeInitiator) flush(t *testing.T) {
 	}
 }
 
-func (c *nvmeInitiator) read(t *testing.T, lba uint64, n int) []byte {
+func (c *nvmeInitiator) read(t testing.TB, lba uint64, n int) []byte {
 	t.Helper()
 	cmd := c.ioCmd(0x02, lba, n/4096)
 	if err := c.w.SendHeaderOnly(0x4, &cmd, 64); err != nil {
