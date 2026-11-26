@@ -48,7 +48,7 @@ func (f *plannedMaster) GetVolume(context.Context, *control.GetLifecycleVolumeRe
 func (f *plannedMaster) RevokeWorkspace(_ context.Context, q *control.WorkspaceIdentity) (*control.WorkspaceLeaseFact, error) {
 	f.count("RevokeWorkspace")
 	f.status.Lease.Revoking = true
-	f.status.RevocationAck = &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: q.VolumeId, ReplicaId: q.ReplicaId, Epoch: q.Epoch, ServerId: "node-a"}, HeadGen: 9}
+	f.status.RevocationAck = &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: q.VolumeId, ReplicaId: q.ReplicaId, Epoch: q.Epoch}, HeadGen: 9}
 	return f.status.Lease, nil
 }
 func startPlannedMaster(t *testing.T, f *plannedMaster) string {
@@ -212,5 +212,16 @@ func TestPlannedMoveRefusesNETBeforeAnySeal(t *testing.T) {
 	code, out, errout := runCLI(plannedMoveArgs(startPlannedMaster(t, f)))
 	if code != 1 || !strings.Contains(out, "RF1") || f.n("RevokeWorkspace") != 0 || f.n("MoveWorkspace") != 0 {
 		t.Fatalf("NET not refused: %d %q %q", code, out, errout)
+	}
+}
+
+func TestPlannedMoveRefusesAnExplicitForeignACKHost(t *testing.T) {
+	f := &plannedMaster{fakeWorkspace: &fakeWorkspace{status: wsHolder()}}
+	f.status.Bindings = []*control.WorkspaceBinding{{VolumeId: "vol", ServerId: "node-b", DataAddr: "127.0.0.1:3260", CtrlAddr: "127.0.0.1:9100"}}
+	f.status.RevocationAck = &control.WorkspaceRevocationAck{Identity: &control.WorkspaceIdentity{VolumeId: "vol", ReplicaId: "r1", Epoch: 3, ServerId: "other"}, HeadGen: 9}
+	master := startPlannedMaster(t, f)
+	code, out, errout := runCLI(plannedMoveArgs(master))
+	if code != wsExitRefused || !strings.Contains(out+errout, "recorded ACK does not match") || f.n("MoveWorkspace") != 0 {
+		t.Fatalf("foreign ACK must refuse without move: code=%d out=%q err=%q calls=%v", code, out, errout, f.calls)
 	}
 }

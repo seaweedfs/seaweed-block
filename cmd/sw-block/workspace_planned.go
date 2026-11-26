@@ -141,8 +141,11 @@ func runWorkspacePlannedMove(args []string, stdout, stderr io.Writer) int {
 	for {
 		ack := st.GetRevocationAck()
 		if ack != nil {
+			// QueryWorkspace serializes ACK volume/replica/epoch and generation,
+			// but not server_id. A present server must agree; an absent optional
+			// field is not evidence that the recorded ACK names another holder.
 			id := ack.GetIdentity()
-			if id.GetVolumeId() != p.volume || id.GetReplicaId() != p.replica || id.GetEpoch() != p.epoch || id.GetServerId() != p.sourceHost || ack.GetHeadGen() == 0 || (sealedGen != 0 && ack.GetHeadGen() != sealedGen) {
+			if id.GetVolumeId() != p.volume || id.GetReplicaId() != p.replica || id.GetEpoch() != p.epoch || (id.GetServerId() != "" && id.GetServerId() != p.sourceHost) || ack.GetHeadGen() == 0 || (sealedGen != 0 && ack.GetHeadGen() != sealedGen) {
 				return p.result(stdout, wsExitRefused, "recorded ACK does not match the sealed source identity")
 			}
 			break
