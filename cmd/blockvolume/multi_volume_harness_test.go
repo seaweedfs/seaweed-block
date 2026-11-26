@@ -35,6 +35,7 @@ const (
 	testVolumeBytesEnv  = "SWBLOCK_TEST_VOLUME_BYTES"
 	siblingDefaultBytes = 100 << 20
 	siblingWriteEvery   = 200 * time.Millisecond
+	siblingRedialAfter  = 40 * time.Second
 )
 
 // siblingVolumes returns the sibling names for SWBLOCK_TEST_VOLUMES (none
@@ -121,6 +122,7 @@ type siblingWriter struct {
 func (w *siblingWriter) run(t testing.TB) {
 	defer close(w.done)
 	var c *nvmeInitiator
+	var dialed time.Time
 	defer func() {
 		if c != nil {
 			c.close()
@@ -132,10 +134,17 @@ func (w *siblingWriter) run(t testing.TB) {
 			return
 		case <-time.After(siblingWriteEvery):
 		}
+		// dialNVMe gives each connection an absolute 60 s deadline: redial
+		// well before it, so a failed write is the product's, not the
+		// connection's age.
+		if c != nil && time.Since(dialed) > siblingRedialAfter {
+			c.close()
+			c = nil
+		}
 		data := siblingBlock(w.volume, lba)
 		err := softly(t, func(st testing.TB) {
 			if c == nil {
-				c = dialNVMe(st, w.nvme, plannedHandoffNQN)
+				c, dialed = dialNVMe(st, w.nvme, plannedHandoffNQN), time.Now()
 			}
 			c.write(st, lba, data)
 			c.flush(st)
@@ -215,9 +224,13 @@ func (env *handoffEnv) readBackSibling(t *testing.T, w *siblingWriter) {
 	w.mu.Unlock()
 	bad, read := 0, 0
 	err := softly(t, func(st testing.TB) {
-		c := dialNVMe(st, w.nvme, plannedHandoffNQN)
-		defer c.close()
+		c, dialed := dialNVMe(st, w.nvme, plannedHandoffNQN), time.Now()
+		defer func() { c.close() }()
 		for lba, want := range acked {
+			if time.Since(dialed) > siblingRedialAfter {
+				c.close()
+				c, dialed = dialNVMe(st, w.nvme, plannedHandoffNQN), time.Now()
+			}
 			if sha256.Sum256(c.read(st, lba, 4096)) != want {
 				bad++
 			}
