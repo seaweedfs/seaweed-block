@@ -79,6 +79,12 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 		}
 		return adapter.PrimaryEvidence{}, err
 	}
+	// The primary is unreachable (a lost host stops heartbeating): the move
+	// is the operator's failover, not a planned move from a live primary, and
+	// it is decided on the fencing round at every replica count.
+	if h.primaryUnreachable(volumeID) {
+		return h.fencedMoveEvidence(volumeID, target, profile, placement.Slots)
+	}
 	result, err := prober.ProbePromotionCandidates(volumeID, authority.AuthorityBasis{}, []authority.ReplicaCandidate{{ReplicaID: target, ServerID: targetServer}})
 	if err != nil {
 		return adapter.PrimaryEvidence{}, fmt.Errorf("planned move: probe round: %w", err)
@@ -93,8 +99,20 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 	return adapter.PrimaryEvidence{}, fmt.Errorf("planned move: replica %s did not answer the probe round ready (caught up, epoch table valid)", target)
 }
 
+// primaryUnreachable: the line's primary has no fresh, reachable heartbeat
+// slot. A volume without a line has no primary to lose.
+func (h *Host) primaryUnreachable(volumeID string) bool {
+	current, ok := h.Publisher().VolumeAuthorityLine(volumeID)
+	if !ok {
+		return false
+	}
+	slot, fresh := h.freshCurrentSlot(volumeID, current.ReplicaID)
+	return !fresh || !slot.Reachable
+}
+
 // fencedMoveEvidence is the operator's move where a planned move needs a seal
-// (the target is not in every acknowledgement set: RF3 sync_quorum). The
+// (the target is not in every acknowledgement set: RF3 sync_quorum), or
+// whose primary is unreachable (the operator's failover, any count). The
 // fencing round is that seal: every other replica is fenced at the line's
 // next epoch, so the old primary, dead or alive, can no longer collect an
 // acknowledgement, and the decision is read from the round alone
