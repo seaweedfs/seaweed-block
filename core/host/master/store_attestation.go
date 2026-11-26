@@ -39,9 +39,10 @@ type attestedStores struct {
 	// so an established volume is never reopened.
 	AwaitingFirstReady bool `json:"awaiting_first_ready,omitempty"`
 	// DeleteWithoutAck: a delete without the holder's acknowledgement was
-	// admitted while the volume was creating (written before the delete's
-	// reservation). Creation never ends after it, and the delete finishes
-	// only on proof that the volume is empty (Host.provenEmptyForDelete).
+	// admitted while the volume's stores were still awaited (stage 1),
+	// written before the delete's reservation. It freezes the record in
+	// stage 1: the wait never ends after it, so the primary, whose
+	// assignment keeps awaiting the stores, never serves.
 	DeleteWithoutAck bool `json:"delete_without_ack,omitempty"`
 }
 
@@ -164,6 +165,10 @@ func (s *storeAttestations) awaited(volumeID string, current []string) (waiting,
 	if waiting > 0 || len(current) == 0 {
 		return waiting, len(current)
 	}
+	if v.DeleteWithoutAck {
+		// A delete without acknowledgement froze the wait: it never ends.
+		return 1, len(current)
+	}
 	vols := make(map[string]attestedStores, len(s.vols))
 	for k, x := range s.vols {
 		vols[k] = x
@@ -193,17 +198,13 @@ func (s *storeAttestations) awaitingFirstReady(volumeID string) bool {
 }
 
 // noteFirstReady records, durably and for good, that the volume's creation
-// ended. It reports whether creation has ended: false when a delete without
-// the holder's acknowledgement was admitted first (it may not end now).
+// ended. It reports whether creation has ended.
 func (s *storeAttestations) noteFirstReady(volumeID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, had := s.vols[volumeID]
 	if !had || !v.AwaitingFirstReady {
 		return true, nil
-	}
-	if v.DeleteWithoutAck {
-		return false, nil // the delete reads the record as it was admitted
 	}
 	vols := make(map[string]attestedStores, len(s.vols))
 	for k, x := range s.vols {
@@ -220,19 +221,29 @@ func (s *storeAttestations) noteFirstReady(volumeID string) (bool, error) {
 }
 
 // markDeleteWithoutAck admits, durably, a delete without the holder's
-// acknowledgement of a volume whose creation has not ended, in the same
-// lock as noteFirstReady: creation cannot end between the check and the
-// mark. false: creation ended (or the volume never waited): the ordinary
-// delete applies.
-func (s *storeAttestations) markDeleteWithoutAck(volumeID string) (bool, error) {
+// acknowledgement of a volume whose stores are still awaited (stage 1: its
+// primary has served nothing), in the same lock as the end of the wait:
+// the wait cannot end between the check and the mark, and never ends after
+// it. false: the volume is past stage 1 (or never waited), and the
+// ordinary delete, refused while a lease is live, applies.
+func (s *storeAttestations) markDeleteWithoutAck(volumeID string, current []string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, had := s.vols[volumeID]
-	if !had || len(v.Initial) == 0 && !v.AwaitingFirstReady {
+	if !had || len(v.Initial) == 0 {
 		return false, nil
 	}
 	if v.DeleteWithoutAck {
 		return true, nil
+	}
+	waiting := 0
+	for _, id := range current {
+		if _, ok := v.Stores[id]; !ok {
+			waiting++
+		}
+	}
+	if waiting == 0 || len(current) == 0 {
+		return false, nil // every store recorded: the wait ends at its next read
 	}
 	vols := make(map[string]attestedStores, len(s.vols))
 	for k, x := range s.vols {

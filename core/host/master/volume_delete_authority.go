@@ -39,14 +39,15 @@ func (a *volumeDeleteAuthority) Reserve(ctx context.Context) error {
 	}
 	// The delete without the holder's acknowledgement (a live lease does
 	// not refuse the reservation, which stops every grant) is admitted only
-	// while creation has not ended, recorded durably before the reservation
-	// so creation never ends after it; it finishes only on proof that the
-	// volume is empty (NoLiveLease). A volume whose creation ended keeps the
-	// live-lease refusal. The line, so a ready answer or a survivor's write
-	// read now ends creation before the delete is decided.
-	line, _ := h.Publisher().VolumeAuthorityLine(a.volume)
-	if h.attest != nil && h.inCreationPhase(a.volume, line, nil) != "" {
-		marked, err := h.attest.markDeleteWithoutAck(a.volume)
+	// in stage 1, while the master's record still awaits a replica store:
+	// the primary serves nothing until every store is recorded. The record
+	// is marked durably first, in the lock that ends the wait, and the mark
+	// freezes it in stage 1, so the primary never starts serving. Past stage
+	// 1 (also while creation has not been recorded as ended: the volume may
+	// be serving) the live-lease refusal stays; a broken primary's lease
+	// ends by itself, and the ordinary delete then applies.
+	if h.attest != nil {
+		marked, err := h.attest.markDeleteWithoutAck(a.volume, h.replicaSlotsFor(a.volume))
 		if err != nil {
 			return fmt.Errorf("workspace delete: record the delete without acknowledgement: %w", err)
 		}
@@ -61,63 +62,7 @@ func (a *volumeDeleteAuthority) NoLiveLease(ctx context.Context) error {
 	if a.host.lifecycle == nil || !a.host.lifecycle.Deletions.CommittedSnapshot(a.volume) {
 		return errors.New("workspace delete: committed reservation required")
 	}
-	if err := a.host.Publisher().NoLiveWorkspaceLease(ctx, a.volume); err != nil {
-		return err
-	}
-	if a.host.attest == nil || !a.host.attest.deleteWithoutAck(a.volume) {
-		return nil
-	}
-	return a.host.provenEmptyForDelete(a.volume)
-}
-
-// ErrDeleteNotProvenEmpty refuses a delete without the holder's
-// acknowledgement of a volume not proven empty.
-var ErrDeleteNotProvenEmpty = errors.New("workspace delete: the volume is not proven empty")
-
-// provenEmptyForDelete is the proof a delete without the holder's
-// acknowledgement finishes on. It is read here, after the reservation
-// stopped every grant and the holder's lease horizon passed, so no write
-// can be acknowledged after it. Proven empty is stage 1 (the primary of a
-// volume whose stores are not all attested serves nothing), or N-K+1
-// survivors (the fencing round's count) that answered, each with a valid
-// table at end 0; a survivor that did not answer is not empty, and one that
-// holds a write refuses the delete for good.
-func (h *Host) provenEmptyForDelete(volumeID string) error {
-	if waiting, _ := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID)); waiting > 0 {
-		return nil
-	}
-	line, ok := h.Publisher().VolumeAuthorityLine(volumeID)
-	if !ok || !line.Assigned {
-		return fmt.Errorf("%w: no line to read its survivors at", ErrDeleteNotProvenEmpty)
-	}
-	h.promotionMu.RLock()
-	prober := h.promotionProber
-	h.promotionMu.RUnlock()
-	if prober == nil {
-		return fmt.Errorf("%w: no promotion gate to read the survivors", ErrDeleteNotProvenEmpty)
-	}
-	survivors := h.survivorCandidates(volumeID, line.ReplicaID)
-	res, err := prober.ProbePromotionCandidates(volumeID, line, survivors)
-	if err != nil {
-		return fmt.Errorf("%w: survivor round: %v", ErrDeleteNotProvenEmpty, err)
-	}
-	if !isKnownAckProfile(res.AckProfile) {
-		return fmt.Errorf("%w: unknown ack profile %q", ErrDeleteNotProvenEmpty, res.AckProfile)
-	}
-	empty := map[string]bool{}
-	for _, c := range res.Candidates {
-		if c.ReplicaID == "" || c.ReplicaID == line.ReplicaID || !c.TableValid {
-			continue
-		}
-		if c.DurableLSN > 0 {
-			return fmt.Errorf("%w: survivor %s holds a write (end %d): the volume served", ErrDeleteNotProvenEmpty, c.ReplicaID, c.DurableLSN)
-		}
-		empty[c.ReplicaID] = true
-	}
-	if need := unknownFrontierSurvivorsNeeded(res.AckProfile, len(survivors)); len(survivors) == 0 || len(empty) < need {
-		return fmt.Errorf("%w: %d of %d survivors answered empty, need %d", ErrDeleteNotProvenEmpty, len(empty), len(survivors), need)
-	}
-	return nil
+	return a.host.Publisher().NoLiveWorkspaceLease(ctx, a.volume)
 }
 
 // ReserveVolumeDeletion exposes the same committed reservation used by startup

@@ -1,129 +1,82 @@
 package master
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/core/storage"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-// creatingStage2 is an RF3 volume whose stores are all attested and whose
-// creation has not ended: its primary is gone (it never answers) and the
-// survivors answer on valid tables, as the case sets.
-func creatingStage2(t *testing.T, set func(p *switchProbe)) (*Host, *switchProbe) {
-	t.Helper()
-	h := newBootGraceMasterCreating(t, Config{})
-	attestAllStores(t, h)
-	p := probeOf(t, h)
-	p.mu.Lock()
-	p.currentUnknown, p.tableValid, p.empty = true, true, true
-	if set != nil {
-		set(p)
+// The state with no exit: every store attested (stage 2) but the end of
+// creation never recorded (the master read neither a ready answer nor a
+// survivor's write since), while the primary may be serving acknowledged
+// writes under its live lease. The delete keeps the live-lease refusal: no
+// reservation stops that primary's grants.
+func TestAStage2VolumeKeepsTheLiveLeaseRefusal(t *testing.T) {
+	h, lc, _, _, _ := neverCreatedVolume(t, false)
+	line := waitAuthorityLine(t, h.Publisher(), "v")
+	published, _ := h.Publisher().PublishedAuthorityLine("v")
+	server := h.workspaceLineOwner(published, "v", line.ReplicaID, line.Epoch)
+	if err := h.ingestStoreAttestation(server, attestation("v", line.ReplicaID, line.Epoch, map[string]storage.StoreID{line.ReplicaID: storeOf(line.ReplicaID)})); err != nil {
+		t.Fatal(err)
 	}
-	p.mu.Unlock()
-	return h, p
+	if waiting, _ := h.attest.awaited("v", h.replicaSlotsFor("v")); waiting != 0 || !h.attest.awaitingFirstReady("v") {
+		t.Fatal("fixture: the volume is not in stage 2")
+	}
+	if h.inCreationPhase("v", line, nil) == "" {
+		t.Fatal("fixture: the end of creation was recorded")
+	}
+	_, err := lc.ReserveVolumeDeletion(t.Context(), &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-stage2"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("delete of a stage-2 volume under a live lease: %v; want FailedPrecondition", err)
+	}
+	if h.attest.deleteWithoutAck("v") {
+		t.Fatal("a stage-2 volume was marked for a delete without acknowledgement")
+	}
 }
 
-func deleteAuthority(h *Host, token string) *volumeDeleteAuthority {
-	return h.VolumeDeleteAuthority("vol-rf3", token)
-}
-
-// Stage 2, no write anywhere, the primary dead: the delete without the
-// holder's acknowledgement is admitted and, read after the horizon, both
-// survivors answered empty (N-K+1 = 2): it finishes.
-func TestAStage2VolumeNoSurvivorHoldsAWriteOfIsDeleted(t *testing.T) {
-	h, _ := creatingStage2(t, nil)
-	defer closeTestMaster(t, h)
-	a := deleteAuthority(h, "del-empty")
+// A delete without acknowledgement admitted in stage 1 freezes the store
+// wait: stores attested after it never end the wait (the primary, whose
+// assignment keeps awaiting them, never serves), also after a restart, and
+// the delete finishes at its HEAD update.
+func TestTheDeleteMarkFreezesTheStoreWait(t *testing.T) {
+	cfg := Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir()}
+	h := newBootGraceMasterCreating(t, cfg)
+	a := h.VolumeDeleteAuthority("vol-rf3", "del-frozen")
 	if err := a.Reserve(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !h.attest.deleteWithoutAck("vol-rf3") {
-		t.Fatal("a creating volume's delete was not admitted without the holder's acknowledgement")
+		t.Fatal("a stage-1 volume's delete was not admitted without acknowledgement")
 	}
-	if err := a.NoLiveLease(t.Context()); err != nil {
-		t.Fatalf("a volume proven empty: %v", err)
+	line := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", line.Epoch, map[string]storage.StoreID{"r1": testStoreID, "r2": testStoreID, "r3": testStoreID})); err != nil {
+		t.Fatal(err)
+	}
+	if !inCreationWait(h) || h.attest.awaitingFirstReady("vol-rf3") {
+		t.Fatal("the store wait ended after the delete mark")
+	}
+	h = restartCreatingMaster(t, h, cfg)
+	defer closeTestMaster(t, h)
+	if !inCreationWait(h) || !h.attest.deleteWithoutAck("vol-rf3") {
+		t.Fatal("after a restart the frozen wait or the mark is lost")
+	}
+	if err := h.VolumeDeleteAuthority("vol-rf3", "del-frozen").NoLiveLease(t.Context()); err != nil {
+		t.Fatalf("the frozen stage-1 delete's HEAD update: %v", err)
 	}
 }
 
-// The same volume after a quorum-acknowledged write (r2 holds it): the
-// survivor's answer ends creation, so the delete without the holder's
-// acknowledgement is not admitted (the ordinary delete applies).
-func TestADeleteWithoutAckOfAVolumeThatServedIsRefused(t *testing.T) {
-	h, _ := creatingStage2(t, func(p *switchProbe) { p.empty = false })
+// Past stage 1 nothing is marked: the ordinary delete applies.
+func TestAStage2VolumeIsNotMarkedForADeleteWithoutAck(t *testing.T) {
+	h := newBootGraceMasterCreating(t, Config{})
 	defer closeTestMaster(t, h)
-	if err := deleteAuthority(h, "del-served").Reserve(t.Context()); err != nil {
+	attestAllStores(t, h)
+	if err := h.VolumeDeleteAuthority("vol-rf3", "del-ordinary").Reserve(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if h.attest.deleteWithoutAck("vol-rf3") {
-		t.Fatal("a volume a survivor holds a write of was admitted for a delete without acknowledgement")
-	}
-	if h.attest.awaitingFirstReady("vol-rf3") {
-		t.Fatal("the survivor's write did not end creation")
-	}
-}
-
-// Row mut_no_horizon: the survivors looked empty at the reservation, but a
-// write was acknowledged before the holder's horizon passed: the proof is
-// read after it, sees the write and refuses.
-func TestADeleteWithoutAckReadsItsProofAfterTheHorizon(t *testing.T) {
-	h, p := creatingStage2(t, nil)
-	defer closeTestMaster(t, h)
-	a := deleteAuthority(h, "del-late-write")
-	if err := a.Reserve(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	p.mu.Lock()
-	p.empty = false // r2 now holds a write acknowledged before the horizon
-	p.mu.Unlock()
-	if err := a.NoLiveLease(t.Context()); !errors.Is(err, ErrDeleteNotProvenEmpty) {
-		t.Fatalf("err=%v; want ErrDeleteNotProvenEmpty", err)
-	}
-}
-
-// Row mut_unstable_read: a silent survivor is not empty. With r3 silent
-// only one survivor answered empty, need 2: refused. So is a round whose
-// answers carry no valid table.
-func TestADeleteWithoutAckNeedsNMinusKPlusOneEmptyAnswers(t *testing.T) {
-	for name, set := range map[string]func(p *switchProbe){
-		"a silent survivor":     func(p *switchProbe) { p.r3Silent = true },
-		"no valid table at all": func(p *switchProbe) { p.tableValid = false },
-	} {
-		t.Run(name, func(t *testing.T) {
-			h, _ := creatingStage2(t, set)
-			defer closeTestMaster(t, h)
-			a := deleteAuthority(h, "del-unstable")
-			if err := a.Reserve(t.Context()); err != nil {
-				t.Fatal(err)
-			}
-			if err := a.NoLiveLease(t.Context()); !errors.Is(err, ErrDeleteNotProvenEmpty) {
-				t.Fatalf("err=%v; want ErrDeleteNotProvenEmpty", err)
-			}
-		})
-	}
-}
-
-// Once a delete without acknowledgement is admitted, creation never ends
-// (the delete reads the record as it was admitted), also after a restart.
-func TestCreationDoesNotEndAfterADeleteWithoutAck(t *testing.T) {
-	cfg := Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir()}
-	h := newBootGraceMasterCreating(t, cfg)
-	attestAllStores(t, h)
-	p := probeOf(t, h)
-	p.mu.Lock()
-	p.empty, p.tableValid = true, true
-	p.mu.Unlock()
-	if err := deleteAuthority(h, "del-freeze").Reserve(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	p.mu.Lock()
-	p.currentReady = true // a ready answer after the admission
-	p.mu.Unlock()
-	line := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
-	if h.inCreationPhase("vol-rf3", line, nil) == "" {
-		t.Fatal("creation ended after the delete without acknowledgement was admitted")
-	}
-	h2 := restartCreatingMaster(t, h, cfg)
-	defer closeTestMaster(t, h2)
-	if !h2.attest.deleteWithoutAck("vol-rf3") || !h2.attest.awaitingFirstReady("vol-rf3") {
-		t.Fatal("after a restart the admitted delete or the creation wait is lost")
+		t.Fatal("a stage-2 volume was marked for a delete without acknowledgement")
 	}
 }
