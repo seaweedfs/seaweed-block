@@ -49,7 +49,11 @@ func TestPrimaryOfAReplicatedLineServesOnlyUnderTheMastersAckProfile(t *testing.
 			h.applyFixtureFact(fact)
 
 			_, werr := backend.Write(context.Background(), 0, []byte("w"))
-			s := NewStatusServer(h.view).statusProjection()
+			// Production wiring: status reads the durable backend's own
+			// "may serve" answer, which refuses because of the same cause.
+			status := NewStatusServer(h.view)
+			status.SetDurableStatusSource(backendStatusSource{volumeID: "vol1", b: backend})
+			s := status.statusProjection()
 			if c.serves {
 				if !h.view.Projection().Healthy || werr != nil {
 					t.Fatalf("does not serve: healthy=%t write=%v reason=%q", h.view.Projection().Healthy, werr, s.NotReadyReason)
@@ -67,4 +71,20 @@ func TestPrimaryOfAReplicatedLineServesOnlyUnderTheMastersAckProfile(t *testing.
 			}
 		})
 	}
+}
+
+// backendStatusSource is the status server's durable source over one real
+// StorageBackend: its AdmitsIO is the backend's own gate.
+type backendStatusSource struct {
+	volumeID string
+	b        *durable.StorageBackend
+}
+
+func (s backendStatusSource) DurableStatuses() []durable.VolumeStatus { return nil }
+
+func (s backendStatusSource) AdmitsIO(volumeID string) error {
+	if volumeID != s.volumeID {
+		return durable.ErrVolumeNotOpen
+	}
+	return s.b.AdmitsIO()
 }
