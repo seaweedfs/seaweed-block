@@ -191,12 +191,27 @@ func (s *services) RevokeWorkspace(ctx context.Context, q *control.WorkspaceIden
 	return leaseFact(s.host.Publisher(), q.GetVolumeId(), lease), nil
 }
 
-func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.WorkspaceRevocationAck) (*control.WorkspaceEmpty, error) {
+func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.WorkspaceRevocationAck) (_ *control.WorkspaceEmpty, err error) {
 	if err := auth.RequireNode(ctx, q.GetIdentity().GetServerId()); err != nil {
 		return nil, err
 	}
+	// Each step's time is logged with the answer: a holder bounds its call
+	// (volume.WorkspaceAckTimeout), and a miss names the step that ate it.
+	arrived := time.Now()
+	var locked, headRead, recorded time.Time
+	defer func() {
+		at := func(t time.Time) string {
+			if t.IsZero() {
+				return "-"
+			}
+			return t.Sub(arrived).String()
+		}
+		s.host.log.Printf("blockmaster: AckWorkspaceRevoked volume=%q replica=%q epoch=%d lock=%s head=%s recorded=%s answered=%s err=%v",
+			q.GetIdentity().GetVolumeId(), q.GetIdentity().GetReplicaId(), q.GetIdentity().GetEpoch(), at(locked), at(headRead), at(recorded), time.Since(arrived), err)
+	}()
 	s.host.workspaceMu.Lock()
 	defer s.host.workspaceMu.Unlock()
+	locked = time.Now()
 	id := q.GetIdentity()
 	if err := s.workspaceVolume(id.GetVolumeId()); err != nil {
 		return nil, err
@@ -212,15 +227,17 @@ func (s *services) AckWorkspaceRevoked(ctx context.Context, q *control.Workspace
 		return nil, status.Error(codes.Unavailable, "workspace ACK: detached HEAD reader unavailable")
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	head, err := s.host.cfg.WorkspaceHeadReader(readCtx, id.GetVolumeId())
+	head, herr := s.host.cfg.WorkspaceHeadReader(readCtx, id.GetVolumeId())
 	cancel()
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "workspace ACK: read detached HEAD: %v", err)
+	headRead = time.Now()
+	if herr != nil {
+		return nil, status.Errorf(codes.Unavailable, "workspace ACK: read detached HEAD: %v", herr)
 	}
 	holder := id.GetServerId() + "/" + id.GetReplicaId()
 	if err := s.host.Publisher().AckWorkspaceRevocation(ctx, id.GetVolumeId(), authority.WorkspaceRevokeAck{ReplicaID: id.GetReplicaId(), Epoch: id.GetEpoch(), HeadGen: q.GetHeadGen(), Holder: holder}, head); err != nil {
 		return nil, workspaceError(err)
 	}
+	recorded = time.Now()
 	if err := s.host.reconcileWorkspaceBindings(); err != nil {
 		return nil, workspaceError(err)
 	}

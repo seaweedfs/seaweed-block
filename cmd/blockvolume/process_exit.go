@@ -18,8 +18,15 @@ const (
 	exitWorkspaceSuperseded = 78
 	// Post-drain ACK wait; M2 Revoking -> Revoked, Part D. It covers the
 	// guard's stop reply (the resource owner has drained by then) and its
-	// ACK call, so it exceeds the ACK's own bound by 1 s.
-	workspaceLeaseCloseoutTimeout = volume.WorkspaceAckTimeout + time.Second
+	// ACK attempts, which the guard repeats until the lease deadline when an
+	// answer is lost. The units kill the process TimeoutStopSec=30s after
+	// the stop (deploy/systemd). Before this wait the drain is bounded by
+	// WorkspaceDrainTimeout (5 s); after it, superviseProcess waits at most
+	// WorkspaceDrainTimeout (5 s) for the exit. 30 s - 5 s - 5 s = 20 s,
+	// less 1 s margin = 19 s. The guard's attempts end at the lease deadline
+	// (about 20 s after the last renewal); attempts still running here end
+	// as an unconfirmed ACK (exit 75), as before.
+	workspaceLeaseCloseoutTimeout = 19 * time.Second
 )
 
 type workspaceExit struct {
