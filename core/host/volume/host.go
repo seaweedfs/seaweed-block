@@ -180,6 +180,10 @@ type Host struct {
 	// storeWait: the primary fact's replica-store wait (ReplicaStoresAwaited,
 	// awaitingStoresEpoch), one value under its own lock.
 	storeWait storeWait
+	// ackProfileRefusal (string; "" = none): the last primary fact named a
+	// replicated line under another ack profile than this volume's own
+	// (AckProfileRefusal); while set the frontend is not Healthy.
+	ackProfileRefusal atomic.Value
 	// roleRetry: the last replica role call failed with an error a retry
 	// may outlast (a floor that could not be persisted); runRoleRetry
 	// re-applies the current role until it succeeds or is refused for good.
@@ -1115,6 +1119,9 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	}
 
 	h.recordSelfAssignment(fact)
+	// A primary of a replicated line serves only under the master's ack
+	// profile: set (or cleared) before anything below can open the frontend.
+	h.noteAckProfile(fact)
 	// A fact that awaits replica stores closes the frontend at once; one
 	// that carries them all opens it only after the peers' expected stores
 	// are installed (below), so no write is served before its peers count.

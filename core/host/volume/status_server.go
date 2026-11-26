@@ -571,6 +571,8 @@ func (s *StatusServer) statusProjection() StatusProjection {
 			p.NotReadyReason = backendReason
 		case s.view.replicaStoresAwaited() != "":
 			p.NotReadyReason = s.view.replicaStoresAwaited()
+		case s.view.ackProfileRefusal() != "":
+			p.NotReadyReason = s.view.ackProfileRefusal()
 		case nvmePending:
 			p.NotReadyReason = "frontend target not listening yet"
 		case !authorityReady:

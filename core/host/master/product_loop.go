@@ -414,6 +414,14 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d failed: %v", volumeID, current.Epoch+1, err)
 		return plain, map[string]bool{}
 	}
+	// The fencing round's answers are the evidence the decision uses, so
+	// their profiles are checked again: a survivor reconfigured between the
+	// two rounds holds the volume like a mismatch in the plain round.
+	if fenced.ProfileMismatch != "" {
+		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d: ack profile mismatch (%s); nothing published", volumeID, fenced.FencedEpoch, fenced.ProfileMismatch)
+		h.recordVolumeBlockedEvent(volumeID, ops.ReasonAckProfileMismatch)
+		return fenced, map[string]bool{}
+	}
 	fenced.AckProfile, fenced.SyncAckLSN, fenced.SyncAckKnown = plain.AckProfile, plain.SyncAckLSN, plain.SyncAckKnown
 	fenced.CurrentKnown, fenced.Current = plain.CurrentKnown, plain.Current
 	counted := map[string]bool{}
