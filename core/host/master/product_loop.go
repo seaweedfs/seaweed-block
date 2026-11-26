@@ -255,8 +255,8 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		// Creation is its own phase: no replacement decision of any kind
 		// (no reassign, no fencing round, no heal at a higher epoch) for a
 		// volume whose master record still awaits its replica stores.
-		if h.creatingByRecord(vol.VolumeID) {
-			h.holdCreating(vol, "the master's record awaits replica stores")
+		if why := h.inCreationPhase(vol.VolumeID, vol.Authority, nil); why != "" {
+			h.holdCreating(vol, why)
 			continue
 		}
 		currentAcceptable := candidateAcceptableForPromotionGate(vol.Slots[currentIdx], serverIndex)
@@ -287,8 +287,8 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		// The same phase by the primary's own answer: its assignment at
 		// this line's epoch still awaits the stores (the master's wait may
 		// be over while the re-sent assignment has not arrived).
-		if ok && creatingByAnswer(result, vol.Authority) {
-			h.holdCreating(vol, "the primary's answer awaits replica stores")
+		if why := h.inCreationPhase(vol.VolumeID, vol.Authority, answerOf(result, ok)); why != "" {
+			h.holdCreating(vol, why)
 			continue
 		}
 		allowed := promotionAllowedReplicas(result, ok, len(candidates), h.freshPromotionPeers(vol.VolumeID, candidates))
@@ -543,9 +543,11 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		// and every start counts toward flap history (#128). The
 		// promotion rules below are unchanged.
 		h.recordCurrentBootFact(placement.VolumeID)
-		if h.creatingByRecord(placement.VolumeID) {
-			h.recordVolumeWaitingEvent(placement.VolumeID, ops.ReasonAwaitingReplicaAttestations, "creating: no replacement decision until the replica stores are attested")
-			continue
+		if line, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID); ok {
+			if why := h.inCreationPhase(placement.VolumeID, line, nil); why != "" {
+				h.noteCreating(placement.VolumeID, line.ReplicaID, why)
+				continue
+			}
 		}
 		// A fencing round fenced survivors above this line and nothing was
 		// published (e.g. the operator's refused failover): continue the
@@ -581,8 +583,8 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		}
 		probeCount++
 		result, probeOK := h.probePromotionCandidatesCurrent(vol.VolumeID, current, candidates)
-		if probeOK && creatingByAnswer(result, current) {
-			h.recordVolumeWaitingEvent(vol.VolumeID, ops.ReasonAwaitingReplicaAttestations, "creating: the primary's answer awaits replica stores; no replacement decision")
+		if why := h.inCreationPhase(vol.VolumeID, current, answerOf(result, probeOK)); why != "" {
+			h.noteCreating(vol.VolumeID, current.ReplicaID, why)
 			continue
 		}
 		allowed := promotionAllowedReplicas(result, probeOK, len(candidates), h.freshPromotionPeers(vol.VolumeID, candidates))
@@ -843,7 +845,7 @@ func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authorit
 	}
 	after, afterOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
 	// A primary that answers it awaits replica stores is in the creation
-	// phase: the gates hold the volume on that answer (creatingByAnswer),
+	// phase: the gates hold the volume on that answer (inCreationPhase),
 	// so it is returned as it is.
 	if result.CurrentKnown && current.Epoch != 0 && result.Current.AwaitingReplicaStoresEpoch == current.Epoch {
 		return result, ok
@@ -1098,22 +1100,34 @@ func (h *Host) freshCurrentSlot(volumeID, replicaID string) (authority.ReplicaCa
 	return h.obs.Store().Snapshot().FreshSlotCandidate(volumeID, replicaID)
 }
 
-// creatingByRecord: the master's own durable record of the volume still
-// awaits a replica store (the creation phase), whatever its primary
-// answers or whether it answers at all.
-func (h *Host) creatingByRecord(volumeID string) bool {
-	if h.attest == nil {
-		return false
+// inCreationPhase is the one decision of the creation phase, which every
+// replacement entry (both promotion gates, the operator's move and planned
+// move, the rebalance through the gate) calls first: it returns why the
+// volume is creating, or "" once it is not. Two sources, in order:
+//   - the master's own durable record still awaits a replica store (every
+//     initial store attested clears it, durably; no other state);
+//   - the current primary's own answer, when one was read, says its
+//     assignment at this line's epoch still awaits the stores (the master's
+//     wait may be over before the re-sent assignment arrives). The answer
+//     can only hold a volume, never release one.
+func (h *Host) inCreationPhase(volumeID string, current authority.AuthorityBasis, answer *PromotionProbeResult) string {
+	if h.attest != nil {
+		if waiting, _ := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID)); waiting > 0 {
+			return "the master's record awaits replica stores"
+		}
 	}
-	waiting, _ := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID))
-	return waiting > 0
+	if answer != nil && answer.CurrentKnown && current.Epoch != 0 && answer.Current.AwaitingReplicaStoresEpoch == current.Epoch {
+		return "the primary's answer awaits replica stores"
+	}
+	return ""
 }
 
-// creatingByAnswer: the current primary answered that its assignment at this
-// line's epoch still awaits the replica stores (the master's wait may be
-// over while the re-sent assignment has not arrived).
-func creatingByAnswer(result PromotionProbeResult, current authority.AuthorityBasis) bool {
-	return result.CurrentKnown && current.Epoch != 0 && result.Current.AwaitingReplicaStoresEpoch == current.Epoch
+// answerOf is the probe's answer, or nil when the probe gave none.
+func answerOf(result PromotionProbeResult, ok bool) *PromotionProbeResult {
+	if !ok {
+		return nil
+	}
+	return &result
 }
 
 // holdCreating keeps a creating volume out of every replacement decision:
@@ -1129,6 +1143,11 @@ func (h *Host) holdCreating(vol *authority.VolumeTopologySnapshot, why string) {
 		slot.PromotionEvidence = adapter.PrimaryEvidence{}
 		slot.PlannedMoveAllowed = false
 	}
-	h.log.Printf("blockmaster: promotion gate volume=%s current=%s creating (%s): no replacement decision", vol.VolumeID, vol.Authority.ReplicaID, why)
-	h.recordVolumeWaitingEvent(vol.VolumeID, ops.ReasonAwaitingReplicaAttestations, "creating: "+why+"; no replacement decision")
+	h.noteCreating(vol.VolumeID, vol.Authority.ReplicaID, why)
+}
+
+// noteCreating makes the hold of a creating volume visible.
+func (h *Host) noteCreating(volumeID, current, why string) {
+	h.log.Printf("blockmaster: promotion gate volume=%s current=%s creating (%s): no replacement decision", volumeID, current, why)
+	h.recordVolumeWaitingEvent(volumeID, ops.ReasonAwaitingReplicaAttestations, "creating: "+why+"; no replacement decision")
 }

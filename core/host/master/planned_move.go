@@ -57,7 +57,7 @@ func (p *roundEvidenceProvider) AckProfile() string { return p.ackProfile }
 // planned move to target: the guard, then a probe round of the target, which
 // must answer ready; its evidence goes on the line (kind PROMOTION).
 func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvidence, error) {
-	if h.creatingByRecord(volumeID) {
+	if line, ok := h.Publisher().VolumeAuthorityLine(volumeID); ok && h.inCreationPhase(volumeID, line, nil) != "" {
 		return adapter.PrimaryEvidence{}, ErrMoveWhileCreating
 	}
 	h.promotionMu.RLock()
@@ -144,7 +144,7 @@ func (h *Host) fencedMoveEvidence(volumeID, target, profile string, slots []life
 	if err != nil {
 		return adapter.PrimaryEvidence{}, fmt.Errorf("fenced move: probe round: %w", err)
 	}
-	if creatingByAnswer(plain, current) {
+	if h.inCreationPhase(volumeID, current, &plain) != "" {
 		return adapter.PrimaryEvidence{}, ErrMoveWhileCreating
 	}
 	if plain.AckProfile == "" {

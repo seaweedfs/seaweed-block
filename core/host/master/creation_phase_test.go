@@ -113,7 +113,7 @@ func establishVolume(t *testing.T, h *Host, volumeID string) {
 	if err := h.ingestStoreAttestation(server, attestation(volumeID, line.ReplicaID, line.Epoch, stores)); err != nil {
 		t.Fatalf("establish %s: %v", volumeID, err)
 	}
-	if h.creatingByRecord(volumeID) {
+	if line, _ := h.Publisher().VolumeAuthorityLine(volumeID); h.inCreationPhase(volumeID, line, nil) != "" {
 		t.Fatalf("establish %s: still creating after the attestation (line %+v, server %q)", volumeID, line, server)
 	}
 }
