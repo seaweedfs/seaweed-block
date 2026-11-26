@@ -270,6 +270,9 @@ func (h *Host) rebuildRetainedBase() bool {
 	h.selfFenceMu.Lock()
 	f := h.selfFence
 	h.selfFenceMu.Unlock()
+	// The self-fence object is this host's replica listener
+	// (*transport.ReplicaListener, installed by SetSelfFence), which latches
+	// the refusal.
 	r, ok := f.(interface{ RebuildRetainedBase() string })
 	return ok && r.RebuildRetainedBase() != ""
 }
