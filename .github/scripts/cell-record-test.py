@@ -11,7 +11,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, 'cell-record.py')
 
 
-def run(volumes, sibling_lines):
+def run(volumes, sibling_lines, env=None):
     with tempfile.TemporaryDirectory() as d:
         names, events, binary = (os.path.join(d, x) for x in ('names', 'events', 'bin'))
         with open(names, 'w') as f:
@@ -23,7 +23,9 @@ def run(volumes, sibling_lines):
         evs += [{'Action': 'pass', 'Test': 'TestA/sub'}, {'Action': 'skip', 'Test': 'TestA/other'}, {'Action': 'pass', 'Test': 'TestA'}]
         with open(events, 'w') as f:
             f.write('\n'.join(json.dumps(e) for e in evs) + '\n')
-        r = subprocess.run([sys.executable, '-I', TOOL, str(volumes), names, events, binary], capture_output=True, text=True)
+        e = {k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'ImageOS', 'ImageVersion', 'RUNNER_NAME')}
+        e.update(env or {})
+        r = subprocess.run([sys.executable, '-I', TOOL, str(volumes), names, events, binary], capture_output=True, text=True, env=e)
         return r.returncode, r.stdout
 
 
@@ -42,16 +44,25 @@ cases = [
     ('sibling read back other bytes', 2, [line('v1s2', bad=1)], 1),
     ('one good and one bad env', 2, [line('v1s2'), line('v1s2', bad=2)], 1),
 ]
+ACTIONS = {'GITHUB_ACTIONS': 'true'}
+cases += [
+    ('on Actions with the runner image', 2, [line('v1s2')], 0, dict(ACTIONS, ImageOS='ubuntu24', ImageVersion='20261116.1')),
+    ('on Actions without a runner image', 2, [line('v1s2')], 1, ACTIONS),
+]
 failed = 0
-for what, volumes, lines, want in cases:
-    rc, out = run(volumes, lines)
+for case in cases:
+    what, volumes, lines, want = case[:4]
+    env = case[4] if len(case) > 4 else None
+    rc, out = run(volumes, lines, env)
     if rc != want:
         print('FAIL %s: exit %d, want %d' % (what, rc, want))
         failed += 1
         continue
     rec = json.loads(out)
     t = rec['tests']['TestA']
-    if t['subtests_run'] != 1 or t['subtests_skipped'] != 1 or rec['binaries'].get('bin') is None:
+    want_image = 'ubuntu24 20261116.1' if env and env.get('ImageOS') else ''
+    if (t['subtests_run'] != 1 or t['subtests_skipped'] != 1 or rec['binaries'].get('bin') is None
+            or 'kernel' not in rec['runner'] or rec['runner']['image'] != want_image):
         print('FAIL %s: record %s' % (what, out))
         failed += 1
         continue

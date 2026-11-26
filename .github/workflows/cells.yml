@@ -5,8 +5,11 @@ name: cells
 # every named test to PASS (required-tests-check.py: a skip, a failure, a test
 # that never ran or was cut off fails it) AND, with 2 or 3 volumes, every
 # sibling volume to read back every acknowledged write (cell-record.py). Each
-# job uploads its record: product head, binary sha256s, and per test the
-# subtests executed and skipped and the sibling lines.
+# job uploads its record: product head, binary sha256s, runner image and
+# kernel, and per test the subtests executed and skipped and the sibling lines.
+# These tests use the test's user-space NVMe/TCP initiator, no kernel
+# nvme-tcp module and no loop device; a cell that needs either is not listed
+# here and runs on a lab host (never skipped here).
 
 on:
   pull_request:
@@ -23,6 +26,9 @@ on:
   push:
     branches:
       - main
+      # A trial branch runs one cell (lifecycle x 2 volumes) to prove the
+      # hosted runner picks the job up and runs it before the full matrix.
+      - "cells-trial/**"
 
 permissions:
   contents: read
@@ -38,9 +44,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        group: [ladder, lifecycle, fault]
-        volumes: [1, 2, 3]
+      matrix: ${{ fromJSON(startsWith(github.ref, 'refs/heads/cells-trial/') && '{"group":["lifecycle"],"volumes":[2]}' || '{"group":["ladder","lifecycle","fault"],"volumes":[1,2,3]}') }}
     env:
       CGO_ENABLED: "0"
       SWBLOCK_TEST_VOLUMES: ${{ matrix.volumes }}
