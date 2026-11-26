@@ -152,8 +152,7 @@ func (env *handoffEnv) deleteServingTarget(t *testing.T, vol string, b bvHost, d
 	})
 	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", vol, "--chunk-filer", env.cluster.filerGRPC,
 		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-"+vol)
-	var del struct{ Completed bool }
-	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
+	if code != 0 || !handoffDeleteCompleted(out) {
 		t.Fatalf("volume-delete of %s after the way out: exit %d %s %s; want completed", vol, code, out, errOut)
 	}
 }
