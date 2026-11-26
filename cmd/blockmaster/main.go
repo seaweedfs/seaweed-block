@@ -171,6 +171,13 @@ func parseFlags(args []string) (flags, error) {
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")
 	}
+	// The promotion gate reads every frontier rule from this profile: an
+	// unknown one is refused here, as blockvolume refuses its own.
+	switch f.launcherReplicationAck {
+	case "best-effort", "sync-quorum", "sync-all":
+	default:
+		return flags{}, fmt.Errorf("--launcher-replication-ack=%q invalid; want best-effort, sync-quorum, or sync-all", f.launcherReplicationAck)
+	}
 	if err := master.ValidateStatusListen(f.statusListen); err != nil {
 		return flags{}, err
 	}

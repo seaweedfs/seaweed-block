@@ -314,13 +314,14 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 				directAsks = append(directAsks, heal)
 			}
 		}
-		if replacing && ok && isBestEffortProfile(result.AckProfile) {
-			// The same refusal as the operator's move (plannedMoveAllowed):
-			// a best_effort write may exist on the primary alone, so no
-			// replica takes its place automatically.
+		holdReason, holdWhy := "", ""
+		if replacing && ok {
+			holdReason, holdWhy = automaticFailoverHold(result)
+		}
+		if holdReason != "" {
 			allowed = map[string]bool{}
-			h.log.Printf("blockmaster: promotion gate volume=%s current=%s ack_profile=best_effort: no automatic failover", vol.VolumeID, vol.Authority.ReplicaID)
-			h.recordVolumeBlockedEvent(vol.VolumeID, ops.ReasonBestEffortNoAutomaticFailover)
+			h.log.Printf("blockmaster: promotion gate volume=%s current=%s %s: no automatic failover", vol.VolumeID, vol.Authority.ReplicaID, holdWhy)
+			h.recordVolumeBlockedEvent(vol.VolumeID, holdReason)
 		} else if (len(allowed) > 0 || emptyVolumeSurvivors(result, ok)) && replacing {
 			result, allowed = h.fencedDecision(vol.VolumeID, vol.Authority, result, len(candidates))
 			if len(allowed) == 0 {
@@ -453,10 +454,33 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 	return fenced, allowed
 }
 
+// automaticFailoverHold is the profile rule that holds a lost primary's
+// volume before any fencing round, as a blocked-event reason and a log
+// phrase ("" when none holds): the round's answers disagree with the
+// master's profile or do not name one, the master's profile is unknown, or
+// it is best_effort (a write may be on the primary alone, the same reason
+// the operator's move refuses it, plannedMoveAllowed).
+func automaticFailoverHold(result PromotionProbeResult) (reason, why string) {
+	switch {
+	case result.ProfileMismatch != "":
+		return ops.ReasonAckProfileMismatch, "ack profile mismatch (" + result.ProfileMismatch + ")"
+	case !isKnownAckProfile(result.AckProfile):
+		return ops.ReasonAckProfileMismatch, fmt.Sprintf("ack_profile=%q unknown", result.AckProfile)
+	case isBestEffortProfile(result.AckProfile):
+		return ops.ReasonBestEffortNoAutomaticFailover, "ack_profile=best_effort"
+	}
+	return "", ""
+}
+
 // isBestEffortProfile: the ack profile acknowledges a write without any
 // replica (planned_move.go's ErrPlannedMoveBestEffort).
 func isBestEffortProfile(profile string) bool {
-	return strings.ToLower(strings.ReplaceAll(profile, "-", "_")) == "best_effort"
+	return canonicalAckProfile(profile) == "best_effort"
+}
+
+// canonicalAckProfile: best-effort and best_effort are the same profile.
+func canonicalAckProfile(profile string) string {
+	return strings.ToLower(strings.ReplaceAll(profile, "-", "_"))
 }
 
 // emptyVolumeSurvivors: the plain round saw a ready replica and every answer
@@ -616,6 +640,16 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 			h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s probe_unavailable reasons=%v", vol.VolumeID, current.ReplicaID, evidence.Reasons)
 			h.recordPromotionProbeUnavailableEvent(vol.VolumeID, current.ReplicaID)
 		}
+		// A lost primary is held before its candidates are read when the
+		// profile rules forbid an automatic failover (best_effort, a profile
+		// mismatch or an unknown profile), so the volume shows why.
+		if probeOK && result.CurrentKnown && !result.Current.Ready {
+			if reason, why := automaticFailoverHold(result); reason != "" {
+				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s %s: no automatic failover", vol.VolumeID, current.ReplicaID, why)
+				h.recordVolumeBlockedEvent(vol.VolumeID, reason)
+				continue
+			}
+		}
 		enabledCandidate := false
 		for _, slot := range vol.Slots {
 			if slot.ReplicaID != current.ReplicaID && allowed[slot.ReplicaID] {
@@ -638,11 +672,6 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 			}
 			if h.primaryBootGraceHoldsNow(vol.VolumeID, current.ReplicaID) {
 				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s not ready but in boot grace; no direct reassign", vol.VolumeID, current.ReplicaID)
-				continue
-			}
-			if isBestEffortProfile(result.AckProfile) {
-				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s ack_profile=best_effort: no automatic failover", vol.VolumeID, current.ReplicaID)
-				h.recordVolumeBlockedEvent(vol.VolumeID, ops.ReasonBestEffortNoAutomaticFailover)
 				continue
 			}
 			// One decision function: the failover is read from a fencing
