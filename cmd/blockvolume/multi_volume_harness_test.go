@@ -23,8 +23,8 @@ import (
 // (own blockvolume process, endpoints and local root), created by the cluster
 // spec at SWBLOCK_TEST_VOLUME_BYTES (default 100 MiB). Each sibling runs a
 // seeded writer for the whole test: every block is written once, and a write
-// whose write and flush both succeeded is journaled (LBA, sha256). In a
-// cleanup that runs before the harness stops its processes, every journaled
+// whose write and flush both succeeded is journaled (LBA, sha256). Before the
+// harness stops any of its processes (beforeStop), every journaled
 // block must read back with the same bytes; a write that failed is ambiguous
 // and is counted, never checked. The cell passes only if the test passes AND
 // every sibling reads back every acknowledged write. The test's own volumes
@@ -109,9 +109,13 @@ func softly(t testing.TB, fn func(testing.TB)) (err error) {
 }
 
 type siblingWriter struct {
-	volume, nvme string
-	blocks       uint64
-	stop, done   chan struct{}
+	volume, nvme, status string
+	blocks               uint64
+	stop, done           chan struct{}
+	// d is the sibling's blockvolume and args its command, to restart it
+	// for the read-back if it exited during the test (a fenced lease).
+	d    *daemon
+	args []string
 
 	mu      sync.Mutex
 	acked   map[uint64][32]byte
@@ -165,8 +169,8 @@ func (w *siblingWriter) run(t testing.TB) {
 }
 
 // startSiblings starts each sibling's blockvolume, waits until it serves as
-// primary, starts its writer, and registers the read-back. The cleanup is
-// registered after the siblings' processes, so it runs before they stop.
+// primary, starts its writer, and registers the read-back as a harness
+// beforeStop hook, which runs before any harness process is stopped.
 func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 	t.Helper()
 	if len(names) == 0 {
@@ -181,11 +185,16 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 		d := env.h.start(t, "blockvolume-"+v, env.h.volume, args...)
 		e := mustU(adoptedEpochOf(v, d.waitLog(t, 60*time.Second, "blockvolume: volume "+v+" adopted as PRIMARY at r1@")))
 		waitSiblingPrimary(t, b.status, v, e)
-		w := &siblingWriter{volume: v, nvme: b.nvme, blocks: bytes / 4096, stop: make(chan struct{}), done: make(chan struct{}), acked: map[uint64][32]byte{}}
+		w := &siblingWriter{volume: v, nvme: b.nvme, status: b.status, blocks: bytes / 4096, stop: make(chan struct{}), done: make(chan struct{}),
+			d: d, args: args, acked: map[uint64][32]byte{}}
 		writers = append(writers, w)
 		go w.run(t)
 	}
-	t.Cleanup(func() {
+	// The read-back runs before any harness process stops (beforeStop), not
+	// as an ordinary cleanup: a process the test starts after the siblings (a
+	// restarted master) registers its cleanup later, so it would stop first
+	// and the siblings, their master gone, would fence before being read.
+	env.h.beforeStop = append(env.h.beforeStop, func() {
 		for _, w := range writers {
 			close(w.stop)
 		}
@@ -196,9 +205,67 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 				t.Errorf("sibling %s: the writer did not stop within 90 s", w.volume)
 				continue
 			}
+			if !env.siblingServing(t, w) {
+				continue
+			}
 			env.readBackSibling(t, w)
 		}
 	})
+}
+
+// siblingServing makes sure the sibling serves before its read-back. A
+// sibling whose process exited during the test (a test that keeps the master
+// away past the lease fences every volume, which then exits by design) is
+// restarted with the same command and local root and must come back as
+// primary; its acknowledged writes are then read through the restarted
+// process. Reports false (with an error) when it cannot serve.
+func (env *handoffEnv) siblingServing(t *testing.T, w *siblingWriter) bool {
+	t.Helper()
+	select {
+	case <-w.d.done:
+	default:
+		return true
+	}
+	why := "exit " + fmt.Sprint(w.d.err)
+	if l := w.d.line("blockvolume: exiting"); l != "" {
+		why = l
+	}
+	t.Logf("SIBLING-RESTART %s: exited during the test (%s); restarting it for the read-back", w.volume, why)
+	w.d = env.h.start(t, "blockvolume-"+w.volume+"-readback", env.h.volume, w.args...)
+	l, err := w.d.waitLogErr(60*time.Second, "blockvolume: volume "+w.volume+" adopted as PRIMARY at r1@")
+	if err != nil {
+		t.Errorf("sibling %s: restarted for the read-back but did not serve: %v", w.volume, err)
+		return false
+	}
+	e, err := adoptedEpochOf(w.volume, l)
+	if err != nil {
+		t.Errorf("sibling %s: restarted for the read-back: %v", w.volume, err)
+		return false
+	}
+	waitSiblingPrimary(t, w.status, w.volume, e)
+	return true
+}
+
+// waitLogErr is waitLog that returns an error instead of failing the test.
+func (d *daemon) waitLogErr(timeout time.Duration, s string) (string, error) {
+	end := time.Now().Add(timeout)
+	for {
+		if l := d.line(s); l != "" {
+			return l, nil
+		}
+		select {
+		case <-d.done:
+			if l := d.line(s); l != "" {
+				return l, nil
+			}
+			return "", fmt.Errorf("%s exited (%v) before logging %q", d.name, d.err, s)
+		default:
+		}
+		if time.Now().After(end) {
+			return "", fmt.Errorf("%s did not log %q within %s", d.name, s, timeout)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // waitSiblingPrimary is waitPrimaryAt for a named volume.
