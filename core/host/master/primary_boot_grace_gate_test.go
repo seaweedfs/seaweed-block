@@ -78,6 +78,8 @@ type switchProbe struct {
 	// awaitingEpoch: the current primary answers that it is not ready only
 	// because its assignment at this epoch awaits replica stores (0: no).
 	awaitingEpoch uint64
+	// profile is the answered ack profile ("" = sync-quorum).
+	profile string
 	// When hold is set, a probe signals entered and then blocks until
 	// release is closed.
 	hold    bool
@@ -110,14 +112,14 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 	defer p.mu.Unlock()
 	if p.empty {
 		return PromotionProbeResult{
-			AckProfile:   "sync-quorum",
+			AckProfile:   p.ackProfile(),
 			CurrentKnown: !p.currentUnknown,
 			Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, AwaitingReplicaStoresEpoch: p.awaitingEpoch},
 			Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true}, {ReplicaID: "r3"}},
 		}, nil
 	}
 	return PromotionProbeResult{
-		AckProfile: "sync-quorum",
+		AckProfile: p.ackProfile(),
 		// Only r2 is ready, so its promotion needs a known frontier it
 		// covers (#181); r3 answers but lags. A fencing round counts both.
 		SyncAckLSN:   70,
@@ -125,6 +127,13 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 		Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, AwaitingReplicaStoresEpoch: p.awaitingEpoch, DurableLSN: 70},
 		Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 70}, {ReplicaID: "r3", DurableLSN: p.lagEnd()}},
 	}, nil
+}
+
+func (p *switchProbe) ackProfile() string {
+	if p.profile == "" {
+		return "sync-quorum"
+	}
+	return p.profile
 }
 
 func (p *switchProbe) lagEnd() uint64 {
