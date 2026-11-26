@@ -82,6 +82,9 @@ type switchProbe struct {
 	profile string
 	// mismatch is the round's ProfileMismatch ("" = every answer agrees).
 	mismatch string
+	// fenceMismatch is the fencing round's ProfileMismatch: the plain round
+	// agrees, a survivor answers the fence in another profile.
+	fenceMismatch string
 	// When hold is set, a probe signals entered and then blocks until
 	// release is closed.
 	hold    bool

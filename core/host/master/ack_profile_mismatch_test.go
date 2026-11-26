@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/host/bootstrap"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -112,5 +114,59 @@ func TestProbeRound_ReportsAnAckProfileMismatch(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The fencing round's answers are the evidence the decision counts, so their
+// profiles are checked too: with the plain round in agreement and a survivor
+// answering the fence in another profile, neither gate publishes a primary;
+// the line stays and the volume shows ack_profile_mismatch.
+func TestTheFencingRoundsAckProfileIsCheckedToo(t *testing.T) {
+	for _, g := range []struct {
+		name string
+		tick func(t *testing.T, h *Host)
+	}{
+		{"unsupported gate", func(t *testing.T, h *Host) {
+			ineligible := restarting
+			ineligible.eligible = false
+			unsupportedTick(t, h, ineligible)
+		}},
+		{"supported gate", func(t *testing.T, h *Host) {
+			supportedCreatingTick(t, h, rf3Slot{incarnation: "r1-a", reachable: true, eligible: false})
+		}},
+	} {
+		t.Run(g.name, func(t *testing.T) {
+			h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}})
+			defer closeTestMaster(t, h)
+			p := probeOf(t, h)
+			p.mu.Lock()
+			p.fenceMismatch = "master sync_quorum, answers r2=best_effort"
+			p.mu.Unlock()
+			time.Sleep(250 * time.Millisecond) // past the boot grace
+			g.tick(t, h)
+			p.mu.Lock()
+			fences := p.fenceCalls
+			p.mu.Unlock()
+			if fences == 0 {
+				t.Fatal("no fencing round ran: the plain round agreed, so the fence must be asked")
+			}
+			expectLineStaysR1(t, h, "a fencing round answered in another profile")
+			if !blockedFor(h, "vol-rf3", ops.ReasonAckProfileMismatch) {
+				t.Fatalf("the volume does not show %s", ops.ReasonAckProfileMismatch)
+			}
+		})
+	}
+}
+
+// Every assignment names the master's ack profile in canonical form, so a
+// primary can refuse to serve a replicated line under another one.
+func TestAssignmentNamesTheMastersAckProfile(t *testing.T) {
+	for flag, want := range map[string]string{"sync-quorum": "sync_quorum", "best-effort": "best_effort", "sync-all": "sync_all"} {
+		h := &Host{boot: &bootstrap.DurableAuthorityBootstrap{Publisher: authority.NewPublisher(authority.NewStaticDirective(nil))}, topo: authority.AcceptedTopology{Volumes: []authority.VolumeExpected{{VolumeID: "v", Slots: []authority.ExpectedSlot{{ReplicaID: "r1", ServerID: "s1"}}}}}}
+		h.promotionProber = &roundEvidenceProvider{ackProfile: flag}
+		fact := (&services{host: h}).assignmentFact(adapter.AssignmentInfo{VolumeID: "v", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1})
+		if fact.GetAckProfile() != want {
+			t.Fatalf("--launcher-replication-ack=%s: assignment names %q; want %q", flag, fact.GetAckProfile(), want)
+		}
 	}
 }

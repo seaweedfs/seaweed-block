@@ -323,6 +323,12 @@ message AssignmentFact {
     // another one is a restarted process: it opens no replica session on
     // this line, whose sessions belong to the dead process.
     string line_incarnation = 17;
+    // The master's replication ACK profile (blockmaster's
+    // --launcher-replication-ack, canonical: best_effort, sync_quorum,
+    // sync_all). A primary of a replicated line whose own --replication-ack
+    // is another one does not serve: a later failover reads its
+    // acknowledged writes by this profile's rules.
+    string ack_profile = 18;
 }
 
 // PrimaryKind is how a line made its primary the primary.
