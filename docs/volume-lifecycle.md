@@ -118,6 +118,11 @@ blockmaster --authority-store /var/lib/sw-block-master/authority \
   --chunk-filer FILER_GRPC --chunk-path /swblock/chunks
 ```
 
+This page's volumes have one replica. A volume with `replication_factor`
+above 1 also needs `--lifecycle-product-loop-interval 100ms` (the shipped
+chart's value; the default `0` turns the loop off and such a volume never gets
+a primary): see [the replicated start](standalone-deployment.md).
+
 With the example units: `SWB_MASTER_TOPOLOGY=` (empty), `SWB_MASTER_EXPECTED_SLOTS=1`,
 `SWB_MASTER_WORKSPACE_RPC=true`, and `--lifecycle-store`, `--cluster-spec`,
 `--chunk-filer` and `--chunk-path` in `SWB_MASTER_EXTRA_ARGS`. blockmaster

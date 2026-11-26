@@ -132,6 +132,20 @@ Do these steps before you start blockvolume:
    `SWB_MASTER_EXPECTED_SLOTS`. blockmaster reads the file only at start:
    after you change it, run `sudo systemctl restart sw-blockmaster`.
 
+   **A replicated volume** (`replication_factor` above 1, in a
+   `--cluster-spec`) gets its primary from blockmaster's lifecycle loop,
+   which runs only when `--lifecycle-product-loop-interval` is set. Use
+   `100ms`, the value the shipped chart sets. With the default `0` the loop
+   is off and a replicated volume never gets a primary. The single-replica
+   start above needs no loop.
+
+   ```bash
+   blockmaster --authority-store /var/lib/sw-block-master/authority \
+     --lifecycle-store /var/lib/sw-block-master/lifecycle \
+     --cluster-spec /etc/sw-block/cluster-spec.yaml --expected-slots-per-volume 3 \
+     --lifecycle-product-loop-interval 100ms --listen 127.0.0.1:9180
+   ```
+
 3. **Start blockvolume with the identity of one slot.** `--volume-id`,
    `--replica-id` and `--server-id` (`SWB_VOLUME_ID`, `SWB_REPLICA_ID`,
    `SWB_SERVER_ID`) must equal one slot of the file: `v1`, `r1`, `s1` here.

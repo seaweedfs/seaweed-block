@@ -275,6 +275,7 @@ Every command on the pages above, and the test that runs it.
 | Command | Test | Kind |
 |---|---|---|
 | `blockmaster ... --cluster-spec ... --lifecycle-store ... --workspace-rpc ...` | `TestStandalonePlannedHandoffToTheSameHost` (`cmd/blockvolume`) | binary |
+| `blockmaster ... --cluster-spec ... --expected-slots-per-volume 3 --lifecycle-product-loop-interval ...` (a replicated volume) | `TestDoubleFailoverReadsBackEveryAckedWrite`, `TestFencingRoundHealContinuesThePrimary` (`cmd/blockvolume`, run with `200ms`) | binary |
 | `blockvolume ... --durable-impl walstore-chunk ... --workspace-lease ...` | same | binary |
 | `sw-block ops workspace show`, `revoke --sealed-gen`, `move --clean` | same | binary |
 | `sw-block ops chunk detach --plain`, `chunk show`, `chunk cut` | same; `TestProcedureForcedMoveWithTheOldHostReturning` | binary |
