@@ -228,6 +228,10 @@ blockmaster restart; registering a host online, without a restart, is planned fo
 4. Move existing volumes onto it with the planned hand-over (or the forced move when their host is lost), naming the
    new host as `--target-host`, then start the volume's unit there: see [moving a volume](volume-lifecycle.md).
 
+Until the restart, a move to the new host is refused with `move target node "<id>" is not registered`
+(`TestCellNewHostFromTheClusterSpec`: the move is refused, the host is added and blockmaster restarts in about 5 to
+7 s while three other volumes keep taking writes, then the same move succeeds and the new host serves the volume).
+
 ## Moving a volume, and returning it
 
 [Volume lifecycle](volume-lifecycle.md):
@@ -306,6 +310,7 @@ Every command on the pages above, and the test that runs it.
 | `sw-block ops workspace show`, `revoke --sealed-gen`, `move --clean` | same | binary |
 | `sw-block ops chunk detach --plain`, `chunk show`, `chunk cut` | same; `TestProcedureForcedMoveWithTheOldHostReturning` | binary |
 | `sw-block ops workspace force-move [--dry-run]`, `lost-range` | `TestProcedureForcedMoveWithTheOldHostReturning`, `TestProcedureRevokeWithoutACKThenForcedMove` | binary |
+| Add a host: cluster-spec `nodes` entry, blockmaster restart, `move --clean` to it | `TestCellNewHostFromTheClusterSpec` (`cmd/blockvolume`) | binary |
 | `sw-block ops volume-unheld --path` | `cmd/sw-block/volume_unheld_test.go` | CLI |
 | `sw-block ops chunk snapshot`, `snapshots`, `snapshot-delete` | `cmd/sw-block/chunk_test.go` | CLI |
 | `sw-block ops chunk verify --depth data [--orphans]` | `cmd/sw-block/chunk_verify_test.go` | CLI |
