@@ -443,6 +443,10 @@ order: `[{"name":"s1","root":"<64 hex>"}]`. An entry also lists
 entry has no state or cut position: a listed snapshot is published. Each delete
 answers `{"volume":"v1-<id8>","name":"s1","state":"absent"}`. Here `v1-<id8>` is
 the volume's store directory: its name and the first 8 hex digits of its layout id.
+A delete is one conditional update of HEAD. If another change of HEAD (the
+holder's cleaning, which runs after a delete, or a snapshot) lands between its
+read and its write, it exits 1 with `"code":"conflict"` and `"retryable":true`
+and changes nothing: run it again.
 
 **4. Delete the volume:**
 
