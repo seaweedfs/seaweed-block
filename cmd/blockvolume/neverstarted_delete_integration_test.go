@@ -4,7 +4,6 @@ package main_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,16 +28,15 @@ func TestNeverAttachedRestoreTargetIsDeletable(t *testing.T) {
 	env.snapshot(t, "s1", "v1", "s1")
 
 	// The target exists in the catalog; its blockvolume never starts.
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 
 	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC,
 		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v2-never-started")
-	var del struct{ Completed bool }
-	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
+	if code != 0 || !handoffDeleteCompleted(out) {
 		t.Fatalf("volume-delete of a never-attached target must complete; exit %d:\n%s\n%s", code, out, errOut)
 	}
-	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	shown := env.headOf(t, "v2")
 	if !strings.Contains(shown, `"state":"deleted"`) {
 		t.Fatalf("the deleted target's HEAD is not a deleted tombstone:\n%s", shown)
 	}
@@ -62,7 +60,7 @@ func TestNeverStartedDeleteFencesALateStart(t *testing.T) {
 	env.adopt(t, holder, "s1")
 	env.writeBlock(t, "s1", 0, cutCrashBlock('L', 0))
 	env.snapshot(t, "s1", "v1", "s1")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC,
 		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-v2-late")
@@ -73,7 +71,7 @@ func TestNeverStartedDeleteFencesALateStart(t *testing.T) {
 	late := env.h.start(t, "blockvolume-v2-late", env.h.volume, env.volArgsFor(b)...)
 	err := late.wait(60 * time.Second)
 	served := late.has("durable: HEAD claim for volume=v2 done") || volumeFrontendReady(b.status, "v2")
-	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	shown := env.headOf(t, "v2")
 	t.Logf("late start after the delete: exit %v, served %v, HEAD %s", err, served, firstLine(shown))
 	if served || err == nil || strings.Contains(fmt.Sprint(err), "still running") || !strings.Contains(shown, `"state":"deleted"`) {
 		t.Fatalf("1.0.1: a start after the delete must exit without claiming or serving and leave the volume deleted; exit %v, served %v, HEAD:\n%s", err, served, shown)
@@ -93,7 +91,7 @@ func TestNeverStartedDeleteRacesAStart(t *testing.T) {
 	env.writeBlock(t, "s1", 0, cutCrashBlock('R', 0))
 	env.snapshot(t, "s1", "v1", "s1")
 	for _, v := range targets {
-		env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", v,
+		env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", v,
 			"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 		b := env.hosts["n-"+v]
 		type delResult struct {
@@ -118,7 +116,7 @@ func TestNeverStartedDeleteRacesAStart(t *testing.T) {
 		// claim) or its frontend became ready; adopting the assignment comes
 		// before the claim and is not serving.
 		served := d.has("durable: HEAD claim for volume="+v+" done") || volumeFrontendReady(b.status, v)
-		shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+		shown := env.headOf(t, v)
 		isDeleted := strings.Contains(shown, `"state":"deleted"`)
 		t.Logf("%s: delete exit %d, served %v, HEAD deleted %v: %s", v, r.code, served, isDeleted, firstLine(r.out))
 		switch {
@@ -143,6 +141,35 @@ func (env *handoffEnv) deleteNoRevoke(ctx context.Context, v, request string) (s
 		code = -1
 	}
 	return out + errOut, code
+}
+
+// deleteAfterTheHorizon is v1's delete of a line HEAD never reached: the
+// delete may be refused only while the stranded line's lease can still be
+// live ("lease expiry plus clock-skew margin has not elapsed"); nobody
+// renews it, so the same delete (same request id, which resumes it) run
+// past the horizon it names completes. Any other refusal is returned as it
+// is. The immediate delete of a never-started line, without waiting, is the
+// 1.0.1 fix.
+func (env *handoffEnv) deleteAfterTheHorizon(t *testing.T, v, request string) (string, int) {
+	t.Helper()
+	out, code := env.deleteNoRevoke(context.Background(), v, request)
+	if code == 0 || !strings.Contains(out, "has not elapsed") {
+		return out, code
+	}
+	wait := 75 * time.Second
+	if i := strings.Index(out, "live until "); i >= 0 {
+		if f := strings.Fields(out[i+len("live until "):]); len(f) > 0 {
+			if until, err := time.Parse(time.RFC3339Nano, strings.TrimRight(f[0], ":")); err == nil {
+				wait = time.Until(until) + 5*time.Second
+			}
+		}
+	}
+	if wait < 0 || wait > 90*time.Second {
+		t.Fatalf("the refusal names a horizon %v away (want within 90 s):\n%s", wait, out)
+	}
+	t.Logf("%s: refused until its lease horizon; retrying in %v:\n%s", v, wait.Round(time.Second), firstLine(out))
+	time.Sleep(wait)
+	return env.deleteNoRevoke(context.Background(), v, request)
 }
 
 // lineOf returns the master's durable authority record for v (the line:
@@ -185,7 +212,7 @@ func (env *handoffEnv) requireNeverStarted(t *testing.T, v string, e, headEpoch 
 // and the process exits. The filer comes back. Line at 1, no lease, HEAD 0.
 func (env *handoffEnv) strandStoreDown(t *testing.T, v string) {
 	t.Helper()
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", v,
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", v,
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	env.cluster.stopProc(t, "filer")
 	d := env.h.start(t, "blockvolume-"+v+"-store-down", env.h.volume, env.volArgsFor(env.hosts["n-"+v])...)
@@ -206,7 +233,7 @@ func (env *handoffEnv) strandStoreDown(t *testing.T, v string) {
 func (env *handoffEnv) strandAtGrant(t *testing.T, candidates ...string) string {
 	t.Helper()
 	for _, v := range candidates {
-		env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", v,
+		env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", v,
 			"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 		d := env.h.start(t, "blockvolume-"+v+"-stopped-at-grant", env.h.volume, env.volArgsFor(env.hosts["n-"+v])...)
 		deadline := time.Now().Add(60 * time.Second)
@@ -236,7 +263,8 @@ func (env *handoffEnv) strandAtGrant(t *testing.T, candidates ...string) string 
 	return ""
 }
 
-// 1.0.1 red (INV-WS-DELETE-NO-LIVE-HOLDER-001): a line whose epoch HEAD never
+// INV-WS-DELETE-NO-LIVE-HOLDER-001 (on v1 past the stranded line's lease
+// horizon: deleteAfterTheHorizon; at once is 1.0.1): a line whose epoch HEAD never
 // reached has acknowledged nothing, so volume-delete completes WITHOUT a
 // revoke; HEAD becomes a deleted tombstone, the source is untouched, and no
 // granted lease stays on the deleted volume. Routes, each without root:
@@ -252,13 +280,12 @@ func TestNeverStartedLineIsDeletableWithoutARevoke(t *testing.T) {
 	deleted := func(t *testing.T, env *handoffEnv, v, request string) {
 		t.Helper()
 		before := env.workspaceShow(t, v)
-		out, code := env.deleteNoRevoke(context.Background(), v, request)
-		var del struct{ Completed bool }
-		completed := code == 0 && json.Unmarshal([]byte(firstLine(out)), &del) == nil && del.Completed
+		out, code := env.deleteAfterTheHorizon(t, v, request)
+		completed := code == 0 && handoffDeleteCompleted(out)
 		head, after := env.headOf(t, v), env.workspaceShow(t, v)
 		t.Logf("delete exit %d, completed %v, HEAD %s\nworkspace show before:\n%s\nafter:\n%s\ndelete output:\n%s", code, completed, head, before, after, out)
 		if !completed {
-			t.Fatalf("1.0.1: volume-delete of %s (line above HEAD) must complete without a revoke; exit %d", v, code)
+			t.Fatalf("volume-delete of %s (line above HEAD) must complete without a revoke, past the lease horizon; exit %d", v, code)
 		}
 		if !strings.Contains(head, `"state":"deleted"`) || strings.Contains(after, "lease state: granted") {
 			t.Fatalf("a completed delete must leave a deleted HEAD and no granted lease")
@@ -310,7 +337,7 @@ func requireSourceUntouched(t *testing.T, env *handoffEnv) {
 	}
 }
 
-// 1.0.1 red: after that delete, a start of the target with the store up
+// After that delete (on v1 past the lease horizon), a start of the target with the store up
 // must not claim it: it exits without serving and the HEAD stays deleted.
 // S1 and S2.
 func TestNeverStartedLineDeleteFencesALateStart(t *testing.T) {
@@ -329,8 +356,8 @@ func TestNeverStartedLineDeleteFencesALateStart(t *testing.T) {
 			} else {
 				v = env.strandAtGrant(t, c.targets...)
 			}
-			if out, code := env.deleteNoRevoke(context.Background(), v, "del-"+v+"-late"); code != 0 {
-				t.Fatalf("1.0.1: volume-delete of %s (line above HEAD): exit %d:\n%s", v, code, out)
+			if out, code := env.deleteAfterTheHorizon(t, v, "del-"+v+"-late"); code != 0 {
+				t.Fatalf("volume-delete of %s (line above HEAD), past the lease horizon: exit %d:\n%s", v, code, out)
 			}
 			b := env.hosts["n-"+v]
 			late := env.h.start(t, "blockvolume-"+v+"-late", env.h.volume, env.volArgsFor(b)...)
@@ -383,7 +410,7 @@ func TestNeverStartedLineDeleteRacesAStart(t *testing.T) {
 	}
 }
 
-// 1.0.1 red (master restart, one direction): the master is SIGKILLed and
+// Master restart, one direction (on v1 past the lease horizon): the master is SIGKILLed and
 // restarted between the stranding and the delete; the delete still completes
 // without a revoke, from what the master and the HEAD keep durably. S1 and S2.
 func TestNeverStartedDeleteAfterAMasterRestart(t *testing.T) {
@@ -398,9 +425,9 @@ func TestNeverStartedDeleteAfterAMasterRestart(t *testing.T) {
 				env.strandStoreDown(t, v)
 			}
 			restartKilledMaster(t, env)
-			out, code := env.deleteNoRevoke(context.Background(), v, "del-"+v+"-after-restart")
+			out, code := env.deleteAfterTheHorizon(t, v, "del-"+v+"-after-restart")
 			if head := env.headOf(t, v); code != 0 || !strings.Contains(head, `"state":"deleted"`) {
-				t.Fatalf("1.0.1: after a master restart, volume-delete of %s must complete; exit %d, HEAD %s:\n%s", v, code, head, out)
+				t.Fatalf("after a master restart, volume-delete of %s must complete (past the lease horizon); exit %d, HEAD %s:\n%s", v, code, head, out)
 			}
 		})
 	}
@@ -412,7 +439,7 @@ func TestNeverStartedDeleteAfterAMasterRestart(t *testing.T) {
 // without a revoke and an ACK is refused and the HEAD is not tombstoned.
 func TestClaimedTargetAfterAMasterRestartIsNotNeverStarted(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	d := env.startTarget(t, "v2", "blockvolume-v2")
 	if head := env.headOf(t, "v2"); strings.Contains(head, `"holder":""`) {

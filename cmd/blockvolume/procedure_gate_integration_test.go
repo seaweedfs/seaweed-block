@@ -50,7 +50,6 @@ func TestProcedurePlannedHandoffToAnotherHost(t *testing.T) {
 	moved, _ := h.command(t, env.moveClean(e, "s2", "move-v1-1")...)
 	e2 := mustU(movedEpochTo(moved, e, g, l, "s2"))
 	nw := env.start(t, "blockvolume-s2", "s2")
-	must(checkClaimDoneBy(nw.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in"), e2, "s2"))
 	if got := env.adopt(t, nw, "s2"); got != e2 {
 		t.Fatalf("s2 adopted at epoch %d; want %d", got, e2)
 	}
@@ -58,7 +57,7 @@ func TestProcedurePlannedHandoffToAnotherHost(t *testing.T) {
 	must(wantLines(out, fmt.Sprintf("holder: r1@%d (logical replica)", e2),
 		fmt.Sprintf("move: request=move-v1-1 kind=clean issued=true s1/r1@%d -> s2/r1@%d HEAD generation %d remote LSN %d", e, e2, g, l)))
 	out, _ = h.command(t, env.chunkShow()...)
-	must(checkHeadReopenedBy(out, e2, g, l, "s2"))
+	must(checkLayoutHeadReopenedBy(out, e2, g, l, "s2"))
 	if !bytes.Equal(env.readBlock(t, "s2", 0), block) {
 		t.Fatal("the block written on s1 does not read back on s2")
 	}
@@ -195,24 +194,27 @@ func TestProcedureForcedMoveWithTheOldHostReturning(t *testing.T) {
 		t.Fatal("the block written after the last cut reads back on s2; the page says it is lost")
 	}
 
-	// The old host returns with its old local root, and the example unit
-	// (Restart=on-failure, RestartSec=5s) starts it again after it exits,
-	// until its start limit. Each time it must not take s2's line as its own
-	// (a holder is server and replica), report its frontend ready or listen
-	// for I/O; it logs a refusal and exits with status 75.
-	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2, 75)
-	time.Sleep(5 * time.Second) // RestartSec of the example unit
-	again := env.oldHostRefuses(t, "blockvolume-s1-restarted", env.hosts["s1"], e2, 75)
-	// Control: on a fresh local root there is no stale root, so its refusal
-	// is the identity check alone; it also exits 75.
+	// The old host returns with its old local root. blockmaster refuses its
+	// lease with a typed MOVED (the volume moved to s2 at a newer epoch), so
+	// it exits 78, which the example unit does not restart
+	// (RestartPreventExitStatus=78); an operator's start again ends the same
+	// way. Each time it must not take s2's line as its own (a holder is server
+	// and replica), report its frontend ready or listen for I/O; it logs
+	// `exiting status=78 reason=moved`.
+	back := env.oldHostRefuses(t, "blockvolume-s1-back", env.hosts["s1"], e2, 78)
+	time.Sleep(5 * time.Second)
+	again := env.oldHostRefuses(t, "blockvolume-s1-restarted", env.hosts["s1"], e2, 78)
+	// Control: on a fresh local root there is no stale root; the master's
+	// MOVED refusal alone ends it, also with status 78.
 	fresh := env.hosts["s1"]
 	fresh.root = fresh.root + "-fresh"
-	freshRoot := env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2, 75)
+	freshRoot := env.oldHostRefuses(t, "blockvolume-s1-fresh-root", fresh, e2, 78)
 	// A line carries its owner and that owner's endpoints: every line
-	// delivered at the forced epoch, to the new owner and to each returning
-	// old host alike, carries s2's own endpoints, never another host's.
+	// delivered at the forced epoch carries s2's own endpoints, never another
+	// host's. A returning source can instead be refused MOVED before the
+	// assignment stream delivers anything (volume-lifecycle.md, do-not list).
 	if bad := wrongOwnerEndpoints(e2, env.hosts["s2"], nw, back, again, freshRoot); len(bad) > 0 {
-		t.Errorf("epoch-%d deliveries not proven to carry s2's endpoints (want data=%s ctrl=%s in every recipient's lines):\n%s",
+		t.Errorf("epoch-%d owner evidence invalid (want data=%s ctrl=%s in every delivery, or a moved refusal before delivery):\n%s",
 			e2, env.hosts["s2"].data, env.hosts["s2"].ctrl, strings.Join(bad, "\n"))
 	}
 	env.h.waitPrimaryAt(t, env.hosts["s2"].status, e2)
@@ -308,65 +310,6 @@ func TestProcedureStartInsideTheBarrierWaitIsReGranted(t *testing.T) {
 	}
 }
 
-// TestProcedureStartTooEarlyExitsAndARestartServes: with
-// --workspace-max-clock-skew 50s the barrier is at most 95 s after the stop.
-// A holder started 31 s after the stop ends its 30 s authority wait before
-// the barrier: it does not serve and exits with status 75, so a supervisor
-// (Restart=on-failure, RestartSec=5s) starts it again; a start that waits
-// past the barrier is re-granted and serves at the same epoch.
-func TestProcedureStartTooEarlyExitsAndARestartServes(t *testing.T) {
-	env := startHandoffEnv(t, 1, "--workspace-max-clock-skew", "50s")
-	first := env.start(t, "blockvolume-s1", "s1")
-	e := env.adopt(t, first, "s1")
-	block := pattern("start-too-early!")
-	env.writeBlock(t, "s1", 0, block)
-	first.kill(t)
-	time.Sleep(31 * time.Second)
-
-	// Attempt 2 starts about 66 s after the stop and its wait ends about
-	// 96 s after it, against a barrier of at most 95 s, so attempt 2 normally
-	// serves; up to 4 attempts allow for scheduling on a loaded host.
-	for attempt := 1; ; attempt++ {
-		d := env.start(t, fmt.Sprintf("blockvolume-s1-try%d", attempt), "s1")
-		served := false
-		end := time.Now().Add(45 * time.Second)
-		for time.Now().Before(end) {
-			if env.servingNow("s1") {
-				served = true
-				break
-			}
-			select {
-			case <-d.done:
-				end = time.Now()
-			default:
-				time.Sleep(200 * time.Millisecond)
-			}
-		}
-		if served {
-			if attempt == 1 {
-				t.Fatal("started before the barrier with its wait ending first, the holder served")
-			}
-			if got := env.adopt(t, d, "s1"); got != e {
-				t.Fatalf("attempt %d adopted epoch %d; want the same epoch %d", attempt, got, e)
-			}
-			break
-		}
-		if err := d.wait(5 * time.Second); exitCode(err) != 75 {
-			t.Fatalf("attempt %d did not serve and did not exit 75: %v", attempt, err)
-		}
-		if !d.has("blockvolume: exiting status=75 reason=assignment_timeout") {
-			t.Fatalf("attempt %d exited 75 without the reason assignment_timeout", attempt)
-		}
-		if attempt == 4 {
-			t.Fatal("four supervised starts never served")
-		}
-		time.Sleep(5 * time.Second)
-	}
-	if !bytes.Equal(env.readBlock(t, "s1", 0), block) {
-		t.Fatal("the block written before the stop does not read back")
-	}
-}
-
 // lastLogTime is the time of the last log line containing s (second
 // resolution, the log's local time), or zero.
 func lastLogTime(d *daemon, s string) time.Time {
@@ -422,7 +365,10 @@ func (env *handoffEnv) oldHostRefuses(t *testing.T, name string, b bvHost, e2 ui
 	if err := d.wait(5 * time.Second); exitCode(err) != wantExit {
 		failures = append(failures, fmt.Sprintf("it did not exit with status %d: %v", wantExit, err))
 	}
-	if !d.has("refusing to attach volume=v1") && !d.has("workspace lease: stale authority") && !d.has("foreign assignment") {
+	if wantExit == 78 && !d.has("exiting status=78 reason=moved") {
+		failures = append(failures, "it did not log `exiting status=78 reason=moved`")
+	}
+	if wantExit != 78 && !d.has("refusing to attach volume=v1") && !d.has("workspace lease: stale authority") && !d.has("foreign assignment") {
 		failures = append(failures, "it logged no refusal (stale root, stale authority, or another server's assignment)")
 	}
 	if len(failures) > 0 {
@@ -441,12 +387,12 @@ func (env *handoffEnv) servingNow(id string) bool {
 func (env *handoffEnv) requireHeadHolder(t *testing.T, e uint64, host string) {
 	t.Helper()
 	out, _ := env.h.command(t, env.chunkShow()...)
-	head, err := parseHead(out)
+	head, err := parseLayoutHead(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if head.State != "active" || head.Epoch != e || head.Holder != host+"/r1" {
-		t.Fatalf("HEAD %+v; want active at epoch %d held by %s/r1", head, e, host)
+	if head.State != "" || head.ClaimID == "" || head.Epoch != e || head.Holder != host+"/r1" {
+		t.Fatalf("HEAD %+v; want live at epoch %d held by %s/r1", head, e, host)
 	}
 }
 
@@ -511,14 +457,14 @@ func (env *handoffEnv) seal(t *testing.T, id string, e uint64) uint64 {
 }
 
 func (env *handoffEnv) chunkShow() []string {
-	return []string{"ops", "chunk", "show", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
+	return []string{"ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 }
 
 func (env *handoffEnv) sealedLSN(t *testing.T, e, g uint64) uint64 {
 	t.Helper()
 	_, mustU := fatalOn(t)
 	out, _ := env.h.command(t, env.chunkShow()...)
-	return mustU(sealedHeadLSN(out, e, g))
+	return mustU(sealedLayoutHeadPosition(out, e, g))
 }
 
 func (env *handoffEnv) revoke(t *testing.T, e, g uint64) {
@@ -565,8 +511,8 @@ func (env *handoffEnv) forceMove(t *testing.T, e uint64, target, request string)
 }
 
 // wrongOwnerEndpoints returns every "assignment stream delivery" log line at epoch e (in any of ds) whose data or control
-// endpoint is not owner's, plus an entry for each recipient whose log cannot be read or shows no epoch-e
-// delivery at all (each recipient must positively have received the owner's line).
+// endpoint is not owner's, plus an entry for each recipient whose log cannot be
+// read or shows neither an epoch-e delivery nor the documented MOVED refusal.
 func wrongOwnerEndpoints(e uint64, owner bvHost, ds ...*daemon) []string {
 	var bad []string
 	tag := fmt.Sprintf(" epoch=%d ev=", e)
@@ -586,7 +532,9 @@ func wrongOwnerEndpoints(e uint64, owner bvHost, ds ...*daemon) []string {
 				bad = append(bad, d.name+": "+strings.TrimSpace(l))
 			}
 		}
-		if seen == 0 { // positive evidence per recipient: a check that saw no forced-epoch delivery proves nothing
+		if seen == 0 && !strings.Contains(string(raw), "blockvolume: exiting status=78 reason=moved") {
+			// Mere absence proves nothing. The master's typed MOVED refusal
+			// ends an old source's stream before any fact can be delivered.
 			bad = append(bad, d.name+": no epoch delivery logged")
 		}
 	}

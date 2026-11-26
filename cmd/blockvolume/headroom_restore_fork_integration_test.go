@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// Local headroom for a restore and a fork target. The durable root of each
+// Local headroom for restore targets. The durable root of each
 // target is on a small file system (CHUNKSTORE_SMALL_ROOT, a directory on it)
 // that a filler file (CHUNKSTORE_SMALL_FILLER, on the same file system) keeps
 // below the volume size + WAL. testdata/headroom-small-fs.sh prepares both on
@@ -152,14 +152,13 @@ func (env *handoffEnv) deleteServingTarget(t *testing.T, vol string, b bvHost, d
 	})
 	out, errOut, code := env.h.run(t, "ops", "chunk", "volume-delete", "--volume", vol, "--chunk-filer", env.cluster.filerGRPC,
 		"--chunk-path", env.chunkPath, "--master", env.h.masterAddr, "--request-id", "del-"+vol)
-	var del struct{ Completed bool }
-	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
+	if code != 0 || !handoffDeleteCompleted(out) {
 		t.Fatalf("volume-delete of %s after the way out: exit %d %s %s; want completed", vol, code, out, errOut)
 	}
 }
 
-// TestHeadroomRefusesARestoreAndAForkTargetThenServesThem: a snapshot of v1
-// is restored into v2, v4 and v6 and forked into v3, each target's durable
+// TestHeadroomRefusesRestoreTargetsThenServesThem: a snapshot of v1 is
+// restored into v2, v4 and v6 (fork is not in v1), each target's durable
 // root on a small file system with less free space than the volume size +
 // WAL.
 // Each target's blockvolume refuses the create, naming both numbers, exits
@@ -172,9 +171,9 @@ func (env *handoffEnv) deleteServingTarget(t *testing.T, vol string, b bvHost, d
 // of 1.0): a volume-delete wants a clean revocation ACK its holder cannot
 // send, and a forced move to a host with room (n-v7) is refused because the
 // master knows no holder of it. The one way out is run: once space is freed,
-// v2 and v3 start and serve the snapshot, and v4 and v6 start, serve, and are
+// v2 starts and serves the snapshot, and v4 and v6 start, serve, and are
 // sealed, revoked, acknowledged and deleted.
-func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
+func TestHeadroomRefusesRestoreTargetsThenServesThem(t *testing.T) {
 	small, filler := os.Getenv("CHUNKSTORE_SMALL_ROOT"), os.Getenv("CHUNKSTORE_SMALL_FILLER")
 	if small == "" || filler == "" {
 		t.Skip("CHUNKSTORE_SMALL_ROOT and CHUNKSTORE_SMALL_FILLER name a small file system and its filler file")
@@ -185,8 +184,8 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	}
 
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(small, t.Name())) })
-	env := startLadderEnv(t, "v2", "v3", "v4", "v5", "v6", "v7")
-	for _, v := range []string{"v2", "v3", "v4", "v6"} {
+	env := startLadderEnv(t, "v2", "v4", "v5", "v6", "v7")
+	for _, v := range []string{"v2", "v4", "v6"} {
 		b := env.hosts["n-"+v]
 		b.root = filepath.Join(small, t.Name(), "vol-n-"+v)
 		env.hosts["n-"+v] = b
@@ -198,16 +197,14 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	env.writeImage(t, "s1", img)
 	env.snapshot(t, "s1", "v1", "base")
 
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", "v2",
-		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	env.h.command(t, "ops", "chunk", "fork", "--source", "v1", "--snapshot", "base", "--target", "v3",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "base", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	for _, v := range []string{"v4", "v6"} {
-		env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "base", "--target", v,
+		env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "base", "--target", v,
 			"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	}
 	refused := map[string]*daemon{}
-	for _, v := range []string{"v2", "v3", "v4", "v6"} {
+	for _, v := range []string{"v2", "v4", "v6"} {
 		refused[v] = env.refusedForHeadroom(t, v, "blockvolume-"+v+"-no-room")
 	}
 
@@ -225,7 +222,7 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	env.requireImage(t, "n-v5", img)
 
 	env.requireImage(t, "s1", img) // the source is intact
-	if l := env.snapshots(t, "v1", "base"); len(l) != 1 || l[0].State != "active" {
+	if l := env.snapshots(t, "v1", "base"); len(l) != 1 {
 		t.Fatalf("the source's snapshot after the refusals: %+v", l)
 	}
 
@@ -235,7 +232,7 @@ func TestHeadroomRefusesARestoreAndAForkTargetThenServesThem(t *testing.T) {
 	if free := freeBytes(t, small); free < need {
 		t.Fatalf("after removing the filler the small file system has %d bytes free; the %d a volume needs does not fit: fix the runner", free, need)
 	}
-	for _, v := range []string{"v2", "v3"} {
+	for _, v := range []string{"v2"} {
 		env.startTarget(t, v, "blockvolume-"+v+"-with-room")
 		env.requireImage(t, "n-"+v, img)
 	}

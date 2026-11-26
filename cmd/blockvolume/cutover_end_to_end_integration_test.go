@@ -59,11 +59,7 @@ func TestCutoverWriteSnapshotKillRestartRestore(t *testing.T) {
 
 func startCutoverLayoutEnv(t *testing.T, precreateTarget bool) *handoffEnv {
 	t.Helper()
-	var tlsCfg map[string]time.Time
-	if procedureTLSOn() {
-		tlsCfg = map[string]time.Time{}
-	}
-	return startHandoffEnvConfigured(t, 1, []string{"v2"}, tlsCfg, precreateTarget)
+	return startHandoffEnvConfigured(t, 1, []string{"v2"}, procedureTLSConfig(), precreateTarget)
 }
 
 func startCutoverVolume(t *testing.T, env *handoffEnv, label, host string) *daemon {

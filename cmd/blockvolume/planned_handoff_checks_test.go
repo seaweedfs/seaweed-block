@@ -138,12 +138,16 @@ func sealedLayoutHeadPosition(out string, epoch, gen uint64) (uint64, error) {
 }
 
 func checkLayoutHeadReopened(out string, epoch, sealedGen, position uint64) error {
+	return checkLayoutHeadReopenedBy(out, epoch, sealedGen, position, "s1")
+}
+
+func checkLayoutHeadReopenedBy(out string, epoch, sealedGen, position uint64, host string) error {
 	h, err := parseLayoutHead(out)
 	if err != nil {
 		return err
 	}
-	if h.Gen <= sealedGen || h.Epoch != epoch || h.Holder != "s1/r1" || h.ClaimID == "" || h.State != "" || h.Position != position || len(h.Current) == 0 || string(h.Current) == "null" {
-		return fmt.Errorf("layout HEAD after claim %+v; want live image above gen %d at epoch %d position %d holder s1/r1", h, sealedGen, epoch, position)
+	if h.Gen <= sealedGen || h.Epoch != epoch || h.Holder != host+"/r1" || h.ClaimID == "" || h.State != "" || h.Position != position || len(h.Current) == 0 || string(h.Current) == "null" {
+		return fmt.Errorf("layout HEAD after claim %+v; want live image above gen %d at epoch %d position %d holder %s/r1", h, sealedGen, epoch, position, host)
 	}
 	return nil
 }

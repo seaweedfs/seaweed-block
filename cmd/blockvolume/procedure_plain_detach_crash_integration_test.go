@@ -26,8 +26,8 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 	env.writeCutCrashImage(t, 'A')
 	env.h.command(t, "ops", "chunk", "cut", "--volume", "v1", "--status-addr", env.hosts["s1"].status)
 	out, _ := env.h.command(t, env.chunkShow()...)
-	before, err := parseHead(out)
-	if err != nil || before.State != "active" || before.Epoch != e {
+	before, err := parseLayoutHead(out)
+	if err != nil || before.State != "" || before.ClaimID == "" || before.Epoch != e {
 		t.Fatalf("baseline HEAD: %+v: %v", before, err)
 	}
 	env.writeCutCrashImage(t, 'B')
@@ -55,11 +55,11 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _ = env.h.command(t, env.chunkShow()...)
-	atKill, err := parseHead(out)
-	if err != nil || atKill.Gen != before.Gen || atKill.State != "active" || atKill.RemoteLSN != before.RemoteLSN {
+	atKill, err := parseLayoutHead(out)
+	if err != nil || atKill.Gen != before.Gen || atKill.State != "" || atKill.ClaimID != before.ClaimID || atKill.Position != before.Position {
 		t.Fatalf("missed mid-upload window: before=%+v stopped=%+v: %v", before, atKill, err)
 	}
-	t.Logf("kill witness: immutable keys %d -> %d, HEAD gen=%d LSN=%d remains active", keys, plainDetachStoredKeys(t, env), atKill.Gen, atKill.RemoteLSN)
+	t.Logf("kill witness: immutable keys %d -> %d, HEAD gen=%d LSN=%d remains active", keys, plainDetachStoredKeys(t, env), atKill.Gen, atKill.Position)
 	select {
 	case <-cli.done:
 		t.Fatal("detach completed or aborted before the verified kill window")
@@ -91,8 +91,8 @@ func TestProcedureKillDuringPlainDetachThenCompleteHandoff(t *testing.T) {
 	env.requireCutCrashImage(t, "s1", 'B')
 	g := env.seal(t, "s1", e)
 	l := env.sealedLSN(t, e, g)
-	if l <= before.RemoteLSN {
-		t.Fatalf("retry did not publish the acknowledged image: remote LSN %d <= baseline %d", l, before.RemoteLSN)
+	if l <= before.Position {
+		t.Fatalf("retry did not publish the acknowledged image: remote LSN %d <= baseline %d", l, before.Position)
 	}
 	if again := env.seal(t, "s1", e); again != g {
 		t.Fatalf("plain seal replay changed generation %d -> %d", g, again)

@@ -31,7 +31,7 @@ func TestSystemdFirstStartDuringAFilerOutageThenResetFailedServes(t *testing.T) 
 		t.Fatal("systemd qualification needs root")
 	}
 	env := startSourceWithSnapshot(t, "v2")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	b := env.hosts["n-v2"]
 

@@ -30,7 +30,7 @@ import (
 // forbids removing those files.
 func TestWrongGeometryCureAsWritten(t *testing.T) {
 	env := startSourceWithSnapshot(t, "v2")
-	env.h.command(t, "ops", "chunk", "restore", "--source", "v1", "--snapshot", "s1", "--target", "v2",
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1", "--snapshot", "s1", "--target", "v2",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	plantStore(t, filepath.Join("testdata", "onezero-wrong-geometry-store.txt"), env.hosts["n-v2"].root)
 	// The planted files are byte for byte the captured ones.
@@ -95,8 +95,13 @@ func startSourceWithSnapshot(t *testing.T, targets ...string) *handoffEnv {
 
 // headOf is the first line of `sw-block ops chunk show --volume v`.
 func (env *handoffEnv) headOf(t *testing.T, v string) string {
-	out, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	return firstLine(out)
+	t.Helper()
+	out, _ := env.h.command(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	head, err := handoffHeadJSON(out)
+	if err != nil {
+		t.Fatalf("show HEAD for %s: %v\n%s", v, err, out)
+	}
+	return head
 }
 
 func listTree(root string) string {

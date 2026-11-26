@@ -21,10 +21,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TestStandalonePlannedHandoffToTheSameHost runs the planned hand-over back
@@ -209,17 +212,29 @@ func startHandoffEnv(t *testing.T, n int, masterArgs ...string) *handoffEnv {
 	return startHandoffEnvWith(t, n, nil, masterArgs...)
 }
 
-// startHandoffEnvWith is startHandoffEnv with more volume records in the
-// cluster spec: each of targets (a volume id) is placed on a node of its
-// own, named after it, with its own endpoints and local root (a restore
-// target, for example).
+// startHandoffEnvWith is startHandoffEnv with restore targets: each of
+// targets (a volume id) is placed on a node of its own, named after it, with
+// its own endpoints and local root. A target has placement only, no volume
+// record: its restore creates it.
 func startHandoffEnvWith(t *testing.T, n int, targets []string, masterArgs ...string) *handoffEnv {
 	t.Helper()
-	var tlsCfg map[string]time.Time
+	return startHandoffEnvConfigured(t, n, targets, procedureTLSConfig(), false, masterArgs...)
+}
+
+// startHandoffEnvVolumes is startHandoffEnvWith with ordinary volumes: each
+// of volumes gets a volume record from the cluster spec, so it starts
+// without a restore.
+func startHandoffEnvVolumes(t *testing.T, n int, volumes []string, masterArgs ...string) *handoffEnv {
+	t.Helper()
+	return startHandoffEnvConfigured(t, n, volumes, procedureTLSConfig(), true, masterArgs...)
+}
+
+// procedureTLSConfig is nil without mutual TLS, else an empty expiry map.
+func procedureTLSConfig() map[string]time.Time {
 	if procedureTLSOn() {
-		tlsCfg = map[string]time.Time{}
+		return map[string]time.Time{}
 	}
-	return startHandoffEnvTLS(t, n, targets, tlsCfg, masterArgs...)
+	return nil
 }
 
 // startHandoffEnvTLS is startHandoffEnvWith with mutual TLS when tlsNotAfter
@@ -233,8 +248,18 @@ func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[s
 // the target's identity and restored image in one request.
 func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, precreateTargets bool, masterArgs ...string) *handoffEnv {
 	t.Helper()
+	return startHandoffEnvOnCluster(t, n, targets, tlsNotAfter, precreateTargets, nil, masterArgs...)
+}
+
+// startHandoffEnvOnCluster also admits a caller-owned stock filer behind a
+// fault-injection front; ordinary callers keep the default cluster unchanged.
+func startHandoffEnvOnCluster(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, precreateTargets bool, cluster *w4WeedCluster, masterArgs ...string) *handoffEnv {
+	t.Helper()
 	h := newPlannedHandoffHarness(t)
-	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
+	if cluster == nil {
+		cluster = startWorkspaceWeed(t)
+	}
+	env := &handoffEnv{h: h, cluster: cluster, chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
 	must, _ := fatalOn(t)
 	env.hosts["s1"] = bvHost{id: "s1", data: h.dataAddr, ctrl: h.ctrlAddr, status: h.statusAddr, nvme: h.nvmeAddr, root: filepath.Join(h.dir, "vol")}
 	for i := 2; i <= n; i++ {
@@ -245,7 +270,7 @@ func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfte
 		id := "n-" + v
 		env.hosts[id] = bvHost{id: id, data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t), root: filepath.Join(h.dir, "vol-"+id), volume: v}
 	}
-	cluster, chunkPath := env.cluster, env.chunkPath
+	chunkPath := env.chunkPath
 	if tlsNotAfter != nil {
 		servers := make([]string, 0, len(env.hosts))
 		for _, b := range env.hosts {
@@ -327,11 +352,25 @@ func (env *handoffEnv) layoutID(volume string) string {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	id, err := lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), volume)
-	if err != nil {
-		t.Fatalf("resolve layout identity for %s: %v", volume, err)
+	// blockmaster logs "lock acquired" before it imports the cluster spec
+	// (each volume's layout created on the filer) and only serves after
+	// that, so a lookup right after that line can find it not serving yet:
+	// retry while it is unavailable, within 60 s. Any other answer (not
+	// found, refused) fails at once.
+	var id layout.VolumeID
+	for end := time.Now().Add(60 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		id, err = lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), volume)
+		cancel()
+		if err == nil {
+			break
+		}
+		if c := status.Code(err); (c != codes.Unavailable && c != codes.DeadlineExceeded) || time.Now().After(end) {
+			t.Fatalf("resolve layout identity for %s: %v", volume, err)
+		}
+	}
+	if env.layoutIDs == nil {
+		env.layoutIDs = make(map[string]string)
 	}
 	env.layoutIDs[volume] = id.String()
 	return id.String()

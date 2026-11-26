@@ -14,11 +14,14 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
 // HEAD size against volume size, informative: it measures,
@@ -194,6 +197,9 @@ type headSzVol struct {
 	// its spec data and ctrl addresses are host:<port> (ports picked here, not
 	// probed there), and the test running on that host uses the same ones.
 	host string
+	// restoreTarget lists the volume with its placement only, no size_bytes:
+	// it has no volume record until a restore creates it.
+	restoreTarget bool
 }
 
 // headSzStartCluster starts one weed cluster (the filer's default store, no
@@ -226,7 +232,11 @@ func headSzStartCluster(t *testing.T, prefix string, vols []headSzVol) (*handoff
 		if v.server != "" {
 			nodes += fmt.Sprintf("  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", server, b.data, b.ctrl)
 		}
-		fmt.Fprintf(&spec, "  - id: %s\n    size_bytes: %d\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: %s\n", v.id, v.bytes, server, replica)
+		size := fmt.Sprintf("    size_bytes: %d\n", v.bytes)
+		if v.restoreTarget {
+			size = ""
+		}
+		fmt.Fprintf(&spec, "  - id: %s\n%s    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: %s\n", v.id, size, server, replica)
 	}
 	specPath := filepath.Join(h.dir, "cluster-spec.yaml")
 	if err := os.WriteFile(specPath, []byte("nodes:\n"+nodes+"volumes:\n"+spec.String()), 0o644); err != nil {
@@ -398,7 +408,7 @@ func headSzCutOnce(t *testing.T, env *handoffEnv, cfg headSzConfig, b bvHost, cu
 		as := time.Now()
 		out, code := headSzRun(t, env, cfg.snapshotTimeout, "ops", "chunk", "snapshot", "--volume", b.volume, "--status-addr", b.status, "--timeout", cfg.snapshotTimeout,
 			"--name", fmt.Sprintf("%s-%d", name, cut), "--request-id", fmt.Sprintf("%s-%s-%d", name, b.volume, cut))
-		at := headSzAttempt{Attempt: a, ExitCode: code, WallMs: ms(time.Since(as)), KeysAfter: headSzCountDir(t, env, env.chunkPath+"/"+b.volume+"/keys")}
+		at := headSzAttempt{Attempt: a, ExitCode: code, WallMs: ms(time.Since(as)), KeysAfter: env.poolObjects(t, b.volume)}
 		if code != 0 {
 			var e struct{ Code, Message string }
 			if json.Unmarshal([]byte(strings.TrimSpace(out)), &e) == nil {
@@ -446,15 +456,26 @@ func headSzCutOnce(t *testing.T, env *handoffEnv, cfg headSzConfig, b bvHost, cu
 			r.UploadedChunks, r.UploadedBytes = l.UploadedChunks, l.UploadedBytes
 		}
 	}
-	head := headSzGet(t, "http://"+env.cluster.filerHTTP+env.chunkPath+"/"+b.volume+"/HEAD", 256<<20)
-	r.HeadBytes = len(head)
-	var doc struct {
-		Segments map[string]json.RawMessage `json:"segments"`
+	// The volume's store directory is <name>-<id8>, its id from blockmaster's
+	// record. HEAD names the current root; the root names the segments.
+	id, err := layout.ParseVolumeID(env.layoutID(b.volume))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(head, &doc); err != nil {
-		t.Fatalf("HEAD of %s is not JSON (%d bytes): %v", b.volume, len(head), err)
+	dir := "http://" + env.cluster.filerHTTP + path.Join(env.chunkPath, layout.VolumeDir(b.volume, id))
+	raw := headSzGet(t, dir+"/"+layout.HeadName, 256<<20)
+	r.HeadBytes = len(raw)
+	head, err := layout.DecodeHead(raw, 0, id)
+	if err != nil {
+		t.Fatalf("HEAD of %s (%d bytes): %v", b.volume, len(raw), err)
 	}
-	r.HeadSegments = len(doc.Segments)
+	if head.Current != nil {
+		root, err := layout.DecodeRoot(headSzGet(t, dir+"/"+head.Current.Path(), 256<<20))
+		if err != nil {
+			t.Fatalf("current root of %s: %v", b.volume, err)
+		}
+		r.HeadSegments = len(root.Segments)
+	}
 	return r
 }
 

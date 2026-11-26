@@ -37,11 +37,30 @@ func testListenHost() string {
 	return "127.0.0.1"
 }
 
+// ephemeralPorts is the host's range for outgoing connections' source ports
+// (Linux ip_local_port_range; the Linux default when unreadable). A port in it
+// can be taken by any outgoing connection between the free check and weed's
+// bind, so a port pair never uses it.
+func ephemeralPorts() (int, int) {
+	lo, hi := 32768, 60999
+	if b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
+		var a, z int
+		if n, _ := fmt.Sscan(string(b), &a, &z); n == 2 && a > 0 && z >= a {
+			lo, hi = a, z
+		}
+	}
+	return lo, hi
+}
+
 func w4FreePortPair(t *testing.T, used map[int]bool) int {
 	t.Helper()
+	lo, hi := ephemeralPorts()
 	for i := 0; i < 200; i++ {
 		p := 20000 + rand.Intn(20000)
 		if used[p] || used[p+10000] {
+			continue
+		}
+		if (p >= lo && p <= hi) || (p+10000 >= lo && p+10000 <= hi) {
 			continue
 		}
 		ok := true
@@ -91,6 +110,10 @@ func startWorkspaceWeedAt(t *testing.T, dir string) *w4WeedCluster {
 // VolumeSizeLimitMB each (the default holds about 8 GiB of chunks).
 type w4WeedOpts struct {
 	VolumeSizeLimitMB, VolumeMax int
+	// A fault-injection front keeps the advertised filer endpoint unchanged.
+	// The one real filer binds a private loopback address; no second filer is registered.
+	FilerBind  string
+	FilerFront func(*w4WeedCluster)
 }
 
 func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedCluster {
@@ -137,8 +160,17 @@ func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedClust
 	run("master", "master", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", mp), "-mdir="+filepath.Join(dir, "m"), fmt.Sprintf("-volumeSizeLimitMB=%d", o.VolumeSizeLimitMB), "-defaultReplication=000")
 	w4WaitTCP(t, c.master, 20*time.Second)
 	run("volume", "volume", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+c.master, fmt.Sprintf("-max=%d", o.VolumeMax))
-	run("filer", "filer", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", fp), "-master="+c.master, "-defaultStoreDir="+filepath.Join(dir, "f"))
+	filerArgs := []string{"filer", "-ip=" + testListenHost(), fmt.Sprintf("-port=%d", fp), "-master=" + c.master, "-defaultStoreDir=" + filepath.Join(dir, "f")}
+	if o.FilerBind != "" {
+		filerArgs = append(filerArgs, "-ip.bind="+o.FilerBind)
+		c.filerHTTP = net.JoinHostPort(o.FilerBind, fmt.Sprint(fp))
+		c.filerGRPC = net.JoinHostPort(o.FilerBind, fmt.Sprint(fp+10000))
+	}
+	run("filer", filerArgs...)
 	w4WaitTCP(t, c.filerGRPC, 30*time.Second)
+	if o.FilerFront != nil {
+		o.FilerFront(c)
+	}
 
 	// Wait until an assign succeeds (volume registered, volumes growable).
 	cl := c.client(t, "/swblock/vols/probe")
