@@ -249,6 +249,9 @@ func chooseChunkStartupExit(e *processExit, f flags, h *volume.Host, p chunkStar
 	// INV-WS-STARTUP-RETRY-001: one exit decision consumes both proof
 	// sources; the provider rechecks the claim generation below.
 	out := workspaceRetryOutcome("assignment_timeout", h, p.ChunkStartupSuperseded(f.volumeID, gen))
+	if identity, ok := p.(interface{ ChunkStartupIdentityRefused(string, uint64) bool }); ok && identity.ChunkStartupIdentityRefused(f.volumeID, gen) {
+		out = workspaceExit{code: exitWorkspaceSuperseded, reason: "layout_identity_mismatch", detail: "VOLUME/HEAD disagrees with --layout-id; retry with the layout id from the master's volume record"}
+	}
 	if h != nil {
 		// A typed MOVED or DELETED master refusal is permanent: 78 at once,
 		// never a restart loop to the unit's start limit. It is the reason

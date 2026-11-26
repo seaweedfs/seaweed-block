@@ -304,6 +304,10 @@ type volHandle struct {
 	// startupCure is the operator's cure of a stale-root startup end.
 	startupCure string
 
+	// startupIdentityRefused is the definite full-id refusal for startupEnded.
+	// endChunkStartup is its decision writer, guarded by p.mu.
+	startupIdentityRefused bool
+
 	// ImplWALStoreChunk. fresh: the local volume is new and starts from
 	// the remote HEAD. It mirrors the durable fresh marker beside the
 	// volume file, written before the file is created and removed only
@@ -1111,6 +1115,7 @@ func (p *DurableProvider) RecoverVolume(ctx context.Context, volumeID string) (R
 		gen = h.recoverGen
 		h.startupEnded = 0
 		h.startupSuperseded = false
+		h.startupIdentityRefused = false
 		p.mu.Unlock()
 	}
 	report := Recover(h.storage, volumeID)

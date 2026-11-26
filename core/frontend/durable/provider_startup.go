@@ -35,6 +35,15 @@ func (p *DurableProvider) ChunkStartupSuperseded(volumeID string, gen uint64) bo
 	return !p.closed && h != nil && gen != 0 && h.recoverGen == gen && h.startupEnded == gen && h.startupSuperseded
 }
 
+// ChunkStartupIdentityRefused reports a definite VOLUME/HEAD identity mismatch
+// for this recovery only. The process must not retry the same launcher value.
+func (p *DurableProvider) ChunkStartupIdentityRefused(volumeID string, gen uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.volumes[volumeID]
+	return !p.closed && h != nil && gen != 0 && h.recoverGen == gen && h.startupEnded == gen && h.startupIdentityRefused
+}
+
 func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -43,6 +52,7 @@ func (p *DurableProvider) endChunkStartup(h *volHandle, gen uint64, cause error)
 	}
 	h.startupEnded = gen
 	h.startupSuperseded = errors.Is(cause, errChunkForeignClaim)
+	h.startupIdentityRefused = errors.Is(cause, layout.ErrIdentity)
 	h.startupCure = ""
 	switch {
 	case errors.Is(cause, layout.ErrStaleLocalRoot):
