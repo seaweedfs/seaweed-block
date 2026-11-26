@@ -202,6 +202,9 @@ func (h *Host) restartedHolderRefresh(ask authority.AssignmentAsk) (authority.As
 		CtrlAddr:    ask.CtrlAddr,
 		Intent:      authority.IntentRefreshEndpoint,
 		Incarnation: slot.Incarnation,
+		// Conditional on the line read here: a move that lands before the
+		// publisher mints is never rewritten back to these addresses.
+		ExpectCurrent: &authority.ExpectedLine{ReplicaID: line.ReplicaID, Epoch: line.Epoch, DataAddr: line.DataAddr, CtrlAddr: line.CtrlAddr},
 	}, true
 }
 

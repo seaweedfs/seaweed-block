@@ -571,6 +571,7 @@ func refreshAsk(volumeID string, current ReplicaCandidate, line AuthorityBasis) 
 		CtrlAddr:      current.CtrlAddr,
 		Intent:        IntentRefreshEndpoint,
 		Incarnation:   current.Incarnation,
+		ExpectCurrent: &ExpectedLine{ReplicaID: line.ReplicaID, Epoch: line.Epoch, DataAddr: line.DataAddr, CtrlAddr: line.CtrlAddr},
 	}
 }
 

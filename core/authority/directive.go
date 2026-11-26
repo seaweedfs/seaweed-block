@@ -97,6 +97,16 @@ type ExpectedLine struct {
 	CtrlAddr  string
 }
 
+// expectedLineMoved reports why cur is not the line exp names ("" when it is).
+func expectedLineMoved(exp *ExpectedLine, cur AuthorityBasis, ok bool) string {
+	switch {
+	case !ok || cur.ReplicaID != exp.ReplicaID || cur.Epoch != exp.Epoch:
+		return fmt.Sprintf("expected %s@%d, the line is %s@%d", exp.ReplicaID, exp.Epoch, cur.ReplicaID, cur.Epoch)
+	case exp.DataAddr != "" && cur.DataAddr != exp.DataAddr, exp.CtrlAddr != "" && cur.CtrlAddr != exp.CtrlAddr:
+		return fmt.Sprintf("expected %s@%d at %s/%s, the line is at %s/%s", exp.ReplicaID, exp.Epoch, exp.DataAddr, exp.CtrlAddr, cur.DataAddr, cur.CtrlAddr)
+	}
+	return ""
+}
 
 // ErrExpectedLineMoved: a conditional reassign found the volume's line no
 // longer the one it was decided against; the publisher mints nothing.
