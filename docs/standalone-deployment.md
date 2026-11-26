@@ -136,7 +136,13 @@ Do these steps before you start blockvolume:
    `--cluster-spec`) needs two flags that are off by default:
    - `--lifecycle-product-loop-interval 100ms` (the shipped chart's value):
      a replicated volume gets its primary from this loop. With the default
-     `0` the loop is off and no replicated volume ever gets a primary.
+     `0` the loop is off:
+     - blockmaster refuses to start when its cluster spec lists a replicated
+       volume (`cluster spec volume v1 has replication factor 3 but
+       --lifecycle-product-loop-interval is 0 (off): ...`);
+     - creating a replicated volume is refused (`create volume: v1 has
+       replication factor 3 but --lifecycle-product-loop-interval is 0
+       (off): ...`).
    - `--failback-runtime-rpc`: the operator's failover (`sw-block ops
      failover`, below) calls it. Without it there is no manual failover.
 
@@ -159,13 +165,19 @@ Do these steps before you start blockvolume:
 
    **Replicated volumes in this release:**
    - **One replicated factor per cluster.** `--expected-slots-per-volume` is one
-     number for the whole cluster, and blockmaster checks every replicated
-     volume against it. One volume with another slot count stops assignment
-     for all of them; it shows only as a controller error on every tick.
-     - Under `--cluster-spec`, single-replica volumes can share a cluster with
-       3-replica volumes (`--expected-slots-per-volume 3`).
-     - 2-replica and 3-replica volumes cannot share a cluster.
-     - A static `--topology` holds one factor only.
+     number for the whole cluster, and blockmaster decides only replicated
+     volumes of that factor.
+     - Under `--cluster-spec`, a replicated volume of another factor is
+       refused: at start when the cluster spec lists it (`cluster spec volume
+       v1 has replication factor 2 but --expected-slots-per-volume is 3: ...`),
+       and at its create (`create volume: v1 has replication factor 2, but
+       this master decides replicated volumes of 3 replicas ...`).
+     - Single-replica volumes can share a `--cluster-spec` cluster with
+       3-replica volumes (`--expected-slots-per-volume 3`); 2-replica and
+       3-replica volumes cannot share one.
+     - A static `--topology` holds one factor only, and is not checked at
+       start: one volume with another slot count stops assignment for all of
+       them, and shows only as a controller error on every tick.
    - **Failover.** blockmaster replaces a primary by itself only when that
      primary answers that it is not ready.
      - A primary whose host is off or unreachable does not answer. It is shown
