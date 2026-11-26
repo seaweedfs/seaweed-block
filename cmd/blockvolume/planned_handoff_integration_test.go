@@ -451,6 +451,21 @@ type plannedHandoffHarness struct {
 	// cliEnv is added to every sw-block command's environment (its master
 	// TLS identity when the env runs with mutual TLS).
 	cliEnv []string
+	// beforeStop runs once, at the first process cleanup, before any process
+	// started by the harness is stopped: cleanups run last-registered-first,
+	// so a process the test starts late (a restarted master) would otherwise
+	// stop before an earlier-registered check that needs it.
+	beforeStop []func()
+	stopOnce   sync.Once
+}
+
+// runBeforeStop runs the beforeStop hooks once.
+func (h *plannedHandoffHarness) runBeforeStop() {
+	h.stopOnce.Do(func() {
+		for _, f := range h.beforeStop {
+			f()
+		}
+	})
 }
 
 func newPlannedHandoffHarness(t *testing.T) *plannedHandoffHarness {
@@ -598,6 +613,7 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 	d := &daemon{name: name, log: log.Name(), done: make(chan struct{}), cancel: cancel}
 	started := false
 	t.Cleanup(func() {
+		h.runBeforeStop()
 		cancel()
 		if started {
 			select {
