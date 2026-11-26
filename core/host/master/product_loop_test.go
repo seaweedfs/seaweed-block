@@ -451,6 +451,7 @@ func TestMountedFailover_ProductLoopRF3PromotesWhenCurrentProbeIsDownDespiteStal
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
+	attestAllStores(t, h) // an established volume, out of its creation wait
 
 	// Heartbeat state still says r1 is acceptable. The on-demand
 	// current-primary probe is the fresher failure signal and must
