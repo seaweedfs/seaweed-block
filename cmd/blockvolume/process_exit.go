@@ -16,8 +16,10 @@ import (
 const (
 	exitWorkspaceRetry      = 75
 	exitWorkspaceSuperseded = 78
-	// Existing post-drain ACK wait; M2 Revoking -> Revoked, Part D.
-	workspaceLeaseCloseoutTimeout = 3 * time.Second
+	// Post-drain ACK wait; M2 Revoking -> Revoked, Part D. It covers the
+	// guard's stop reply (the resource owner has drained by then) and its
+	// ACK call, so it exceeds the ACK's own bound by 1 s.
+	workspaceLeaseCloseoutTimeout = volume.WorkspaceAckTimeout + time.Second
 )
 
 type workspaceExit struct {
