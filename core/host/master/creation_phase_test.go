@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
-	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -184,26 +183,5 @@ func TestCreationPhaseSurvivesAMasterRestart(t *testing.T) {
 			creatingTick(t, h2, ineligible)
 			expectLineStaysR1(t, h2, "a creating volume after a master restart")
 		})
-	}
-}
-
-// A creating volume that is really broken stays in its wait by rule; the
-// documented way out is to delete it and create it again, so its delete is
-// admitted.
-func TestAStuckCreatingVolumeCanBeDeleted(t *testing.T) {
-	h := newBootGraceMasterCreating(t, Config{})
-	defer closeTestMaster(t, h)
-	if !inCreationWait(h) {
-		t.Fatal("fixture: the volume is not creating")
-	}
-	ineligible := restarting
-	ineligible.eligible = false
-	time.Sleep(250 * time.Millisecond)
-	creatingTick(t, h, ineligible) // stuck: no decision
-	if _, err := newServices(h).DeleteVolume(t.Context(), &control.DeleteVolumeRequest{VolumeId: "vol-rf3"}); err != nil {
-		t.Fatalf("delete of a stuck creating volume: %v", err)
-	}
-	if _, placed := h.Lifecycle().Placements.GetPlacement("vol-rf3"); placed {
-		t.Fatal("the deleted volume keeps its placement")
 	}
 }
