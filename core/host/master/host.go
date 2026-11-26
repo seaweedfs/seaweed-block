@@ -68,6 +68,12 @@ type Config struct {
 	// ControllerConfig tunes controller knobs (retry window etc).
 	ControllerConfig authority.TopologyControllerConfig
 
+	// LifecycleProductLoop reports that the host's lifecycle product loop
+	// runs (blockmaster --lifecycle-product-loop-interval above 0). Only
+	// that loop binds, mints and promotes a replicated lifecycle volume, so
+	// CreateVolume refuses a replicated volume while it is off.
+	LifecycleProductLoop bool
+
 	// LifecycleStoreDir, when non-empty, opens product lifecycle
 	// registration stores (desired volumes, node inventory, placement
 	// intents). This is read-only composition for G9D: these stores do
@@ -135,7 +141,7 @@ type Host struct {
 	probeSlots          slotServers // replica -> server, for the round
 	cfg                 Config
 	attest              *storeAttestations // primaries' attested write-ACK stores
-	healthMu            sync.Mutex // orders replica health events with their accepted heartbeats (#128 rule 6)
+	healthMu            sync.Mutex         // orders replica health events with their accepted heartbeats (#128 rule 6)
 	log                 *log.Logger
 	boot                *bootstrap.DurableAuthorityBootstrap
 	ctrl                *authority.TopologyController
@@ -159,8 +165,8 @@ type Host struct {
 	// without a line being published there. Until the line reaches it, those
 	// survivors refuse the primary, so the gate keeps trying to heal it.
 	fencePending map[string]uint64
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
 
 	started atomic.Bool
 }

@@ -245,6 +245,7 @@ func run(f flags) int {
 		ControllerConfig:                 authority.TopologyControllerConfig{ExpectedSlotsPerVolume: f.expectedSlotsPerVol},
 		WorkspaceMaxClockSkew:            f.workspaceMaxClockSkew,
 		FailbackRuntimeRPC:               f.failbackRuntimeRPC,
+		LifecycleProductLoop:             f.lifecycleLoop > 0,
 		FrontendPublicationRuntimeHTTP:   f.frontendPublicationRuntimeHTTP,
 		FrontendPublicationRuntimeListen: f.frontendPublicationRuntimeListen,
 		StrictJournalIsolation:           f.strictJournalIsolation,
