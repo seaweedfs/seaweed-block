@@ -6,42 +6,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"path"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 )
 
-// Rung E of the snapshot ladder: faults. E1 kills the holder (SIGKILL) while
-// a snapshot is being taken, at several points of the snapshot, and restarts
-// it within its lease. The per-step crash cases of the catalog half (after
-// the name record, after the intent, with the attempt create unknown) are
-// pinned by a unit test of the catalog; this rung is the same property
-// through the real processes.
-
-// nameRecorded reports whether vol's catalog holds a name record for the
-// snapshot name, read from the filer (not through the product).
-func (env *handoffEnv) nameRecorded(t *testing.T, vol, name string) bool {
-	t.Helper()
-	c := &http.Client{Timeout: 10 * time.Second}
-	p := path.Join(env.chunkPath, vol, "snapnames", url.PathEscape(name))
-	resp, err := c.Get("http://" + env.cluster.filerHTTP + p + "?metadata=true")
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return true
-	case http.StatusNotFound:
-		return false
-	}
-	t.Fatalf("filer lookup of %s: status %d", p, resp.StatusCode)
-	return false
-}
+// Rung E: kill the real holder at applied Begin, object and Commit writes.
+// The filer's reply is held until SIGKILL, and HEAD is observed before restart.
+// Per-write kernel controls remain TestSnapshotSession_InterruptAtEveryStep.
 
 // filerNames lists the entry names (unescaped) of a filer directory, read
 // straight from the filer (not through the product); a missing directory
@@ -86,45 +62,28 @@ func (env *handoffEnv) filerNames(t *testing.T, dir string) map[string]bool {
 	}
 }
 
-// TestSnapshotLadderE1CrashDuringASnapshot: rounds on one volume. In each,
-// blocks in twelve chunks are written and acknowledged (so the snapshot's cut
-// has twelve chunks to upload), a snapshot with a fixed request id is
-// started, and the holder is killed after a different delay (from at once to
-// well after the answer), then restarted within its lease. Each kill's step
-// is recorded from what it left, read from the filer and the list (not
-// through the snapshot's own answer):
-//   - ANSWERED: the command answered success before the kill;
-//   - PUBLISHED: no answer, but the snapshot is listed after the restart
-//     (the attempt entry was written; the answer was lost);
-//   - CATALOG: no answer, not listed, but the name record exists (the kill
-//     landed in the catalog steps, before the attempt entry);
-//   - CUT: no answer, no name record, but an intent that was not there
-//     before the request (the kill landed in the snapshot's cut, which
-//     writes its intent first);
-//   - BEFORE: none of these.
-//
-// The test fails as inconclusive unless at least one kill is PUBLISHED,
-// CATALOG or CUT (inside the snapshot). After each restart, before the
-// retry:
-//   - the snapshot is listed at most once and only active; an ANSWERED one
-//     is listed, at the cut its answer gave;
-//   - one more block is written (acknowledged).
-//
-// Then a retry with the same request id completes the snapshot, listed once:
-// at the cut listed before the retry if it was listed (a replay), else at a
-// new cut that holds the post-restart block. At the end a next snapshot is
-// taken after more writes. Every round's snapshot and the next one restore
-// (to independence, per the restore status) exactly as expected: the blocks
-// acknowledged before it, the post-restart block only when the retry cut
-// anew, and every block written after it reading zero.
+// TestSnapshotLadderE1CrashDuringASnapshot retains the data/replay/restore
+// oracle, but reaches each crash boundary causally through the stock filer.
+// A missed boundary is inconclusive, never a successful BEFORE-only campaign.
 func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
-	delays := []time.Duration{0, 25 * time.Millisecond, 50 * time.Millisecond, 75 * time.Millisecond,
-		100 * time.Millisecond, 125 * time.Millisecond, 150 * time.Millisecond, 200 * time.Millisecond, 600 * time.Millisecond}
+	boundaries := []string{"BEGIN", "OBJECT", "COMMIT"}
 	var targets []string
-	for i := 0; i <= len(delays); i++ {
+	for i := 0; i <= len(boundaries); i++ {
 		targets = append(targets, fmt.Sprintf("v%d", i+2))
 	}
-	env := startHandoffEnvWith(t, 1, targets)
+	if testListenHost() != "127.0.0.1" {
+		t.Fatal("causal filer fixture requires loopback")
+	}
+	var boundary *snapshotFilerBoundary
+	cluster := startWorkspaceWeedWith(t, t.TempDir(), w4WeedOpts{VolumeSizeLimitMB: 256, VolumeMax: 32,
+		FilerBind: "127.0.0.2", FilerFront: func(c *w4WeedCluster) { boundary = newSnapshotFilerBoundary(t, c) }})
+	env := startHandoffEnvOnCluster(t, 1, targets, procedureTLSConfig(), false, cluster)
+	id, err := layout.ParseVolumeID(env.layoutID("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary.id = id
+	boundary.dir = path.Join(env.chunkPath, layout.VolumeDir("v1", id))
 	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	holder := env.start(t, "blockvolume-v1", "s1")
 	e := env.adopt(t, holder, "s1")
@@ -139,14 +98,13 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 	var images []map[uint64][]byte // what each round's snapshot must hold
 	cum := map[uint64][]byte{0: marker}
 	steps := map[string]int{}
-	for k, delay := range delays {
+	for k, kind := range boundaries {
 		img := ladderImage(fmt.Sprintf("e1r%d", k), []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, 3)
 		env.writeImage(t, "s1", img)
 		cum = mergeImages(cum, img)
 		name, req := fmt.Sprintf("e1-%d", k), fmt.Sprintf("r-e1-%d", k)
 
-		intents := path.Join(env.chunkPath, "v1", "intents")
-		before := env.filerNames(t, intents)
+		reached := boundary.arm(kind, name)
 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 		done := make(chan result, 1)
 		go func() {
@@ -154,9 +112,23 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 				"--name", name, "--request-id", req)
 			done <- result{out, errOut, code, err}
 		}()
-		time.Sleep(delay)
+		select {
+		case <-reached:
+		case <-time.After(30 * time.Second):
+			cancel()
+			boundary.unblock()
+			<-done
+			t.Fatalf("inconclusive: snapshot never reached applied %s boundary", kind)
+		}
 		holder.kill(t)
 		killed := time.Now()
+		// Restart can abort the old session, so read the real backend first.
+		crashed := boundary.head(t)
+		_, published := crashed.Snapshots[name]
+		if kind == "COMMIT" && !published || kind != "COMMIT" && (published || crashed.Activity.Kind != layout.ActSnap) {
+			t.Fatalf("boundary %s disagrees with pre-restart HEAD: %+v", kind, crashed)
+		}
+		boundary.unblock()
 		var r result
 		select {
 		case r = <-done:
@@ -171,11 +143,6 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		}
 		cancel()
 		answered := r.err == nil && r.code == 0
-		newIntent := false
-		for n := range env.filerNames(t, intents) {
-			newIntent = newIntent || !before[n]
-		}
-		named := env.nameRecorded(t, "v1", name)
 
 		// Restarted within the lease, as the unit's RestartSec does: the same
 		// epoch, serving the blocks written before the kill.
@@ -190,20 +157,13 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		env.requireImage(t, "s1", cum)
 
 		pre := env.snapshots(t, "v1", name)
-		step := "BEFORE"
-		switch {
-		case answered:
-			step = "ANSWERED"
-		case len(pre) == 1:
-			step = "PUBLISHED"
-		case named:
-			step = "CATALOG"
-		case newIntent:
-			step = "CUT"
-		}
+		step := kind
 		steps[step]++
-		t.Logf("round %d (kill after %v): step %s (exit %d err %v; name record %v, new intent %v, listed %v); adopted %v and frontend ready %v after the kill",
-			k, delay, step, r.code, r.err, named, newIntent, len(pre) == 1, adopted.Round(time.Millisecond), time.Since(killed).Round(time.Millisecond))
+		if published != (len(pre) == 1) {
+			t.Fatalf("round %d: pre-restart HEAD published=%v but restart lists %+v", k, published, pre)
+		}
+		t.Logf("round %d: applied %s, pre-restart HEAD gen=%d activity=%s published=%v; exit %d err %v; adopted %v after kill",
+			k, step, crashed.Gen, crashed.Activity.Kind, published, r.code, r.err, adopted.Round(time.Millisecond))
 		switch {
 		case len(pre) > 1:
 			t.Fatalf("round %d: %s listed %d times: %+v", k, name, len(pre), pre)
@@ -234,8 +194,8 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		}
 		cum = mergeImages(cum, post)
 	}
-	t.Logf("kill steps: %v; the catalog steps (CATALOG, PUBLISHED) are pinned per step by TestCatalogRestartAfterAbandonedSnapshot", steps)
-	if steps["PUBLISHED"]+steps["CATALOG"]+steps["CUT"] == 0 {
+	t.Logf("kill steps: %v; per-write cases pinned by TestSnapshotSession_InterruptAtEveryStep", steps)
+	if steps["BEGIN"] != 1 || steps["OBJECT"] != 1 || steps["COMMIT"] != 1 {
 		t.Fatalf("inconclusive: no kill landed inside a snapshot (steps %v)", steps)
 	}
 
@@ -244,9 +204,10 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 	env.snapshot(t, "s1", "v1", "e1-next")
 	final := mergeImages(cum, next)
 
-	for k := range delays {
+	for k := range boundaries {
 		later := []map[uint64][]byte{final}
 		env.restoreChecked(t, fmt.Sprintf("e1-%d", k), targets[k], images[k], later...)
 	}
-	env.restoreChecked(t, "e1-next", targets[len(delays)], final)
+	env.restoreChecked(t, "e1-next", targets[len(boundaries)], final)
+	t.Logf("final restore oracle reached: %d crash snapshots plus next snapshot read back", len(boundaries))
 }

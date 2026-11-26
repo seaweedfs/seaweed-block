@@ -245,8 +245,18 @@ func startHandoffEnvTLS(t *testing.T, n int, targets []string, tlsNotAfter map[s
 // the target's identity and restored image in one request.
 func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, precreateTargets bool, masterArgs ...string) *handoffEnv {
 	t.Helper()
+	return startHandoffEnvOnCluster(t, n, targets, tlsNotAfter, precreateTargets, nil, masterArgs...)
+}
+
+// startHandoffEnvOnCluster also admits a caller-owned stock filer behind a
+// fault-injection front; ordinary callers keep the default cluster unchanged.
+func startHandoffEnvOnCluster(t *testing.T, n int, targets []string, tlsNotAfter map[string]time.Time, precreateTargets bool, cluster *w4WeedCluster, masterArgs ...string) *handoffEnv {
+	t.Helper()
 	h := newPlannedHandoffHarness(t)
-	env := &handoffEnv{h: h, cluster: startWorkspaceWeed(t), chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
+	if cluster == nil {
+		cluster = startWorkspaceWeed(t)
+	}
+	env := &handoffEnv{h: h, cluster: cluster, chunkPath: fmt.Sprintf("/handoff-%d", time.Now().UnixNano()), hosts: map[string]bvHost{}}
 	must, _ := fatalOn(t)
 	env.hosts["s1"] = bvHost{id: "s1", data: h.dataAddr, ctrl: h.ctrlAddr, status: h.statusAddr, nvme: h.nvmeAddr, root: filepath.Join(h.dir, "vol")}
 	for i := 2; i <= n; i++ {
@@ -257,7 +267,7 @@ func startHandoffEnvConfigured(t *testing.T, n int, targets []string, tlsNotAfte
 		id := "n-" + v
 		env.hosts[id] = bvHost{id: id, data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t), root: filepath.Join(h.dir, "vol-"+id), volume: v}
 	}
-	cluster, chunkPath := env.cluster, env.chunkPath
+	chunkPath := env.chunkPath
 	if tlsNotAfter != nil {
 		servers := make([]string, 0, len(env.hosts))
 		for _, b := range env.hosts {

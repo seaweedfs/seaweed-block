@@ -508,7 +508,11 @@ func (env *handoffEnv) hydrate(t *testing.T, target string) {
 	t.Helper()
 	b := env.hosts["n-"+target]
 	c := dialNVMe(t, b.nvme, plannedHandoffNQN)
-	for lba := uint64(0); lba <= ladderLastBlock; lba += ladderChunkBlocks {
+	// A read fetches its chunk only when the block read is not local: a
+	// block the guest wrote is served locally and fills nothing. So read
+	// each chunk's last block, which no ladder image writes (ladderImage
+	// writes offsets 0, 37, 74, ... in a chunk).
+	for lba := uint64(ladderChunkBlocks - 1); lba <= ladderLastBlock; lba += ladderChunkBlocks {
 		_ = c.io.SetDeadline(time.Now().Add(60 * time.Second))
 		c.read(t, lba, 4096)
 	}

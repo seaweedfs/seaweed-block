@@ -49,11 +49,13 @@ func TestProcedureMasterKilledAfterMoveBeforeTargetStarts(t *testing.T) {
 		t.Fatalf("sealed HEAD LSN %d; want %d", got, l)
 	}
 	nw := env.start(t, "blockvolume-s2", "s2")
-	must(checkClaimDoneBy(nw.waitLog(t, 60*time.Second, "durable: HEAD claim for volume=v1 done in"), e2, "s2"))
 	if got := env.adopt(t, nw, "s2"); got != e2 {
 		t.Fatalf("target adopted epoch %d; want recovered epoch %d", got, e2)
 	}
-	env.requireHeadHolder(t, e2, "s2")
+	// Planned hand-over step 8 observes the completed layout claim in HEAD:
+	// its identity advanced while the sealed image and position were kept.
+	out, _ = env.h.command(t, env.chunkShow()...)
+	must(checkLayoutHeadReopenedBy(out, e2, g, l, "s2"))
 	if !bytes.Equal(env.readBlock(t, "s2", 0), block) {
 		t.Fatal("acknowledged source block changed after master crash and move recovery")
 	}
