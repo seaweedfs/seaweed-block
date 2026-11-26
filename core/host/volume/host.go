@@ -168,9 +168,9 @@ type Host struct {
 	// even on a host that was healthy at its prior epoch; only a later
 	// successful role call for the current role and epoch clears it.
 	roleAdmissionFailed atomic.Value // string reason; "" = not failed
-	// storesAwaited: the primary fact's (awaited<<32 | initial) replica
-	// store count (ReplicaStoresAwaited).
-	storesAwaited atomic.Uint64
+	// storeWait: the primary fact's replica-store wait (ReplicaStoresAwaited,
+	// awaitingStoresEpoch), one value under its own lock.
+	storeWait storeWait
 	// roleRetry: the last replica role call failed with an error a retry
 	// may outlast (a floor that could not be persisted); runRoleRetry
 	// re-applies the current role until it succeeds or is refused for good.
@@ -1092,7 +1092,12 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	}
 
 	h.recordSelfAssignment(fact)
-	h.noteReplicaStores(fact)
+	// A fact that awaits replica stores closes the frontend at once; one
+	// that carries them all opens it only after the peers' expected stores
+	// are installed (below), so no write is served before its peers count.
+	if fact.GetReplicaStoresAwaited() > 0 {
+		h.noteReplicaStores(fact)
+	}
 	h.reportAssignmentEndpoints(fact)
 
 	// The recovery watchdog runs from the primary assignment, before any
@@ -1169,6 +1174,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		h.log.Printf("blockvolume: volume %s replication UpdateReplicaSet ok (gen=%d, peers=%d): %v",
 			h.cfg.VolumeID, gen, len(targets), peerIDs)
 	}
+	h.noteReplicaStores(fact)
 
 	// Step (2c): identity install only after replication is live.
 	// SOLE permitted decode path. See subscribe.go.

@@ -2,14 +2,43 @@ package volume
 
 import (
 	"fmt"
+	"sync"
 
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
+// storeWait is the primary fact's replica-store wait, read and written as
+// one value: the fact's epoch and its counts.
+type storeWait struct {
+	mu               sync.Mutex
+	epoch            uint64
+	awaited, initial uint32
+}
+
 // noteReplicaStores keeps the primary fact's count of a new volume's initial
 // replicas whose store the master has not recorded yet.
 func (h *Host) noteReplicaStores(f *control.AssignmentFact) {
-	h.storesAwaited.Store(uint64(f.GetReplicaStoresAwaited())<<32 | uint64(f.GetReplicaStoresInitial()))
+	w := &h.storeWait
+	w.mu.Lock()
+	w.epoch, w.awaited, w.initial = f.GetEpoch(), f.GetReplicaStoresAwaited(), f.GetReplicaStoresInitial()
+	w.mu.Unlock()
+}
+
+// awaitingStoresEpoch is the epoch of the primary assignment whose creation
+// wait holds now (0: none). The frontend gate reads the same value, so once
+// it reads 0 the wait no longer holds the frontend back: a not-ready answer
+// read after it has another cause.
+func (h *Host) awaitingStoresEpoch() uint64 {
+	if _, ok := h.getReplication().(storeRequirer); !ok {
+		return 0
+	}
+	w := &h.storeWait
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.awaited == 0 {
+		return 0
+	}
+	return w.epoch
 }
 
 // ReplicaStoresAwaited is the reason a new volume's primary serves nothing
@@ -20,8 +49,10 @@ func (h *Host) ReplicaStoresAwaited() string {
 	if _, ok := h.getReplication().(storeRequirer); !ok {
 		return ""
 	}
-	v := h.storesAwaited.Load()
-	waiting, initial := v>>32, v&0xffffffff
+	w := &h.storeWait
+	w.mu.Lock()
+	waiting, initial := w.awaited, w.initial
+	w.mu.Unlock()
 	if waiting == 0 {
 		return ""
 	}

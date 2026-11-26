@@ -616,6 +616,11 @@ message ProbeAnswer {
     // The replica's durable epoch floor when it answered (after a fencing
     // round's raise). Above the round's fence_epoch: superseded, not counted.
     uint64 floor = 13;
+    // The epoch of this replica's primary assignment that still awaits
+    // replica stores (a new volume's creation wait), when that is why it does
+    // not serve: primary_ready is false by design, not because it failed.
+    // 0: not awaiting. It names its line, so it never excuses another.
+    uint64 awaiting_replica_stores_epoch = 14;
 }
 
 message ProbeAck {}
