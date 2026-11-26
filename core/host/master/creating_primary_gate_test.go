@@ -41,17 +41,18 @@ func TestPrimaryAwaitingReplicaStoresIsNotReplacedForNotReady(t *testing.T) {
 	defer closeTestMaster(t, h)
 	awaitingProbe(t, h, true)
 	time.Sleep(250 * time.Millisecond) // past the boot grace
-	unsupportedTick(t, h, readySlot("r1-a"))
+	creatingTick(t, h, readySlot("r1-a"))
 	expectLineStaysR1(t, h, "a primary awaiting replica stores answered not ready")
-	unsupportedTick(t, h, readySlot("r1-a"))
+	creatingTick(t, h, readySlot("r1-a"))
 	expectLineStaysR1(t, h, "still awaiting on the next tick")
 }
 
 // The real-path schedule: the master has recorded every store (its wait is
 // over) but the primary has not received the re-sent assignment yet, so it
 // still answers "awaiting replica stores"; the master restarts in that gap.
-// The excuse is the primary's own answer, so nothing the master forgets on a
-// restart reopens the gap: the line stays.
+// Creation ends only at the primary's first ready answer, recorded durably,
+// so the restarted master still holds the volume: no decision, the line
+// stays.
 func TestMasterRestartInTheGapDoesNotReassign(t *testing.T) {
 	cfg := Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(),
 		ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}}
@@ -69,18 +70,22 @@ func TestMasterRestartInTheGapDoesNotReassign(t *testing.T) {
 	}
 	h2.Start()
 	defer closeTestMaster(t, h2)
-	h2.SetPromotionEvidenceProvider(&switchProbe{awaitingEpoch: waitAuthorityLine(t, h2.Publisher(), "vol-rf3").Epoch})
+	// The primary still awaits the stores: it served nothing, so no survivor
+	// holds a write (every end is zero).
+	h2.SetPromotionEvidenceProvider(&switchProbe{awaitingEpoch: waitAuthorityLine(t, h2.Publisher(), "vol-rf3").Epoch, empty: true})
 	if inCreationWait(h2) {
 		t.Fatal("fixture: the restarted master still waits for stores")
 	}
 	time.Sleep(250 * time.Millisecond) // past the boot grace
-	unsupportedTick(t, h2, readySlot("r1-a"))
+	creatingTick(t, h2, readySlot("r1-a"))
 	expectLineStaysR1(t, h2, "restarted master, primary still awaiting the re-sent stores")
 }
 
-// A primary that is not ready for another reason (it does not say it awaits
-// replica stores) is replaced as before, also on a new volume.
-func TestPrimaryNotReadyForAnotherReasonIsReplaced(t *testing.T) {
+// Creation is its own phase (decided on the master's record): a creating
+// volume's primary is not replaced even when it is not ready for another
+// reason (it does not say it awaits replica stores). No decision is made at
+// all: the gate does not even probe.
+func TestCreatingPrimaryNotReadyForAnotherReasonIsNotReplaced(t *testing.T) {
 	h := newBootGraceMasterCreating(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}})
 	defer closeTestMaster(t, h)
 	awaitingProbe(t, h, false)
@@ -88,14 +93,13 @@ func TestPrimaryNotReadyForAnotherReasonIsReplaced(t *testing.T) {
 		t.Fatal("fixture: the new volume is not in its creation wait")
 	}
 	time.Sleep(250 * time.Millisecond) // past the boot grace
-	unsupportedTick(t, h, readySlot("r1-a"))
-	expectFailoverToR2(t, h, "a primary not ready without awaiting replica stores")
+	creatingTick(t, h, readySlot("r1-a"))
+	expectLineStaysR1(t, h, "a primary not ready without awaiting replica stores")
 }
 
-// The answer names its line: one that says it awaits replica stores for
-// another epoch (a stale answer) excuses nothing, and the primary is
-// replaced as one not ready for another reason.
-func TestAwaitingAnswerForAnotherLineExcusesNothing(t *testing.T) {
+// The phase is the master's record, not the answer: a stale awaiting answer
+// (naming another epoch) changes nothing while the record still awaits.
+func TestCreatingVolumeWithAStaleAwaitingAnswerIsNotReplaced(t *testing.T) {
 	h := newBootGraceMasterCreating(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}})
 	defer closeTestMaster(t, h)
 	p := probeOf(t, h)
@@ -103,21 +107,22 @@ func TestAwaitingAnswerForAnotherLineExcusesNothing(t *testing.T) {
 	p.awaitingEpoch = waitAuthorityLine(t, h.Publisher(), "vol-rf3").Epoch + 1
 	p.mu.Unlock()
 	time.Sleep(250 * time.Millisecond) // past the boot grace
-	unsupportedTick(t, h, readySlot("r1-a"))
-	expectFailoverToR2(t, h, "an awaiting answer naming another line")
+	creatingTick(t, h, readySlot("r1-a"))
+	expectLineStaysR1(t, h, "an awaiting answer naming another line")
 }
 
-// The answer never shelters a failed primary: one whose own fresh slot is
-// not acceptable (an unhealthy heartbeat makes it ineligible) is replaced
-// through the fencing round, as for an established volume.
-func TestPrimaryAwaitingReplicaStoresIsReplacedWhenItsSlotIsNotAcceptable(t *testing.T) {
+// A creating primary whose own slot is not acceptable (ineligible) is not
+// replaced either: a creating volume that is really broken stays in its
+// visible wait, and the operator deletes and recreates it (it served
+// nothing).
+func TestCreatingPrimaryWithAnUnacceptableSlotIsNotReplaced(t *testing.T) {
 	h := newBootGraceMasterCreating(t, Config{})
 	defer closeTestMaster(t, h)
 	awaitingProbe(t, h, true)
 	ineligible := restarting
 	ineligible.eligible = false
-	unsupportedTick(t, h, ineligible)
-	expectFailoverToR2(t, h, "an ineligible primary awaiting replica stores")
+	creatingTick(t, h, ineligible)
+	expectLineStaysR1(t, h, "an ineligible primary awaiting replica stores")
 }
 
 // attestSomeStores records r1 and r2 but not r3: the volume is still in its
@@ -133,27 +138,26 @@ func attestSomeStores(t *testing.T, h *Host) {
 	}
 }
 
-// Partial attestation (still creating), the primary answering that it awaits
-// replica stores: a primary whose own slot is not acceptable is replaced;
-// one that does not answer the probe is unknown and never replaced.
+// Partial attestation (still creating): whatever the primary's state
+// (ineligible, expired, unanswered), no replacement decision is made.
 func TestCreationWaitPartialAttestationControls(t *testing.T) {
-	t.Run("unhealthy primary (ineligible) is replaced", func(t *testing.T) {
+	t.Run("unhealthy primary (ineligible) is not replaced", func(t *testing.T) {
 		h := newBootGraceMasterCreating(t, Config{})
 		defer closeTestMaster(t, h)
 		attestSomeStores(t, h)
 		awaitingProbe(t, h, true)
 		ineligible := restarting
 		ineligible.eligible = false
-		unsupportedTick(t, h, ineligible)
-		expectFailoverToR2(t, h, "an unhealthy primary inside the creation wait")
+		creatingTick(t, h, ineligible)
+		expectLineStaysR1(t, h, "an unhealthy primary inside the creation wait")
 	})
-	t.Run("expired primary (no fresh slot) is replaced", func(t *testing.T) {
+	t.Run("expired primary (no fresh slot) is not replaced", func(t *testing.T) {
 		h := newBootGraceMasterCreating(t, Config{})
 		defer closeTestMaster(t, h)
 		attestSomeStores(t, h)
 		awaitingProbe(t, h, true)
-		unsupportedTick(t, h, silent)
-		expectFailoverToR2(t, h, "an expired primary inside the creation wait")
+		creatingTick(t, h, silent)
+		expectLineStaysR1(t, h, "an expired primary inside the creation wait")
 	})
 	t.Run("unanswered primary is never replaced", func(t *testing.T) {
 		h := newBootGraceMasterCreating(t, Config{})
@@ -163,7 +167,7 @@ func TestCreationWaitPartialAttestationControls(t *testing.T) {
 		p.mu.Lock()
 		p.currentUnknown = true
 		p.mu.Unlock()
-		unsupportedTick(t, h, readySlot("r1-a"))
+		creatingTick(t, h, readySlot("r1-a"))
 		expectLineStaysR1(t, h, "an unanswered primary inside the creation wait")
 	})
 }
@@ -199,9 +203,9 @@ func TestCreationWaitEmptyVolumeOutcomes(t *testing.T) {
 			p.mu.Lock()
 			p.empty, p.currentUnknown = true, c.unknown
 			p.mu.Unlock()
-			unsupportedTick(t, h, c.r1)
+			creatingTick(t, h, c.r1)
 			if c.promoted {
-				expectFailoverToR2(t, h, c.name)
+				expectLineStaysR1(t, h, c.name)
 				return
 			}
 			expectLineStaysR1(t, h, c.name)
@@ -209,5 +213,21 @@ func TestCreationWaitEmptyVolumeOutcomes(t *testing.T) {
 				t.Fatal("the volume left its creation wait without the missing store")
 			}
 		})
+	}
+}
+
+// creatingTick ingests fresh r1/r2 facts (node-c silent), runs one product
+// tick on the unsupported-volume path, and requires that no promotion
+// decision was even probed: a creating volume is outside every replacement
+// decision.
+func creatingTick(t *testing.T, h *Host, r1 rf3Slot) {
+	t.Helper()
+	ingestRF3Incarnations(t, h, r1, readySlot("r2-a"), silent)
+	res, err := h.RunLifecycleProductTick()
+	if err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	if res.PromotionProbes != 0 {
+		t.Fatalf("product tick %+v: a creating volume was probed for a promotion decision", res)
 	}
 }

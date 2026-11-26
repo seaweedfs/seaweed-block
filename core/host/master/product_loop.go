@@ -25,14 +25,14 @@ type LifecycleProductTickResult struct {
 }
 
 type PromotionCandidateEvidence struct {
-	ReplicaID  string
-	Ready      bool
+	ReplicaID string
+	Ready     bool
 	// AwaitingReplicaStoresEpoch: the primary answered not ready only because
 	// its assignment at this epoch still awaits replica stores (its own
 	// report); 0: not awaiting.
 	AwaitingReplicaStoresEpoch uint64
-	DurableLSN uint64
-	ProbeAddr  string
+	DurableLSN                 uint64
+	ProbeAddr                  string
 	// LastDataEpoch and LastDataFirstLSN are the candidate's epoch-table row
 	// at DurableLSN (zero: no table, or no row): the promotion line carries
 	// them, and the target adopts only if its own row at that LSN is the same.
@@ -252,6 +252,13 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		if currentIdx < 0 {
 			continue
 		}
+		// Creation is its own phase: no replacement decision of any kind
+		// (no reassign, no fencing round, no heal at a higher epoch) for a
+		// volume whose master record still awaits its replica stores.
+		if why := h.inCreationPhase(vol.VolumeID, vol.Authority, nil); why != "" {
+			h.holdCreating(vol, why)
+			continue
+		}
 		currentAcceptable := candidateAcceptableForPromotionGate(vol.Slots[currentIdx], serverIndex)
 		// A fencing round fenced survivors above this line and nothing was
 		// published: they refuse the primary at its epoch (and may no longer
@@ -277,6 +284,13 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		}
 		probeCount++
 		result, ok := h.probePromotionCandidatesCurrent(vol.VolumeID, vol.Authority, candidates)
+		// The same phase by the primary's own answer: its assignment at
+		// this line's epoch still awaits the stores (the master's wait may
+		// be over while the re-sent assignment has not arrived).
+		if why := h.inCreationPhase(vol.VolumeID, vol.Authority, answerOf(result, ok)); why != "" {
+			h.holdCreating(vol, why)
+			continue
+		}
 		allowed := promotionAllowedReplicas(result, ok, len(candidates), h.freshPromotionPeers(vol.VolumeID, candidates))
 		// Replacing the primary (it is not acceptable, or answered not
 		// ready): the decision is read from a fencing round, never from the
@@ -529,6 +543,12 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		// and every start counts toward flap history (#128). The
 		// promotion rules below are unchanged.
 		h.recordCurrentBootFact(placement.VolumeID)
+		if line, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID); ok {
+			if why := h.inCreationPhase(placement.VolumeID, line, nil); why != "" {
+				h.noteCreating(placement.VolumeID, line.ReplicaID, why)
+				continue
+			}
+		}
 		// A fencing round fenced survivors above this line and nothing was
 		// published (e.g. the operator's refused failover): continue the
 		// line's own primary at e+1 when it is back and answers ready,
@@ -563,6 +583,10 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		}
 		probeCount++
 		result, probeOK := h.probePromotionCandidatesCurrent(vol.VolumeID, current, candidates)
+		if why := h.inCreationPhase(vol.VolumeID, current, answerOf(result, probeOK)); why != "" {
+			h.noteCreating(vol.VolumeID, current.ReplicaID, why)
+			continue
+		}
 		allowed := promotionAllowedReplicas(result, probeOK, len(candidates), h.freshPromotionPeers(vol.VolumeID, candidates))
 		if probeOK {
 			h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s reasons=%v current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
@@ -820,17 +844,10 @@ func (h *Host) probePromotionCandidatesCurrent(volumeID string, current authorit
 		return result, ok
 	}
 	after, afterOK := h.freshCurrentSlot(volumeID, current.ReplicaID)
-	// A new volume's primary serves nothing until its assignment carries
-	// every replica's store (the creation wait), and it says so in its
-	// answer. That not-ready answer is the wait, not a failure: the primary
-	// is judged ready for this decision, but only while its own fresh slot is
-	// acceptable. One that is unreachable, ineligible (an unhealthy
-	// heartbeat) or withdrawn is replaced as for an established volume. The
-	// primary owns this fact; the master keeps no state for it.
-	if result.CurrentKnown && current.Epoch != 0 && result.Current.AwaitingReplicaStoresEpoch == current.Epoch &&
-		afterOK && after.Reachable && after.Eligible && !after.Withdrawn {
-		h.log.Printf("blockmaster: promotion gate volume=%s current=%s not ready, awaiting replica stores (its own answer); judged ready", volumeID, current.ReplicaID)
-		result.Current.Ready = true
+	// A primary that answers it awaits replica stores is in the creation
+	// phase: the gates hold the volume on that answer (inCreationPhase),
+	// so it is returned as it is.
+	if result.CurrentKnown && current.Epoch != 0 && result.Current.AwaitingReplicaStoresEpoch == current.Epoch {
 		return result, ok
 	}
 	if !afterOK || !after.ReadyForPrimary || !after.Reachable || !after.Eligible || after.Withdrawn {
@@ -1081,4 +1098,155 @@ func (h *Host) freshCurrentSlot(volumeID, replicaID string) (authority.ReplicaCa
 		return authority.ReplicaCandidate{}, false
 	}
 	return h.obs.Store().Snapshot().FreshSlotCandidate(volumeID, replicaID)
+}
+
+// inCreationPhase is the one decision of the creation phase, which every
+// replacement entry (both promotion gates, the operator's move and planned
+// move, the rebalance through the gate) calls first: it returns why the
+// volume is creating, or "" once creation ended. A replacement acts only on
+// ended: one durable, one-way fact in the master's record, written by the
+// first of
+//   - the line's primary answering ready (its first Healthy), or
+//   - a survivor answering DurableLSN > 0 at the current line (under the
+//     quorum ack every acknowledged write is on a survivor, so a volume
+//     that served and lost its primary before the master read a ready
+//     answer still ends creation and fails over),
+// once every initial store is attested (stage 1 holds whatever is
+// answered). Nothing clears it. Besides, the current
+// primary's own answer, when one was read, holds the volume while its
+// assignment at this line's epoch still awaits the stores (the master's
+// wait may be over before the re-sent assignment arrives); an answer can
+// only hold a volume, never release one.
+func (h *Host) inCreationPhase(volumeID string, current authority.AuthorityBasis, answer *PromotionProbeResult) string {
+	if h.attest != nil {
+		if waiting, _ := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID)); waiting > 0 {
+			return "the master's record awaits replica stores"
+		}
+		if h.attest.awaitingFirstReady(volumeID) {
+			by := ""
+			if h.firstReadyNow(volumeID, current, answer) {
+				by = "primary " + current.ReplicaID + " answered ready"
+			} else if holder, ok := h.survivorHoldingAWrite(volumeID, current, answer); ok {
+				by = "survivor " + holder + " holds a write"
+			} else {
+				return "neither a ready answer of the primary nor a write on a survivor yet"
+			}
+			ended, err := h.attest.noteFirstReady(volumeID)
+			if err != nil {
+				return "the end of creation could not be recorded: " + err.Error()
+			}
+			if !ended {
+				return "creation may not end now"
+			}
+			h.log.Printf("blockmaster: volume=%s creation complete: %s at %s@%d", volumeID, by, current.ReplicaID, current.Epoch)
+		}
+	}
+	if answer != nil && answer.CurrentKnown && current.Epoch != 0 && answer.Current.AwaitingReplicaStoresEpoch == current.Epoch {
+		return "the primary's answer awaits replica stores"
+	}
+	return ""
+}
+
+// firstReadyNow: the line's own primary answers ready now (from the answer
+// given, or a round of the primary alone). A primary that awaits the stores,
+// or one that does not answer, is not ready.
+func (h *Host) firstReadyNow(volumeID string, current authority.AuthorityBasis, answer *PromotionProbeResult) bool {
+	if !current.Assigned || current.ReplicaID == "" {
+		return false
+	}
+	res := answer
+	if res == nil {
+		h.promotionMu.RLock()
+		prober := h.promotionProber
+		h.promotionMu.RUnlock()
+		if prober == nil {
+			return false
+		}
+		r, err := prober.ProbePromotionCandidates(volumeID, current, nil)
+		if err != nil {
+			return false
+		}
+		res = &r
+	}
+	return res.CurrentKnown && res.Current.ReplicaID == current.ReplicaID && res.Current.Ready && res.Current.AwaitingReplicaStoresEpoch == 0
+}
+
+// survivorHoldingAWrite: a survivor (any replica but the line's own) answers,
+// in a probe of the current line, DurableLSN > 0 with its epoch-table row at
+// the current epoch (or no row). It reads the answer given, else a round of
+// the survivors alone. It names the survivor.
+func (h *Host) survivorHoldingAWrite(volumeID string, current authority.AuthorityBasis, answer *PromotionProbeResult) (string, bool) {
+	if !current.Assigned || current.ReplicaID == "" {
+		return "", false
+	}
+	res := answer
+	if res == nil {
+		h.promotionMu.RLock()
+		prober := h.promotionProber
+		h.promotionMu.RUnlock()
+		if prober == nil {
+			return "", false
+		}
+		r, err := prober.ProbePromotionCandidates(volumeID, current, h.survivorCandidates(volumeID, current.ReplicaID))
+		if err != nil {
+			return "", false
+		}
+		res = &r
+	}
+	for _, c := range res.Candidates {
+		if c.ReplicaID == "" || c.ReplicaID == current.ReplicaID {
+			continue
+		}
+		if c.DurableLSN > 0 && (c.LastDataEpoch == 0 || c.LastDataEpoch == current.Epoch) {
+			return c.ReplicaID, true
+		}
+	}
+	return "", false
+}
+
+// survivorCandidates are the volume's replicas other than the line's own,
+// each from its fresh heartbeat slot when it has one.
+func (h *Host) survivorCandidates(volumeID, currentReplica string) []authority.ReplicaCandidate {
+	var out []authority.ReplicaCandidate
+	for _, id := range h.replicaSlotsFor(volumeID) {
+		if id == currentReplica {
+			continue
+		}
+		c, ok := h.freshCurrentSlot(volumeID, id)
+		if !ok {
+			c = authority.ReplicaCandidate{ReplicaID: id}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// answerOf is the probe's answer, or nil when the probe gave none.
+func answerOf(result PromotionProbeResult, ok bool) *PromotionProbeResult {
+	if !ok {
+		return nil
+	}
+	return &result
+}
+
+// holdCreating keeps a creating volume out of every replacement decision:
+// no candidate is enabled (the controller reassigns only to an enabled
+// slot), and the wait is visible.
+func (h *Host) holdCreating(vol *authority.VolumeTopologySnapshot, why string) {
+	for si := range vol.Slots {
+		slot := &vol.Slots[si]
+		if slot.ReplicaID == vol.Authority.ReplicaID {
+			continue
+		}
+		slot.ReadyForPrimary = false
+		slot.PromotionEvidence = adapter.PrimaryEvidence{}
+		slot.PlannedMoveAllowed = false
+	}
+	h.noteCreating(vol.VolumeID, vol.Authority.ReplicaID, why)
+}
+
+// noteCreating makes the hold of a creating volume visible.
+func (h *Host) noteCreating(volumeID, current, why string) {
+	h.log.Printf("blockmaster: promotion gate volume=%s current=%s creating (%s): no replacement decision", volumeID, current, why)
+	h.recordVolumeWaitingEvent(volumeID, ops.ReasonAwaitingReplicaAttestations, "creating: "+why+"; no replacement decision")
 }

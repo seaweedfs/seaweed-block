@@ -36,6 +36,7 @@ func TestProductLoop_MissingRequiredFrontierRefusesRF3Promotion(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v", initial)
 	}

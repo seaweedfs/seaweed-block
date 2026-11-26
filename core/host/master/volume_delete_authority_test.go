@@ -125,6 +125,7 @@ func TestVolumeDeleteAuthorityRPCFailureIsUnknown(t *testing.T) {
 func TestReserveVolumeDeletionLiveLeaseIsDefiniteAndKeepsRenewing(t *testing.T) {
 	h, conn, ctx := reviewBindingHost(t)
 	reviewLegacyBind(t, h, conn, ctx, "live-delete")
+	establishVolume(t, h, "live-delete") // a volume past creation keeps the live-lease refusal
 	if _, err := h.Publisher().RenewWorkspaceLease(ctx, "live-delete", "r1", 1); err != nil {
 		t.Fatal(err)
 	}
