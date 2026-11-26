@@ -132,18 +132,22 @@ Do these steps before you start blockvolume:
    `SWB_MASTER_EXPECTED_SLOTS`. blockmaster reads the file only at start:
    after you change it, run `sudo systemctl restart sw-blockmaster`.
 
-   **A replicated volume** (`replication_factor` above 1, in a
-   `--cluster-spec`) gets its primary from blockmaster's lifecycle loop,
-   which runs only when `--lifecycle-product-loop-interval` is set. Use
-   `100ms`, the value the shipped chart sets. With the default `0` the loop
-   is off and a replicated volume never gets a primary. The single-replica
-   start above needs no loop.
+   **A replicated cluster** (volumes with `replication_factor` above 1, in a
+   `--cluster-spec`) needs two flags that are off by default:
+   - `--lifecycle-product-loop-interval 100ms` (the shipped chart's value):
+     a replicated volume gets its primary from this loop. With the default
+     `0` the loop is off and no replicated volume ever gets a primary.
+   - `--failback-runtime-rpc`: the operator's failover (`sw-block ops
+     failover`, below) calls it. Without it there is no manual failover.
+
+   The single-replica start above needs neither.
 
    ```bash
    blockmaster --authority-store /var/lib/sw-block-master/authority \
      --lifecycle-store /var/lib/sw-block-master/lifecycle \
      --cluster-spec /etc/sw-block/cluster-spec.yaml --expected-slots-per-volume 3 \
-     --lifecycle-product-loop-interval 100ms --listen 127.0.0.1:9180
+     --lifecycle-product-loop-interval 100ms --failback-runtime-rpc \
+     --listen 127.0.0.1:9180
    ```
 
    **Replicated volumes in this release:**
@@ -155,14 +159,16 @@ Do these steps before you start blockvolume:
        3-replica volumes (`--expected-slots-per-volume 3`).
      - 2-replica and 3-replica volumes cannot share a cluster.
      - A static `--topology` holds one factor only.
-   - **Failover.** blockmaster fails a replicated volume over by itself only
-     under `--cluster-spec` with the lifecycle loop on. The same loop also
-     continues a fencing round that did not complete.
-     - On a static `--topology` nothing fails over by itself: run
-       `sw-block ops failover`.
-     - It needs blockmaster started with `--failback-runtime-rpc` and an admin
-       client certificate (`SW_BLOCK_TLS_CERT`, `SW_BLOCK_TLS_KEY`,
-       `SW_BLOCK_TLS_CA`).
+   - **Failover.** blockmaster replaces a primary by itself only when that
+     primary answers that it is not ready.
+     - A primary whose host is off or unreachable does not answer. It is shown
+       as unreachable and is not replaced, at every replica count, with the
+       loop on or off.
+     - Then the operator powers the old node off or cuts it from its clients,
+       and runs `sw-block ops failover` with `--confirm-old-node-off`.
+     - The failover needs blockmaster started with `--failback-runtime-rpc`
+       and an admin client certificate (`SW_BLOCK_TLS_CERT`,
+       `SW_BLOCK_TLS_KEY`, `SW_BLOCK_TLS_CA`).
      - If its fencing round is refused, run the command again.
        `sw-block ops failover -h` describes the round and its exit codes.
 
@@ -654,7 +660,7 @@ A restore makes a new volume from a snapshot. The new volume reads every chunk i
    This creates `v2` from the snapshot and prints one JSON document. It is idempotent by `--request-id` (a generated id is printed when you omit it); reuse it to retry an uncertain result. `--master` is required: it resolves each volume's layout id.
 
    The JSON `target` is the store directory, `"target":"v2-<id8>"`, where `<id8>` is the first eight hex digits of v2's layout id. The public volume name remains `v2`: keep using `--volume v2`, `--source v2`, `blockvolume --volume-id v2` and status queries with `volume=v2`. The directory printed in the result is not a replacement name for those arguments. Resolve v2's full layout id through the master for `blockvolume --layout-id` as described [above](#resolve-the-local-volumes-layout-id).
-3. **Start v2's blockvolume** with the normal standalone command, its own volume id, endpoints and local root, and the same chunk settings as the source (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`). v2 serves at once.
+3. **Start v2's blockvolume** with the normal standalone command, its own volume id, endpoints and local root, the source's geometry (`--durable-blocks` and `--durable-blocksize`, for example `65536` and `4096`), and the same chunk settings as the source (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`). v2 serves at once. A start with other geometry flags is refused with `geometry_mismatch` and exits 78, creating no local store; the refusal names the record's values.
 4. **Reads fill v2.** A block in a chunk that v2 does not hold yet is read from the source's snapshot; the read waits for that chunk, which is then kept locally. There is no background copy: a chunk that is never read stays in the source's snapshot.
    - Progress is the volume's count of chunks still absent: `Chunk.Stats.AbsentChunks` in `GET http://STATUS_OF_V2/status/durable?volume=v2` (0 means every chunk is local).
    - That progress is written to v2's local store at its next checkpoint. If v2's blockvolume is killed before then, the chunks it made local since are absent again after the restart and are fetched again from the source's snapshot on their next read. No data is lost: the source's snapshot still holds them.
