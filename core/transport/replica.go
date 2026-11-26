@@ -492,6 +492,20 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 						log.Printf("replica: live entry of new epoch %d at lsn %d, this store's next lsn is %d: refused", entry.Lineage.Epoch, entry.LSN, r.store.NextLSN())
 						return true
 					}
+					// Inside an epoch an entry is applied only at the position
+					// its LSN names, the next one: an entry above it (an LSN
+					// skipped) would be held at another position while the
+					// replica reports it does not hold it, and the missing LSN
+					// could never land below it. Refused and the connection
+					// closed; the primary catches up from the replica's
+					// barrier end. (A lower LSN is a stale re-ship, handled
+					// below.) This holds with the apply gate too: it checks
+					// each block's staleness, not the position, and no live
+					// entry lands while a recovery owns the store.
+					if entry.LSN > r.store.NextLSN() {
+						log.Printf("replica: live entry at lsn %d skips ahead of this store's next lsn %d (epoch %d): refused", entry.LSN, r.store.NextLSN(), entry.Lineage.Epoch)
+						return true
+					}
 					if err := r.epochs.Note(entry.Lineage.Epoch, entry.LSN); err != nil {
 						log.Printf("replica: epoch table lsn=%d epoch=%d: %v", entry.LSN, entry.Lineage.Epoch, err)
 						return true

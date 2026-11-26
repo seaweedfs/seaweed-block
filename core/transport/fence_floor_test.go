@@ -18,7 +18,7 @@ func TestFenceFloor_PromiseRefusesBelowAndSurvivesRestart(t *testing.T) {
 	if err := ln.AdmitAsReplica(3); err != nil {
 		t.Fatal(err)
 	}
-	if !g1Ship(t, ln, store, g1Lineage(1, 3), 1, 'a') || !g1Barrier(t, ln, g1Lineage(1, 3)) {
+	if !g1Ship(t, ln, store, g1Lineage(1, 3), 'a') || !g1Barrier(t, ln, g1Lineage(1, 3)) {
 		t.Fatal("fixture: the epoch-3 primary's ship and barrier were refused before the fence")
 	}
 	if err := ln.FenceFloor(4); err != nil {
@@ -31,7 +31,7 @@ func TestFenceFloor_PromiseRefusesBelowAndSurvivesRestart(t *testing.T) {
 	if g1Barrier(t, ln, g1Lineage(2, 3)) {
 		t.Fatal("an epoch-3 barrier was ACKed after the replica promised floor 4")
 	}
-	if g1Ship(t, ln, store, g1Lineage(3, 3), 2, 'b') || g1Rebuild(t, ln, store, g1Lineage(4, 3), 'r') {
+	if g1Ship(t, ln, store, g1Lineage(3, 3), 'b') || g1Rebuild(t, ln, store, g1Lineage(4, 3), 'r') {
 		t.Fatal("an epoch-3 mutation was applied after the replica promised floor 4")
 	}
 	ln.StopHard()
@@ -40,14 +40,14 @@ func TestFenceFloor_PromiseRefusesBelowAndSurvivesRestart(t *testing.T) {
 	if err := restarted.AdmitAsReplica(3); err != nil { // the stale line, again
 		t.Fatal(err)
 	}
-	if g1Barrier(t, restarted, g1Lineage(5, 3)) || g1Ship(t, restarted, store, g1Lineage(6, 3), 3, 'c') {
+	if g1Barrier(t, restarted, g1Lineage(5, 3)) || g1Ship(t, restarted, store, g1Lineage(6, 3), 'c') {
 		t.Fatal("after a restart the replica took the epoch-3 primary below its promised floor 4")
 	}
 	// closure: the round failed, the master re-issues the same primary at 4
 	if err := restarted.AdmitAsReplica(4); err != nil {
 		t.Fatal(err)
 	}
-	if !g1Ship(t, restarted, store, g1Lineage(7, 4), 4, 'd') || !g1Barrier(t, restarted, g1Lineage(7, 4)) {
+	if !g1Ship(t, restarted, store, g1Lineage(7, 4), 'd') || !g1Barrier(t, restarted, g1Lineage(7, 4)) {
 		t.Fatal("the line re-issued at the fenced epoch 4 was refused: a failed round would degrade the volume for ever")
 	}
 }

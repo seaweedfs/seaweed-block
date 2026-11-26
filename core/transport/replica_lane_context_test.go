@@ -4,6 +4,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 type recordingApplyHook struct {
@@ -39,7 +41,7 @@ func (h *recordingApplyHook) expect(t *testing.T, want string) {
 func runReplicaHandlerPipe(t *testing.T, hook ApplyHook) net.Conn {
 	t.Helper()
 	client, server := net.Pipe()
-	r := &ReplicaListener{applyHook: hook}
+	r := &ReplicaListener{applyHook: hook, store: storage.NewBlockStore(16, 4096)}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -80,7 +82,7 @@ func TestReplicaListener_DefaultMsgShipEntry_TargetLSNHigh_RoutesLive(t *testing
 	if err := WriteMsg(conn, MsgShipEntry, EncodeShipEntry(ShipEntry{
 		Lineage: lineage,
 		LBA:     5,
-		LSN:     50,
+		LSN:     1, // the store's next: a live entry is applied only there
 		Data:    []byte{0xBB},
 	})); err != nil {
 		t.Fatalf("write live ship entry: %v", err)

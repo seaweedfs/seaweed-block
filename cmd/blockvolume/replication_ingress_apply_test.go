@@ -12,6 +12,7 @@ import (
 
 func TestReplicationIngressSharesApplyVersionsAcrossSessions(t *testing.T) {
 	store := storage.NewBlockStore(64, 4096)
+	store.AdvanceFrontier(119) // the replica holds 1..119 (a rebuilt base): 120 is its next LSN
 	r := newReplicationIngress(flags{dataAddr: "127.0.0.1:0", volumeID: "vol1"}, store)
 	if err := r.AdmitAsReplica(1); err != nil {
 		t.Fatal(err)
