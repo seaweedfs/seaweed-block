@@ -9,6 +9,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // ackedFenceProbe is a fenceProbe that reports its ack profile, as the
@@ -377,5 +378,78 @@ func TestManualFailoverAndThePromotionLoopPublishOneLine(t *testing.T) {
 	}
 	if after.Epoch != e+1 {
 		t.Fatalf("line=%+v; want r3 at %d", after, e+1)
+	}
+}
+
+// healedR1 is the line's own primary answering a heal round ready.
+var healedR1 = PromotionProbeResult{CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true, DurableLSN: 11,
+	LastDataEpoch: 1, LastDataFirstLSN: 1, StoreID: storage.StoreID{7}, TableValid: true}}
+
+// A fencing round the operator's failover allowed, whose publication then
+// failed (here: the evidence is decided and never applied), has fenced the
+// survivors above the line all the same. The fence is pending from the
+// moment the round is attempted, so when the primary comes back the next
+// tick continues it at e+1, without a ready survivor (they refuse it now).
+func TestManualFailoverAllowedButUnpublishedFenceIsHealed(t *testing.T) {
+	h, line := rf3LineOnR1(t)
+	defer closeTestMaster(t, h)
+	ingestRF3Observation(t, h, false, true, true)
+	e := line.Epoch
+	p := &fenceProbe{
+		plain: PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10}, {ReplicaID: "r3", Ready: true, DurableLSN: 12}}},
+		fenced: fencedAs(
+			PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: e + 1, TableValid: true},
+			PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: e + 1, TableValid: true}),
+	}
+	h.SetPromotionEvidenceProvider(ackedFenceProbe{p})
+	if _, err := h.plannedMoveEvidence("vol-rf3", "r3"); err != nil {
+		t.Fatalf("the fenced failover was not allowed: %v", err)
+	}
+	// The publication failed: the line is still r1 at e.
+	if !h.pendingFence("vol-rf3", e) {
+		t.Fatal("an allowed fencing round left no pending fence")
+	}
+	p.heal = healedR1
+	snap := rf3DeadPrimary()
+	snap.Volumes[0].Authority.Epoch = e
+	s := snap.Volumes[0].Slots
+	s[0].Reachable, s[0].ReadyForPrimary = true, true
+	s[1].ReadyForPrimary, s[2].ReadyForPrimary = false, false // fenced: they refuse r1 at e
+	_, _, asks := h.applyPromotionEvidenceGate(&snap)
+	if len(asks) != 1 || asks[0].ReplicaID != "r1" || asks[0].Evidence.Basis != adapter.BasisHeal || asks[0].Evidence.FencedEpoch != e+1 {
+		t.Fatalf("asks %+v; want r1 healed at %d", asks, e+1)
+	}
+}
+
+// A refused operator failover leaves the fence pending; the primary then
+// returns ready while another slot is still stale, so the volume is
+// unsupported (partial inventory). The unsupported gate heals the line's own
+// primary at e+1 before any candidate check, as the supported gate does.
+func TestManualFailoverRefusedFenceIsHealedOnTheUnsupportedPath(t *testing.T) {
+	h, line := rf3LineOnR1(t)
+	defer closeTestMaster(t, h)
+	ingestRF3Observation(t, h, false, true, true)
+	e := line.Epoch
+	p := &fenceProbe{
+		plain: PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10}, {ReplicaID: "r3", Ready: true, DurableLSN: 12}}},
+		fenced: fencedAs(
+			PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: e + 1, TableValid: true},
+			PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: e + 1, TableValid: true}),
+	}
+	h.SetPromotionEvidenceProvider(ackedFenceProbe{p})
+	if err := failoverTo(h, line, "r2"); err == nil {
+		t.Fatal("a failover to the survivor below the highest fenced end was allowed")
+	}
+	// r1 is back and ready; r3's slot is stale.
+	ingestRF3ObservationForServersWithReady(t, h, "vol-rf3", "node-a", "node-b", "node-c", true, true, true, true, false, false)
+	p.plain = PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true},
+		Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", DurableLSN: 10}}}
+	p.heal = healedR1
+	report := authority.SupportabilityReport{Unsupported: map[string]authority.VolumeUnsupportedEvidence{
+		"vol-rf3": {VolumeID: "vol-rf3", Reasons: []string{authority.ReasonPartialInventory}},
+	}}
+	_, _, asks := h.applyUnsupportedPromotionEvidenceGate(h.Lifecycle().Placements.ListPlacements(), report, nil)
+	if len(asks) != 1 || asks[0].ReplicaID != "r1" || asks[0].Evidence.Basis != adapter.BasisHeal || asks[0].Evidence.FencedEpoch != e+1 {
+		t.Fatalf("asks %+v; want r1 healed at %d on the unsupported path", asks, e+1)
 	}
 }
