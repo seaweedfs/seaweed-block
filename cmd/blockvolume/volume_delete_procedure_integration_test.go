@@ -240,7 +240,7 @@ func TestProcedureDeleteAVolume(t *testing.T) {
 // sealed and blockvolume is then stopped with SIGTERM, so the ACK is
 // skipped: volume-delete is refused while the lease is live and nothing
 // is deleted. blockvolume is started again with
-// the same flags and local root; it is revoked and sends the ACK (exit 0 by
+// the same flags and local root; after recovery it is resealed, revoked and ACKs (exit 0 by
 // itself); volume-delete then completes, HEAD is deleted with no chunks, and
 // a rerun with the same request id completes again.
 func TestProcedureDeleteAfterASignalStop(t *testing.T) {
@@ -261,9 +261,11 @@ func TestProcedureDeleteAfterASignalStop(t *testing.T) {
 	}
 
 	again := env.start(t, "blockvolume-s1-again", "s1")
-	poll(t, 60*time.Second, "the restarted holder never listened on its status address", func() bool {
-		return listening(env.hosts["s1"].status)
-	})
+	// Status starts before recovery/claim. The documented recovery repeats
+	// the seal only after the restarted backend admits I/O, then revokes that
+	// NEW sealed generation, never the pre-restart generation.
+	again.waitLog(t, 60*time.Second, "blockvolume: backend admits I/O: starting the frontends")
+	g = env.seal(t, "s1", e)
 	env.revoke(t, e, g)
 	if err := again.wait(60 * time.Second); err != nil {
 		t.Fatalf("the restarted s1 after the revocation: %v; want a clean exit by itself", err)
