@@ -1103,28 +1103,42 @@ func (h *Host) freshCurrentSlot(volumeID, replicaID string) (authority.ReplicaCa
 // inCreationPhase is the one decision of the creation phase, which every
 // replacement entry (both promotion gates, the operator's move and planned
 // move, the rebalance through the gate) calls first: it returns why the
-// volume is creating, or "" once it is not. Two sources, in order:
-//   - the master's own durable record: it still awaits a replica store, or
-//     every store is attested but the primary has not yet answered ready at
-//     its first line (its first ready answer ends creation, recorded durably
-//     and for good; no other state);
-//   - the current primary's own answer, when one was read, says its
-//     assignment at this line's epoch still awaits the stores (the master's
-//     wait may be over before the re-sent assignment arrives). The answer
-//     can only hold a volume, never release one.
+// volume is creating, or "" once creation ended. A replacement acts only on
+// ended: one durable, one-way fact in the master's record, written by the
+// first of
+//   - the line's primary answering ready (its first Healthy), or
+//   - a survivor answering DurableLSN > 0 at the current line (under the
+//     quorum ack every acknowledged write is on a survivor, so a volume
+//     that served and lost its primary before the master read a ready
+//     answer still ends creation and fails over),
+// once every initial store is attested (stage 1 holds whatever is
+// answered). Nothing clears it. Besides, the current
+// primary's own answer, when one was read, holds the volume while its
+// assignment at this line's epoch still awaits the stores (the master's
+// wait may be over before the re-sent assignment arrives); an answer can
+// only hold a volume, never release one.
 func (h *Host) inCreationPhase(volumeID string, current authority.AuthorityBasis, answer *PromotionProbeResult) string {
 	if h.attest != nil {
 		if waiting, _ := h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID)); waiting > 0 {
 			return "the master's record awaits replica stores"
 		}
 		if h.attest.awaitingFirstReady(volumeID) {
-			if !h.firstReadyNow(volumeID, current, answer) {
-				return "the primary has not yet answered ready at its first line"
+			by := ""
+			if h.firstReadyNow(volumeID, current, answer) {
+				by = "primary " + current.ReplicaID + " answered ready"
+			} else if holder, ok := h.survivorHoldingAWrite(volumeID, current, answer); ok {
+				by = "survivor " + holder + " holds a write"
+			} else {
+				return "neither a ready answer of the primary nor a write on a survivor yet"
 			}
-			if err := h.attest.noteFirstReady(volumeID); err != nil {
-				return "the first ready answer could not be recorded: " + err.Error()
+			ended, err := h.attest.noteFirstReady(volumeID)
+			if err != nil {
+				return "the end of creation could not be recorded: " + err.Error()
 			}
-			h.log.Printf("blockmaster: volume=%s creation complete: primary %s answered ready at epoch %d", volumeID, current.ReplicaID, current.Epoch)
+			if !ended {
+				return "creation may not end now"
+			}
+			h.log.Printf("blockmaster: volume=%s creation complete: %s at %s@%d", volumeID, by, current.ReplicaID, current.Epoch)
 		}
 	}
 	if answer != nil && answer.CurrentKnown && current.Epoch != 0 && answer.Current.AwaitingReplicaStoresEpoch == current.Epoch {
@@ -1155,6 +1169,56 @@ func (h *Host) firstReadyNow(volumeID string, current authority.AuthorityBasis, 
 		res = &r
 	}
 	return res.CurrentKnown && res.Current.ReplicaID == current.ReplicaID && res.Current.Ready && res.Current.AwaitingReplicaStoresEpoch == 0
+}
+
+// survivorHoldingAWrite: a survivor (any replica but the line's own) answers,
+// in a probe of the current line, DurableLSN > 0 with its epoch-table row at
+// the current epoch (or no row). It reads the answer given, else a round of
+// the survivors alone. It names the survivor.
+func (h *Host) survivorHoldingAWrite(volumeID string, current authority.AuthorityBasis, answer *PromotionProbeResult) (string, bool) {
+	if !current.Assigned || current.ReplicaID == "" {
+		return "", false
+	}
+	res := answer
+	if res == nil {
+		h.promotionMu.RLock()
+		prober := h.promotionProber
+		h.promotionMu.RUnlock()
+		if prober == nil {
+			return "", false
+		}
+		r, err := prober.ProbePromotionCandidates(volumeID, current, h.survivorCandidates(volumeID, current.ReplicaID))
+		if err != nil {
+			return "", false
+		}
+		res = &r
+	}
+	for _, c := range res.Candidates {
+		if c.ReplicaID == "" || c.ReplicaID == current.ReplicaID {
+			continue
+		}
+		if c.DurableLSN > 0 && (c.LastDataEpoch == 0 || c.LastDataEpoch == current.Epoch) {
+			return c.ReplicaID, true
+		}
+	}
+	return "", false
+}
+
+// survivorCandidates are the volume's replicas other than the line's own,
+// each from its fresh heartbeat slot when it has one.
+func (h *Host) survivorCandidates(volumeID, currentReplica string) []authority.ReplicaCandidate {
+	var out []authority.ReplicaCandidate
+	for _, id := range h.replicaSlotsFor(volumeID) {
+		if id == currentReplica {
+			continue
+		}
+		c, ok := h.freshCurrentSlot(volumeID, id)
+		if !ok {
+			c = authority.ReplicaCandidate{ReplicaID: id}
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // answerOf is the probe's answer, or nil when the probe gave none.
