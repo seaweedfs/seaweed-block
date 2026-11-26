@@ -160,52 +160,68 @@ func TestBCatalog_DeleteRerunSkipsOnlyMissingRootsOfADeletingVolume(t *testing.T
 		}
 	})
 
-	t.Run("read failure of a root of a deleting HEAD", func(t *testing.T) {
-		c, f, _, _, tgt := rerunFixture(t)
-		// Interrupt at the source's release: HEAD is deleting, roots intact.
-		n := 0
-		f.mu.Lock()
-		f.failUpdate = func(string) error {
-			n++
-			if n == 2 {
-				return errors.New("injected: interrupted")
+	for _, deleted := range []bool{false, true} {
+		name := map[bool]string{false: "read failure of a root of a deleting HEAD", true: "read failure of a root of a deleted HEAD"}[deleted]
+		t.Run(name, func(t *testing.T) {
+			c, f, _, _, tgt := rerunFixture(t)
+			root := rootOf(t, f, tgt)
+			if deleted {
+				// A completed delete: HEAD deleted, its roots' objects gone.
+				if _, err := c.DeleteVolume(ctx, tgt, okDeleteAuthority{}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Interrupted at the source's release: HEAD deleting, roots intact.
+				n := 0
+				f.mu.Lock()
+				f.failUpdate = func(string) error {
+					n++
+					if n == 2 {
+						return errors.New("injected: interrupted")
+					}
+					return nil
+				}
+				f.mu.Unlock()
+				if _, err := c.DeleteVolume(ctx, tgt, okDeleteAuthority{}); err == nil {
+					t.Fatal("fixture: the delete was not interrupted")
+				}
 			}
-			return nil
-		}
-		f.mu.Unlock()
-		if _, err := c.DeleteVolume(ctx, tgt, okDeleteAuthority{}); err == nil {
-			t.Fatal("fixture: the delete was not interrupted")
-		}
-		ts, _, err := c.open(tgt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		before, _, err := ts.ReadHead(ctx)
-		if err != nil || before.State != layout.StateDeleting {
-			t.Fatalf("fixture: HEAD %+v %v; want deleting", before, err)
-		}
-		root := rootOf(t, f, tgt)
-		sentinel := errors.New("injected: filer read failed")
-		f.mu.Lock()
-		f.failUpdate = nil
-		f.failLookup = func(p string) error {
-			if p == root {
-				return sentinel
+			ts, _, err := c.open(tgt)
+			if err != nil {
+				t.Fatal(err)
 			}
-			return nil
-		}
-		f.mu.Unlock()
-		skipped, err := c.DeleteVolume(ctx, tgt, okDeleteAuthority{})
-		f.mu.Lock()
-		f.failLookup = nil
-		f.mu.Unlock()
-		if !errors.Is(err, sentinel) || len(skipped) != 0 {
-			t.Fatalf("re-run with a root read failure: skipped=%v err=%v; want the read error and nothing skipped", skipped, err)
-		}
-		if after, _, err := ts.ReadHead(ctx); err != nil || after.Gen != before.Gen || after.State != layout.StateDeleting {
-			t.Fatalf("HEAD after the failed re-run %+v %v; want it unchanged (gen %d, deleting)", after, err, before.Gen)
-		}
-	})
+			want := map[bool]string{false: layout.StateDeleting, true: layout.StateDeleted}[deleted]
+			before, _, err := ts.ReadHead(ctx)
+			if err != nil || before.State != want {
+				t.Fatalf("fixture: HEAD %+v %v; want %s", before, err, want)
+			}
+			sentinel := errors.New("injected: filer read failed")
+			f.mu.Lock()
+			f.failUpdate = nil
+			f.failLookup = func(p string) error {
+				if p == root {
+					return sentinel
+				}
+				return nil
+			}
+			updates, deletes := f.updates, f.deletes
+			f.mu.Unlock()
+			skipped, err := c.DeleteVolume(ctx, tgt, okDeleteAuthority{})
+			f.mu.Lock()
+			f.failLookup = nil
+			updatesAfter, deletesAfter := f.updates, f.deletes
+			f.mu.Unlock()
+			if !errors.Is(err, sentinel) || len(skipped) != 0 {
+				t.Fatalf("re-run with a root read failure: skipped=%v err=%v; want the read error and nothing skipped", skipped, err)
+			}
+			if updatesAfter != updates || deletesAfter != deletes {
+				t.Fatalf("the failed re-run wrote: updates %d -> %d, deletes %d -> %d; want no source release and no object delete", updates, updatesAfter, deletes, deletesAfter)
+			}
+			if after, _, err := ts.ReadHead(ctx); err != nil || after.Gen != before.Gen || after.State != want {
+				t.Fatalf("HEAD after the failed re-run %+v %v; want it unchanged (gen %d, %s)", after, err, before.Gen, want)
+			}
+		})
+	}
 
 	t.Run("missing root of a live HEAD", func(t *testing.T) {
 		c, f, _, _, tgt := rerunFixture(t)
