@@ -75,6 +75,22 @@ volumes:
         replica_id: r1
 ```
 
+A restore target is the one exception: list it with `id`,
+`replication_factor` and `placements` only, **without `size_bytes`**. Such an
+entry places the volume but creates no record; `sw-block ops chunk restore`
+creates the record, with the source snapshot's geometry. With `size_bytes` the
+entry creates an ordinary empty volume, and the restore into it is refused
+with `target_exists`. Use a new name: a name that was ever deleted is never
+created again.
+
+```yaml
+  - id: v2                     # restore target: no size_bytes
+    replication_factor: 1
+    placements:
+      - server_id: s2
+        replica_id: r1
+```
+
 In a multi-host cluster, register each node by the address it connects to
 blockmaster from, never loopback. One server id names one host: a volume host whose
 server id is registered on `127.0.0.1` is refused with `server id s1 is registered on
@@ -152,10 +168,10 @@ These are rules for the operator. The product does not detect every breach.
   A copy older than the last cut is refused. A copy taken after the last cut is NOT
   detected: it attaches and loses the writes acknowledged after the copy was taken. To go
   back, start from the remote image with a fresh root.
-- **After a forced move, stop and disable the old host's unit.** Until you do, it
-  starts, refuses, exits 75 and is started again, and cannot serve. The shipped unit
-  gives up after 10 starts in 10 minutes (`StartLimitBurst=10`,
-  `StartLimitIntervalSec=600`) and then stays failed until you reset it.
+- **After a forced move, stop and disable the old host's unit.** Until you do, a
+  start of it is refused by blockmaster: it logs `exiting status=78 reason=moved`,
+  exits 78 and cannot serve. The shipped unit does not restart a process that exits
+  78, so it stays failed; disable it so that a reboot does not start it again.
 - **Before moving a volume back to a host that held it earlier, move that host's old
   root aside** (after the check above). The old root is stale; the new holder must start
   on a fresh one.
@@ -187,10 +203,9 @@ Each procedure below runs as written on this page, with the real binaries, two
 | Same host: restart inside the lease | `TestProcedureSameHostRestartInsideTheLease` | runs |
 | After a crash: return after a lapsed lease (started 65 s after the stop) | `TestProcedureReturnAfterALapsedLease` | runs |
 | Revoke without the ACK, then forced move to another node | `TestProcedureRevokeWithoutACKThenForcedMove` | runs |
-| Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | runs: the returning old host does not take the new host's assignment, does not report ready and does not listen for I/O; it logs the refusal and exits 75, on its old local root and on a fresh one, each time the unit starts it; the new host keeps serving |
+| Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | runs: the returning old host does not take the new host's assignment, does not report ready and does not listen for I/O; it logs `exiting status=78 reason=moved` and exits 78, on its old local root and on a fresh one; the new host keeps serving |
 | Same host: restart after a crash inside the lease | `TestProcedureSameHostCrashRestartInsideTheLease` | runs |
 | After a crash: started 40 s after the stop, the barrier passes inside the start wait | `TestProcedureStartInsideTheBarrierWaitIsReGranted` | runs: does not serve while renewals are refused, serves once re-granted |
-| After a crash: started too early (the start wait ends before the barrier) | `TestProcedureStartTooEarlyExitsAndARestartServes` | runs: exits 75 with `reason=assignment_timeout`; a later start serves |
 | Delete a volume: seal, revoke, ACK, delete the snapshots, volume-delete | `TestProcedureDeleteAVolume` | runs: refused while a snapshot exists, with nothing deleted; completes after the snapshot is deleted; a rerun with the same request id completes again |
 | Delete after the process was stopped by a signal (start again, revoke, ACK, delete) | `TestProcedureDeleteAfterASignalStop` | runs: refused for the missing ACK, with nothing deleted; completes after the restart, the revoke and the ACK |
 | After a crash: the process is killed while the guest writes, restart inside the lease | `TestProcedureCrashWithIOInFlight` | runs: every write acknowledged by a flush reads back |

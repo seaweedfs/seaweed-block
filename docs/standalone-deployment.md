@@ -595,7 +595,18 @@ Retiring the source of a template is not supported in this release either: a res
 
 A restore makes a new volume from a snapshot. The new volume reads every chunk it has not made local from the source's snapshot, so the snapshot stays in use for as long as the new volume exists.
 
-1. **Add the target to blockmaster.** Add the target volume (for example `v2`) to blockmaster's topology, with the source's geometry.
+1. **Add the target to blockmaster's cluster spec as placement only.** A restore needs blockmaster's lifecycle store, so blockmaster runs with `--cluster-spec` (see [the volume record](volume-lifecycle.md#setup)). Add the target (for example `v2`) with its id, replication factor and placement, and **no `size_bytes`**:
+
+   ```yaml
+   volumes:
+     - id: v2                   # a new name: never used, never deleted
+       replication_factor: 1
+       placements:
+         - server_id: s2
+           replica_id: r1
+   ```
+
+   Restart blockmaster to read it. An entry without `size_bytes` creates no volume record; the restore creates it, with the snapshot's geometry. An entry with `size_bytes` creates an ordinary empty volume, and the restore into it is then refused with `target_exists` (`v2 is bound to another restore request`).
 2. **Create the restore:**
 
    ```bash
