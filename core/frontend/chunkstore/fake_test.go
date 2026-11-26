@@ -32,6 +32,9 @@ type fakeFiler struct {
 	failUpdateAfterApply func(p string) error
 	updates              int
 	deletes              int
+	// failDelete, if set, is called before a DeleteEntry is applied; a
+	// non-nil return fails the call and the entry is NOT deleted.
+	failDelete func(p string) error
 	// beforeCreate, if set, runs under the lock just before an entry is
 	// created (it may read f.entries but must not call f's methods).
 	beforeCreate func(p string)
@@ -170,6 +173,11 @@ func (f *fakeFiler) DeleteEntry(_ context.Context, dir, name string, expected ma
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := path.Join(dir, name)
+	if f.failDelete != nil {
+		if err := f.failDelete(p); err != nil {
+			return err
+		}
+	}
 	cur, ok := f.entries[p]
 	if len(expected) > 0 {
 		if !ok {
