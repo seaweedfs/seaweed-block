@@ -4,7 +4,7 @@
 # rendered: usage: render-k8s-alpha-image.sh IMAGE IN OUT
 set -euo pipefail
 [[ $# -eq 3 ]] || { echo "usage: $0 IMAGE IN OUT" >&2; exit 2; }
-image_sed="$(printf '%s' "$1" | sed 's/[\/&]/\&/g')"
+image_sed="$(printf '%s' "$1" | sed 's/[\/&]/\\&/g')"
 sed -e "s/sw-block:local/${image_sed}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$2" >"$3"
