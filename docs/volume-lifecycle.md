@@ -443,7 +443,10 @@ the volume's store directory: its name and the first 8 hex digits of its layout 
 sw-block ops chunk volume-delete --volume v1 --chunk-filer FILER --master MASTER --request-id del-v1
 ```
 
-It answers with `"admitted":true,"committed":true,"headMarked":true,"completed":true`.
+On completion it answers `{"volume":"v1-<id8>","state":"deleted"}`, where
+`<id8>` is the first eight hex digits of the volume's layout id. `volume` in
+this result is the store directory; subsequent commands still use the public
+name `--volume v1`.
 Keep the `--request-id` and use the same one if you have to run the command again.
 Afterwards `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
 `head.State` `deleted`. The HEAD view has no `chunkCount` field; use the

@@ -618,6 +618,8 @@ A restore makes a new volume from a snapshot. The new volume reads every chunk i
    ```
 
    This creates `v2` from the snapshot and prints one JSON document. It is idempotent by `--request-id` (a generated id is printed when you omit it); reuse it to retry an uncertain result. `--master` is required: it resolves each volume's layout id.
+
+   The JSON `target` is the store directory, `"target":"v2-<id8>"`, where `<id8>` is the first eight hex digits of v2's layout id. The public volume name remains `v2`: keep using `--volume v2`, `--source v2`, `blockvolume --volume-id v2` and status queries with `volume=v2`. The directory printed in the result is not a replacement name for those arguments. Resolve v2's full layout id through the master for `blockvolume --layout-id` as described [above](#resolve-the-local-volumes-layout-id).
 3. **Start v2's blockvolume** with the normal standalone command, its own volume id, endpoints and local root, and the same chunk settings as the source (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`). v2 serves at once.
 4. **Reads fill v2.** A block in a chunk that v2 does not hold yet is read from the source's snapshot; the read waits for that chunk, which is then kept locally. There is no background copy: a chunk that is never read stays in the source's snapshot.
    - Progress is the volume's count of chunks still absent: `Chunk.Stats.AbsentChunks` in `GET http://STATUS_OF_V2/status/durable?volume=v2` (0 means every chunk is local).
