@@ -215,10 +215,12 @@ func f1StartEnv(t *testing.T, cfg f1Config) (*handoffEnv, *daemon) {
 	for i := 1; i <= cfg.Volumes; i++ {
 		add(fmt.Sprintf("v%d", i), fmt.Sprintf("v%d", i), i)
 	}
+	targets := map[string]bool{}
 	for r := 1; r <= cfg.Rounds; r++ {
 		for i := 1; i <= cfg.Volumes; i++ {
 			v := f1RestoreTarget(i, r)
 			add(v, v, i+cfg.Volumes*r)
+			targets[v] = true
 		}
 	}
 	var vols strings.Builder
@@ -229,7 +231,11 @@ func f1StartEnv(t *testing.T, cfg f1Config) (*handoffEnv, *daemon) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		b := env.hosts[k]
-		fmt.Fprintf(&vols, "  - id: %s\n    size_bytes: 268435456\n    replication_factor: 1\n    placements:\n      - server_id: s1\n        replica_id: %s\n", b.volume, b.replica)
+		size := "    size_bytes: 268435456\n"
+		if targets[k] {
+			size = "" // a restore target: placement only, its restore creates it
+		}
+		fmt.Fprintf(&vols, "  - id: %s\n%s    replication_factor: 1\n    placements:\n      - server_id: s1\n        replica_id: %s\n", b.volume, size, b.replica)
 	}
 	spec := filepath.Join(h.dir, "cluster-spec.yaml")
 	must(os.WriteFile(spec, []byte(fmt.Sprintf("nodes:\n  - server_id: s1\n    data_addr: %s\n    ctrl_addr: %s\nvolumes:\n%s", h.dataAddr, h.ctrlAddr, vols.String())), 0o644))
