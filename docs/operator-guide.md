@@ -117,8 +117,8 @@ named like an admin client's or blockmaster's, but it cannot see a certificate's
   or recreate the record, then start it.
   A wrong-size local store left by an earlier release's first start is different: its log repeats `chunk attach check:
   chunkstore: geometry_mismatch` and it exits; waiting or restarting with the right flags does not help. In one sitting: stop the unit first; then check that the volume never served:
-  `sw-block ops chunk show --master <master> --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
-  `"holder":""` in its head; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
+  `sw-block ops chunk show --master <master> --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"Epoch":0` and
+  `"Holder":""` in its `head` object; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
   `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. If the head shows an epoch above 0 or
   a holder, do not remove these files; if the volume served before, its local store has its original size: correct the
   flag and start it again (not run as a test in this release).
