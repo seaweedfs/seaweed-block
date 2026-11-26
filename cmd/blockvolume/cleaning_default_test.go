@@ -137,17 +137,35 @@ func TestCutDuringTheHoldersCleaningCancelsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleaner := r.(layoutCleaner)
+	// The cleaning runs under its own context: cleanup cancels it and joins
+	// it, so a failure below never leaves it running.
+	cleanCtx, cleanCancel := context.WithCancel(ctx)
 	started, cancelled := make(chan struct{}), make(chan struct{})
-	cleaned := make(chan error, 1)
+	cleaned, joined := make(chan error, 1), make(chan struct{})
 	go func() {
-		cleaned <- cleaner.Clean(ctx, func(ctx context.Context, _ layout.HolderID, _ string) error {
+		defer close(joined)
+		cleaned <- cleaner.Clean(cleanCtx, func(ctx context.Context, _ layout.HolderID, _ string) error {
 			close(started)
 			<-ctx.Done() // a cleaning pass in progress until the cut ends it
 			close(cancelled)
 			return ctx.Err()
 		})
 	}()
-	<-started
+	t.Cleanup(func() {
+		cleanCancel()
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			t.Error("the cleaning did not end after its context was cancelled")
+		}
+	})
+	select {
+	case <-started:
+	case err := <-cleaned:
+		t.Fatalf("the cleaning ended before it ran: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cleaning did not start")
+	}
 	ctl := volume.NewChunkControl(dp, fixture.Catalog, fixture.Ref)
 	cutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -160,8 +178,13 @@ func TestCutDuringTheHoldersCleaningCancelsIt(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the cut did not cancel the cleaning")
 	}
-	if err := <-cleaned; err != nil {
-		t.Fatalf("the cancelled cleaning ended with %v; want a clean end", err)
+	select {
+	case err := <-cleaned:
+		if err != nil {
+			t.Fatalf("the cancelled cleaning ended with %v; want a clean end", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled cleaning did not return")
 	}
 	h, _, err := fixture.Catalog.ReadHead(ctx, fixture.Ref)
 	if err != nil || h.Activity.Kind != layout.ActIdle || h.Position < res.CutLSN {

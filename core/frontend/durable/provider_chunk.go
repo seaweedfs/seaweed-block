@@ -941,14 +941,20 @@ func (p *DurableProvider) maintenanceCurrent(volumeID string, h *volHandle, laye
 var maintenanceKickRetry = 30 * time.Second // a var only so tests can shorten it
 
 // KickMaintenance asks the volume's maintenance loop for one pass now, as
-// after a snapshot delete. It reports whether a loop was there to ask; kicks
-// coalesce, and the pass is the same bounded pass the timer runs.
+// after a snapshot delete. It reports whether a running loop was there to
+// ask (a stopped or ended loop is not); kicks coalesce, and the pass is the
+// same bounded pass the timer runs.
 func (p *DurableProvider) KickMaintenance(volumeID string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	h := p.volumes[volumeID]
-	if h == nil || h.maintKick == nil {
+	if h == nil || h.maintKick == nil || h.chunkStop == nil || h.chunkDone == nil {
 		return false
+	}
+	select {
+	case <-h.chunkDone:
+		return false // the loop ended (fence, lineage change) and was not re-armed
+	default:
 	}
 	select {
 	case h.maintKick <- struct{}{}:
@@ -1002,13 +1008,18 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 			_ = obs.ObserveRemoteError(err)
 		}
 		// Completion-relative reset coalesces all elapsed ticks; no catch-up queue.
-		// A kicked pass refused because a cut session was open is tried again
-		// soon, not a whole interval later.
+		// A kick stays pending until a pass the volume did not refuse as busy:
+		// while a session is open, every retry comes after the short delay,
+		// not an interval later. The delay only paces the retries; whether a
+		// pass may clean is decided by HEAD's activity, never by this timer.
 		next := interval
-		if kicked && errors.Is(err, layout.ErrBusy) && maintenanceKickRetry < next {
-			next = maintenanceKickRetry
+		if kicked && errors.Is(err, layout.ErrBusy) {
+			if maintenanceKickRetry < next {
+				next = maintenanceKickRetry
+			}
+		} else {
+			kicked = false
 		}
-		kicked = false
 		timer.Reset(next)
 	}
 }

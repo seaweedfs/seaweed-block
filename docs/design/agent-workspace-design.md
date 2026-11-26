@@ -296,7 +296,9 @@ stateDiagram-v2
   [*] --> PendingAttach
   PendingAttach --> Armed: attached and healthy
   Armed --> Running: staggered due event
-  Running --> Armed: retention and optional scoped GC settle
+  Armed --> Running: kick (a snapshot deleted through the holder)
+  Running --> Armed: retention and the cleaning settle
+  Running --> Armed: busy (a cut session open), kick kept, retry in 30 s
   Running --> Draining: detach, fence, close
   Armed --> Draining: detach, fence, close
   Draining --> Closed: cancel and join every worker

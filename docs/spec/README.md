@@ -399,6 +399,14 @@ Native tests separately bind replica/epoch/endpoint and current handle/layer,
 witness cancellation while held, and same-handle stop/join/re-arm. This finite
 model does not establish physical-I/O cancellation or a fleet scheduling bound.
 
+The kick (2026-11-25): a snapshot deleted through the holder moves `Armed -> Due`;
+a pass refused as busy (a cut session open) keeps the kick and re-arms it, and
+only a pass that is not refused clears it (`NoLostKick`). Run 2026-11-26 00:27 UTC,
+same jar SHA256, OpenJDK 17: `safe` no error (699 generated / 212 distinct,
+depth 13); `overlap`, `early_release` and `stale_rearm` violate OneOwner,
+JoinedBeforeRelease and CurrentHandleAtAdmission as before; the new negative
+`lost_kick` (a busy pass drops the kick) violates NoLostKick (92/39, depth 6).
+
 `ScopedMaintenanceGC.tla` extends S9's scope correspondence: three keys across
 two volumes, one foreign-only root, independent local coverage and crash/config
 invalidation. `ScopedMaintenanceGC_safe.cfg` checks foreign-root preservation,
