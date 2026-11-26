@@ -48,10 +48,14 @@ type ackProfiled interface{ AckProfile() string }
 
 func (p *roundEvidenceProvider) AckProfile() string { return p.ackProfile }
 
-// plannedMoveEvidence is the promotion gate's decision for an operator's
-// planned move to target: the guard, then a probe round of the target, which
-// must answer ready; its evidence goes on the line (kind PROMOTION).
-func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvidence, error) {
+// plannedMoveEvidenceAt is the promotion gate's decision for an operator's
+// move to target: the guard, then a probe round of the target, which must
+// answer ready (or, for an unreachable primary, the fencing round); its
+// evidence goes on the line (kind PROMOTION). It decides the move against current, the line the
+// operator's request was checked against (its expected line): the
+// reachability judged and the fencing round opened are that line's, never a
+// line read later. The publisher then mints only while the line is still it.
+func (h *Host) plannedMoveEvidenceAt(volumeID, target string, current authority.AuthorityBasis) (adapter.PrimaryEvidence, error) {
 	h.promotionMu.RLock()
 	prober := h.promotionProber
 	h.promotionMu.RUnlock()
@@ -80,8 +84,8 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 	// move stays a planned move under its guard.
 	if err := plannedMoveAllowed(profile, len(placement.Slots)); err != nil && !errors.Is(err, ErrPlannedMoveNeedsSeal) {
 		return adapter.PrimaryEvidence{}, err
-	} else if h.primaryUnreachable(volumeID) {
-		return h.fencedMoveEvidence(volumeID, target, profile, placement.Slots)
+	} else if h.primaryUnreachable(volumeID, current) {
+		return h.fencedMoveEvidence(volumeID, target, profile, placement.Slots, current)
 	} else if err != nil {
 		return adapter.PrimaryEvidence{}, err
 	}
@@ -101,9 +105,8 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 
 // primaryUnreachable: the line's primary has no fresh, reachable heartbeat
 // slot. A volume without a line has no primary to lose.
-func (h *Host) primaryUnreachable(volumeID string) bool {
-	current, ok := h.Publisher().VolumeAuthorityLine(volumeID)
-	if !ok {
+func (h *Host) primaryUnreachable(volumeID string, current authority.AuthorityBasis) bool {
+	if !current.Assigned {
 		return false
 	}
 	slot, fresh := h.freshCurrentSlot(volumeID, current.ReplicaID)
@@ -118,9 +121,8 @@ func (h *Host) primaryUnreachable(volumeID string) bool {
 // fenced end and is ready). A round that does not allow the target publishes
 // nothing and leaves the fence pending, so a primary that answers again is
 // continued at e+1 (healAfterFailedFence) by the product loop.
-func (h *Host) fencedMoveEvidence(volumeID, target, profile string, slots []lifecycle.PlacementSlotIntent) (adapter.PrimaryEvidence, error) {
-	current, ok := h.Publisher().VolumeAuthorityLine(volumeID)
-	if !ok {
+func (h *Host) fencedMoveEvidence(volumeID, target, profile string, slots []lifecycle.PlacementSlotIntent, current authority.AuthorityBasis) (adapter.PrimaryEvidence, error) {
+	if !current.Assigned {
 		return adapter.PrimaryEvidence{}, fmt.Errorf("fenced move: volume %s has no authority line", volumeID)
 	}
 	h.promotionMu.RLock()

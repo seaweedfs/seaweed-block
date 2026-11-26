@@ -82,7 +82,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor|chunk|volume|volume-unheld|workspace")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor|chunk|volume|volume-unheld|workspace|failover")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -131,6 +131,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsVolumeUnheld(args[2:], stdout, stderr)
 	case "workspace":
 		return runOpsWorkspace(args[2:], stdout, stderr)
+	case "failover":
+		return runOpsFailover(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
@@ -2300,6 +2302,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "      (read-only; every root HEAD names is checked; exit 0 clean, 3 findings, 1 incomplete; --depth data needs --timeout)")
 	fmt.Fprintln(w, "  sw-block ops volume resolve --master <addr> [--timeout 10s] <name>   (prints the master layout id)")
 	fmt.Fprintln(w, "  sw-block ops volume-unheld --path <volume-file>   (exit 0: no process on this host holds it; local filesystems only)")
+	fmt.Fprintln(w, "  sw-block ops failover --master <addr> --volume <id> --target <replica> --target-data <addr> --target-ctrl <addr> --expect-current <replica>@<epoch> --confirm-old-node-off <volume>")
 	fmt.Fprintln(w, "  sw-block ops workspace force-move --master <addr> --volume <id> --target-host <server-id> --target-data <addr> --target-ctrl <addr> --request-id <id> --confirm-forced <volume>@<epoch> [--dry-run]")
 	fmt.Fprintln(w, "  sw-block ops workspace lost-range --master <addr> --volume <id> [--request-id <id>]   (authority only; no bypass: see `sw-block ops workspace help`)")
 }

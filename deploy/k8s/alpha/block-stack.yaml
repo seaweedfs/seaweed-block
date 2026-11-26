@@ -53,6 +53,7 @@ spec:
             - "--audit-log=/var/lib/sw-block/audit.log"
             - "--launcher-master-tls-secret-prefix=sw-block-node-tls"
             - "--expected-slots-per-volume=__EXPECTED_SLOTS_PER_VOLUME__"
+            - "--failback-runtime-rpc"
           ports:
             - name: grpc
               containerPort: 9333
