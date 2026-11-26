@@ -1,8 +1,11 @@
 package main
 
 import (
-	"io"
+	"context"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,39 +40,53 @@ func clusterSpecText(t *testing.T, rf int, sized bool) string {
 	return p
 }
 
+// guardHelperEnv carries a blockmaster command line (fields separated by
+// guardHelperSep) to the helper process below.
+const (
+	guardHelperEnv = "SWB_BLOCKMASTER_GUARD_HELPER_ARGS"
+	guardHelperSep = "\x1f"
+)
+
+// TestGuardHelperProcess is not a test on its own: re-executed by
+// TestReplicatedClusterSpecWithTheProductLoopOffIsRefused, it runs
+// blockmaster's run with the given arguments and exits with its code.
+func TestGuardHelperProcess(t *testing.T) {
+	args := os.Getenv(guardHelperEnv)
+	if args == "" {
+		t.Skip("helper process only")
+	}
+	f, err := parseFlags(strings.Split(args, guardHelperSep))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(64)
+	}
+	os.Exit(run(f))
+}
+
 // A replicated cluster-spec volume with the product loop off is refused at
-// start, naming the flag, before anything is opened (run returns 2).
+// start, naming the flag, before anything is opened (exit 2). blockmaster
+// runs as a bounded child: without the guard it would start and serve, so
+// the child is killed at the deadline and joined (exec closes its pipes).
 func TestReplicatedClusterSpecWithTheProductLoopOffIsRefused(t *testing.T) {
-	f, err := parseFlags([]string{
+	args := []string{
 		"--authority-store", filepath.Join(t.TempDir(), "authority"),
 		"--lifecycle-store", filepath.Join(t.TempDir(), "lifecycle"),
 		"--cluster-spec", clusterSpecWithRF(t, 3),
 		"--expected-slots-per-volume", "3",
 		"--listen", "127.0.0.1:0",
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestGuardHelperProcess$")
+	cmd.Env = append(os.Environ(), guardHelperEnv+"="+strings.Join(args, guardHelperSep))
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput() // returns once the child exited (or was killed) and its pipes closed
+	if ctx.Err() != nil {
+		t.Fatalf("blockmaster started with a replicated cluster spec and the product loop off (killed at the deadline):\n%s", out)
 	}
-	saved := os.Stderr
-	os.Stderr = w
-	done := make(chan int, 1)
-	go func() { done <- run(f) }() // without the guard run starts and serves
-	var code int
-	select {
-	case code = <-done:
-	case <-time.After(10 * time.Second):
-		os.Stderr = saved
-		t.Fatal("blockmaster started with a replicated cluster spec and the product loop off")
-	}
-	os.Stderr = saved
-	w.Close()
-	out, _ := io.ReadAll(r)
-	if code != 2 || !strings.Contains(string(out), "--lifecycle-product-loop-interval") || !strings.Contains(string(out), "v1") {
-		t.Fatalf("run=%d, stderr %q; want 2 and the flag named", code, out)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(string(out), "--lifecycle-product-loop-interval") || !strings.Contains(string(out), "v1") {
+		t.Fatalf("exit %v, output %q; want exit 2 and the flag named", err, out)
 	}
 }
 
