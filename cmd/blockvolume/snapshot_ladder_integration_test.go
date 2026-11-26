@@ -208,7 +208,7 @@ func (env *handoffEnv) snapshot(t *testing.T, hostID, vol, name string) snapshot
 // listSnapshots lists vol's snapshots (with a name prefix when given) under
 // ctx, without failing the test.
 func (env *handoffEnv) listSnapshots(ctx context.Context, vol, prefix string) ([]snapshotInfo, error) {
-	args := []string{"ops", "chunk", "snapshots", "--volume", vol, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
+	args := []string{"ops", "chunk", "snapshots", "--master", env.h.masterAddr, "--volume", vol, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 	if prefix != "" {
 		args = append(args, "--prefix", prefix)
 	}
@@ -228,7 +228,7 @@ func (env *handoffEnv) listSnapshots(ctx context.Context, vol, prefix string) ([
 // snapshots lists vol's snapshots (with a name prefix when given).
 func (env *handoffEnv) snapshots(t *testing.T, vol, prefix string) []snapshotInfo {
 	t.Helper()
-	args := []string{"ops", "chunk", "snapshots", "--volume", vol, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
+	args := []string{"ops", "chunk", "snapshots", "--master", env.h.masterAddr, "--volume", vol, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath}
 	if prefix != "" {
 		args = append(args, "--prefix", prefix)
 	}

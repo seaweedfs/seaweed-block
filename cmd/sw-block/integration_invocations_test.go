@@ -84,23 +84,36 @@ func literalOpsInvocations(t *testing.T, dir string) []opsInvocation {
 			t.Fatal(err)
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || call.Ellipsis != token.NoPos || len(call.Args) < 2 {
-				return true
-			}
-			from := opsArg(call)
-			if from < 0 {
+			var elems []ast.Expr
+			switch x := n.(type) {
+			case *ast.CallExpr:
+				if x.Ellipsis != token.NoPos || len(x.Args) < 2 {
+					return true
+				}
+				from := opsArg(x)
+				if from < 0 {
+					return true
+				}
+				elems = x.Args[from:]
+			case *ast.CompositeLit:
+				// a prepared argument list, []string{"ops", ...}, that a
+				// harness call spreads
+				if len(x.Elts) < 2 || literal(x.Elts[0]) != "ops" {
+					return true
+				}
+				elems = x.Elts
+			default:
 				return true
 			}
 			var args []string
-			for _, a := range call.Args[from:] {
+			for _, a := range elems {
 				if v := literal(a); v != "" || isStringLit(a) {
 					args = append(args, v)
 					continue
 				}
 				args = append(args, placeholder(args, len(args)))
 			}
-			pos := fset.Position(call.Pos())
+			pos := fset.Position(n.Pos())
 			out = append(out, opsInvocation{where: filepath.Base(pos.Filename) + ":" + strconv.Itoa(pos.Line), args: args})
 			return true
 		})
