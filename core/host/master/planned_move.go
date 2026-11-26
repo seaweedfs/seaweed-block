@@ -43,6 +43,11 @@ func plannedMoveAllowed(ackProfile string, replicas int) error {
 	return fmt.Errorf("planned move: unknown ack profile %q", ackProfile)
 }
 
+// ErrMoveWhileCreating: the volume is still creating (its replica stores
+// are not all attested, or its primary still awaits them); no primary
+// change is decided before its first line is healthy.
+var ErrMoveWhileCreating = errors.New("move: the volume is still creating (replica stores not yet attested); no primary change until its first line is healthy")
+
 // ackProfiled is a promotion evidence provider that knows the ack profile.
 type ackProfiled interface{ AckProfile() string }
 
@@ -52,6 +57,9 @@ func (p *roundEvidenceProvider) AckProfile() string { return p.ackProfile }
 // planned move to target: the guard, then a probe round of the target, which
 // must answer ready; its evidence goes on the line (kind PROMOTION).
 func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvidence, error) {
+	if h.creatingByRecord(volumeID) {
+		return adapter.PrimaryEvidence{}, ErrMoveWhileCreating
+	}
 	h.promotionMu.RLock()
 	prober := h.promotionProber
 	h.promotionMu.RUnlock()
@@ -135,6 +143,9 @@ func (h *Host) fencedMoveEvidence(volumeID, target, profile string, slots []life
 	plain, err := prober.ProbePromotionCandidates(volumeID, current, candidates)
 	if err != nil {
 		return adapter.PrimaryEvidence{}, fmt.Errorf("fenced move: probe round: %w", err)
+	}
+	if creatingByAnswer(plain, current) {
+		return adapter.PrimaryEvidence{}, ErrMoveWhileCreating
 	}
 	if plain.AckProfile == "" {
 		plain.AckProfile = profile
