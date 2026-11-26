@@ -112,7 +112,7 @@ func TestBCatalog_RestoreThenDeleteTheTarget(t *testing.T) {
 		t.Fatalf("delete a depended-on snapshot: %v; want ErrHasDependents", err)
 	}
 
-	if err := c.DeleteVolume(ctx, tgt, okDeleteAuthority{}); err != nil {
+	if _, err := c.DeleteVolume(ctx, tgt, okDeleteAuthority{}); err != nil {
 		t.Fatalf("delete the target: %v", err)
 	}
 	if h, _, err := ts.ReadHead(ctx); err != nil || h.State != layout.StateDeleted {
