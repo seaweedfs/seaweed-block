@@ -115,7 +115,7 @@ func establishVolume(t *testing.T, h *Host, volumeID string) {
 		t.Fatalf("establish %s: %v", volumeID, err)
 	}
 	h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID))   // the wait closes
-	if err := h.attest.noteFirstReady(volumeID); err != nil { // the primary's first ready answer
+	if _, err := h.attest.noteFirstReady(volumeID); err != nil { // creation ended (the primary's first ready answer)
 		t.Fatalf("establish %s: %v", volumeID, err)
 	}
 	if line, _ := h.Publisher().VolumeAuthorityLine(volumeID); h.inCreationPhase(volumeID, line, nil) != "" {
@@ -160,7 +160,7 @@ func TestCreationPhaseSurvivesAMasterRestart(t *testing.T) {
 			if established {
 				attestAllStores(t, h)
 				h.attest.awaited("vol-rf3", h.replicaSlotsFor("vol-rf3"))
-				if err := h.attest.noteFirstReady("vol-rf3"); err != nil {
+				if _, err := h.attest.noteFirstReady("vol-rf3"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -195,13 +195,12 @@ func TestCreationPhaseSurvivesAMasterRestart(t *testing.T) {
 	}
 }
 
-// Creation ends at the primary's first ready answer at its first line, not
-// at the last store attestation: a primary restarted after the last
-// attestation, before it adopts the complete assignment (it answers not
-// ready, and no longer says it awaits the stores), is still creating: no
-// fencing round, no reassign. Its first ready answer ends creation, durably,
-// and from then on the normal rules apply.
-func TestCreationEndsAtThePrimarysFirstReadyAnswer(t *testing.T) {
+// Creation does not end at the last store attestation: a primary restarted
+// after it, before it adopts the complete assignment (it answers not ready,
+// and no longer says it awaits the stores), with no write on any survivor,
+// is still creating: no fencing round, no reassign. Creation ends at a
+// ready answer or a survivor's write (TestCreationEndsAtTheFirstReadyAnswerOrASurvivorsWrite).
+func TestCreationOutlivesTheLastStoreAttestation(t *testing.T) {
 	h := newBootGraceMasterCreating(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}})
 	defer closeTestMaster(t, h)
 	attestAllStores(t, h) // every store recorded: the master's wait is over
@@ -222,32 +221,17 @@ func TestCreationEndsAtThePrimarysFirstReadyAnswer(t *testing.T) {
 	expectLineStaysR1(t, h, "a restarted primary before its first ready answer")
 	line := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
 	if h.inCreationPhase("vol-rf3", line, nil) == "" {
-		t.Fatal("creation ended before the primary's first ready answer")
-	}
-	p.mu.Lock()
-	p.currentReady = true // the first ready answer
-	p.mu.Unlock()
-	if why := h.inCreationPhase("vol-rf3", line, nil); why != "" {
-		t.Fatalf("after the first ready answer: still creating (%s)", why)
-	}
-	if h.attest.awaitingFirstReady("vol-rf3") {
-		t.Fatal("the first ready answer was not recorded")
-	}
-	p.mu.Lock()
-	p.currentReady = false // a later not-ready answer reopens nothing
-	p.mu.Unlock()
-	if why := h.inCreationPhase("vol-rf3", line, nil); why != "" {
-		t.Fatalf("creation reopened after it ended (%s)", why)
+		t.Fatal("creation ended with no write on any survivor")
 	}
 }
 
-// recordFirstReady records that the volume's primary answered ready at its
-// first line (after its stores were attested): fixtures whose primary was
-// healthy before the scenario's failure.
+// recordFirstReady records the end of creation (after the stores were
+// attested), as the primary's first ready answer does: fixtures whose
+// primary was healthy before the scenario's failure.
 func recordFirstReady(t *testing.T, h *Host, volumeID string) {
 	t.Helper()
 	h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID))
-	if err := h.attest.noteFirstReady(volumeID); err != nil {
+	if _, err := h.attest.noteFirstReady(volumeID); err != nil {
 		t.Fatal(err)
 	}
 }

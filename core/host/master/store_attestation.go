@@ -31,11 +31,12 @@ type attestedStores struct {
 	// meanwhile is not waited for); it is cleared, for good, the first time
 	// every current replica has a recorded store.
 	Initial []string `json:"initial,omitempty"`
-	// AwaitingFirstReady: every initial store is attested, but the volume's
-	// primary has not yet answered ready at its first line (first Healthy).
-	// Set in the same write that clears Initial, cleared for good by the
-	// first ready answer: creation ends there. A record written before this
-	// field existed has none, so an established volume is never reopened.
+	// AwaitingFirstReady: every initial store is attested, but creation has
+	// not ended: neither has the primary answered ready nor a survivor
+	// answered that it holds a write of the current line. Set in the same
+	// write that clears Initial, cleared for good by the first of the two
+	// (creation ended). A record written before this field existed has none,
+	// so an established volume is never reopened.
 	AwaitingFirstReady bool `json:"awaiting_first_ready,omitempty"`
 }
 
@@ -166,17 +167,19 @@ func (s *storeAttestations) awaited(volumeID string, current []string) (waiting,
 	v.AwaitingFirstReady = true // creation ends at the primary's first ready answer
 	vols[volumeID] = v
 	if err := s.persist(vols); err != nil {
-		// Not cleared: the volume keeps answering from its stores (nothing
-		// awaited); the next call retries the write.
-		return 0, len(current)
+		// Not recorded: the volume stays in its wait (reported as one store
+		// awaited) until the end of the wait is durable; the next call
+		// retries the write. Releasing it here would end creation with no
+		// durable record of its next stage.
+		return 1, len(current)
 	}
 	s.vols = vols
 	s.notifyLocked(volumeID)
 	return 0, len(current)
 }
 
-// awaitingFirstReady: the volume's stores are all attested and its primary
-// has not yet answered ready at its first line.
+// awaitingFirstReady: the volume's stores are all attested and its creation
+// has not ended.
 func (s *storeAttestations) awaitingFirstReady(volumeID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -184,14 +187,14 @@ func (s *storeAttestations) awaitingFirstReady(volumeID string) bool {
 	return had && v.AwaitingFirstReady
 }
 
-// noteFirstReady records, durably and for good, that the volume's primary
-// answered ready at its first line: its creation is complete.
-func (s *storeAttestations) noteFirstReady(volumeID string) error {
+// noteFirstReady records, durably and for good, that the volume's creation
+// ended. It reports whether creation has ended (false: it may not end now).
+func (s *storeAttestations) noteFirstReady(volumeID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, had := s.vols[volumeID]
 	if !had || !v.AwaitingFirstReady {
-		return nil
+		return true, nil
 	}
 	vols := make(map[string]attestedStores, len(s.vols))
 	for k, x := range s.vols {
@@ -200,11 +203,11 @@ func (s *storeAttestations) noteFirstReady(volumeID string) error {
 	v.AwaitingFirstReady = false
 	vols[volumeID] = v
 	if err := s.persist(vols); err != nil {
-		return err
+		return false, err
 	}
 	s.vols = vols
 	s.notifyLocked(volumeID)
-	return nil
+	return true, nil
 }
 
 // record merges att into the volume's record, in one write: each replica it

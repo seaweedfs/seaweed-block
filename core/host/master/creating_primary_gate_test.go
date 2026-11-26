@@ -70,7 +70,9 @@ func TestMasterRestartInTheGapDoesNotReassign(t *testing.T) {
 	}
 	h2.Start()
 	defer closeTestMaster(t, h2)
-	h2.SetPromotionEvidenceProvider(&switchProbe{awaitingEpoch: waitAuthorityLine(t, h2.Publisher(), "vol-rf3").Epoch})
+	// The primary still awaits the stores: it served nothing, so no survivor
+	// holds a write (every end is zero).
+	h2.SetPromotionEvidenceProvider(&switchProbe{awaitingEpoch: waitAuthorityLine(t, h2.Publisher(), "vol-rf3").Epoch, empty: true})
 	if inCreationWait(h2) {
 		t.Fatal("fixture: the restarted master still waits for stores")
 	}
