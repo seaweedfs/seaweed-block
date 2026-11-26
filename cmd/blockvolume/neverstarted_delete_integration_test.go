@@ -143,6 +143,35 @@ func (env *handoffEnv) deleteNoRevoke(ctx context.Context, v, request string) (s
 	return out + errOut, code
 }
 
+// deleteAfterTheHorizon is v1's delete of a line HEAD never reached: the
+// delete may be refused only while the stranded line's lease can still be
+// live ("lease expiry plus clock-skew margin has not elapsed"); nobody
+// renews it, so the same delete (same request id, which resumes it) run
+// past the horizon it names completes. Any other refusal is returned as it
+// is. The immediate delete of a never-started line, without waiting, is the
+// 1.0.1 fix.
+func (env *handoffEnv) deleteAfterTheHorizon(t *testing.T, v, request string) (string, int) {
+	t.Helper()
+	out, code := env.deleteNoRevoke(context.Background(), v, request)
+	if code == 0 || !strings.Contains(out, "has not elapsed") {
+		return out, code
+	}
+	wait := 75 * time.Second
+	if i := strings.Index(out, "live until "); i >= 0 {
+		if f := strings.Fields(out[i+len("live until "):]); len(f) > 0 {
+			if until, err := time.Parse(time.RFC3339Nano, strings.TrimRight(f[0], ":")); err == nil {
+				wait = time.Until(until) + 5*time.Second
+			}
+		}
+	}
+	if wait < 0 || wait > 90*time.Second {
+		t.Fatalf("the refusal names a horizon %v away (want within 90 s):\n%s", wait, out)
+	}
+	t.Logf("%s: refused until its lease horizon; retrying in %v:\n%s", v, wait.Round(time.Second), firstLine(out))
+	time.Sleep(wait)
+	return env.deleteNoRevoke(context.Background(), v, request)
+}
+
 // lineOf returns the master's durable authority record for v (the line:
 // replica, epoch, and any workspace lease), as stored in --authority-store.
 func (env *handoffEnv) lineOf(t *testing.T, v string) string {
@@ -234,7 +263,8 @@ func (env *handoffEnv) strandAtGrant(t *testing.T, candidates ...string) string 
 	return ""
 }
 
-// 1.0.1 red (INV-WS-DELETE-NO-LIVE-HOLDER-001): a line whose epoch HEAD never
+// INV-WS-DELETE-NO-LIVE-HOLDER-001 (on v1 past the stranded line's lease
+// horizon: deleteAfterTheHorizon; at once is 1.0.1): a line whose epoch HEAD never
 // reached has acknowledged nothing, so volume-delete completes WITHOUT a
 // revoke; HEAD becomes a deleted tombstone, the source is untouched, and no
 // granted lease stays on the deleted volume. Routes, each without root:
@@ -250,12 +280,12 @@ func TestNeverStartedLineIsDeletableWithoutARevoke(t *testing.T) {
 	deleted := func(t *testing.T, env *handoffEnv, v, request string) {
 		t.Helper()
 		before := env.workspaceShow(t, v)
-		out, code := env.deleteNoRevoke(context.Background(), v, request)
+		out, code := env.deleteAfterTheHorizon(t, v, request)
 		completed := code == 0 && handoffDeleteCompleted(out)
 		head, after := env.headOf(t, v), env.workspaceShow(t, v)
 		t.Logf("delete exit %d, completed %v, HEAD %s\nworkspace show before:\n%s\nafter:\n%s\ndelete output:\n%s", code, completed, head, before, after, out)
 		if !completed {
-			t.Fatalf("1.0.1: volume-delete of %s (line above HEAD) must complete without a revoke; exit %d", v, code)
+			t.Fatalf("volume-delete of %s (line above HEAD) must complete without a revoke, past the lease horizon; exit %d", v, code)
 		}
 		if !strings.Contains(head, `"state":"deleted"`) || strings.Contains(after, "lease state: granted") {
 			t.Fatalf("a completed delete must leave a deleted HEAD and no granted lease")
@@ -307,7 +337,7 @@ func requireSourceUntouched(t *testing.T, env *handoffEnv) {
 	}
 }
 
-// 1.0.1 red: after that delete, a start of the target with the store up
+// After that delete (on v1 past the lease horizon), a start of the target with the store up
 // must not claim it: it exits without serving and the HEAD stays deleted.
 // S1 and S2.
 func TestNeverStartedLineDeleteFencesALateStart(t *testing.T) {
@@ -326,8 +356,8 @@ func TestNeverStartedLineDeleteFencesALateStart(t *testing.T) {
 			} else {
 				v = env.strandAtGrant(t, c.targets...)
 			}
-			if out, code := env.deleteNoRevoke(context.Background(), v, "del-"+v+"-late"); code != 0 {
-				t.Fatalf("1.0.1: volume-delete of %s (line above HEAD): exit %d:\n%s", v, code, out)
+			if out, code := env.deleteAfterTheHorizon(t, v, "del-"+v+"-late"); code != 0 {
+				t.Fatalf("volume-delete of %s (line above HEAD), past the lease horizon: exit %d:\n%s", v, code, out)
 			}
 			b := env.hosts["n-"+v]
 			late := env.h.start(t, "blockvolume-"+v+"-late", env.h.volume, env.volArgsFor(b)...)
@@ -380,7 +410,7 @@ func TestNeverStartedLineDeleteRacesAStart(t *testing.T) {
 	}
 }
 
-// 1.0.1 red (master restart, one direction): the master is SIGKILLed and
+// Master restart, one direction (on v1 past the lease horizon): the master is SIGKILLed and
 // restarted between the stranding and the delete; the delete still completes
 // without a revoke, from what the master and the HEAD keep durably. S1 and S2.
 func TestNeverStartedDeleteAfterAMasterRestart(t *testing.T) {
@@ -395,9 +425,9 @@ func TestNeverStartedDeleteAfterAMasterRestart(t *testing.T) {
 				env.strandStoreDown(t, v)
 			}
 			restartKilledMaster(t, env)
-			out, code := env.deleteNoRevoke(context.Background(), v, "del-"+v+"-after-restart")
+			out, code := env.deleteAfterTheHorizon(t, v, "del-"+v+"-after-restart")
 			if head := env.headOf(t, v); code != 0 || !strings.Contains(head, `"state":"deleted"`) {
-				t.Fatalf("1.0.1: after a master restart, volume-delete of %s must complete; exit %d, HEAD %s:\n%s", v, code, head, out)
+				t.Fatalf("after a master restart, volume-delete of %s must complete (past the lease horizon); exit %d, HEAD %s:\n%s", v, code, head, out)
 			}
 		})
 	}
