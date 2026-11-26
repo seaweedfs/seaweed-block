@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 // RF3 and an RF1 create are admitted; and every existing volume keeps failing
 // over (no volume of another slot count can stop the controller's decisions).
 func TestAnRF2CreateOnAnRF3MasterIsRefusedAndFailoverContinues(t *testing.T) {
-	h := newBootGraceMaster(t, Config{ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}})
+	h := newBootGraceMaster(t, Config{LifecycleProductLoop: true, ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}})
 	defer closeTestMaster(t, h)
 	svc := newServices(h)
 	_, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "v-rf2", SizeBytes: 1 << 20, ReplicationFactor: 2})
@@ -37,4 +38,30 @@ func TestAnRF2CreateOnAnRF3MasterIsRefusedAndFailoverContinues(t *testing.T) {
 	ineligible.eligible = false
 	unsupportedTick(t, h, ineligible)
 	expectFailoverToR2(t, h, "an existing RF3 volume after the refused RF2 create")
+}
+
+// The third door: a replicated volume created while the lifecycle product
+// loop is off (which alone binds and promotes it) would never get a primary,
+// so CreateVolume refuses it naming the flag; with the loop on the same
+// create is admitted, and an RF1 create is admitted either way.
+func TestAReplicatedCreateWithTheProductLoopOffIsRefused(t *testing.T) {
+	for _, loop := range []bool{false, true} {
+		h, err := New(Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0", LifecycleProductLoop: loop})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.Start()
+		svc := newServices(h)
+		_, err = svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "v-rf3", SizeBytes: 1 << 20, ReplicationFactor: 3})
+		if loop && err != nil {
+			t.Fatalf("RF3 create with the loop on: %v", err)
+		}
+		if !loop && (status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "--lifecycle-product-loop-interval")) {
+			t.Fatalf("RF3 create with the loop off: %v; want FailedPrecondition naming the flag", err)
+		}
+		if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "v-rf1", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+			t.Fatalf("RF1 create (loop %v): %v", loop, err)
+		}
+		closeTestMaster(t, h)
+	}
 }

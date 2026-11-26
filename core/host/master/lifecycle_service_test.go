@@ -92,6 +92,7 @@ func TestRestoreCreateVolumePersistsRequestBeforeTargetAndHealsRetry(t *testing.
 	if _, ok := h.Lifecycle().Volumes.GetVolume("net-target"); ok {
 		t.Fatal("RF2 restore created a target record")
 	}
+	h.cfg.LifecycleProductLoop = true // a replicated create needs the product loop
 	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "net-source", SizeBytes: 1 << 20, ReplicationFactor: 3}); err != nil {
 		t.Fatal(err)
 	}
