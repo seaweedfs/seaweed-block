@@ -109,9 +109,13 @@ func runProductLoop(t *testing.T, h *master.Host) {
 // reported its slot: tickAfterProcessReports waits for that report, then
 // runs the product tick that binds.
 //
-// SWBLOCK_TEST_EARLY_LINE=1 is the control: earlyLineControl mints the line
-// from a hand-ingested observation before the holder starts, so the line
-// names no process, the holder refuses it and never serves.
+// SWBLOCK_TEST_EARLY_LINE=1 is the control, the order the fixture used
+// before: earlyLineControl mints the line from a hand-ingested observation
+// before the holder starts, and no product tick runs after the holder
+// starts. The line names no process, the holder refuses it and never
+// serves. A tick after the holder reported would re-issue the line for its
+// process (an unbound placement goes through the controller, which
+// refreshes on a process change), so the control runs none.
 func earlyLineControl(t *testing.T, h *master.Host, server, volume, replica, data, ctrl string) {
 	t.Helper()
 	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") != "1" {
@@ -124,16 +128,21 @@ func earlyLineControl(t *testing.T, h *master.Host, server, volume, replica, dat
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatal(err)
 	}
+	leaseBinaryPoll(t, "control: no early line", func() bool { line, ok := h.Publisher().VolumeAuthorityLine(volume); return ok && line.Epoch > 0 })
+	if line, _ := h.Publisher().VolumeAuthorityLine(volume); line.Incarnation != "" {
+		t.Fatalf("control: want an early line that names no process, have %+v", line)
+	}
 }
 
 func tickAfterProcessReports(t *testing.T, h *master.Host, server, volume, replica string) {
 	t.Helper()
-	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") != "1" {
-		leaseBinaryPoll(t, "the holder never reported its process", func() bool {
-			s, ok := h.ObservationHost().Store().SlotFactOnServer(server, volume, replica)
-			return ok && s.Incarnation != ""
-		})
+	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") == "1" {
+		return
 	}
+	leaseBinaryPoll(t, "the holder never reported its process", func() bool {
+		s, ok := h.ObservationHost().Store().SlotFactOnServer(server, volume, replica)
+		return ok && s.Incarnation != ""
+	})
 	if _, err := h.RunLifecycleProductTick(); err != nil {
 		t.Fatal(err)
 	}
