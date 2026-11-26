@@ -151,10 +151,19 @@ type ChunkSnapshotRequest struct {
 	Class       string // retention class: "semantic" or "pinned"
 }
 
+// ChunkDetachHolder is the caller's expected assignment for a conditional seal.
+// Fields are optional only as a group: old callers omit expectedHolder entirely.
+type ChunkDetachHolder struct {
+	ReplicaID string `json:"replicaID"`
+	Epoch     uint64 `json:"epoch"`
+	ClaimID   string `json:"claimID,omitempty"`
+}
+
 // ChunkDetachResponse is the body of a successful POST /chunk/detach (§3.6).
 type ChunkDetachResponse struct {
 	Precopy        *storage.PrecopyReport `json:"precopy,omitempty"`
 	VolumeID       string                 `json:"volumeID"`
+	Holder         string                 `json:"holder,omitempty"`
 	CutLSN         uint64                 `json:"cutLSN"`
 	HeadGen        uint64                 `json:"headGen"`
 	HeadEpoch      uint64                 `json:"headEpoch"`
@@ -300,6 +309,8 @@ func chunkErrorCode(err error) (int, string, bool) {
 	case errors.Is(err, durable.ErrDetachOutcomeUnknown):
 		// Before any cause: the detach may still have landed; I/O stays stopped.
 		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
+	case errors.Is(err, durable.ErrSealHolderChanged):
+		return http.StatusConflict, "holder_changed", false
 	case errors.Is(err, layout.ErrGeometryMismatch):
 		return http.StatusConflict, chunkstore.CodeGeometryMismatch, false
 	case errors.Is(err, layout.ErrHeadAbsent), errors.Is(err, layout.ErrNoSnapshot):
@@ -554,12 +565,13 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		VolumeID          string `json:"volumeID"`
-		TimeoutMs         int64  `json:"timeoutMs"`
-		Plain             bool   `json:"plain,omitempty"`
-		Frozen            bool   `json:"frozen,omitempty"`
-		FreezeStartedAtNs int64  `json:"freezeStartedAtNs,omitempty"`
-		AllowOverBudget   bool   `json:"allowOverBudget,omitempty"`
+		VolumeID          string             `json:"volumeID"`
+		TimeoutMs         int64              `json:"timeoutMs"`
+		Plain             bool               `json:"plain,omitempty"`
+		Frozen            bool               `json:"frozen,omitempty"`
+		FreezeStartedAtNs int64              `json:"freezeStartedAtNs,omitempty"`
+		AllowOverBudget   bool               `json:"allowOverBudget,omitempty"`
+		ExpectedHolder    *ChunkDetachHolder `json:"expectedHolder,omitempty"`
 	}
 	if !decodeChunkBody(w, r, &req) {
 		return
@@ -572,6 +584,18 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 	if req.Plain && req.TimeoutMs <= 0 {
 		writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "plain detach requires positive timeoutMs")
 		return
+	}
+	if req.ExpectedHolder != nil {
+		want := req.ExpectedHolder
+		if !req.Plain || want.ReplicaID == "" || want.Epoch == 0 {
+			writeChunkErr(w, http.StatusBadRequest, codeBadRequest, false, "expectedHolder requires plain, replicaID and a positive epoch")
+			return
+		}
+		own := s.view.Projection()
+		if own.VolumeID != req.VolumeID || own.ReplicaID != want.ReplicaID || own.Epoch != want.Epoch {
+			writeChunkErr(w, http.StatusConflict, "holder_changed", false, "holder changed")
+			return
+		}
 	}
 	ctl := s.chunkTarget(w, req.VolumeID)
 	if ctl == nil {
@@ -600,7 +624,18 @@ func (s *StatusServer) handleChunkDetach(w http.ResponseWriter, r *http.Request)
 			writeChunkErr(w, http.StatusConflict, "plain_detach_unsupported", false, "plain detach unsupported")
 			return
 		}
-		res, err = plain.DetachPlain(ctx, req.VolumeID)
+		if req.ExpectedHolder != nil {
+			conditional, ok := ctl.(interface {
+				DetachPlainFor(context.Context, string, ChunkDetachHolder) (ChunkDetachResponse, error)
+			})
+			if !ok {
+				writeChunkErr(w, http.StatusConflict, "conditional_seal_unsupported", false, "conditional seal unsupported")
+				return
+			}
+			res, err = conditional.DetachPlainFor(ctx, req.VolumeID, *req.ExpectedHolder)
+		} else {
+			res, err = plain.DetachPlain(ctx, req.VolumeID)
+		}
 	} else {
 		res, err = ctl.Detach(ctx, req.VolumeID)
 	}
@@ -785,6 +820,23 @@ func (c *chunkControl) DetachPlain(ctx context.Context, volumeID string) (ChunkD
 	}
 	r, last, err := p.DetachVolumePlain(ctx, volumeID)
 	return chunkDetachResponse(volumeID, r, last, err)
+}
+
+// DetachPlainFor preserves the request's expected assignment down to the
+// receiver lock; never fall back to an unconditional seal.
+func (c *chunkControl) DetachPlainFor(ctx context.Context, volumeID string, want ChunkDetachHolder) (ChunkDetachResponse, error) {
+	p, ok := c.p.(interface {
+		DetachVolumePlainFor(context.Context, string, durable.SealExpectation) (storage.ChunkCutResult, uint64, error)
+	})
+	if !ok {
+		return ChunkDetachResponse{}, durable.ErrSealHolderChanged
+	}
+	r, last, err := p.DetachVolumePlainFor(ctx, volumeID, durable.SealExpectation{ReplicaID: want.ReplicaID, Epoch: want.Epoch, ClaimID: want.ClaimID})
+	response, err := chunkDetachResponse(volumeID, r, last, err)
+	if err == nil {
+		response.Holder = r.Head.Holder
+	}
+	return response, err
 }
 
 func chunkDetachResponse(volumeID string, r storage.ChunkCutResult, last uint64, err error) (ChunkDetachResponse, error) {

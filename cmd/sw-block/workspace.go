@@ -26,6 +26,9 @@ const (
 )
 
 const workspaceUsage = `usage:
+  sw-block ops workspace planned-move --master ADDR --volume V --replica R --epoch E
+      --source-host S --source-status URL --target-host T --target-status URL
+      --request-id ID [--claim-id C] [--timeout 5m]
   sw-block ops workspace show --master ADDR --volume V [--timeout 30s]
   sw-block ops workspace revoke --master ADDR --volume V --replica R --epoch E
       (--sealed-gen G | --without-seal) [--timeout 30s]
@@ -34,6 +37,13 @@ const workspaceUsage = `usage:
   sw-block ops workspace force-move --master ADDR --volume V --target-host H --target-data A --target-ctrl A
       --request-id ID --confirm-forced V@EPOCH [--dry-run] [--timeout 30s]
   sw-block ops workspace lost-range --master ADDR --volume V [--request-id ID] [--timeout 30s]
+
+planned-move drives seal, revoke, recorded ACK and clean move for RF1 workspaces.
+Quiesce the guest first and start the target unit waiting for its grant. A missing
+live target binding is refused before any mutation. COMPLETE requires the target's
+own status at the new epoch; a move receipt alone is not completion. Exit 6 means
+MOVED-TARGET-NOT-SERVING: keep the target unit running and rerun the SAME id.
+Guest reconnect is an operator step after COMPLETE; no local journal is written.
 
 force-move FORCES an RF1 workspace volume's authority off a holder that is gone,
 abandoning what it wrote after the last published HEAD. It moves AUTHORITY only:
@@ -84,6 +94,8 @@ func runOpsWorkspace(args []string, stdout, stderr io.Writer) int {
 		return wsExitRefusedLocally
 	}
 	switch args[0] {
+	case "planned-move":
+		return runWorkspacePlannedMove(args[1:], stdout, stderr)
 	case "show":
 		return runWorkspaceShow(args[1:], stdout, stderr)
 	case "move":

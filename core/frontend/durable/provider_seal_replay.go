@@ -19,7 +19,7 @@ func (p *DurableProvider) chunkHolder(proj frontend.Projection) string {
 
 // replayPlainSeal implements M5 PlainSeal -> RemoteProof. It also works when
 // RecoverVolume refused a sealed incarnation and installed no local layer.
-func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, result storage.ChunkCutResult) (storage.ChunkCutResult, uint64, error) {
+func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, result storage.ChunkCutResult, want *SealExpectation) (storage.ChunkCutResult, uint64, error) {
 	p.mu.Lock()
 	h, ok := p.volumes[volumeID]
 	if p.closed || !ok {
@@ -35,6 +35,9 @@ func (p *DurableProvider) replayPlainSeal(ctx context.Context, volumeID string, 
 	defer p.inflight.Done()
 	h.attachMu.Lock()
 	defer h.attachMu.Unlock()
+	if err := p.checkSealExpectation(volumeID, h, want); err != nil {
+		return storage.ChunkCutResult{}, 0, err
+	}
 	if err := ctx.Err(); err != nil {
 		return storage.ChunkCutResult{}, 0, err
 	}

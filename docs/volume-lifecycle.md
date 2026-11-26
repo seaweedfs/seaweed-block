@@ -245,6 +245,33 @@ Copy `replica:` (`R`) and `epoch:` (`E`). `lease state:` must be `granted`.
 **2. Stop the writer.** Stop the guest or unmount the file system, so that no
 I/O is in flight. Leave `blockvolume` running: the seal runs inside it.
 
+The optional `ops workspace planned-move` command performs steps 3 through 6
+in one invocation for RF1 workspace volumes. Keep the guest quiesced and start
+the target's unit first, waiting for its grant. Blockmaster must report that
+host's live per-volume binding; otherwise the command refuses before sealing.
+For example:
+
+```bash
+sw-block ops workspace planned-move --master MASTER --volume v1 --replica R --epoch E \
+  --source-host s1 --source-status SOURCE_STATUS --target-host s2 --target-status TARGET_STATUS \
+  --request-id move-v1-1 --timeout 5m
+```
+
+Add `--claim-id C` if the source claim is known. Both status URLs are the
+operator-configured endpoints of those hosts. The command always sends a
+conditional seal and verifies the returned holder/epoch before revoking. It
+never creates an ACK, starts a remote service, or writes a local journal.
+Only the target's own `FrontendPrimaryReady` status for the new epoch permits
+`COMPLETE` (exit 0); reconnect the guest then. A recorded move with a target
+not yet serving returns `MOVED-TARGET-NOT-SERVING` (exit 6), with the next step.
+`REFUSED` is exit 1, `UNKNOWN` exit 3 (bad usage remains exit 2). On interruption,
+UNKNOWN, or exit 6, keep the guest quiesced and rerun the same arguments with
+the **same request ID**. An issued move is read from blockmaster and reused;
+the command does not seal the old source again. The timeout stops waiting,
+never proves that a seal, ACK, move or target readiness happened.
+
+The individual commands remain available:
+
 **3. Seal (plain detach)**, while the lease is granted:
 
 ```bash
@@ -256,6 +283,18 @@ Exit 0: stdout is JSON with `volumeID`, `cutLSN`, `headGen`, `headEpoch` and
 the volume refuses I/O on this host. Do not go on after any other answer (see
 the table below). Repeating the command is safe: it answers from the sealed
 HEAD.
+
+The HTTP plain-seal request can additionally bind the intended holder:
+`"expectedHolder":{"replicaID":"R","epoch":E,"claimID":"C"}`.
+`replicaID` and a positive `epoch` are required when this object is present;
+`claimID` is optional when unknown. The receiver checks its own assignment
+before stopping, and checks the expected identity again under attachment
+serialization before closing admission. A different replica, epoch or supplied
+claim returns HTTP 409 `holder_changed`, `retryable:false`; it does not stop
+the replacement. A successful conditional reply also contains the actual
+sealed `holder` (host/replica) alongside `headEpoch`. The caller must compare
+both to its request before revoking. Omitting `expectedHolder` preserves the
+existing request and response shape. This form requires `plain:true`.
 
 To check: `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
 `head.State` `detached`, `head.Holder` `s1/R`, `head.Epoch` E, a nonempty
