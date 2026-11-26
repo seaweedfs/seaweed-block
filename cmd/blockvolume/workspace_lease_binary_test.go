@@ -70,8 +70,13 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("workspace-rpc-%v", enabled), func(t *testing.T) {
 			base := fmt.Sprintf("/workspace-lease-%d", time.Now().UnixNano())
+			cl := cluster.client(t, base)
+			headCat, err := chunkstore.NewBCatalog(cl, cl, base)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var h *master.Host
-			reader, err := master.NewLayoutWorkspaceHEADReader("http://"+cluster.filerHTTP+base, func(ctx context.Context, name string) (chunkstore.VolumeRef, error) {
+			reader, err := master.NewLayoutWorkspaceHEADReader(headCat, func(ctx context.Context, name string) (chunkstore.VolumeRef, error) {
 				return h.WorkspaceLayoutVolume(ctx, name)
 			})
 			if err != nil {

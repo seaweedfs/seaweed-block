@@ -89,6 +89,16 @@ func (c *BCatalog) ReadHead(ctx context.Context, v VolumeRef) (layout.Head, bool
 	return s.ReadHead(ctx)
 }
 
+// ReadHeadObserved reads the volume's HEAD with its entry's modification
+// time (LayoutStore.ReadHeadObserved): the master's one HEAD reader.
+func (c *BCatalog) ReadHeadObserved(ctx context.Context, v VolumeRef) (layout.Head, int64, bool, error) {
+	s, err := c.Store(v)
+	if err != nil {
+		return layout.Head{}, 0, false, err
+	}
+	return s.ReadHeadObserved(ctx)
+}
+
 // DeleteSnapshot removes the named snapshot; refused while it has
 // dependents.
 func (c *BCatalog) DeleteSnapshot(ctx context.Context, v VolumeRef, name string) (layout.Head, error) {

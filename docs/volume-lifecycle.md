@@ -83,20 +83,20 @@ connects from (not loopback) in the cluster spec`. The loopback
 addresses above fit only when blockmaster and blockvolume run on the same machine.
 
 **3. blockmaster flags.** `--cluster-spec` replaces `--topology` (setting both
-stops blockmaster). `--workspace-head-base-url` is the filer HTTP address plus
-blockvolume's `--chunk-path`:
+stops blockmaster). blockmaster reads HEAD through the layout catalog: `--chunk-filer`
+is the filer gRPC address and `--chunk-path` is blockvolume's:
 
 ```bash
 blockmaster --authority-store /var/lib/sw-block-master/authority \
   --lifecycle-store /var/lib/sw-block-master/lifecycle \
   --cluster-spec /etc/sw-block/cluster-spec.yaml --expected-slots-per-volume 1 \
   --listen 127.0.0.1:9180 --workspace-rpc \
-  --workspace-head-base-url http://FILER_HTTP/swblock/chunks
+  --chunk-filer FILER_GRPC --chunk-path /swblock/chunks
 ```
 
 With the example units: `SWB_MASTER_TOPOLOGY=` (empty), `SWB_MASTER_EXPECTED_SLOTS=1`,
-`SWB_MASTER_WORKSPACE_RPC=true`, `SWB_MASTER_WORKSPACE_HEAD_BASE_URL=...`, and
-`--lifecycle-store` and `--cluster-spec` in `SWB_MASTER_EXTRA_ARGS`. blockmaster
+`SWB_MASTER_WORKSPACE_RPC=true`, and `--lifecycle-store`, `--cluster-spec`,
+`--chunk-filer` and `--chunk-path` in `SWB_MASTER_EXTRA_ARGS`. blockmaster
 reads the file only at start.
 
 blockvolume runs with its identity from the spec (`--server-id s1 --volume-id v1

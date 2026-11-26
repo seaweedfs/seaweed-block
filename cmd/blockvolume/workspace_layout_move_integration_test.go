@@ -146,8 +146,13 @@ func TestIntegrationWorkspaceLayoutMove(t *testing.T) {
 
 func layoutMove(t *testing.T, exe string, cluster *w4WeedCluster, kind string) {
 	base := fmt.Sprintf("/workspace-move-%s-%d", kind, time.Now().UnixNano())
+	cl := cluster.client(t, base)
+	headCat, err := chunkstore.NewBCatalog(cl, cl, base)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var h *master.Host
-	reader, err := master.NewLayoutWorkspaceHEADReader("http://"+cluster.filerHTTP+base, func(ctx context.Context, name string) (chunkstore.VolumeRef, error) {
+	reader, err := master.NewLayoutWorkspaceHEADReader(headCat, func(ctx context.Context, name string) (chunkstore.VolumeRef, error) {
 		return h.WorkspaceLayoutVolume(ctx, name)
 	})
 	if err != nil {
