@@ -95,8 +95,13 @@ func startSourceWithSnapshot(t *testing.T, targets ...string) *handoffEnv {
 
 // headOf is the first line of `sw-block ops chunk show --volume v`.
 func (env *handoffEnv) headOf(t *testing.T, v string) string {
-	out, _, _ := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	return firstLine(out)
+	t.Helper()
+	out, _ := env.h.command(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	head, err := handoffHeadJSON(out)
+	if err != nil {
+		t.Fatalf("show HEAD for %s: %v\n%s", v, err, out)
+	}
+	return head
 }
 
 func listTree(root string) string {
