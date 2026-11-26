@@ -122,6 +122,20 @@ func TestPlannedMoveCommandInterruptEveryStep(t *testing.T) {
 	}
 	defer conn.Close()
 	ws := control.NewWorkspaceServiceClient(conn)
+	// Preparing endpoint ownership is an operator prerequisite, separate
+	// from starting the target process. This legacy harness only registers
+	// node endpoints; install both explicit bindings through the public RPC.
+	for _, id := range []string{"s1", "s2"} {
+		host := env.hosts[id]
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := ws.RegisterWorkspaceBinding(ctx, &control.WorkspaceBinding{
+			VolumeId: "v1", ServerId: id, DataAddr: host.data, CtrlAddr: host.ctrl,
+		})
+		cancel()
+		if err != nil {
+			t.Fatalf("prepare %s binding: %v", id, err)
+		}
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
