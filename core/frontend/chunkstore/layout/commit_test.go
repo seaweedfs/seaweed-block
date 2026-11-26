@@ -92,7 +92,7 @@ func TestCommit_Closure(t *testing.T) {
 func commitFixture(t *testing.T) (*memObjects, Head, CommitRequest) {
 	t.Helper()
 	f := newMemObjects(volRoot)
-	prev := manifest(ref("v1", 0, "a"), ref("v1", 3, "b"))
+	prev := manifest(ref("v1", 0, "a"), ref("v1", 3, "b"), ref("src", 7, "d")) // a restore target: it holds a source chunk
 	prevRoot := prepared(t, f, prev, "s0")
 	next := manifest(ref("v1", 0, "a"), ref("v1", 3, "b2"), ref("v1", 10004, "c"), ref("src", 7, "d"))
 	prepared(t, f, next, "s1")
@@ -287,4 +287,39 @@ func TestRunCommit_NeedsObjectsOfItsOwnSession(t *testing.T) {
 			t.Fatalf("after EnsureObject reused it: %v", err)
 		}
 	}
+}
+
+// A restore target keeps or drops its source's references and never gains
+// one: a commit whose manifest holds another volume's chunk at an index
+// where the previous manifest did not hold that same chunk is refused, and
+// HEAD is not written. Keeping one (the fixture) and dropping one commit.
+func TestRunCommit_RefusesAnAddedForeignReference(t *testing.T) {
+	for name, add := range map[string]func(next map[uint64]Ref){
+		"at a fresh index":                func(next map[uint64]Ref) { next[20] = ref("src", 20, "e") },
+		"another chunk at a held index":   func(next map[uint64]Ref) { next[7] = ref("src", 7, "d2") },
+		"a third volume at a held index":  func(next map[uint64]Ref) { next[7] = ref("other", 7, "d") },
+		"over an own chunk at that index": func(next map[uint64]Ref) { next[3] = ref("src", 3, "b") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, h, req := commitFixture(t)
+			add(req.Next)
+			prepared(t, f, req.Next, "s1")
+			st := &memHead{h: &h}
+			if _, err := runCommit(st, f, req); !errors.Is(err, ErrForeignRefAdded) {
+				t.Fatalf("commit adding a foreign reference %s: %v; want ErrForeignRefAdded", name, err)
+			}
+			if st.updates != 0 || st.h.Activity.Kind != ActSnap {
+				t.Fatalf("HEAD written by a refused commit: %+v", st.h)
+			}
+		})
+	}
+	t.Run("dropping a foreign reference", func(t *testing.T) {
+		f, h, req := commitFixture(t)
+		delete(req.Next, 7)
+		prepared(t, f, req.Next, "s1")
+		st := &memHead{h: &h}
+		if _, err := runCommit(st, f, req); err != nil {
+			t.Fatalf("commit dropping a source reference: %v", err)
+		}
+	})
 }

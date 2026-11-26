@@ -226,7 +226,7 @@ func mustRoot(m map[uint64]Ref) RootName {
 func sessionFixture(t *testing.T) (func() *memVolume, map[uint64][]byte, CommitRequest) {
 	t.Helper()
 	data := map[uint64][]byte{0: []byte("a"), 3: []byte("b2"), 10004: []byte("c")}
-	prev := manifest(ref("v1", 0, "a"), ref("v1", 3, "b"))
+	prev := manifest(ref("v1", 0, "a"), ref("v1", 3, "b"), ref("src", 7, "d")) // a restore target: it holds a source chunk
 	next := manifest(ref("v1", 0, "a"), ref("v1", 3, "b2"), ref("v1", 10004, "c"), ref("src", 7, "d"))
 	prevData := map[uint64][]byte{0: []byte("a"), 3: []byte("b")}
 	fresh := func() *memVolume {
