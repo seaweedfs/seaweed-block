@@ -210,7 +210,7 @@ func TestWorkspaceRestartReissueTouchesOnlyTheEndpointVersion(t *testing.T) {
 func TestPublisher_AskWithoutAProcessIsIssuedForTheReportedOne(t *testing.T) {
 	pub := NewPublisher(NewStaticDirective(nil))
 	reported := map[string]string{"r1": "p1", "r2": "q7"}
-	pub.SetIncarnationSource(func(volumeID, replicaID string) string { return reported[replicaID] })
+	pub.SetIncarnationSource(func(volumeID, replicaID, dataAddr, ctrlAddr string) string { return reported[replicaID] })
 	if err := pub.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d1", CtrlAddr: "c1", Intent: IntentBind}); err != nil {
 		t.Fatal(err)
 	}
@@ -286,4 +286,54 @@ func TestWorkspaceLeaseWriteKeepsTheLinesIncarnationAcrossReload(t *testing.T) {
 	if got, _ := q.LastPublished("v", "r"); got.EndpointVersion != 1 {
 		t.Fatalf("the unchanged primary was re-issued after reload: EV %d", got.EndpointVersion)
 	}
+}
+
+// A workspace move keeps the replica id across hosts, so the source and
+// the target both report it, and the source's report may be the newer
+// one. The process a line is issued for is the one at the line's
+// endpoints: the target's, never the source holder's.
+func TestObservationStore_SlotFactAtIsTheProcessAtThoseEndpoints(t *testing.T) {
+	now := time.Date(2026, 11, 26, 4, 0, 0, 0, time.UTC)
+	s := NewObservationStore(FreshnessConfig{FreshnessWindow: 30 * time.Second}, func() time.Time { return now })
+	ingest := func(server, data, ctrl, incarnation string, at time.Time) {
+		t.Helper()
+		if err := s.Ingest(Observation{ServerID: server, ObservedAt: at,
+			Slots: []SlotFact{{VolumeID: "v", ReplicaID: "r", DataAddr: data, CtrlAddr: ctrl, Incarnation: incarnation}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ingest("target-host", "t:1", "t:2", "target-proc", now.Add(-2*time.Second))
+	ingest("source-host", "s:1", "s:2", "source-proc", now.Add(-time.Second)) // newer
+	if f, ok := s.SlotFact("v", "r"); !ok || f.Incarnation != "source-proc" {
+		t.Fatalf("fixture: the newest report is not the source's: %+v", f)
+	}
+	if f, ok := s.SlotFactAt("v", "r", "t:1", "t:2"); !ok || f.Incarnation != "target-proc" {
+		t.Fatalf("at the target's endpoints: %+v %v; want target-proc", f, ok)
+	}
+	if _, ok := s.SlotFactAt("v", "r", "t:1", "other:2"); ok {
+		t.Fatal("a report at other endpoints was taken for the target's")
+	}
+}
+
+// A line that names no process (its target had no fresh report when it was
+// minted) is re-issued once on the target's first report, for that
+// process; then nothing more. The volume, configured as production is,
+// adopts nothing on the unnamed line meanwhile (TestHost_ApplyFact_
+// UnnamedLineIsNotAdoptedWhereLinesNameTheirProcess), so no session is
+// opened on it.
+func TestTopologyController_UnnamedLineIsReissuedOnceForTheReportingProcess(t *testing.T) {
+	g := newBootGraceRig(t)
+	g.reissued = false
+	g.line.Incarnation = ""
+	g.reader.Set("v1", "r1", g.line)
+	g.submit(r1Slot("r1-a", "d1-old", "c1-old", true))
+	ask := nextAskOrFail(t, g.ctrl)
+	if ask.Intent != IntentRefreshEndpoint || ask.Incarnation != "r1-a" {
+		t.Fatalf("first report on an unnamed line: %+v; want one refresh for r1-a", ask)
+	}
+	g.line.Incarnation, g.line.EndpointVersion = "r1-a", 2
+	g.reader.Set("v1", "r1", g.line)
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-a", "d1-old", "c1-old", true))
+	expectNoNext(t, g.ctrl)
 }

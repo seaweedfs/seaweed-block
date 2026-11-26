@@ -123,7 +123,7 @@ type Publisher struct {
 	// incarnationOf is the latest process incarnation a replica reports
 	// (SetIncarnationSource); its own lock, never taken under mu.
 	incarnationMu sync.RWMutex
-	incarnationOf func(volumeID, replicaID string) string
+	incarnationOf func(volumeID, replicaID, dataAddr, ctrlAddr string) string
 
 	mu    sync.Mutex
 	state map[subKey]assignmentState
@@ -471,9 +471,10 @@ func (p *Publisher) closeAllSubscriptions() {
 // non-zero Epoch. The structural non-forgeability test in
 // authority_test.go enforces this boundary at repo scope.
 // SetIncarnationSource gives the publisher the latest process incarnation
-// each replica reports, for asks that do not name one (see
-// AssignmentAsk.Incarnation). nil (the default) records what asks name.
-func (p *Publisher) SetIncarnationSource(of func(volumeID, replicaID string) string) {
+// reported by the slot an ask targets (its replica at its endpoints), for
+// asks that do not name one (see AssignmentAsk.Incarnation). nil (the
+// default) records what asks name.
+func (p *Publisher) SetIncarnationSource(of func(volumeID, replicaID, dataAddr, ctrlAddr string) string) {
 	p.incarnationMu.Lock()
 	p.incarnationOf = of
 	p.incarnationMu.Unlock()
@@ -500,7 +501,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 		of := p.incarnationOf
 		p.incarnationMu.RUnlock()
 		if of != nil {
-			ask.Incarnation = of(ask.VolumeID, ask.ReplicaID)
+			ask.Incarnation = of(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr)
 		}
 	}
 

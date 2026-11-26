@@ -42,3 +42,46 @@ func TestLinesNameTheirPrimarysProcess(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// Overlapping reports of one replica from two hosts (a workspace move keeps
+// the replica id), the source's the newer: a line for the target's
+// endpoints is issued for the target's process.
+func TestLineForTheTargetsEndpointsNamesTheTargetsProcess(t *testing.T) {
+	h := newBootGraceMaster(t, Config{})
+	defer closeTestMaster(t, h)
+	now := time.Now().UTC()
+	for _, r := range []struct {
+		server, data, ctrl, incarnation string
+		at                              time.Time
+	}{
+		{"node-d", "127.0.0.1:19401", "127.0.0.1:19402", "r2-target", now.Add(-time.Second)},
+		{"node-b", "127.0.0.1:19201", "127.0.0.1:19202", "r2-source", now},
+	} {
+		if err := h.ObservationHost().Ingest(authority.Observation{ServerID: r.server, ObservedAt: r.at,
+			Server: authority.ServerFact{Reachable: true, Eligible: true},
+			Slots: []authority.SlotFact{{VolumeID: "vol-rf3", ReplicaID: "r2", DataAddr: r.data, CtrlAddr: r.ctrl,
+				Reachable: true, ReadyForPrimary: true, Eligible: true, Incarnation: r.incarnation}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.Controller().SubmitAssignmentAsk(authority.AssignmentAsk{
+		VolumeID: "vol-rf3", ReplicaID: "r2", DataAddr: "127.0.0.1:19401", CtrlAddr: "127.0.0.1:19402",
+		Intent: authority.IntentReassign, Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindForced},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		line, ok := h.Publisher().VolumeAuthorityLine("vol-rf3")
+		if ok && line.ReplicaID == "r2" {
+			if line.Incarnation != "r2-target" {
+				t.Fatalf("line at the target's endpoints issued for %q; want r2-target", line.Incarnation)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the reassign was not published: %+v", line)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

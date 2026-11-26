@@ -1685,19 +1685,20 @@ func hostConfig(f flags, readyCh chan<- adapter.AssignmentInfo) volume.Config {
 		ident = storeident.Of(f.durableRoot)
 	}
 	return volume.Config{
-		MasterAddr:        f.masterAddr,
-		ServerID:          f.serverID,
-		VolumeID:          f.volumeID,
-		ReplicaID:         f.replicaID,
-		DataAddr:          f.dataAddr,
-		CtrlAddr:          f.ctrlAddr,
-		HeartbeatInterval: f.hbInterval,
-		RecoverTimeout:    f.recoverTimeout,
-		ReadyMarker:       readyCh,
-		EnableT1Readiness: f.enableT1Readiness,
-		WorkspaceLease:    f.workspaceLease,
-		RF1Only:           rf1Only(f),
-		StorageIdentity:   ident,
+		MasterAddr:            f.masterAddr,
+		LinesNameTheirProcess: true,
+		ServerID:              f.serverID,
+		VolumeID:              f.volumeID,
+		ReplicaID:             f.replicaID,
+		DataAddr:              f.dataAddr,
+		CtrlAddr:              f.ctrlAddr,
+		HeartbeatInterval:     f.hbInterval,
+		RecoverTimeout:        f.recoverTimeout,
+		ReadyMarker:           readyCh,
+		EnableT1Readiness:     f.enableT1Readiness,
+		WorkspaceLease:        f.workspaceLease,
+		RF1Only:               rf1Only(f),
+		StorageIdentity:       ident,
 	}
 }
 

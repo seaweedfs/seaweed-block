@@ -30,6 +30,11 @@ import (
 type Config struct {
 	// MasterAddr is the gRPC address of the block master daemon.
 	MasterAddr string
+	// LinesNameTheirProcess: the master stamps every primary line with the
+	// process it was issued for, so a line that names no process is not this
+	// process's either and is not adopted until re-issued. Off, a line that
+	// names none is adopted (fixtures that build lines by hand).
+	LinesNameTheirProcess bool
 	// MasterTLS is the mutual-TLS dial option of the master link
 	// (link.ClientCredentials); nil dials plaintext (development mode).
 	MasterTLS grpc.DialOption
@@ -1099,7 +1104,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// could equal one of them. Nothing is adopted or recorded (no
 	// assignment, watchdog, replica set or role) until the master re-issues
 	// the line for this process (a new endpoint version).
-	if inc := fact.GetLineIncarnation(); inc != "" && inc != h.incarnation {
+	if inc := fact.GetLineIncarnation(); inc != h.incarnation && (inc != "" || h.cfg.LinesNameTheirProcess) {
 		h.log.Printf("blockvolume: volume %s line epoch=%d EV=%d was issued for process %s, this is %s: NOT adopting until it is re-issued",
 			h.cfg.VolumeID, fact.Epoch, fact.EndpointVersion, inc, h.incarnation)
 		return
