@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,11 +21,13 @@ import (
 //     again on the same host (same server and endpoints) with --durable-root
 //     on a file system with room and nothing freed, starts and serves the
 //     snapshot;
-//   - no blast radius: while v2 stays refused (in the catalog, never
-//     started), deleting the source's snapshot is allowed (deleting), and the
-//     source volume is then deleted through the volume-lifecycle page's steps
-//     (seal, revoke, ACK, volume-delete), which complete. Each step answers
-//     within its bound; nothing is blocked by the refused target.
+//   - the source's snapshot stays while targets depend on it: its delete is
+//     refused with snapshot_has_dependents while v2 is refused and v3
+//     serves. Once both targets are deleted (v2 started on a root with room;
+//     each through the volume-lifecycle page's seal, revoke, ACK and
+//     volume-delete), the snapshot delete succeeds, and the source volume is
+//     then deleted through the same steps. Each step answers within its
+//     bound.
 func TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot(t *testing.T) {
 	small, filler := os.Getenv("CHUNKSTORE_SMALL_ROOT"), os.Getenv("CHUNKSTORE_SMALL_FILLER")
 	if small == "" || filler == "" {
@@ -67,11 +70,32 @@ func TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot(t *testing.T) {
 	})
 	env.requireImage(t, "n-v3", img)
 
-	// Blast radius, v2 still refused: delete the source's snapshot, then the source volume.
-	out, errOut, code := env.h.run(t, "ops", "chunk", "snapshot-delete", "--master", env.h.masterAddr, "--volume", "v1", "--name", "base",
-		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	if code != 0 || !strings.Contains(out, `"state":"deleting"`) {
-		t.Fatalf("snapshot-delete of the source snapshot while a restore target is refused: exit %d %s %s; want deleting", code, out, errOut)
+	// While v2 is refused and v3 serves, the source's snapshot cannot be deleted.
+	deleteBase := func() (string, string, int) {
+		return env.h.run(t, "ops", "chunk", "snapshot-delete", "--master", env.h.masterAddr, "--volume", "v1", "--name", "base",
+			"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	}
+	out, errOut, code := deleteBase()
+	if code == 0 || !strings.Contains(out+errOut, "snapshot_has_dependents") {
+		t.Fatalf("snapshot-delete of the source snapshot while restore targets depend on it: exit %d %s %s; want snapshot_has_dependents", code, out, errOut)
+	}
+
+	// Delete both targets: v2 on a root with room, then each through the
+	// page's steps.
+	b2 := env.hosts["n-v2"]
+	b2.root = filepath.Join(env.h.dir, "vol-n-v2-with-room")
+	env.hosts["n-v2"] = b2
+	adopted := func(vol string) *regexp.Regexp {
+		return regexp.MustCompile(`blockvolume: volume ` + vol + ` adopted as PRIMARY at r1@(\d+) `)
+	}
+	d2 := env.startTarget(t, "v2", "blockvolume-v2-with-room")
+	env.deleteServingTarget(t, "v2", env.hosts["n-v2"], d2, logUint(t, d2, adopted("v2")))
+	env.deleteServingTarget(t, "v3", b3, d3, logUint(t, d3, adopted("v3")))
+
+	// Now the snapshot delete succeeds, and then the source volume's delete.
+	out, errOut, code = deleteBase()
+	if code != 0 || !strings.Contains(out, `"state":"absent"`) {
+		t.Fatalf("snapshot-delete of the source snapshot after its targets were deleted: exit %d %s %s; want absent", code, out, errOut)
 	}
 	g := env.seal(t, "s1", e)
 	env.revoke(t, e, g)
@@ -80,7 +104,7 @@ func TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot(t *testing.T) {
 	}
 	env.waitAck(t, e, g)
 	out, errOut, code = env.volumeDelete(t, "del-v1")
-	requireDeleteCompleted(t, out, errOut, code, false)
+	requireDeleteCompleted(t, out, errOut, code)
 }
 
 // TestHeadroomRefusedRestoreTargetKeepsItsSourceSnapshot: a restore target

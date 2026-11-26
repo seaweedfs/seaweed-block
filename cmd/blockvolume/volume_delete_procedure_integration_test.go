@@ -22,52 +22,52 @@ func (env *handoffEnv) volumeDelete(t *testing.T, request string) (string, strin
 		"--master", env.h.masterAddr, "--request-id", request)
 }
 
-// requireDeleteCompleted checks step 4's answer: admitted, committed, HEAD
-// marked, completed; and replayed when it is a rerun of a completed delete.
-func requireDeleteCompleted(t *testing.T, out, errOut string, code int, rerun bool) {
+// requireDeleteCompleted checks step 4's documented state:"deleted" result
+// (volume-lifecycle.md, "Delete a volume", step 4). Retries use the same
+// request id and must complete again; the CLI reports no replayed flag.
+func requireDeleteCompleted(t *testing.T, out, errOut string, code int) {
 	t.Helper()
-	var res struct {
-		Admitted, Committed, HeadMarked, Completed, Replayed bool
-	}
-	if code != 0 || json.Unmarshal([]byte(out), &res) != nil || !res.Admitted || !res.Committed || !res.HeadMarked || !res.Completed || res.Replayed != rerun {
-		t.Fatalf("volume-delete: exit %d %s %s; want admitted, committed, headMarked, completed, replayed %v", code, out, errOut, rerun)
+	if code != 0 || !handoffDeleteCompleted(out) {
+		t.Fatalf("volume-delete: exit %d %s %s; want a volume directory and state deleted", code, out, errOut)
 	}
 }
 
-// headShown returns HEAD's state and chunk count from `ops chunk show`.
+// headShown reads head.State and independently counts stored pool objects.
+// volume-lifecycle.md step 4 specifies that show has no chunkCount field;
+// its object-listing alternative preserves the checks that nothing was
+// removed on refusal and no chunks remain after completion.
 func (env *handoffEnv) headShown(t *testing.T) (string, int) {
 	t.Helper()
-	out, _ := env.h.command(t, env.chunkShow()...)
-	var body struct {
-		Head *struct {
-			State      string `json:"state"`
-			ChunkCount int    `json:"chunkCount"`
-		} `json:"head"`
+	var head struct {
+		State string `json:"state"`
 	}
-	if err := json.Unmarshal([]byte(out), &body); err != nil || body.Head == nil {
+	out := env.headOf(t, "v1")
+	if err := json.Unmarshal([]byte(out), &head); err != nil {
 		t.Fatalf("chunk show: %v %s", err, out)
 	}
-	return body.Head.State, body.Head.ChunkCount
+	return head.State, env.poolObjects(t, "v1")
 }
 
-// requireDeletedForGood checks the page's end state ("state": "deleted",
-// "chunkCount": 0) and that a rerun with the same request id completes
-// again.
+// requireDeletedForGood checks the page's deleted HEAD and empty pool,
+// then repeats the delete with the same request id and checks both again.
 func (env *handoffEnv) requireDeletedForGood(t *testing.T, request string) {
 	t.Helper()
 	if state, n := env.headShown(t); state != "deleted" || n != 0 {
-		t.Fatalf("chunk show after the delete: state %q, chunkCount %d; want deleted, 0", state, n)
+		t.Fatalf("after the delete: HEAD state %q, pool objects %d; want deleted, 0", state, n)
 	}
 	out, errOut, code := env.volumeDelete(t, request)
-	requireDeleteCompleted(t, out, errOut, code, true)
+	requireDeleteCompleted(t, out, errOut, code)
+	if state, n := env.headShown(t); state != "deleted" || n != 0 {
+		t.Fatalf("after the repeated delete: HEAD state %q, pool objects %d; want deleted, 0", state, n)
+	}
 }
 
 // TestProcedureDeleteAVolume: the page's steps. A volume with a snapshot is
 // sealed, revoked (blockvolume sends the ACK and exits 0 by itself) and its
 // ACK seen; volume-delete is refused while the snapshot exists, with nothing
-// deleted; the snapshot is deleted; volume-delete then answers admitted,
-// committed, headMarked, completed, `chunk show` shows HEAD deleted with no
-// chunks, and a rerun with the same request id completes again.
+// deleted; the snapshot is deleted; volume-delete then answers deleted,
+// `chunk show` shows HEAD deleted and the pool is empty, and a rerun with
+// the same request id completes again.
 func TestProcedureDeleteAVolume(t *testing.T) {
 	env := startHandoffEnv(t, 1)
 	holder := env.start(t, "blockvolume-s1", "s1")
@@ -92,7 +92,7 @@ func TestProcedureDeleteAVolume(t *testing.T) {
 	}
 	env.deleteSnapshot(t, "v1", "s1")
 	out, errOut, code = env.volumeDelete(t, "del-v1")
-	requireDeleteCompleted(t, out, errOut, code, false)
+	requireDeleteCompleted(t, out, errOut, code)
 	env.requireDeletedForGood(t, "del-v1")
 }
 
@@ -130,6 +130,6 @@ func TestProcedureDeleteAfterASignalStop(t *testing.T) {
 	}
 	env.waitAck(t, e, g)
 	out, errOut, code = env.volumeDelete(t, "del-v1")
-	requireDeleteCompleted(t, out, errOut, code, false)
+	requireDeleteCompleted(t, out, errOut, code)
 	env.requireDeletedForGood(t, "del-v1")
 }

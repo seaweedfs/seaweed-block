@@ -393,8 +393,8 @@ func TestSnapshotLadderB1SnapshotQuery(t *testing.T) {
 	}
 	out, errOut, code := env.h.run(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v2", "--snapshot", "x", "--target", "v3",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
-	if code == 0 || !strings.Contains(out+errOut, "restore_source_not_own") {
-		t.Fatalf("restore from a restore target's snapshot: exit %d, want restore_source_not_own\n%s\n%s", code, out, errOut)
+	if code == 0 || !strings.Contains(out, `"code":"not_admitted"`) || !strings.Contains(out, "names another volume's chunks") {
+		t.Fatalf("restore from a restore target's snapshot: exit %d, want not_admitted naming another volume's chunks\n%s\n%s", code, out, errOut)
 	}
 }
 
