@@ -99,7 +99,9 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 // fillReader reads one block of each of its chunks, in order, on its own
 // connection: v1 fills a restore target only on access, so this is the fill
 // the test kills into. It stops at its first error (the kill, or a failure
-// before it, which state reports) or at stop, which waits for it.
+// before it, which state reports) or at stop, which waits for it. Its stop
+// also runs at the test's cleanup, so a failure before the explicit stop
+// still ends and joins the reader.
 type fillReader struct {
 	mu       sync.Mutex
 	reads    int64
@@ -108,12 +110,14 @@ type fillReader struct {
 	quit     chan struct{}
 	done     chan struct{}
 	close    func()
+	once     sync.Once
 }
 
 func (env *handoffEnv) readConcurrently(t *testing.T, target string, chunks []uint64) *fillReader {
 	t.Helper()
 	c := dialNVMe(t, env.hosts["n-"+target].nvme, plannedHandoffNQN)
 	r := &fillReader{quit: make(chan struct{}), done: make(chan struct{}), close: c.close}
+	t.Cleanup(r.stop)
 	go func() {
 		defer close(r.done)
 		for _, ch := range chunks {
@@ -150,9 +154,11 @@ func (r *fillReader) progress(baseline, absent int) fillProgress {
 }
 
 func (r *fillReader) stop() {
-	close(r.quit)
-	r.close()
-	<-r.done
+	r.once.Do(func() {
+		close(r.quit)
+		r.close()
+		<-r.done
+	})
 }
 
 // awaitFill waits until fillWitness accepts the reader's progress on target
