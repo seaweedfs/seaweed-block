@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -169,7 +171,7 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 		args := append(env.volArgsFor(b), "--durable-blocks", fmt.Sprint(bytes/4096))
 		d := env.h.start(t, "blockvolume-"+v, env.h.volume, args...)
 		e := mustU(adoptedEpochOf(v, d.waitLog(t, 60*time.Second, "blockvolume: volume "+v+" adopted as PRIMARY at r1@")))
-		env.h.waitPrimaryAt(t, b.status, e)
+		waitSiblingPrimary(t, b.status, v, e)
 		w := &siblingWriter{volume: v, nvme: b.nvme, blocks: bytes / 4096, stop: make(chan struct{}), done: make(chan struct{}), acked: map[uint64][32]byte{}}
 		writers = append(writers, w)
 		go w.run(t)
@@ -187,6 +189,21 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 			}
 			env.readBackSibling(t, w)
 		}
+	})
+}
+
+// waitSiblingPrimary is waitPrimaryAt for a named volume.
+func waitSiblingPrimary(t *testing.T, statusAddr, volume string, epoch uint64) {
+	t.Helper()
+	c := &http.Client{Timeout: 5 * time.Second}
+	poll(t, 60*time.Second, fmt.Sprintf("status at %s never showed %s as a healthy primary at epoch %d", statusAddr, volume, epoch), func() bool {
+		resp, err := c.Get("http://" + statusAddr + "/status?volume=" + volume)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return statusPrimary(b, epoch)
 	})
 }
 
