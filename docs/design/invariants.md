@@ -127,6 +127,24 @@ flowchart LR
 | `INV-WS-DELETE-WITHOUT-ACK-001` | A delete without the holder's acknowledgement is admitted only while the master's record still awaits a replica store (stage 1), marked durably first; the mark freezes the wait, so the primary never serves. Past stage 1 the live-lease refusal stays. | M2 any authority line, stores still awaited → DeleteReserved without the holder's acknowledgement | `core/host/master/volume_delete_authority.go` `Reserve`; `core/host/master/store_attestation.go` `markDeleteWithoutAck`, `awaited` | `TestANeverCreatedVolumeIsDeletedWithoutItsHolder`, `TestAnEstablishedVolumeIsNotDeletedUnderALiveLease` (`core/host/master/workspace_delete_never_created_test.go`); `TestAStage2VolumeKeepsTheLiveLeaseRefusal`, `TestTheDeleteMarkFreezesTheStoreWait`, `TestAStage2VolumeIsNotMarkedForADeleteWithoutAck` (`core/host/master/workspace_delete_proof_test.go`) | CreateEvid2 model rows `mut_delete_on_flag_only`, `mut_no_horizon` | ACTIVE |
 | any authority line, stores still awaited (stage 1) | DeleteReserved without the holder's acknowledgement | the master's record is marked first, durably and in the lock that ends the store wait; the mark freezes the record in stage 1 (the wait never ends after it, so the primary, whose assignment keeps awaiting the stores, never serves); the reservation then skips the live-lease refusal. Deleting HEAD waits out the lease horizon as above. Past stage 1, also while the end of creation is unrecorded (the volume may be serving), the live-lease refusal stays | `core/host/master/volume_delete_authority.go` `Reserve`; `core/host/master/store_attestation.go` `markDeleteWithoutAck`, `awaited`; `core/authority/workspace_delete_reservation.go` `ReserveNeverCreatedWorkspaceDeletion` | `INV-WS-DELETE-WITHOUT-ACK-001` |
 
+**Volume creation phase, in blockmaster's store record** (`core/host/master/store_attestation.go`, decided by `inCreationPhase` in `core/host/master/product_loop.go`). Every replacement entry (both promotion gates, the operator's failover and planned move, the rebalance) acts only on Established.
+
+```mermaid
+stateDiagram-v2
+  [*] --> AwaitingStores: first bind of a new volume (record opened with its initial replicas)
+  AwaitingStores --> AwaitingStores: the write that ends the wait fails (still held, reported as one store awaited)
+  AwaitingStores --> AwaitingEnd: every current replica's store attested (written durably)
+  AwaitingEnd --> Established: first of the primary's ready answer, or a survivor's DurableLSN > 0 at the line (written durably)
+  Established --> Established: later answers reopen nothing
+```
+
+| From | To | Event and guard | Enforced in | Protects |
+|---|---|---|---|---|
+| (none) | AwaitingStores | the master binds a volume for the first time; the record lists its initial replicas | `core/host/master/store_attestation.go` `openStoreRecord`, `open` | `INV-PROMOTE-CREATION-WAIT-001` |
+| AwaitingStores | AwaitingEnd | every current replica has an attested store; Initial is cleared and `awaiting_first_ready` set in one durable write; a failed write leaves the record as it was and the volume held | `core/host/master/store_attestation.go` `awaited` | `INV-PROMOTE-CREATION-WAIT-001` |
+| AwaitingEnd | Established | the line's primary answers ready, or a survivor answers DurableLSN > 0 with its epoch-table row at the current epoch (or none), in any probe; recorded durably and for good | `core/host/master/product_loop.go` `inCreationPhase`, `firstReadyNow`, `survivorHoldingAWrite`; `core/host/master/store_attestation.go` `noteFirstReady` | `INV-PROMOTE-CREATION-WAIT-001` |
+| AwaitingStores, AwaitingEnd | (no change) | no replacement decision: no reassign, fencing round, heal, operator move or rebalance; also while the primary's own answer says its assignment at the line's epoch awaits the stores | `core/host/master/product_loop.go` `holdCreating`, `noteCreating`; `core/host/master/planned_move.go` `plannedMoveEvidenceAt`, `fencedMoveEvidence` | `INV-PROMOTE-CREATION-WAIT-001` |
+
 **Workspace lease and move, in blockmaster.**
 
 TERM-HOLDER-001 uses one owner decision, `PublishedLine.Owner` (core/authority),
