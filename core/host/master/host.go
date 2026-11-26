@@ -453,7 +453,26 @@ func (h *Host) Publisher() *authority.Publisher {
 // the live Publisher. Callers still need an explicit policy gate before using
 // it; constructing the runtime does not execute failback.
 func (h *Host) FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime {
-	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher(), Gate: h.plannedMoveEvidence}
+	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher(), Gate: h.plannedMoveEvidence, TargetEndpoint: h.replicaEndpoint}
+}
+
+// replicaEndpoint is the master's own record of a replica's addresses: its
+// fresh heartbeat slot (what the automatic path publishes), else its
+// placement slot when that names both.
+func (h *Host) replicaEndpoint(volumeID, replicaID string) (string, string, bool) {
+	if s, ok := h.freshCurrentSlot(volumeID, replicaID); ok && s.DataAddr != "" && s.CtrlAddr != "" {
+		return s.DataAddr, s.CtrlAddr, true
+	}
+	if h.lifecycle != nil {
+		if p, ok := h.lifecycle.Placements.GetPlacement(volumeID); ok {
+			for _, s := range p.Slots {
+				if s.ReplicaID == replicaID && s.DataAddr != "" && s.CtrlAddr != "" {
+					return s.DataAddr, s.CtrlAddr, true
+				}
+			}
+		}
+	}
+	return "", "", false
 }
 
 // Controller exposes the controller for tests.

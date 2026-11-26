@@ -20,7 +20,7 @@ func TestFailbackAuthorityRuntime_ReassignsThroughPublisher(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("bind current: %v", err)
 	}
-	result, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate}).ExecuteFailback(context.Background(), validAuthorityFailbackRequest())
+	result, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate, TargetEndpoint: r1Endpoint}).ExecuteFailback(context.Background(), validAuthorityFailbackRequest())
 	if err != nil {
 		t.Fatalf("execute failback: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestFailbackAuthorityRuntime_RejectsStaleExpectedCurrent(t *testing.T) {
 	}
 	req := validAuthorityFailbackRequest()
 	req.ExpectedCurrentEpoch = 99
-	_, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate}).ExecuteFailback(context.Background(), req)
+	_, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate, TargetEndpoint: r1Endpoint}).ExecuteFailback(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "stale expected current line") {
 		t.Fatalf("err=%v", err)
 	}
@@ -63,7 +63,7 @@ func TestFailbackAuthorityRuntime_RequiresTerminalPreconditions(t *testing.T) {
 	pub := NewPublisher(NewStaticDirective(nil))
 	req := validAuthorityFailbackRequest()
 	req.AckEligible = false
-	_, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate}).ExecuteFailback(context.Background(), req)
+	_, err := (FailbackAuthorityRuntime{Publisher: pub, Gate: allowGate, TargetEndpoint: r1Endpoint}).ExecuteFailback(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "terminal failback preconditions") {
 		t.Fatalf("err=%v", err)
 	}
@@ -101,7 +101,7 @@ func TestFailbackAuthorityRuntime_PublishesNothingWithoutTheGatesEvidence(t *tes
 	for name, rt := range map[string]func(*Publisher) FailbackAuthorityRuntime{
 		"no gate": func(p *Publisher) FailbackAuthorityRuntime { return FailbackAuthorityRuntime{Publisher: p} },
 		"gate refuses": func(p *Publisher) FailbackAuthorityRuntime {
-			return FailbackAuthorityRuntime{Publisher: p, Gate: func(string, string) (adapter.PrimaryEvidence, error) {
+			return FailbackAuthorityRuntime{Publisher: p, TargetEndpoint: r1Endpoint, Gate: func(string, string) (adapter.PrimaryEvidence, error) {
 				return adapter.PrimaryEvidence{}, errors.New("not caught up")
 			}}
 		},
@@ -117,6 +117,56 @@ func TestFailbackAuthorityRuntime_PublishesNothingWithoutTheGatesEvidence(t *tes
 			}
 			if after, _ := pub.VolumeAuthorityLine("v1"); after != before {
 				t.Fatalf("the line moved without the gate's evidence: %+v -> %+v", before, after)
+			}
+		})
+	}
+}
+
+// r1Endpoint is the master's record of r1's addresses, as the valid request
+// names them.
+func r1Endpoint(_, replica string) (string, string, bool) {
+	if replica == "r1" {
+		return "data-r1", "ctrl-r1", true
+	}
+	return "", "", false
+}
+
+// The line is published at the master's record of the target's addresses:
+// a request naming other addresses, a target with no record, or a runtime
+// without the record is refused with ErrFailbackTargetEndpoint, and nothing
+// is published.
+func TestFailbackAuthorityRuntime_RefusesAddressesThatAreNotTheMastersRecord(t *testing.T) {
+	for name, c := range map[string]struct {
+		endpoint func(string, string) (string, string, bool)
+		data     string
+		ctrl     string
+	}{
+		"wrong data address":            {r1Endpoint, "data-elsewhere", "ctrl-r1"},
+		"wrong control address":         {r1Endpoint, "data-r1", "ctrl-elsewhere"},
+		"no record of the target":       {func(string, string) (string, string, bool) { return "", "", false }, "data-r1", "ctrl-r1"},
+		"no endpoint record configured": {nil, "data-r1", "ctrl-r1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pub := NewPublisher(NewStaticDirective(nil))
+			if err := pub.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r2", DataAddr: "data-r2", CtrlAddr: "ctrl-r2", Intent: IntentBind}); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := pub.VolumeAuthorityLine("v1")
+			req := validAuthorityFailbackRequest()
+			req.TargetDataAddr, req.TargetCtrlAddr = c.data, c.ctrl
+			gated := false
+			rt := FailbackAuthorityRuntime{Publisher: pub, TargetEndpoint: c.endpoint, Gate: func(v, r string) (adapter.PrimaryEvidence, error) {
+				gated = true
+				return allowGate(v, r)
+			}}
+			if _, err := rt.ExecuteFailback(context.Background(), req); !errors.Is(err, ErrFailbackTargetEndpoint) {
+				t.Fatalf("err=%v; want ErrFailbackTargetEndpoint", err)
+			}
+			if gated {
+				t.Fatal("the gate ran (a fencing round may have fenced survivors) for a request refused on its addresses")
+			}
+			if after, _ := pub.VolumeAuthorityLine("v1"); after != before {
+				t.Fatalf("line=%+v; want %+v unchanged", after, before)
 			}
 		})
 	}
