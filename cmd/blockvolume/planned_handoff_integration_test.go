@@ -333,6 +333,9 @@ func (env *handoffEnv) layoutID(volume string) string {
 	if err != nil {
 		t.Fatalf("resolve layout identity for %s: %v", volume, err)
 	}
+	if env.layoutIDs == nil {
+		env.layoutIDs = make(map[string]string)
+	}
 	env.layoutIDs[volume] = id.String()
 	return id.String()
 }
