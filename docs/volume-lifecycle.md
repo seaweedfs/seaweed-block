@@ -33,7 +33,7 @@ Snapshots, retention and restore are in
 | Record | How to read it | What it proves |
 |---|---|---|
 | The lease | `sw-block ops workspace show --master MASTER --volume v1`: `replica:`, `epoch:`, `lease state:`, `holder: r1@E` | Which holder blockmaster lets serve. `granted`, `revoking` or `expired` is the host validity at query time, not permission to move |
-| HEAD | `sw-block ops chunk show --volume v1 --chunk-filer FILER`: `head.gen`, `head.epoch`, `head.holder`, `head.remoteLSN`, `head.state`, `head.detachedBy` | What any host can start from: every write up to `remoteLSN`. `state` `detached` with `detachedBy` means sealed by that holder |
+| HEAD | `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER`: `head.gen`, `head.epoch`, `head.holder`, `head.remoteLSN`, `head.state`, `head.detachedBy` | What any host can start from: every write up to `remoteLSN`. `state` `detached` with `detachedBy` means sealed by that holder |
 | The ACK | the same `show`: `recorded ACK: r1@E HEAD generation G` | The old holder drained and closed after reading the sealed HEAD G. A clean move needs it |
 
 `MASTER` is blockmaster's `--listen` address, `FILER` the SeaweedFS filer gRPC
@@ -161,10 +161,16 @@ These are rules for the operator. The product does not detect every breach.
   on a fresh one.
 - **Never revoke before the seal is confirmed** (see the hand-over steps): a revoke
   without an ACK cannot be undone on one node.
-- **Never restore blockmaster's `--authority-store` or `--lifecycle-store` from a copy.**
-  They decide who may write each volume. An older copy hands out epochs the volumes have
-  already passed, and every start is then refused. A lost store needs a recovery
+- **Never restore blockmaster's directory from an older copy** (its `--authority-store`
+  and `--lifecycle-store`). They decide who may write each volume. An older copy can hand
+  out epochs that were already used; do not do it. A lost store needs a recovery
   procedure, not a restore.
+- **Run exactly one blockmaster per cluster.** It alone issues each volume's epochs and
+  leases; there is no second or standby blockmaster in this release.
+- **A deleted volume's name cannot be created again.** Its record stays, deleted, and a
+  create under that name is refused. To start over, create the new volume under another
+  name. (A snapshot name is different: once its delete has finished, the name can be
+  taken again.)
 
 ## Which procedures run end to end
 
@@ -221,7 +227,7 @@ the volume refuses I/O on this host. Do not go on after any other answer (see
 the table below). Repeating the command is safe: it answers from the sealed
 HEAD.
 
-To check: `sw-block ops chunk show --volume v1 --chunk-filer FILER` shows
+To check: `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
 `head.state` `detached` and `head.detachedBy` `{"holder":"s1/R","epoch":E,"gen":G}`.
 
 **4. Revoke**, giving the generation you copied:
@@ -392,8 +398,8 @@ sw-block ops workspace show   --master MASTER --volume v1
 **3. Delete every snapshot of the volume:**
 
 ```bash
-sw-block ops chunk snapshots       --volume v1 --chunk-filer FILER
-sw-block ops chunk snapshot-delete --volume v1 --chunk-filer FILER --name s1
+sw-block ops chunk snapshots       --master MASTER --volume v1 --chunk-filer FILER
+sw-block ops chunk snapshot-delete --master MASTER --volume v1 --chunk-filer FILER --name s1
 ```
 
 Each delete answers `{"volumeID":"v1","name":"s1","state":"deleting"}`.
@@ -406,7 +412,7 @@ sw-block ops chunk volume-delete --volume v1 --chunk-filer FILER --master MASTER
 
 It answers with `"admitted":true,"committed":true,"headMarked":true,"completed":true`.
 Keep the `--request-id` and use the same one if you have to run the command again.
-Afterwards `sw-block ops chunk show --volume v1 --chunk-filer FILER` shows
+Afterwards `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
 `"state": "deleted"` and `"chunkCount": 0`.
 
 **If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
@@ -425,7 +431,7 @@ follow from that order:
   the name does not appear in the list, yet another request for that name is refused
   with `snapshot_exists`, and deleting the volume is refused with `volume v1 has
   snapshots (NAME); delete them first`. Free it with
-  `sw-block ops chunk snapshot-delete --volume v1 --chunk-filer FILER --name NAME`,
+  `sw-block ops chunk snapshot-delete --master MASTER --volume v1 --chunk-filer FILER --name NAME`,
   or finish it by repeating the request with the same `--request-id`.
 - **After `outcome_unknown`, repeat the request with the same `--request-id` within
   5 minutes.** Later, the unfinished attempt may have been swept, and the request is

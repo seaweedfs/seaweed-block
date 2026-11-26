@@ -167,6 +167,7 @@ func newBootGraceMaster(t *testing.T, cfg Config) *Host {
 	t.Helper()
 	h := newBootGraceMasterCreating(t, cfg)
 	attestAllStores(t, h)
+	establishVolume(t, h, "vol-rf3") // and the primary's first ready answer: an established volume
 	return h
 }
 
