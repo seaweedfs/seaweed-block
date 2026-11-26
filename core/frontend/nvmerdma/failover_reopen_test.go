@@ -14,7 +14,34 @@ import (
 	master "github.com/seaweedfs/seaweed-block/core/host/master"
 	volume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// attestStores sends r1's heartbeat with its attestation of both replicas'
+// stores through the master's own Heartbeat RPC, as a replicated primary
+// does once its peers' barriers ran. This test's volume host has no
+// replication slot, so it never attests; without the record the volume
+// stays in its creation phase and nothing fails it over.
+func attestStores(t *testing.T, addr string, epoch uint64) {
+	t.Helper()
+	c, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	store := func(b byte) []byte { id := make([]byte, 16); id[15] = b; return id }
+	att := &control.StoreAttestation{VolumeId: "v1", ReplicaId: "r1", Epoch: epoch, Stores: []*control.AttestedStore{
+		{ReplicaId: "r1", StoreId: store(1)}, {ReplicaId: "r2", StoreId: store(2)}}}
+	if _, err := control.NewObservationServiceClient(c).ReportHeartbeat(context.Background(), &control.HeartbeatReport{
+		ServerId: "s1", SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
+		Slots:            []*control.HeartbeatSlot{{VolumeId: "v1", ReplicaId: "r1", DataAddr: "127.0.0.1:19101", CtrlAddr: "127.0.0.1:19102"}},
+		StoreAttestation: att}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // readyGate is a promotion gate whose candidates all answered ready.
 type readyGate struct{}
@@ -114,6 +141,8 @@ func TestProviderBackendReopensAfterRealMasterFailover(t *testing.T) {
 		t.Logf("real publisher authority: %s epoch%d", line.ReplicaID, line.Epoch)
 	}
 	transition(true, true, "r1", 1)
+	line, _ := m.Publisher().VolumeAuthorityLine("v1")
+	attestStores(t, m.Addr(), line.Epoch)
 	provider := memback.NewProvider(h.ProjectionView())
 	adapters := map[string]*providerBackend{}
 	for _, op := range []string{"read", "write", "sync", "demoted"} {

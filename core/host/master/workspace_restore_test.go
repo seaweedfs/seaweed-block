@@ -50,6 +50,7 @@ func TestWorkspaceMoveRestoresLazilyAndFencesOldHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldLine := waitAuthorityLine(t, m.Publisher(), "vol-a")
+	establishVolume(t, m, "vol-a")
 	fixture := testutil.NewLayoutFixture(t, "vol-a", 64, 4)
 	var gets atomic.Uint64
 	readHead := func() layout.Head {

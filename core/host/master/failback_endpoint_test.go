@@ -27,6 +27,7 @@ func TestFailbackPublishesOnlyTheMastersRecordedTargetAddresses(t *testing.T) {
 	if line.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", line)
 	}
+	establishVolume(t, h, "vol-rf2") // an established volume: the move is past creation
 	req := func(data, ctrl string) authority.FailbackRuntimeRequest {
 		return authority.FailbackRuntimeRequest{VolumeID: "vol-rf2", ReplicaID: "r2", TargetDataAddr: data, TargetCtrlAddr: ctrl,
 			ExpectedCurrentReplicaID: line.ReplicaID, ExpectedCurrentEpoch: line.Epoch,

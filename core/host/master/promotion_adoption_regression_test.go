@@ -77,6 +77,7 @@ func TestPromotionRefusesReplicaMissingAcknowledgedWrite(t *testing.T) {
 			if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", initial.Epoch, attested)); err != nil {
 				t.Fatal(err)
 			}
+			recordFirstReady(t, h, "vol-rf3") // the primary served before it failed
 			if err := cluster.Primary().RepVol.Close(); err != nil {
 				t.Fatal(err)
 			}

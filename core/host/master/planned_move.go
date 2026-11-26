@@ -43,6 +43,11 @@ func plannedMoveAllowed(ackProfile string, replicas int) error {
 	return fmt.Errorf("planned move: unknown ack profile %q", ackProfile)
 }
 
+// ErrMoveWhileCreating: the volume is still creating (its replica stores
+// are not all attested, or its primary still awaits them); no primary
+// change is decided before its first line is healthy.
+var ErrMoveWhileCreating = errors.New("move: the volume is still creating (replica stores not yet attested); no primary change until its first line is healthy")
+
 // ackProfiled is a promotion evidence provider that knows the ack profile.
 type ackProfiled interface{ AckProfile() string }
 
@@ -56,6 +61,11 @@ func (p *roundEvidenceProvider) AckProfile() string { return p.ackProfile }
 // reachability judged and the fencing round opened are that line's, never a
 // line read later. The publisher then mints only while the line is still it.
 func (h *Host) plannedMoveEvidenceAt(volumeID, target string, current authority.AuthorityBasis) (adapter.PrimaryEvidence, error) {
+	// Creation is its own phase: no move of a creating volume, decided first
+	// on the line the request was checked against.
+	if h.inCreationPhase(volumeID, current, nil) != "" {
+		return adapter.PrimaryEvidence{}, ErrMoveWhileCreating
+	}
 	h.promotionMu.RLock()
 	prober := h.promotionProber
 	h.promotionMu.RUnlock()
@@ -137,6 +147,9 @@ func (h *Host) fencedMoveEvidence(volumeID, target, profile string, slots []life
 	plain, err := prober.ProbePromotionCandidates(volumeID, current, candidates)
 	if err != nil {
 		return adapter.PrimaryEvidence{}, fmt.Errorf("fenced move: probe round: %w", err)
+	}
+	if h.inCreationPhase(volumeID, current, &plain) != "" {
+		return adapter.PrimaryEvidence{}, ErrMoveWhileCreating
 	}
 	if plain.AckProfile == "" {
 		plain.AckProfile = profile
