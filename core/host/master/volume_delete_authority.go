@@ -41,7 +41,10 @@ func (a *volumeDeleteAuthority) Reserve(ctx context.Context) error {
 	// lease does not refuse the reservation, which stops every grant; the
 	// HEAD update still waits for no live lease. A volume that ever completed
 	// creation keeps the live-lease refusal.
-	if h.inCreationPhase(a.volume, authority.AuthorityBasis{}, nil) != "" {
+	// The line, so a primary that has just answered ready is recorded
+	// (creation complete) before the delete is decided.
+	line, _ := h.Publisher().VolumeAuthorityLine(a.volume)
+	if h.inCreationPhase(a.volume, line, nil) != "" {
 		return h.Publisher().ReserveNeverCreatedWorkspaceDeletion(ctx, a.volume, persist)
 	}
 	return h.Publisher().ReserveWorkspaceDeletion(ctx, a.volume, persist)
