@@ -16,6 +16,7 @@ import (
 // Count references, not just calls: method values, method expressions and
 // package-level aliases can all hide another writer. Resolve the layout import
 // so unrelated structs' VolumeName fields do not count as the VOLUME constant.
+// A write using the literal entry name instead of the constant is not caught.
 func volumeCreationRefs(name string, src []byte) (map[string]int, error) {
 	f, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
 	if err != nil {
