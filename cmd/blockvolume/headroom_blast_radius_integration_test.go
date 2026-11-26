@@ -104,7 +104,7 @@ func TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot(t *testing.T) {
 	}
 	env.waitAck(t, e, g)
 	out, errOut, code = env.volumeDelete(t, "del-v1")
-	requireDeleteCompleted(t, out, errOut, code, false)
+	requireDeleteCompleted(t, out, errOut, code)
 }
 
 // TestHeadroomRefusedRestoreTargetKeepsItsSourceSnapshot: a restore target
