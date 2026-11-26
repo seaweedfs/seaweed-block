@@ -168,7 +168,7 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 		b := env.hosts["n-"+v]
 		args := append(env.volArgsFor(b), "--durable-blocks", fmt.Sprint(bytes/4096))
 		d := env.h.start(t, "blockvolume-"+v, env.h.volume, args...)
-		e := mustU(adoptedEpoch(d.waitLog(t, 60*time.Second, "blockvolume: volume "+v+" adopted as PRIMARY at r1@")))
+		e := mustU(adoptedEpochOf(v, d.waitLog(t, 60*time.Second, "blockvolume: volume "+v+" adopted as PRIMARY at r1@")))
 		env.h.waitPrimaryAt(t, b.status, e)
 		w := &siblingWriter{volume: v, nvme: b.nvme, blocks: bytes / 4096, stop: make(chan struct{}), done: make(chan struct{}), acked: map[uint64][32]byte{}}
 		writers = append(writers, w)

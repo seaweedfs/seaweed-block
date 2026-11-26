@@ -96,7 +96,26 @@ func TestCellDeletedNameIsNotReused(t *testing.T) {
 		t.Fatalf("s1 after the revocation: %v; want a clean exit by itself", err)
 	}
 	env.waitAck(t, e, g)
+	// Row A5's pass line: the delete completes once the lease has expired
+	// (about 60 s). A refusal before that names its horizon; the same
+	// request id resumes the delete past it.
 	out, errOut, code := env.volumeDelete(t, "del-v1-reuse")
+	if code != 0 && strings.Contains(out+errOut, "has not elapsed") {
+		wait := 75 * time.Second
+		if i := strings.Index(out+errOut, "live until "); i >= 0 {
+			if f := strings.Fields((out + errOut)[i+len("live until "):]); len(f) > 0 {
+				if until, err := time.Parse(time.RFC3339Nano, strings.TrimRight(f[0], ":")); err == nil {
+					wait = time.Until(until) + 5*time.Second
+				}
+			}
+		}
+		if wait < 0 || wait > 90*time.Second {
+			t.Fatalf("the delete's refusal names a horizon %v away (want within 90 s):\n%s\n%s", wait, out, errOut)
+		}
+		t.Logf("v1: delete refused until its lease horizon; retrying in %v", wait.Round(time.Second))
+		time.Sleep(wait)
+		out, errOut, code = env.volumeDelete(t, "del-v1-reuse")
+	}
 	requireDeleteCompleted(t, out, errOut, code)
 
 	requireNameRefused(t, env.createVolumeV1(t), "after the delete")
