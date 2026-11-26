@@ -457,6 +457,16 @@ and step 4 is refused with `live authority requires clean revocation ACK`. Nothi
 was deleted. Start `blockvolume` again with the same flags and local root, then do
 step 2 and continue. This recovery runs as written (`TestProcedureDeleteAfterASignalStop`).
 
+**A volume that never served** has no holder to seal or ACK: its blockvolume
+was stopped at its first lease grant, or a clean move went to a host that
+never started. Run step 4 without steps 1-3. While the lease that start was
+granted could still be live, step 4 is refused with `workspace delete: live
+until <time>: ... lease expiry plus clock-skew margin has not elapsed`, and
+nothing is deleted. Nobody renews that lease, so run the same command (the same
+`--request-id`) after `<time>`, about 60 seconds later with default flags;
+it then completes. In this release the delete waits for that time
+(`TestNeverStartedLineIsDeletableWithoutARevoke`).
+
 ## Snapshot names and retries
 
 A snapshot request first takes its name, then publishes the snapshot. Three rules
