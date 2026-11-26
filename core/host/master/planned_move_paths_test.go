@@ -1,7 +1,6 @@
 package master
 
 import (
-	"errors"
 	"fmt"
 	"testing"
 
@@ -12,8 +11,7 @@ import (
 // passes one guard: a failback (plannedMoveEvidence) and a rebalance (the
 // gate's PlannedMoveAllowed on the slot, which the controller requires) are
 // allowed exactly when plannedMoveAllowed holds for the volume's ack profile
-// and replica count; where it refuses for want of a seal, the failback
-// takes the fencing round instead. One row per profile x RF; each row checks both paths.
+// and replica count. One row per profile x RF; each row checks both paths.
 func TestPlannedMoveOneGuardForFailbackAndRebalance(t *testing.T) {
 	for _, profile := range []string{"sync_all", "sync_quorum", "best_effort"} {
 		for _, rf := range []int{2, 3} {
@@ -41,15 +39,9 @@ func TestPlannedMoveOneGuardForFailbackAndRebalance(t *testing.T) {
 					Candidates:   candidates,
 				}})
 
-				// Failback. Where a planned move needs a seal (RF3
-				// sync_quorum), the failback runs the fencing round instead
-				// (manual_failover_fence_test.go); the rebalance stays refused.
+				// Failback.
 				_, err := h.plannedMoveEvidence(vol, "r2")
-				if errors.Is(plannedMoveAllowed(profile, rf), ErrPlannedMoveNeedsSeal) {
-					if errors.Is(err, ErrPlannedMoveNeedsSeal) {
-						t.Fatalf("failback to r2 refused for want of a seal; want the fencing round: %v", err)
-					}
-				} else if (err == nil) != want {
+				if (err == nil) != want {
 					t.Fatalf("failback to r2: err=%v; want allowed=%t", err, want)
 				}
 

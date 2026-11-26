@@ -210,7 +210,7 @@ This alpha MVP does not yet claim:
 - production-ready durability
 - multi-node Kubernetes operation
 - failover while a pod remains mounted
-- automatic failover when the primary node or pod is lost: blockmaster does not reassign on a primary it cannot read; failover is a manual admin action (a `SwBlockReplicaFailback` with the expected current line, applied for the failback executor, which calls blockmaster's admin `ExecuteFailback`); when the primary is unreachable, and for any RF3 `sync_quorum` move, that failover runs the fencing round first and moves only to a ready replica holding the highest fenced end (a `best_effort` volume is refused)
+- automatic failover when the primary node or pod is lost: blockmaster does not reassign on a primary it cannot read; failover is a manual admin action (a `SwBlockReplicaFailback` with the expected current line, applied for the failback executor, which calls blockmaster's admin `ExecuteFailback`); when the primary is unreachable that failover runs the fencing round first and moves only to a ready replica holding the highest fenced end (a `best_effort` volume, and a reachable RF3 `sync_quorum` primary, are refused; the round stops the old primary's writes, not its reads, so confirm the old node is off or cut from its clients first)
 - real operator reconciliation
 - backend data shredding on delete
 - snapshots, clone, resize, block mode, topology spread, or NVMe-oF

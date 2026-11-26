@@ -73,17 +73,17 @@ func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvid
 			targetServer = s.ServerID
 		}
 	}
-	if err := plannedMoveAllowed(profile, len(placement.Slots)); err != nil {
-		if errors.Is(err, ErrPlannedMoveNeedsSeal) {
-			return h.fencedMoveEvidence(volumeID, target, profile, placement.Slots)
-		}
-		return adapter.PrimaryEvidence{}, err
-	}
 	// The primary is unreachable (a lost host stops heartbeating): the move
 	// is the operator's failover, not a planned move from a live primary, and
-	// it is decided on the fencing round at every replica count.
-	if h.primaryUnreachable(volumeID) {
+	// it is decided on the fencing round at every replica count, where the
+	// planned guard refuses only for want of a seal. A reachable primary's
+	// move stays a planned move under its guard.
+	if err := plannedMoveAllowed(profile, len(placement.Slots)); err != nil && !errors.Is(err, ErrPlannedMoveNeedsSeal) {
+		return adapter.PrimaryEvidence{}, err
+	} else if h.primaryUnreachable(volumeID) {
 		return h.fencedMoveEvidence(volumeID, target, profile, placement.Slots)
+	} else if err != nil {
+		return adapter.PrimaryEvidence{}, err
 	}
 	result, err := prober.ProbePromotionCandidates(volumeID, authority.AuthorityBasis{}, []authority.ReplicaCandidate{{ReplicaID: target, ServerID: targetServer}})
 	if err != nil {
@@ -110,10 +110,8 @@ func (h *Host) primaryUnreachable(volumeID string) bool {
 	return !fresh || !slot.Reachable
 }
 
-// fencedMoveEvidence is the operator's move where a planned move needs a seal
-// (the target is not in every acknowledgement set: RF3 sync_quorum), or
-// whose primary is unreachable (the operator's failover, any count). The
-// fencing round is that seal: every other replica is fenced at the line's
+// fencedMoveEvidence is the operator's failover of an unreachable primary,
+// at any replica count. The fencing round seals the old primary: every other replica is fenced at the line's
 // next epoch, so the old primary, dead or alive, can no longer collect an
 // acknowledgement, and the decision is read from the round alone
 // (fencedDecision: enough counted answers, the target holds the highest

@@ -3,7 +3,9 @@ package master
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
@@ -50,8 +52,9 @@ func failoverVolumeTo(h *Host, volumeID string, current authority.AuthorityBasis
 	return err
 }
 
-// The operator's failover of an RF3 sync_quorum volume (its primary
-// powered off: no answer) needs no seal: it runs the fencing round, and the
+// The operator's failover of an RF3 sync_quorum volume whose primary is
+// unreachable (its host powered off: no fresh heartbeat) runs the fencing
+// round, which is the seal a planned move there lacks, and the
 // decision is the round's (Fence model Open/Answer/Decide). Survivors answer
 // at floor e+1, both of them (N-K+1 = 2), so the old primary can no longer
 // collect an acknowledgement; the target must hold the highest fenced end and
@@ -102,6 +105,7 @@ func TestManualFailoverRF3SyncQuorumDecidesOnTheFencingRound(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h, line := rf3LineOnR1(t)
 			defer closeTestMaster(t, h)
+			ingestRF3Observation(t, h, false, true, true) // r1's host is gone
 			p := &fenceProbe{plain: plain, fenced: c.fenced(line.Epoch)}
 			h.SetPromotionEvidenceProvider(ackedFenceProbe{p})
 
@@ -134,6 +138,7 @@ func TestManualFailoverRF3SyncQuorumDecidesOnTheFencingRound(t *testing.T) {
 func TestManualFailoverRF3EvidenceIsTheFencingRounds(t *testing.T) {
 	h, line := rf3LineOnR1(t)
 	defer closeTestMaster(t, h)
+	ingestRF3Observation(t, h, false, true, true)
 	p := &fenceProbe{
 		plain: PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, Candidates: []PromotionCandidateEvidence{
 			{ReplicaID: "r2", Ready: true, DurableLSN: 10}, {ReplicaID: "r3", Ready: true, DurableLSN: 12}}},
@@ -277,5 +282,100 @@ func TestManualFailoverRF2ReachablePrimaryStaysPlanned(t *testing.T) {
 	}
 	if ev.Basis != adapter.BasisPlanned || ev.FencedEpoch != 0 || len(p.survivors) != 0 {
 		t.Fatalf("evidence %+v fenced=%v; want a planned move with no fencing round", ev, p.survivors)
+	}
+}
+
+// A reachable RF3 sync_quorum primary's move is a planned move, and a planned
+// move there needs a seal v1 does not have: refused, with no fencing round.
+// Only the failover of an unreachable primary is fenced.
+func TestManualFailoverRF3ReachablePrimaryIsRefused(t *testing.T) {
+	h, line := rf3LineOnR1(t)
+	defer closeTestMaster(t, h)
+	p := &fenceProbe{
+		plain:  PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10}, {ReplicaID: "r3", Ready: true, DurableLSN: 12}}},
+		fenced: fencedAs(),
+	}
+	h.SetPromotionEvidenceProvider(ackedFenceProbe{p})
+	err := failoverTo(h, line, "r3")
+	if !errors.Is(err, ErrPlannedMoveNeedsSeal) || len(p.survivors) != 0 {
+		t.Fatalf("err=%v fenced=%v; want ErrPlannedMoveNeedsSeal and no fencing round", err, p.survivors)
+	}
+	if after, _ := h.Publisher().VolumeAuthorityLine("vol-rf3"); after != line {
+		t.Fatalf("line=%+v; want %+v unchanged", after, line)
+	}
+}
+
+// meetingFenceProbe holds each fencing round until two have arrived (or a
+// bound passes), so two callers decide the same volume at the same time.
+type meetingFenceProbe struct {
+	*fenceProbe
+	mu      sync.Mutex
+	arrived int
+	both    chan struct{}
+}
+
+func (p *meetingFenceProbe) FencePromotionCandidates(v string, current authority.AuthorityBasis, survivors []PromotionCandidateEvidence) (PromotionProbeResult, error) {
+	p.mu.Lock()
+	p.arrived++
+	if p.arrived == 2 {
+		close(p.both)
+	}
+	p.mu.Unlock()
+	select {
+	case <-p.both:
+	case <-time.After(2 * time.Second):
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fenceProbe.FencePromotionCandidates(v, current, survivors)
+}
+
+func (p *meetingFenceProbe) AckProfile() string { return p.plain.AckProfile }
+
+// The operator's failover and the master's own promotion loop decide the
+// same volume at once: both fence at the same next epoch and both allow the
+// target, but exactly one line is published (the line's conditional update
+// refuses the second), so the epoch moves once.
+func TestManualFailoverAndThePromotionLoopPublishOneLine(t *testing.T) {
+	h, line := rf3LineOnR1(t)
+	defer closeTestMaster(t, h)
+	ingestRF3Observation(t, h, false, true, true)
+	e := line.Epoch
+	p := &meetingFenceProbe{both: make(chan struct{}), fenceProbe: &fenceProbe{
+		// The primary answered not ready: the loop's own promotion applies.
+		plain: PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true,
+			Current:    PromotionCandidateEvidence{ReplicaID: "r1"},
+			Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 10}, {ReplicaID: "r3", Ready: true, DurableLSN: 12}}},
+		fenced: fencedAs(
+			PromotionCandidateEvidence{ReplicaID: "r2", Ready: true, DurableLSN: 10, Floor: e + 1, TableValid: true},
+			PromotionCandidateEvidence{ReplicaID: "r3", Ready: true, DurableLSN: 12, Floor: e + 1, TableValid: true}),
+	}}
+	h.SetPromotionEvidenceProvider(p)
+
+	var wg sync.WaitGroup
+	var opErr, loopErr error
+	wg.Add(2)
+	go func() { defer wg.Done(); opErr = failoverTo(h, line, "r3") }()
+	go func() { defer wg.Done(); _, loopErr = h.RunLifecycleProductTick() }()
+	wg.Wait()
+	if loopErr != nil {
+		t.Fatalf("product tick: %v", loopErr)
+	}
+	p.mu.Lock()
+	met := p.arrived
+	p.mu.Unlock()
+	if met < 2 {
+		t.Fatalf("%d fencing rounds; want both callers deciding at once", met)
+	}
+	after := waitAuthorityReplica(t, h.Publisher(), "vol-rf3", "r3")
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if cur, _ := h.Publisher().VolumeAuthorityLine("vol-rf3"); cur.Epoch != e+1 || cur.ReplicaID != "r3" {
+			t.Fatalf("line=%+v; want exactly one publication: r3 at %d (operator err=%v)", cur, e+1, opErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if after.Epoch != e+1 {
+		t.Fatalf("line=%+v; want r3 at %d", after, e+1)
 	}
 }
