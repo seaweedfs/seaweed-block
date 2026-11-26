@@ -2,7 +2,9 @@ package master
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -13,11 +15,17 @@ import (
 // neverCreatedVolume builds a layout volume the production way (create,
 // binding, placement, heartbeat, a product tick binds its line) whose
 // primary holds a live lease, and, when established, records its stores.
-func neverCreatedVolume(t *testing.T, established bool) (*Host, control.LifecycleServiceClient, control.WorkspaceServiceClient, *control.WorkspaceIdentity) {
+func neverCreatedVolume(t *testing.T, established bool) (*Host, control.LifecycleServiceClient, control.WorkspaceServiceClient, *control.WorkspaceIdentity, *atomic.Int64) {
 	t.Helper()
+	// The lease clock is the master's (server configuration): the test
+	// moves it past the lease horizon.
+	nowNS := &atomic.Int64{}
+	nowNS.Store(time.Now().UnixNano())
 	h, conn, ctx := reviewBindingHostBeforeStart(t, func(context.Context, string) (authority.WorkspaceHead, error) {
 		return authority.WorkspaceHead{Gen: 2}, authority.ErrWorkspaceHeadUnclaimed
-	}, nil)
+	}, func(h *Host) {
+		authority.WithWorkspaceLeaseConfig(30*time.Second, func() time.Time { return time.Unix(0, nowNS.Load()) })(h.Publisher())
+	})
 	reviewCreate(t, conn, ctx, "v")
 	ws := control.NewWorkspaceServiceClient(conn)
 	b := &control.WorkspaceBinding{VolumeId: "v", ServerId: "node-a", DataAddr: "127.0.0.1:10000", CtrlAddr: "127.0.0.1:10001"}
@@ -42,7 +50,7 @@ func neverCreatedVolume(t *testing.T, established bool) (*Host, control.Lifecycl
 	if creating := h.inCreationPhase("v", line, nil) != ""; creating == established {
 		t.Fatalf("fixture: creating=%t, want %t", creating, !established)
 	}
-	return h, control.NewLifecycleServiceClient(conn), ws, id
+	return h, control.NewLifecycleServiceClient(conn), ws, id, nowNS
 }
 
 // A volume that never completed creation is deleted without its holder's
@@ -53,7 +61,7 @@ func neverCreatedVolume(t *testing.T, established bool) (*Host, control.Lifecycl
 // until no lease is live (the horizon), after which HEAD is marked deleting
 // and no claim or commit applies to it.
 func TestANeverCreatedVolumeIsDeletedWithoutItsHolder(t *testing.T) {
-	_, lc, ws, id := neverCreatedVolume(t, false)
+	_, lc, ws, id, nowNS := neverCreatedVolume(t, false)
 	req := &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-never-created"}
 	if _, err := lc.ReserveVolumeDeletion(t.Context(), req); err != nil {
 		t.Fatalf("delete reservation of a never-created volume with a live lease: %v", err)
@@ -64,12 +72,21 @@ func TestANeverCreatedVolumeIsDeletedWithoutItsHolder(t *testing.T) {
 	if _, err := lc.CheckVolumeNoLiveLease(t.Context(), req); err == nil {
 		t.Fatal("the delete's HEAD update was admitted while the last lease may still be live")
 	}
+	// Past the lease horizon (the 30 s lease plus the clock-skew margin) the
+	// HEAD update is admitted: the delete finishes without the holder.
+	nowNS.Add(int64(2 * time.Minute))
+	if _, err := lc.CheckVolumeNoLiveLease(t.Context(), req); err != nil {
+		t.Fatalf("past the lease horizon the delete's HEAD update is still refused: %v", err)
+	}
+	if _, err := ws.RenewWorkspaceLease(t.Context(), id); err == nil {
+		t.Fatal("the creating primary renewed its lease past the horizon")
+	}
 }
 
 // A volume that completed creation keeps the rule: its delete is refused
 // while its holder's lease is live (the holder must be revoked first).
 func TestAnEstablishedVolumeIsNotDeletedUnderALiveLease(t *testing.T) {
-	_, lc, _, _ := neverCreatedVolume(t, true)
+	_, lc, _, _, _ := neverCreatedVolume(t, true)
 	_, err := lc.ReserveVolumeDeletion(t.Context(), &control.MarkVolumeDeletingRequest{VolumeId: "v", Token: "del-established"})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("delete of an established volume under a live lease: %v; want FailedPrecondition", err)
