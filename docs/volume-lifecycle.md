@@ -185,6 +185,8 @@ These are rules for the operator. The product does not detect every breach.
   start of it is refused by blockmaster: it logs `exiting status=78 reason=moved`,
   exits 78 and cannot serve. The shipped unit does not restart a process that exits
   78, so it stays failed; disable it so that a reboot does not start it again.
+  This refusal can happen before any assignment is delivered to the old host;
+  its `reason=moved` exit is the evidence that the start was refused.
 - **Before moving a volume back to a host that held it earlier, move that host's old
   root aside** (after the check above). The old root is stale; the new holder must start
   on a fresh one.
@@ -310,13 +312,13 @@ predates another host's HEAD refuses it, see the table). If you start it
 later, its first renewal waits until 65 seconds after the move: start it after
 that, as in [after a crash](#after-a-crash).
 
-**8. Verify.** The new holder logs `durable: HEAD claim for volume=v1 done in
-...: gen=... epoch=E2 holder="S2/R"` and `blockvolume: volume v1 adopted as
-PRIMARY at R@E2`. `ops workspace show` prints `holder: R@E2` and a line
+**8. Verify.** The new holder logs `blockvolume: volume v1 adopted as
+PRIMARY at R@E2`. Its completed claim is observable in HEAD. `ops workspace show`
+prints `holder: R@E2` and a line
 `move: request=move-v1-1 kind=clean issued=true ...`. `ops chunk show` shows
 `head.State` `""` (live), `head.Epoch` E2, `head.Holder` `S2/R`, a nonempty
-`head.ClaimID`, a non-null `head.Current` and `head.Position` L. Reconnect the
-guest to the new host.
+`head.ClaimID`, `head.Gen` above the sealed generation G, a non-null `head.Current`
+and `head.Position` L. Reconnect the guest to the new host.
 
 ## Same host
 
