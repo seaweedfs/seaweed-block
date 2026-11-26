@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -139,8 +140,11 @@ func TestCreateVolumeRetriesFilerCreateBeforeStoreReady(t *testing.T) {
 }
 
 func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
-	h := newTestMaster(t, t.TempDir())
+	// An RF2 volume is admitted by a master that decides RF2 volumes and
+	// runs its product loop (#646).
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 2})
 	defer closeTestMaster(t, h)
+	h.cfg.LifecycleProductLoop = true
 	svc := newServices(h)
 
 	resp, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
