@@ -57,6 +57,10 @@ func (c *TopologyController) SetNowForTest(now func() time.Time) {
 	c.now = now
 }
 
+// ExpectedSlotsPerVolume is the one replica-slot count every volume the
+// controller decides must have (validateVolumeTopology).
+func (c *TopologyController) ExpectedSlotsPerVolume() int { return c.config.ExpectedSlotsPerVolume }
+
 // SubmitClusterSnapshot is the cluster-scoped entry point for
 // topology, health, and convergence observations. Rejects empty
 // snapshots to preserve the "supported truth only" invariant on

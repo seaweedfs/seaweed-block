@@ -92,15 +92,15 @@ func TestRestoreCreateVolumePersistsRequestBeforeTargetAndHealsRetry(t *testing.
 	if _, ok := h.Lifecycle().Volumes.GetVolume("net-target"); ok {
 		t.Fatal("RF2 restore created a target record")
 	}
-	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "net-source", SizeBytes: 1 << 20, ReplicationFactor: 2}); err != nil {
+	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{VolumeId: "net-source", SizeBytes: 1 << 20, ReplicationFactor: 3}); err != nil {
 		t.Fatal(err)
 	}
 	unsafe = &control.CreateVolumeRequest{VolumeId: "from-net", SourceVolume: "net-source", SourceSnapshot: "daily", CreateRequestId: "restore-from-net"}
 	if _, err := svc.CreateVolume(context.Background(), unsafe); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("RF2 source restore: %v; want refusal", err)
+		t.Fatalf("RF3 source restore: %v; want refusal", err)
 	}
 	if _, ok := h.Lifecycle().Volumes.GetVolume("from-net"); ok {
-		t.Fatal("RF2 source restore created a target record")
+		t.Fatal("RF3 source restore created a target record")
 	}
 }
 
