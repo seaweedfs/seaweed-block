@@ -176,6 +176,28 @@ that store. This release has no `sw-block` command that creates that record. Che
 volume`. A move target must also be a registered node, or the move is refused
 with `move target node "s2" is not registered`.
 
+### Resolve the LOCAL volume's layout id
+
+Before starting a standalone `walstore-chunk` blockvolume for an existing
+volume, ask the same master for its layout id:
+
+```bash
+sw-block ops volume resolve --master 127.0.0.1:9180 v1
+```
+
+The command prints only the full 32-hex-digit id and a newline. Pass that
+value as `blockvolume --layout-id <printed-id>` along with `--volume-id v1`
+and the other startup flags. For the example systemd units, add
+`--layout-id <printed-id>` to `SWB_VOLUME_EXTRA_ARGS` in
+`/etc/sw-block/blockvolume.env` before starting the service. Resolve each
+volume separately; do not mint an id or copy another volume's value.
+
+This is a read-only query of the master's volume record, using the same
+TLS and token environment settings as `ops chunk`. A missing volume, an
+invalid identity or an unreachable master returns nonzero and prints no id;
+fix that error before starting blockvolume. The query does not create a
+volume or prove frontend readiness.
+
 ## blockmaster settings
 
 | Variable | Flag | Default | Meaning |
