@@ -31,7 +31,10 @@ type exitAssignmentStream struct {
 	// the typed IDENTITY detail.
 	identityRefusals atomic.Int32
 	ackError         error
-	acks             atomic.Int32
+	// ackFirstError, when set, answers only the first ACK (counted, not
+	// recorded) with it; later ones get ackError.
+	ackFirstError error
+	acks          atomic.Int32
 	facts            chan *control.AssignmentFact
 }
 
@@ -45,7 +48,9 @@ func (s *exitAssignmentStream) AckWorkspaceRevoked(_ context.Context, a *control
 	if a.GetHeadGen() != 1 {
 		return nil, errors.New("ACK lacks the stored detached proof")
 	}
-	s.acks.Add(1)
+	if s.acks.Add(1) == 1 && s.ackFirstError != nil {
+		return nil, s.ackFirstError
+	}
 	return &control.WorkspaceEmpty{}, s.ackError
 }
 func (s *exitAssignmentStream) ReportHeartbeat(context.Context, *control.HeartbeatReport) (*control.HeartbeatAck, error) {
