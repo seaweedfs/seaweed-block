@@ -145,7 +145,7 @@ func (p *snapshotFilerBoundary) LookupDirectoryEntry(ctx context.Context, r *fil
 }
 func (p *snapshotFilerBoundary) CreateEntry(ctx context.Context, r *filerpb.CreateEntryRequest) (*filerpb.CreateEntryResponse, error) {
 	out, err := p.backend.CreateEntry(ctx, r)
-	if err == nil && out.GetError() == "" {
+	if err == nil && out.GetErrorCode() == filerpb.FilerError_OK && out.GetError() == "" {
 		p.after(ctx, r.Directory, r.Entry)
 	}
 	return out, err
