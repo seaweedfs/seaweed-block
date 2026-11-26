@@ -148,12 +148,18 @@ func (h *Host) probeAnswer(round uint64) *control.ProbeAnswer {
 			a.StoreId = id[:]
 		}
 	}
+	// The wait is read BEFORE readiness: if it held, a not-ready answer read
+	// after is the wait (the frontend gate reads the same value); if it no
+	// longer held, a not-ready answer has another cause and says nothing.
+	awaiting := h.awaitingStoresEpoch()
 	if roles, ok := h.probeRoles.Load().(probeRoleSource); ok && roles != nil {
 		a.ReplicaReady, a.PrimaryReady = roles()
 	}
 	// Not serving only because the creation wait of this line still holds:
 	// said so, with the line's epoch, so the master does not take the
 	// not-ready answer for a failure (and no other line can borrow it).
-	a.AwaitingReplicaStoresEpoch = h.replicaStoresAwaitedEpoch(a.PrimaryReady)
+	if !a.PrimaryReady {
+		a.AwaitingReplicaStoresEpoch = awaiting
+	}
 	return a
 }

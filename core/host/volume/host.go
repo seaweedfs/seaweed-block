@@ -169,7 +169,7 @@ type Host struct {
 	// successful role call for the current role and epoch clears it.
 	roleAdmissionFailed atomic.Value // string reason; "" = not failed
 	// storeWait: the primary fact's replica-store wait (ReplicaStoresAwaited,
-	// replicaStoresAwaitedEpoch), one value under its own lock.
+	// awaitingStoresEpoch), one value under its own lock.
 	storeWait storeWait
 	// roleRetry: the last replica role call failed with an error a retry
 	// may outlast (a floor that could not be persisted); runRoleRetry
@@ -775,7 +775,6 @@ func (h *Host) runHeartbeat(ctx context.Context) {
 	send := func() {
 		rpcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		h.noteFrontendServing()
 		_, err := h.obsCli.ReportHeartbeat(rpcCtx, h.buildReport())
 		if ctx.Err() == nil {
 			h.mw.call(err)
@@ -1093,7 +1092,12 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	}
 
 	h.recordSelfAssignment(fact)
-	h.noteReplicaStores(fact)
+	// A fact that awaits replica stores closes the frontend at once; one
+	// that carries them all opens it only after the peers' expected stores
+	// are installed (below), so no write is served before its peers count.
+	if fact.GetReplicaStoresAwaited() > 0 {
+		h.noteReplicaStores(fact)
+	}
 	h.reportAssignmentEndpoints(fact)
 
 	// The recovery watchdog runs from the primary assignment, before any
@@ -1170,6 +1174,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		h.log.Printf("blockvolume: volume %s replication UpdateReplicaSet ok (gen=%d, peers=%d): %v",
 			h.cfg.VolumeID, gen, len(targets), peerIDs)
 	}
+	h.noteReplicaStores(fact)
 
 	// Step (2c): identity install only after replication is live.
 	// SOLE permitted decode path. See subscribe.go.

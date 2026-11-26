@@ -8,16 +8,11 @@ import (
 )
 
 // storeWait is the primary fact's replica-store wait, read and written as
-// one value: the fact's epoch, its counts, and the line still starting from
-// that wait.
+// one value: the fact's epoch and its counts.
 type storeWait struct {
 	mu               sync.Mutex
 	epoch            uint64
 	awaited, initial uint32
-	// starting: the epoch of a line whose assignment awaited replica stores
-	// and whose frontend has not opened on it yet (0: none). It outlives the
-	// stores-complete assignment until the frontend opens.
-	starting uint64
 }
 
 // noteReplicaStores keeps the primary fact's count of a new volume's initial
@@ -25,47 +20,25 @@ type storeWait struct {
 func (h *Host) noteReplicaStores(f *control.AssignmentFact) {
 	w := &h.storeWait
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	w.epoch, w.awaited, w.initial = f.GetEpoch(), f.GetReplicaStoresAwaited(), f.GetReplicaStoresInitial()
-	switch {
-	case w.awaited > 0:
-		w.starting = w.epoch
-	case w.starting != w.epoch:
-		w.starting = 0 // another line: it never started from a wait
-	}
+	w.mu.Unlock()
 }
 
-// replicaStoresAwaitedEpoch is, for the probe answer, the epoch of the line
-// that still starts from its creation wait: its assignment awaits replica
-// stores, or carried them but the frontend has not opened on it yet. 0
-// once the frontend is open (primaryReady), for good on that line.
-func (h *Host) replicaStoresAwaitedEpoch(primaryReady bool) uint64 {
+// awaitingStoresEpoch is the epoch of the primary assignment whose creation
+// wait holds now (0: none). The frontend gate reads the same value, so once
+// it reads 0 the wait no longer holds the frontend back: a not-ready answer
+// read after it has another cause.
+func (h *Host) awaitingStoresEpoch() uint64 {
 	if _, ok := h.getReplication().(storeRequirer); !ok {
 		return 0
 	}
 	w := &h.storeWait
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.starting == 0 || w.starting != w.epoch {
+	if w.awaited == 0 {
 		return 0
 	}
-	if primaryReady {
-		w.starting = 0
-		return 0
-	}
-	return w.starting
-}
-
-// noteFrontendServing ends the line's start once its frontend is open: the
-// heartbeat calls it, so the start ends without waiting for a probe.
-func (h *Host) noteFrontendServing() {
-	roles, ok := h.probeRoles.Load().(probeRoleSource)
-	if !ok || roles == nil {
-		return
-	}
-	if _, ready := roles(); ready {
-		h.replicaStoresAwaitedEpoch(true)
-	}
+	return w.epoch
 }
 
 // ReplicaStoresAwaited is the reason a new volume's primary serves nothing
