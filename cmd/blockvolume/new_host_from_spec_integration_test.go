@@ -48,7 +48,7 @@ func TestCellNewHostFromTheClusterSpec(t *testing.T) {
 		root: filepath.Join(h.dir, "vol-s2")}
 
 	// Control: blockmaster has not registered s2, so it refuses the move.
-	move := env.moveClean(e, "s2", "move-v1-new-host")
+	move := env.moveClean(e, "s2", "move-v1-1") // movedEpochTo reads this request id
 	out, errOut, code := h.run(t, move...)
 	if code == 0 || !strings.Contains(out+errOut, `move target node "s2" is not registered`) {
 		t.Fatalf("move to a host not in the cluster spec: exit %d %s %s; want refused by blockmaster, not registered", code, out, errOut)
