@@ -3,6 +3,7 @@ package master
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
@@ -29,13 +30,32 @@ func (a *volumeDeleteAuthority) Reserve(ctx context.Context) error {
 	if h.lifecycle == nil {
 		return errors.New("workspace delete: lifecycle store unavailable")
 	}
-	return h.Publisher().ReserveWorkspaceDeletion(ctx, a.volume, func() error {
+	persist := func() error {
 		if _, err := h.lifecycle.Deletions.Admit(a.volume, a.token); err != nil {
 			return err
 		}
 		_, err := h.lifecycle.Deletions.Commit(a.volume, a.token)
 		return err
-	})
+	}
+	// The delete without the holder's acknowledgement (a live lease does
+	// not refuse the reservation, which stops every grant) is admitted only
+	// in stage 1, while the master's record still awaits a replica store:
+	// the primary serves nothing until every store is recorded. The record
+	// is marked durably first, in the lock that ends the wait, and the mark
+	// freezes it in stage 1, so the primary never starts serving. Past stage
+	// 1 (also while creation has not been recorded as ended: the volume may
+	// be serving) the live-lease refusal stays; a broken primary's lease
+	// ends by itself, and the ordinary delete then applies.
+	if h.attest != nil {
+		marked, err := h.attest.markDeleteWithoutAck(a.volume, h.replicaSlotsFor(a.volume))
+		if err != nil {
+			return fmt.Errorf("workspace delete: record the delete without acknowledgement: %w", err)
+		}
+		if marked {
+			return h.Publisher().ReserveNeverCreatedWorkspaceDeletion(ctx, a.volume, persist)
+		}
+	}
+	return h.Publisher().ReserveWorkspaceDeletion(ctx, a.volume, persist)
 }
 
 func (a *volumeDeleteAuthority) NoLiveLease(ctx context.Context) error {

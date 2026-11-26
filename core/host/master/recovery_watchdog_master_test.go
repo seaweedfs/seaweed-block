@@ -68,6 +68,7 @@ func watchdogMaster(t *testing.T) (*Host, *services) {
 	if line := waitAuthorityLine(t, h.Publisher(), "vol-rf3"); line.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", line)
 	}
+	establishVolume(t, h, "vol-rf3")
 	return h, svc
 }
 

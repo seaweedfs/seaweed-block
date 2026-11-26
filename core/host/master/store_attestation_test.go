@@ -139,6 +139,7 @@ func TestPromotionRefusesAReplacedStoreThePrimaryNeverAttested(t *testing.T) {
 			if err := h.ingestStoreAttestation("node-a", attestation("vol-rf3", "r1", line.Epoch, map[string]storage.StoreID{"r1": storeID(1), "r2": s1, "r3": t1})); err != nil {
 				t.Fatal(err)
 			}
+			recordFirstReady(t, h, "vol-rf3") // the primary served before it failed
 			// r2's node reports its new store: never the reference.
 			if err := h.ingestStoreAttestation("node-b", attestation("vol-rf3", "r2", line.Epoch, map[string]storage.StoreID{"r2": s2})); err != nil {
 				t.Fatal(err)

@@ -43,6 +43,7 @@ func rf3LineOnR1With(t *testing.T, h *Host) (*Host, authority.AuthorityBasis) {
 	if line.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", line)
 	}
+	establishVolume(t, h, "vol-rf3")
 	return h, line
 }
 
@@ -182,6 +183,7 @@ func rf2LineOnR1(t *testing.T, profile string) (*Host, authority.AuthorityBasis)
 	if line.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", line)
 	}
+	establishVolume(t, h, "vol-rf2")
 	return h, line
 }
 

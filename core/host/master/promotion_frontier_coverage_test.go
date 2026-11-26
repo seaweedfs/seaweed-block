@@ -198,6 +198,7 @@ func TestProductLoop_UnknownFrontierSurvivorReadyLastTickMissingNowRefused(t *te
 	if initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3"); initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
+	establishVolume(t, h, "vol-rf3")
 
 	// Previous tick: both survivors probed ready, current primary ready.
 	probe.set(PromotionProbeResult{
@@ -265,6 +266,7 @@ func TestMountedFailover_ProductLoopRF2DecidesOnThePromotionGate(t *testing.T) {
 			if initial := waitAuthorityLine(t, h.Publisher(), "vol-rf2"); initial.ReplicaID != "r1" {
 				t.Fatalf("initial line=%+v want r1", initial)
 			}
+			establishVolume(t, h, "vol-rf2")
 			ingestRF2Observation(t, h, false, true)
 			result, err := h.RunLifecycleProductTick()
 			if err != nil {
@@ -281,6 +283,7 @@ func TestMountedFailover_ProductLoopRF2DecidesOnThePromotionGate(t *testing.T) {
 				return
 			}
 			failover := waitAuthorityReplica(t, h.Publisher(), "vol-rf2", "r2")
+			establishVolume(t, h, "vol-rf2")
 			if failover.Epoch != 2 {
 				t.Fatalf("failover line=%+v want r2@2", failover)
 			}
