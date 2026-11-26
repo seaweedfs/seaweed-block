@@ -91,6 +91,10 @@ func startWorkspaceWeedAt(t *testing.T, dir string) *w4WeedCluster {
 // VolumeSizeLimitMB each (the default holds about 8 GiB of chunks).
 type w4WeedOpts struct {
 	VolumeSizeLimitMB, VolumeMax int
+	// A fault-injection front keeps the advertised filer endpoint unchanged.
+	// The one real filer binds a private loopback address; no second filer is registered.
+	FilerBind  string
+	FilerFront func(*w4WeedCluster)
 }
 
 func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedCluster {
@@ -137,8 +141,17 @@ func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedClust
 	run("master", "master", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", mp), "-mdir="+filepath.Join(dir, "m"), fmt.Sprintf("-volumeSizeLimitMB=%d", o.VolumeSizeLimitMB), "-defaultReplication=000")
 	w4WaitTCP(t, c.master, 20*time.Second)
 	run("volume", "volume", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+c.master, fmt.Sprintf("-max=%d", o.VolumeMax))
-	run("filer", "filer", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", fp), "-master="+c.master, "-defaultStoreDir="+filepath.Join(dir, "f"))
+	filerArgs := []string{"filer", "-ip=" + testListenHost(), fmt.Sprintf("-port=%d", fp), "-master=" + c.master, "-defaultStoreDir=" + filepath.Join(dir, "f")}
+	if o.FilerBind != "" {
+		filerArgs = append(filerArgs, "-ip.bind="+o.FilerBind)
+		c.filerHTTP = net.JoinHostPort(o.FilerBind, fmt.Sprint(fp))
+		c.filerGRPC = net.JoinHostPort(o.FilerBind, fmt.Sprint(fp+10000))
+	}
+	run("filer", filerArgs...)
 	w4WaitTCP(t, c.filerGRPC, 30*time.Second)
+	if o.FilerFront != nil {
+		o.FilerFront(c)
+	}
 
 	// Wait until an assign succeeds (volume registered, volumes growable).
 	cl := c.client(t, "/swblock/vols/probe")

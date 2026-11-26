@@ -6,6 +6,9 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path"
 	"sync"
@@ -37,28 +40,46 @@ type snapshotFilerBoundary struct {
 	hit        bool
 }
 
-func newSnapshotFilerBoundary(t *testing.T, env *handoffEnv) (*snapshotFilerBoundary, string) {
+func newSnapshotFilerBoundary(t *testing.T, cluster *w4WeedCluster) *snapshotFilerBoundary {
 	t.Helper()
-	id, err := layout.ParseVolumeID(env.layoutID("v1"))
+	conn, err := grpc.NewClient(cluster.filerGRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := grpc.NewClient(env.cluster.filerGRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	p := &snapshotFilerBoundary{backend: filerpb.NewSeaweedFilerClient(conn)}
+	_, gp, _ := net.SplitHostPort(cluster.filerGRPC)
+	listener, err := net.Listen("tcp", net.JoinHostPort(testListenHost(), gp))
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &snapshotFilerBoundary{backend: filerpb.NewSeaweedFilerClient(conn), id: id,
-		dir: path.Join(env.chunkPath, layout.VolumeDir("v1", id))}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	backendURL, err := url.Parse("http://" + cluster.filerHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, hp, _ := net.SplitHostPort(cluster.filerHTTP)
+	httpListener, err := net.Listen("tcp", net.JoinHostPort(testListenHost(), hp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := &http.Server{Handler: httputil.NewSingleHostReverseProxy(backendURL), ReadHeaderTimeout: 10 * time.Second}
+	httpDone := make(chan struct{})
+	go func() { defer close(httpDone); _ = httpServer.Serve(httpListener) }()
 	server := grpc.NewServer()
 	filerpb.RegisterSeaweedFilerServer(server, p)
 	done := make(chan struct{})
 	go func() { defer close(done); _ = server.Serve(listener) }()
-	t.Cleanup(func() { p.unblock(); server.Stop(); _ = listener.Close(); <-done; _ = conn.Close() })
-	return p, listener.Addr().String()
+	t.Cleanup(func() {
+		p.unblock()
+		server.Stop()
+		_ = listener.Close()
+		<-done
+		_ = httpServer.Close()
+		<-httpDone
+		_ = conn.Close()
+	})
+	cluster.filerGRPC = listener.Addr().String()
+	cluster.filerHTTP = httpListener.Addr().String()
+	return p
 }
 
 func (p *snapshotFilerBoundary) arm(kind, name string) <-chan struct{} {

@@ -71,9 +71,20 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 	for i := 0; i <= len(boundaries); i++ {
 		targets = append(targets, fmt.Sprintf("v%d", i+2))
 	}
-	env := startHandoffEnvWith(t, 1, targets)
-	boundary, filerAddr := newSnapshotFilerBoundary(t, env)
-	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off", "--chunk-filer", filerAddr}
+	if testListenHost() != "127.0.0.1" {
+		t.Fatal("causal filer fixture requires loopback")
+	}
+	var boundary *snapshotFilerBoundary
+	cluster := startWorkspaceWeedWith(t, t.TempDir(), w4WeedOpts{VolumeSizeLimitMB: 256, VolumeMax: 32,
+		FilerBind: "127.0.0.2", FilerFront: func(c *w4WeedCluster) { boundary = newSnapshotFilerBoundary(t, c) }})
+	env := startHandoffEnvOnCluster(t, 1, targets, procedureTLSConfig(), false, cluster)
+	id, err := layout.ParseVolumeID(env.layoutID("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary.id = id
+	boundary.dir = path.Join(env.chunkPath, layout.VolumeDir("v1", id))
+	env.volExtra = []string{"--chunk-capture-interval", "0", "--chunk-snapshot-schedule", "off"}
 	holder := env.start(t, "blockvolume-v1", "s1")
 	e := env.adopt(t, holder, "s1")
 	marker := pattern("ladder-e1-marker")
