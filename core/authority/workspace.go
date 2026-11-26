@@ -403,7 +403,7 @@ func (p *Publisher) persistWorkspaceTimedLocked(volume string, s *WorkspaceState
 	}
 	i := line.info
 	record := DurableRecord{VolumeID: volume, ReplicaID: i.ReplicaID, Epoch: i.Epoch, EndpointVersion: i.EndpointVersion, DataAddr: i.DataAddr, CtrlAddr: i.CtrlAddr,
-		WriteSeq: p.writeSeqByVolume[volume] + 1, Workspace: cloneWorkspace(s)}
+		WriteSeq: p.writeSeqByVolume[volume] + 1, Workspace: cloneWorkspace(s), Incarnation: i.Incarnation}
 	start := time.Now()
 	err = p.store.Put(record)
 	write = time.Since(start)
