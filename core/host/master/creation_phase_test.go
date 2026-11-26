@@ -239,3 +239,14 @@ func TestCreationEndsAtThePrimarysFirstReadyAnswer(t *testing.T) {
 		t.Fatalf("creation reopened after it ended (%s)", why)
 	}
 }
+
+// recordFirstReady records that the volume's primary answered ready at its
+// first line (after its stores were attested): fixtures whose primary was
+// healthy before the scenario's failure.
+func recordFirstReady(t *testing.T, h *Host, volumeID string) {
+	t.Helper()
+	h.attest.awaited(volumeID, h.replicaSlotsFor(volumeID))
+	if err := h.attest.noteFirstReady(volumeID); err != nil {
+		t.Fatal(err)
+	}
+}

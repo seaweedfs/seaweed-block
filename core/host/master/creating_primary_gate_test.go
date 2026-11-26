@@ -50,8 +50,9 @@ func TestPrimaryAwaitingReplicaStoresIsNotReplacedForNotReady(t *testing.T) {
 // The real-path schedule: the master has recorded every store (its wait is
 // over) but the primary has not received the re-sent assignment yet, so it
 // still answers "awaiting replica stores"; the master restarts in that gap.
-// The excuse is the primary's own answer, so nothing the master forgets on a
-// restart reopens the gap: the line stays.
+// Creation ends only at the primary's first ready answer, recorded durably,
+// so the restarted master still holds the volume: no decision, the line
+// stays.
 func TestMasterRestartInTheGapDoesNotReassign(t *testing.T) {
 	cfg := Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(),
 		ControllerConfig: authority.TopologyControllerConfig{PrimaryBootGrace: 200 * time.Millisecond}}
@@ -74,7 +75,7 @@ func TestMasterRestartInTheGapDoesNotReassign(t *testing.T) {
 		t.Fatal("fixture: the restarted master still waits for stores")
 	}
 	time.Sleep(250 * time.Millisecond) // past the boot grace
-	unsupportedTick(t, h2, readySlot("r1-a"))
+	creatingTick(t, h2, readySlot("r1-a"))
 	expectLineStaysR1(t, h2, "restarted master, primary still awaiting the re-sent stores")
 }
 
