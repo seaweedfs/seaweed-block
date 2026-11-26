@@ -171,18 +171,18 @@ func (env *handoffEnv) requireDeletedForGood(t *testing.T, request string) {
 	}
 }
 
-// TestProcedureDeleteAVolume: the page's steps. A volume with a snapshot is
-// sealed, revoked (blockvolume sends the ACK and exits 0 by itself) and its
-// ACK seen; volume-delete is refused while the snapshot exists, with nothing
-// deleted; the snapshot is deleted; volume-delete then answers deleted,
-// `chunk show` shows HEAD deleted and the pool is empty, and a rerun with
-// the same request id completes again.
+// TestProcedureDeleteAVolume: ACK does not bypass the lease horizon; a
+// restored-volume dependent blocks deletion, while ordinary snapshots do not.
+// Refusals preserve HEAD/pool; completion empties the pool and replays by id.
 func TestProcedureDeleteAVolume(t *testing.T) {
-	env := startHandoffEnv(t, 1)
+	env := startHandoffEnvWith(t, 1, []string{"v2"})
 	holder := env.start(t, "blockvolume-s1", "s1")
 	e := env.adopt(t, holder, "s1")
 	env.writeBlock(t, "s1", 0, pattern("delete-a-volume!"))
 	env.snapshot(t, "s1", "v1", "s1")
+	env.snapshot(t, "s1", "v1", "plain")
+	env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1",
+		"--snapshot", "s1", "--target", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 
 	g := env.seal(t, "s1", e)
 	env.revoke(t, e, g)
@@ -192,14 +192,45 @@ func TestProcedureDeleteAVolume(t *testing.T) {
 	env.waitAck(t, e, g)
 
 	state0, n0 := env.headShown(t)
-	out, errOut, code := env.volumeDelete(t, "del-v1")
-	if code == 0 || !strings.Contains(out+errOut, "has snapshots (s1)") {
-		t.Fatalf("volume-delete with a snapshot: exit %d %s %s; want refused, naming s1", code, out, errOut)
+	out, errOut, code := env.deletePastPrintedHorizon(t, "v1", "del-v1", true)
+	var refusal struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(out), &refusal); err != nil || code != 1 || refusal.Code != "snapshot_has_dependents" || !strings.Contains(refusal.Message, `snapshot "s1"`) {
+		t.Fatalf("volume-delete with a dependent: exit %d %s %s; want typed snapshot_has_dependents naming s1", code, out, errOut)
 	}
 	if state, n := env.headShown(t); state != "detached" || state != state0 || n != n0 || n == 0 {
 		t.Fatalf("after the refused delete HEAD is %q with %d chunks; want it as before (%q, %d chunks): nothing deleted", state, n, state0, n0)
 	}
-	env.deleteSnapshot(t, "v1", "s1")
+	// v2 never started; delete it through the public API (and its own horizon,
+	// if the master granted a line). This releases s1's dependent.
+	out, errOut, code = env.deletePastPrintedHorizon(t, "v2", "del-v2", false)
+	requireDeleteCompleted(t, out, errOut, code)
+	if state, n := env.headOf(t, "v2"), env.poolObjects(t, "v2"); !strings.Contains(state, `"state":"deleted"`) || n != 0 {
+		t.Fatalf("restored target not deleted: HEAD %s pool %d", state, n)
+	}
+	// Both snapshots still exist, now without dependents: plain snapshots
+	// must be removed by the volume delete itself, not by this fixture.
+	snapshots, _ := env.h.command(t, "ops", "chunk", "snapshots", "--master", env.h.masterAddr,
+		"--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	var names []struct {
+		Name       string   `json:"name"`
+		Dependents []string `json:"dependents"`
+	}
+	if err := json.Unmarshal([]byte(snapshots), &names); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, snap := range names {
+		if len(snap.Dependents) != 0 {
+			t.Fatalf("dependent not released: %s", snapshots)
+		}
+		seen[snap.Name] = true
+	}
+	if !seen["s1"] || !seen["plain"] {
+		t.Fatalf("plain snapshots disappeared before volume-delete: %s", snapshots)
+	}
 	out, errOut, code = env.volumeDelete(t, "del-v1")
 	requireDeleteCompleted(t, out, errOut, code)
 	env.requireDeletedForGood(t, "del-v1")
