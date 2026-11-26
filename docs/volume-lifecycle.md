@@ -477,8 +477,10 @@ volume's object listing or verification report to check its remaining objects.
 
 **If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
 and the immediate step 4 is refused (a live lease is reported as
-`not_admitted ... live until <T>`). Nothing was deleted. Start `blockvolume` again with the same flags and local root, then do
-step 2 and continue. This recovery runs as written (`TestProcedureDeleteAfterASignalStop`).
+`not_admitted ... live until <T>`). Nothing was deleted. Start `blockvolume` again with the same flags and local root. Wait for
+`blockvolume: backend admits I/O: starting the frontends` (the storage claim has
+completed); `status-listening` alone is too early. Repeat step 1 to confirm a new
+seal, then revoke in step 2 with that sealed generation and continue. This recovery runs as written (`TestProcedureDeleteAfterASignalStop`).
 
 **A volume that never served** has no holder to seal or ACK: its blockvolume
 was stopped at its first lease grant, or a clean move went to a host that
