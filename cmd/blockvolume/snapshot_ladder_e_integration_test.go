@@ -209,4 +209,5 @@ func TestSnapshotLadderE1CrashDuringASnapshot(t *testing.T) {
 		env.restoreChecked(t, fmt.Sprintf("e1-%d", k), targets[k], images[k], later...)
 	}
 	env.restoreChecked(t, "e1-next", targets[len(boundaries)], final)
+	t.Logf("final restore oracle reached: %d crash snapshots plus next snapshot read back", len(boundaries))
 }
