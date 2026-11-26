@@ -35,8 +35,13 @@ func TestWALStoreChunkFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.chunk.captureInterval != 0 || d.chunk.maintenanceInterval != time.Hour || d.chunk.automaticGC {
-		t.Fatalf("scheduler defaults interval %s, want capture off (0), maintenance 1h and GC off", d.chunk.captureInterval)
+	if d.chunk.captureInterval != 0 || d.chunk.maintenanceInterval != time.Hour || !d.chunk.automaticGC {
+		t.Fatalf("scheduler defaults: capture %s, maintenance %s, cleaning %v; want capture off (0), maintenance 1h and the cleaning on", d.chunk.captureInterval, d.chunk.maintenanceInterval, d.chunk.automaticGC)
+	}
+	// The cleaning is on by default; the one way to turn it off is explicit.
+	noClean, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-maintenance-gc=false"))
+	if err != nil || noClean.chunk.automaticGC || noClean.chunk.maintenanceInterval != time.Hour {
+		t.Fatalf("turning the cleaning off: %+v %v", noClean.chunk, err)
 	}
 	on, err := parseFlags(base("--durable-root=/tmp/sw-block", "--durable-impl=walstore-chunk", "--chunk-filer=x:1", "--chunk-capture-interval=15m"))
 	if err != nil || on.chunk.captureInterval != 15*time.Minute {

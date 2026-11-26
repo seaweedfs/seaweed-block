@@ -229,8 +229,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.DurationVar(&f.chunk.captureInterval, "chunk-capture-interval", defaultChunkCaptureInterval, "walstore-chunk: periodic HEAD capture interval (default 0: off; when set, at least "+durable.MinCaptureInterval.String()+")")
 	f.chunk.snapshotSchedule = defaultSnapshotSchedule
 	fs.Var(&f.chunk.snapshotSchedule, "chunk-snapshot-schedule", "walstore-chunk: scheduled snapshots, daily:N or weekly:N (once per period at a per-volume offset, the newest N kept) or off")
-	fs.DurationVar(&f.chunk.maintenanceInterval, "chunk-maintenance-interval", defaultChunkMaintenanceInterval, "walstore-chunk: retention and optional GC pass interval; 0 disables")
-	fs.BoolVar(&f.chunk.automaticGC, "chunk-maintenance-gc", false, "walstore-chunk: let the holder's maintenance pass remove chunks no root of the volume reaches (cleaning); off by default")
+	fs.DurationVar(&f.chunk.maintenanceInterval, "chunk-maintenance-interval", defaultChunkMaintenanceInterval, "walstore-chunk: interval of the holder's maintenance pass (retention, then the cleaning); 0 disables the whole pass")
+	fs.BoolVar(&f.chunk.automaticGC, "chunk-maintenance-gc", defaultChunkMaintenanceGC, "walstore-chunk: the holder's maintenance pass removes chunks no root of the volume reaches (cleaning), every --chunk-maintenance-interval and after each snapshot delete; on by default, =false turns the cleaning off")
 	fs.IntVar(&f.chunk.uploadConcurrency, "chunk-upload-concurrency", 8, "walstore-chunk: maximum concurrent dirty-chunk uploads (1..64)")
 	fs.IntVar(&f.chunk.hydrationWorkers, "chunk-hydration-workers", 2, "walstore-chunk: concurrent lazy chunk fetches per volume (1..64)")
 	fs.IntVar(&f.chunk.hydrationQueueDepth, "chunk-hydration-queue-depth", 64, "walstore-chunk: distinct queued/in-flight hydration chunks per volume (1..65536)")

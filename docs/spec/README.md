@@ -399,6 +399,14 @@ Native tests separately bind replica/epoch/endpoint and current handle/layer,
 witness cancellation while held, and same-handle stop/join/re-arm. This finite
 model does not establish physical-I/O cancellation or a fleet scheduling bound.
 
+The kick (2026-11-25): a snapshot deleted through the holder moves `Armed -> Due`;
+a pass refused as busy (a cut session open) keeps the kick and re-arms it, and
+only a pass that is not refused clears it (`NoLostKick`). Run 2026-11-26 00:27 UTC,
+same jar SHA256, OpenJDK 17: `safe` no error (699 generated / 212 distinct,
+depth 13); `overlap`, `early_release` and `stale_rearm` violate OneOwner,
+JoinedBeforeRelease and CurrentHandleAtAdmission as before; the new negative
+`lost_kick` (a busy pass drops the kick) violates NoLostKick (92/39, depth 6).
+
 `ScopedMaintenanceGC.tla` extends S9's scope correspondence: three keys across
 two volumes, one foreign-only root, independent local coverage and crash/config
 invalidation. `ScopedMaintenanceGC_safe.cfg` checks foreign-root preservation,
@@ -407,8 +415,9 @@ depth 9, with the same TLC/jar. Its three negative configs narrow
 the root domain, widen reclamation or import namespace coverage. Native tests
 exercise the persisted mark records and real catalog root traversal; the finite
 model abstracts the complete mark and grace, whose timing remains in S9.
-No 50/200-volume density or metadata-RPC qualification is claimed; automatic GC
-remains opt-in, while periodic HEAD capture and retention are enabled by the CLI.
+No 50/200-volume density or metadata-RPC qualification is claimed. Automatic
+cleaning is on by default (owner decision, 2026-11-25), as are periodic HEAD capture
+and retention in the CLI.
 
 The unchanged S9 timing models were replayed with the same TLC/jar:
 `cfg/S9_rule_G4.cfg` (`RetentionGCTiming`, D=2/G=4/MD=1/MaxT=10)

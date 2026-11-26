@@ -64,6 +64,9 @@ type LayoutFixture struct {
 	Catalog *chunkstore.BCatalog
 	Ref     chunkstore.VolumeRef
 	Blobs   *MemoryBlobs
+	// Filer is the in-memory filer under Catalog, for tests that count the
+	// entries a volume holds.
+	Filer *chunkstore.MemFiler
 }
 
 func NewLayoutFixture(t testing.TB, name string, blocks, chunkBlocks uint64) *LayoutFixture {
@@ -72,7 +75,8 @@ func NewLayoutFixture(t testing.TB, name string, blocks, chunkBlocks uint64) *La
 		t.Fatal("layout fixture requires nonzero geometry")
 	}
 	blobs := &MemoryBlobs{data: make(map[string][]byte)}
-	cat, err := chunkstore.NewBCatalog(chunkstore.NewMemFiler(), blobs, "/provider-test")
+	mf := chunkstore.NewMemFiler()
+	cat, err := chunkstore.NewBCatalog(mf, blobs, "/provider-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +88,7 @@ func NewLayoutFixture(t testing.TB, name string, blocks, chunkBlocks uint64) *La
 	if _, err := cat.CreateVolume(context.Background(), ref, layout.Geometry{SizeBytes: blocks * 4096, BlockSize: 4096, ChunkBytes: chunkBlocks * 4096}); err != nil {
 		t.Fatal(err)
 	}
-	return &LayoutFixture{Catalog: cat, Ref: ref, Blobs: blobs}
+	return &LayoutFixture{Catalog: cat, Ref: ref, Blobs: blobs, Filer: mf}
 }
 
 func (f *LayoutFixture) Configure(cfg *durable.ProviderConfig) {

@@ -622,6 +622,9 @@ type ChunkProvider interface {
 	// DetachVolume stops the volume's I/O and periodic cuts and publishes
 	// the detached final cut; it also returns the last written LSN.
 	DetachVolume(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error)
+	// KickMaintenance asks the volume's maintenance loop for one pass now
+	// (its cleaning), as after a snapshot delete; false when no loop runs.
+	KickMaintenance(volumeID string) bool
 }
 
 var errFrozenDetachUnsupported = errors.New("frozen detach unsupported by provider")
@@ -722,6 +725,9 @@ func (c *chunkControl) DeleteSnapshot(ctx context.Context, volumeID, name string
 	if err != nil {
 		return "", err
 	}
+	// The deleted snapshot's chunks are removed by the holder's next
+	// cleaning: ask for it now rather than at the next interval.
+	c.p.KickMaintenance(volumeID)
 	return "deleted", nil
 }
 

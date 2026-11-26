@@ -29,6 +29,9 @@ const (
 	defaultChunkMaintenanceInterval = time.Hour
 	defaultChunkCutTimeout          = 5 * time.Minute
 	defaultChunkMaintenanceTimeout  = time.Minute
+	// The holder's cleaning (removal of chunks no root names) is on by
+	// default; --chunk-maintenance-gc=false turns it off.
+	defaultChunkMaintenanceGC = true
 )
 
 type chunkFlags struct {
@@ -63,7 +66,7 @@ func validateChunkFlags(f flags) error {
 	}
 	if f.durableImpl != "walstore-chunk" {
 		if c.filer != "" || c.collection != "" || c.replication != "" || c.path != defaultChunkPath ||
-			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.snapshotSchedule != defaultSnapshotSchedule || c.automaticGC ||
+			c.captureInterval != defaultChunkCaptureInterval || c.maintenanceInterval != defaultChunkMaintenanceInterval || c.snapshotSchedule != defaultSnapshotSchedule || c.automaticGC != defaultChunkMaintenanceGC ||
 			c.uploadConcurrency != 8 || c.hydrationWorkers != 2 || c.hydrationQueueDepth != 64 || c.controlEndpoint || c.detachPrecopy || c.hostLimit.Directory != "" {
 			return errors.New("--chunk-* flags require --durable-impl=walstore-chunk")
 		}

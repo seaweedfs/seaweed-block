@@ -261,7 +261,9 @@ and the volume does not serve. A monitor that only watches for failed units does
 - **One live process per volume per host.** The host lock keeps two processes for one volume apart only on one host;
   two hosts are kept apart by the assignment and the lease. A container needs the host's `/run/sw-block/locks`
   ([one process per volume](releases/one-process-per-volume.md)).
-- **Manual GC.** Automatic GC is off (`--chunk-maintenance-gc`): run GC passes yourself.
+- **Cleaning is on by default.** The holder removes chunks no root names after each snapshot delete and every
+  `--chunk-maintenance-interval` (hourly by default); `--chunk-maintenance-gc=false` turns it off, and then nothing
+  removes them. The disk space returns when SeaweedFS vacuums its volumes.
 - **Node reattach events under mutual TLS.** Node reattach events are not recorded in the cluster event log under
   mutual TLS: a CSI node's certificate is `viewer`, so blockmaster refuses the event and the node logs one line per
   reattach.

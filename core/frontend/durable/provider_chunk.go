@@ -439,9 +439,14 @@ func (p *DurableProvider) startChunkLoop(volumeID string, h *volHandle, layer st
 	} else if h.cutWait == nil {
 		h.cutWait = &cutWaitSlot{}
 	}
+	if p.cfg.ChunkMaintenanceInterval <= 0 || p.cfg.ChunkMaintenance == nil {
+		h.maintKick = nil
+	} else if h.maintKick == nil {
+		h.maintKick = make(chan struct{}, 1)
+	}
 	lin := h.chunkLineage
 	current := func() bool { return p.maintenanceCurrent(volumeID, h, layer, lin) }
-	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current, h.snapshots, h.cutWait)
+	go p.chunkBackground(loopCtx, cancel, volumeID, layer, h.chunkDone, current, h.snapshots, h.cutWait, h.maintKick)
 }
 
 func (p *DurableProvider) newChunkLayer(ctx context.Context, volumeID string, h *volHandle) (storage.ChunkLayer, error) {
@@ -887,7 +892,7 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 // chunkBackground owns both workers and their cancellation. A fence is observed
 // even while either worker is waiting on a cooperative remote call. INV-MAINT-JOIN:
 // done closes only after every admitted worker has returned.
-func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool, snapshots *snapshotSlot, cutWait *cutWaitSlot) {
+func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool, snapshots *snapshotSlot, cutWait *cutWaitSlot, kick <-chan struct{}) {
 	defer close(done)
 	defer cancel()
 	var workers sync.WaitGroup
@@ -901,7 +906,7 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 	}
 	if p.cfg.ChunkMaintenanceInterval > 0 && p.cfg.ChunkMaintenance != nil {
 		workers.Add(1)
-		go func() { defer workers.Done(); p.chunkMaintenanceLoop(ctx, volumeID, layer, current) }()
+		go func() { defer workers.Done(); p.chunkMaintenanceLoop(ctx, volumeID, layer, current, kick) }()
 	}
 	if snapshots != nil {
 		workers.Add(1)
@@ -931,7 +936,34 @@ func (p *DurableProvider) maintenanceCurrent(volumeID string, h *volHandle, laye
 	return active && chunkAuthority(cur, volumeID) && cur.VolumeID == lin.volumeID && cur.ReplicaID == lin.replicaID && cur.Epoch == lin.epoch && cur.EndpointVersion == lin.endpoint
 }
 
-func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool) {
+// maintenanceKickRetry is how soon a kicked pass that found the volume busy
+// (a cut session open: the cleaning never runs during one) is tried again.
+var maintenanceKickRetry = 30 * time.Second // a var only so tests can shorten it
+
+// KickMaintenance asks the volume's maintenance loop for one pass now, as
+// after a snapshot delete. It reports whether a running loop was there to
+// ask (a stopped or ended loop is not); kicks coalesce, and the pass is the
+// same bounded pass the timer runs.
+func (p *DurableProvider) KickMaintenance(volumeID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.volumes[volumeID]
+	if h == nil || h.maintKick == nil || h.chunkStop == nil || h.chunkDone == nil {
+		return false
+	}
+	select {
+	case <-h.chunkDone:
+		return false // the loop ended (fence, lineage change) and was not re-armed
+	default:
+	}
+	select {
+	case h.maintKick <- struct{}{}:
+	default: // a pass is already asked for
+	}
+	return true
+}
+
+func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, kick <-chan struct{}) {
 	interval := p.cfg.ChunkMaintenanceInterval
 	due := time.Now().Add(interval)
 	if p.cfg.ChunkStagger {
@@ -939,11 +971,20 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 	}
 	timer := time.NewTimer(time.Until(due))
 	defer timer.Stop()
+	kicked := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+		case <-kick:
+			kicked = true
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 		}
 		if ctx.Err() != nil || layer.Fenced() {
 			return
@@ -967,7 +1008,19 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 			_ = obs.ObserveRemoteError(err)
 		}
 		// Completion-relative reset coalesces all elapsed ticks; no catch-up queue.
-		timer.Reset(interval)
+		// A kick stays pending until a pass the volume did not refuse as busy:
+		// while a session is open, every retry comes after the short delay,
+		// not an interval later. The delay only paces the retries; whether a
+		// pass may clean is decided by HEAD's activity, never by this timer.
+		next := interval
+		if kicked && errors.Is(err, layout.ErrBusy) {
+			if maintenanceKickRetry < next {
+				next = maintenanceKickRetry
+			}
+		} else {
+			kicked = false
+		}
+		timer.Reset(next)
 	}
 }
 
