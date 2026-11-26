@@ -76,7 +76,7 @@ func TestProcedureLocalDiskFull(t *testing.T) {
 	verify := []string{"ops", "chunk", "verify", "--volume", "v1", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--depth", "data", "--timeout", "5m"}
 	headGen := func() uint64 {
 		out, _ := env.h.command(t, env.chunkShow()...)
-		hd, err := parseHead(out)
+		hd, err := parseLayoutHead(out)
 		if err != nil {
 			t.Fatal(err)
 		}

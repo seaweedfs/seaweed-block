@@ -58,7 +58,7 @@ func TestProcedurePlannedHandoffToAnotherHost(t *testing.T) {
 	must(wantLines(out, fmt.Sprintf("holder: r1@%d (logical replica)", e2),
 		fmt.Sprintf("move: request=move-v1-1 kind=clean issued=true s1/r1@%d -> s2/r1@%d HEAD generation %d remote LSN %d", e, e2, g, l)))
 	out, _ = h.command(t, env.chunkShow()...)
-	must(checkHeadReopenedBy(out, e2, g, l, "s2"))
+	must(checkLayoutHeadReopenedBy(out, e2, g, l, "s2"))
 	if !bytes.Equal(env.readBlock(t, "s2", 0), block) {
 		t.Fatal("the block written on s1 does not read back on s2")
 	}
@@ -387,12 +387,12 @@ func (env *handoffEnv) servingNow(id string) bool {
 func (env *handoffEnv) requireHeadHolder(t *testing.T, e uint64, host string) {
 	t.Helper()
 	out, _ := env.h.command(t, env.chunkShow()...)
-	head, err := parseHead(out)
+	head, err := parseLayoutHead(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if head.State != "active" || head.Epoch != e || head.Holder != host+"/r1" {
-		t.Fatalf("HEAD %+v; want active at epoch %d held by %s/r1", head, e, host)
+	if head.State != "" || head.ClaimID == "" || head.Epoch != e || head.Holder != host+"/r1" {
+		t.Fatalf("HEAD %+v; want live at epoch %d held by %s/r1", head, e, host)
 	}
 }
 
@@ -464,7 +464,7 @@ func (env *handoffEnv) sealedLSN(t *testing.T, e, g uint64) uint64 {
 	t.Helper()
 	_, mustU := fatalOn(t)
 	out, _ := env.h.command(t, env.chunkShow()...)
-	return mustU(sealedHeadLSN(out, e, g))
+	return mustU(sealedLayoutHeadPosition(out, e, g))
 }
 
 func (env *handoffEnv) revoke(t *testing.T, e, g uint64) {
