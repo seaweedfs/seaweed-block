@@ -42,16 +42,19 @@ func TestCellNewHostFromTheClusterSpec(t *testing.T) {
 	}
 	env.waitAck(t, e, g)
 
-	// Control: s2 is not in the cluster spec yet, so the move is refused.
+	// The new host's endpoints exist from here on (the move names them), but
+	// the cluster spec does not list it yet.
+	env.hosts["s2"] = bvHost{id: "s2", data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t),
+		root: filepath.Join(h.dir, "vol-s2")}
+
+	// Control: blockmaster has not registered s2, so it refuses the move.
 	move := env.moveClean(e, "s2", "move-v1-new-host")
 	out, errOut, code := h.run(t, move...)
 	if code == 0 || !strings.Contains(out+errOut, `move target node "s2" is not registered`) {
-		t.Fatalf("move to a host not in the cluster spec: exit %d %s %s; want refused, not registered", code, out, errOut)
+		t.Fatalf("move to a host not in the cluster spec: exit %d %s %s; want refused by blockmaster, not registered", code, out, errOut)
 	}
 
 	// The new host enters the cluster spec; blockmaster restarts with it.
-	env.hosts["s2"] = bvHost{id: "s2", data: handoffAddress(t), ctrl: handoffAddress(t), status: handoffAddress(t), nvme: handoffAddress(t),
-		root: filepath.Join(h.dir, "vol-s2")}
 	spec := filepath.Join(h.dir, "cluster-spec.yaml")
 	raw, err := os.ReadFile(spec)
 	must(err)
