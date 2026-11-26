@@ -24,7 +24,7 @@ Snapshots, retention and restore are in
   new **HEAD** (the volume's root record in the object store, one per volume,
   with a generation number that grows with every change).
 - **Seal:** the final cut of a volume that takes no more writes. The sealed
-  HEAD has `state: "detached"` and names the holder, epoch and generation.
+  HEAD has `State: "detached"` and names the holder, epoch, claim id and position.
 - **ACK:** the old holder's acknowledgement, recorded by blockmaster, that it
   stopped and read the sealed HEAD at generation G.
 
@@ -33,8 +33,15 @@ Snapshots, retention and restore are in
 | Record | How to read it | What it proves |
 |---|---|---|
 | The lease | `sw-block ops workspace show --master MASTER --volume v1`: `replica:`, `epoch:`, `lease state:`, `holder: r1@E` | Which holder blockmaster lets serve. `granted`, `revoking` or `expired` is the host validity at query time, not permission to move |
-| HEAD | `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER`: `head.gen`, `head.epoch`, `head.holder`, `head.remoteLSN`, `head.state`, `head.detachedBy` | What any host can start from: every write up to `remoteLSN`. `state` `detached` with `detachedBy` means sealed by that holder |
+| HEAD | `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER`: `head.Gen`, `head.Epoch`, `head.Holder`, `head.ClaimID`, `head.Position`, `head.State`, `head.Current` | The committed image through `Position`. `State` `detached` names the holder's stopped image; there is no separate `detachedBy` field |
 | The ACK | the same `show`: `recorded ACK: r1@E HEAD generation G` | The old holder drained and closed after reading the sealed HEAD G. A clean move needs it |
+
+`ops chunk show` prints JSON with `volume` and `head` objects. The HEAD view
+uses the field spellings above (capitalized); it is not the on-store HEAD
+encoding. A live HEAD has `State: ""`; a stopped HEAD has `State: "detached"`.
+`Position` is the committed write position, `ClaimID` identifies the claim,
+and `Current` names the committed root (null before an image is committed).
+`Gen` is the current record generation, not the holder's identity.
 
 `MASTER` is blockmaster's `--listen` address, `FILER` the SeaweedFS filer gRPC
 address (`--chunk-filer`), `STATUS` a blockvolume's `--status-addr` (with
@@ -141,7 +148,7 @@ The lock covers one host. Two hosts are kept apart by blockmaster's assignment
 and the lease, not by this lock.
 
 An existing local root attaches only if its durable position reaches the
-`remoteLSN` of HEAD. A root that is behind (a copy taken before a later cut)
+`Position` of HEAD. A root that is behind (a copy taken before a later cut)
 is refused, never serves, and its process exits 78 (no automatic restart) with
 `reason=superseded cure="remove or quarantine the local root to attach fresh
 from HEAD"`. A power loss does not cause this: a cut makes its position durable
@@ -244,7 +251,9 @@ the table below). Repeating the command is safe: it answers from the sealed
 HEAD.
 
 To check: `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
-`head.state` `detached` and `head.detachedBy` `{"holder":"s1/R","epoch":E,"gen":G}`.
+`head.State` `detached`, `head.Holder` `s1/R`, `head.Epoch` E, a nonempty
+`head.ClaimID`, `head.Gen` G and a non-null `head.Current`. Its `head.Position`
+is the sealed position L; the HEAD itself is the stop proof, with no `detachedBy`.
 
 **4. Revoke**, giving the generation you copied:
 
@@ -300,7 +309,8 @@ that, as in [after a crash](#after-a-crash).
 ...: gen=... epoch=E2 holder="S2/R"` and `blockvolume: volume v1 adopted as
 PRIMARY at R@E2`. `ops workspace show` prints `holder: R@E2` and a line
 `move: request=move-v1-1 kind=clean issued=true ...`. `ops chunk show` shows
-`head.state` `active`, `head.epoch` E2 and `head.remoteLSN` L. Reconnect the
+`head.State` `""` (live), `head.Epoch` E2, `head.Holder` `S2/R`, a nonempty
+`head.ClaimID`, a non-null `head.Current` and `head.Position` L. Reconnect the
 guest to the new host.
 
 ## Same host
@@ -431,7 +441,8 @@ sw-block ops chunk volume-delete --volume v1 --chunk-filer FILER --master MASTER
 It answers with `"admitted":true,"committed":true,"headMarked":true,"completed":true`.
 Keep the `--request-id` and use the same one if you have to run the command again.
 Afterwards `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
-`"state": "deleted"` and `"chunkCount": 0`.
+`head.State` `deleted`. The HEAD view has no `chunkCount` field; use the
+volume's object listing or verification report to check its remaining objects.
 
 **If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
 and step 4 is refused with `live authority requires clean revocation ACK`. Nothing
