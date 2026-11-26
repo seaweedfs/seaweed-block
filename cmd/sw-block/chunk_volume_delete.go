@@ -44,10 +44,21 @@ func chunkVolumeDelete(args []string, stdout, stderr io.Writer) int {
 		}
 		defer conn.Close()
 		auth := &masterAuthority{lc: control.NewLifecycleServiceClient(conn), req: &control.MarkVolumeDeletingRequest{VolumeId: ref.Name, Token: requestID}}
-		if err := cat.DeleteVolume(ctx, ref, auth); err != nil {
+		skipped, err := cat.DeleteVolume(ctx, ref, auth)
+		if err != nil {
 			return nil, err
 		}
-		return map[string]string{"volume": ref.Dir(), "state": "deleted"}, nil
+		out := map[string]any{"volume": ref.Dir(), "state": "deleted"}
+		if len(skipped) > 0 {
+			// Roots HEAD names whose objects an earlier run already deleted
+			// (after releasing every source): reported, not read.
+			names := make([]string, 0, len(skipped))
+			for _, rn := range skipped {
+				names = append(names, rn.String())
+			}
+			out["already_deleted_roots"] = names
+		}
+		return out, nil
 	})
 }
 

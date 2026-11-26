@@ -187,7 +187,7 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		if err := c.SetRetention(ctx, v, retain.DefaultPolicy()); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
 			t.Fatalf("policy of an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
 		}
-		if err := c.DeleteVolume(ctx, v, okDeleteAuthority{}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
+		if _, err := c.DeleteVolume(ctx, v, okDeleteAuthority{}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
 			t.Fatalf("delete of an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
 		}
 	})
