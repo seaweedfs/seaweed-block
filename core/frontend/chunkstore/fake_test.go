@@ -35,6 +35,9 @@ type fakeFiler struct {
 	// failDelete, if set, is called before a DeleteEntry is applied; a
 	// non-nil return fails the call and the entry is NOT deleted.
 	failDelete func(p string) error
+	// failLookup, if set, is called before a LookupEntry reads p; a non-nil
+	// return is the lookup's error (a read or transport failure).
+	failLookup func(p string) error
 	// beforeCreate, if set, runs under the lock just before an entry is
 	// created (it may read f.entries but must not call f's methods).
 	beforeCreate func(p string)
@@ -65,6 +68,11 @@ func (f *fakeFiler) LookupEntry(_ context.Context, dir, name string) (*filerpb.E
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := path.Join(dir, name)
+	if f.failLookup != nil {
+		if err := f.failLookup(p); err != nil {
+			return nil, err
+		}
+	}
 	e, ok := f.entries[p]
 	var out *filerpb.Entry
 	if ok {
