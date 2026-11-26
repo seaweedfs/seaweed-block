@@ -235,3 +235,55 @@ func TestPublisher_AskWithoutAProcessIsIssuedForTheReportedOne(t *testing.T) {
 		t.Fatalf("the promoted process's first report re-issued its line: EV %d -> %d", line.EndpointVersion, got.EndpointVersion)
 	}
 }
+
+// Held publication: a refresh for one process is queued and not yet
+// published when a newer report names another process at the same
+// address. The queued ask is replaced, so the line is issued for the
+// process that reports now, not for one that cannot adopt it.
+func TestTopologyController_QueuedRefreshIsReplacedForANewerProcess(t *testing.T) {
+	g := newBootGraceRig(t)
+	g.reissued = false
+	g.steadyPrimary()
+	g.submit(r1Slot("r1-a", "d1-new", "c1-new", true)) // r1-a moved: refresh queued, not consumed
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-b", "d1-new", "c1-new", true)) // restarted before the refresh was published
+	ask := nextAskOrFail(t, g.ctrl)
+	if ask.Intent != IntentRefreshEndpoint || ask.Incarnation != "r1-b" || ask.DataAddr != "d1-new" {
+		t.Fatalf("published ask %+v; want the refresh for r1-b at d1-new", ask)
+	}
+	expectNoNext(t, g.ctrl)
+}
+
+// The workspace writer keeps the line's process: after a lease grant is
+// persisted through it, a reload still names the process the line was
+// issued for, so the unchanged primary is not re-issued and a restarted
+// one still is.
+func TestWorkspaceLeaseWriteKeepsTheLinesIncarnationAcrossReload(t *testing.T) {
+	ctx := context.Background()
+	disk, dir := newTempStore(t)
+	now := time.Unix(1000, 0)
+	p := NewPublisher(nil, WithStore(disk), WithWorkspaceLeaseConfig(time.Second, func() time.Time { return now }))
+	if err := p.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "r", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind, Incarnation: "p1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err != nil { // a workspace write
+		t.Fatal(err)
+	}
+	_ = disk.Close()
+	again, err := NewFileAuthorityStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	q := NewPublisher(nil, WithStore(again), WithWorkspaceLeaseConfig(time.Second, func() time.Time { return now }))
+	line, ok := q.VolumeAuthorityLine("v")
+	if !ok || line.Incarnation != "p1" || line.EndpointVersion != 1 {
+		t.Fatalf("reloaded after a workspace write: %+v; want issued for p1 at EV 1", line)
+	}
+	if err := q.apply(AssignmentAsk{VolumeID: "v", ReplicaID: "r", DataAddr: "d", CtrlAddr: "c", Intent: IntentRefreshEndpoint, Incarnation: "p1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := q.LastPublished("v", "r"); got.EndpointVersion != 1 {
+		t.Fatalf("the unchanged primary was re-issued after reload: EV %d", got.EndpointVersion)
+	}
+}

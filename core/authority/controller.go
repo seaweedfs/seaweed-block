@@ -749,7 +749,8 @@ func sameAsk(a, b AssignmentAsk) bool {
 		a.ReplicaID == b.ReplicaID &&
 		a.DataAddr == b.DataAddr &&
 		a.CtrlAddr == b.CtrlAddr &&
-		a.Intent == b.Intent
+		a.Intent == b.Intent &&
+		a.Incarnation == b.Incarnation
 }
 
 // plannedEvidence is a rebalance's evidence: the gate's probe of the target,
