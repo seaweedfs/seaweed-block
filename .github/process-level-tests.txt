@@ -34,6 +34,7 @@ TestStandaloneCleanMoveWithoutTheACKIsRefused
 TestDoubleFailoverReadsBackEveryAckedWrite
 TestFencingRoundHealContinuesThePrimary
 TestFencingRoundSurvivorRejoins
+TestAVolumeThatServedBeforeItsFirstGateTickFailsOver
 
 # Many volumes on one host (F1_RUN=1).
 TestSnapshotLadderF1VolumesOneHost

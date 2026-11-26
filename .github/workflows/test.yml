@@ -96,7 +96,7 @@ jobs:
     # Tests that need root or systemd are not in the list (see its header).
     if: github.event_name == 'push' || !github.event.pull_request.draft
     runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
-    # 43 tests in sequence; measured at 15 to 170 s each on a 4-core test host
+    # 44 tests in sequence; measured at 15 to 170 s each on a 4-core test host
     # (about 40 to 50 min in all).
     timeout-minutes: 90
     env:
