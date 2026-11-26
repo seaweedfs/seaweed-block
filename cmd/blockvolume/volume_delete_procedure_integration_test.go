@@ -273,3 +273,47 @@ func TestProcedureDeleteAfterASignalStop(t *testing.T) {
 	requireDeleteCompleted(t, out, errOut, code)
 	env.requireDeletedForGood(t, "del-v1")
 }
+
+// TestProcedureRevocationACKWithSnapshotDependent isolates the restore from
+// the subsequent delete: identical public seal/revoke/ACK sequence, first
+// with run-4's setup, then with the new placement/plain snapshot, then with
+// only the restore RPC added. No delete is issued in this comparison.
+func TestProcedureRevocationACKWithSnapshotDependent(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		plain, dependent bool
+	}{
+		{"run4-baseline", false, false},
+		{"plain-and-placement", true, false},
+		{"restored-dependent", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var targets []string
+			if tc.plain {
+				targets = []string{"v2"}
+			}
+			env := startHandoffEnvWith(t, 1, targets)
+			holder := env.start(t, "blockvolume-s1", "s1")
+			e := env.adopt(t, holder, "s1")
+			env.writeBlock(t, "s1", 0, pattern("delete-a-volume!"))
+			env.snapshot(t, "s1", "v1", "s1")
+			if tc.plain {
+				env.snapshot(t, "s1", "v1", "plain")
+			}
+			if tc.dependent {
+				env.h.command(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v1",
+					"--snapshot", "s1", "--target", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+			}
+			g := env.seal(t, "s1", e)
+			env.revoke(t, e, g)
+			err := holder.wait(30 * time.Second)
+			t.Logf("after revoke (%s), holder exit=%v, master view:\n%s", tc.name, err, env.workspaceShow(t, "v1"))
+			keepFullLog(t, holder)
+			keepFullLog(t, env.masterProcess)
+			if err != nil {
+				t.Fatalf("holder must ACK and exit cleanly before any delete: %v", err)
+			}
+			env.waitAck(t, e, g)
+		})
+	}
+}
