@@ -171,6 +171,9 @@ type Host struct {
 	// storesAwaited: the primary fact's (awaited<<32 | initial) replica
 	// store count (ReplicaStoresAwaited).
 	storesAwaited atomic.Uint64
+	// storesAwaitedEpoch: the epoch of the primary fact storesAwaited came
+	// from.
+	storesAwaitedEpoch atomic.Uint64
 	// roleRetry: the last replica role call failed with an error a retry
 	// may outlast (a floor that could not be persisted); runRoleRetry
 	// re-applies the current role until it succeeds or is refused for good.

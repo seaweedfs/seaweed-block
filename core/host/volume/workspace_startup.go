@@ -9,7 +9,17 @@ import (
 // noteReplicaStores keeps the primary fact's count of a new volume's initial
 // replicas whose store the master has not recorded yet.
 func (h *Host) noteReplicaStores(f *control.AssignmentFact) {
+	h.storesAwaitedEpoch.Store(f.GetEpoch())
 	h.storesAwaited.Store(uint64(f.GetReplicaStoresAwaited())<<32 | uint64(f.GetReplicaStoresInitial()))
+}
+
+// replicaStoresAwaitedEpoch is the epoch of the primary assignment whose
+// creation wait holds (0: none), for the probe answer.
+func (h *Host) replicaStoresAwaitedEpoch() uint64 {
+	if h.ReplicaStoresAwaited() == "" {
+		return 0
+	}
+	return h.storesAwaitedEpoch.Load()
 }
 
 // ReplicaStoresAwaited is the reason a new volume's primary serves nothing

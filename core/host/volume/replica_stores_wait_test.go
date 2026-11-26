@@ -74,3 +74,23 @@ func TestReplicaStoresWaitOnlyWhereStoresAreRequired(t *testing.T) {
 		t.Fatalf("a host without a store-requiring slot waits: %q", reason)
 	}
 }
+
+// The probe answer says the primary awaits replica stores, with the epoch
+// of the assignment that awaits them, only while that wait holds; once the
+// assignment carries every store it says nothing.
+func TestProbeAnswerNamesTheLineAwaitingReplicaStores(t *testing.T) {
+	h, _, rep := newStubbedHost(t, "vol1", "rB", &orderingRecorder{})
+	h.replicationMu.Lock()
+	h.setReplicationLocked(requiringReplication{rep})
+	h.replicationMu.Unlock()
+	fact := selfFact(3)
+	fact.ReplicaStoresAwaited, fact.ReplicaStoresInitial = 2, 3
+	h.noteReplicaStores(fact)
+	if got := h.probeAnswer(1).GetAwaitingReplicaStoresEpoch(); got != 3 {
+		t.Fatalf("awaiting epoch %d inside the wait; want 3 (the line's epoch)", got)
+	}
+	h.noteReplicaStores(selfFact(3)) // the re-sent assignment carries every store
+	if got := h.probeAnswer(2).GetAwaitingReplicaStoresEpoch(); got != 0 {
+		t.Fatalf("awaiting epoch %d after the wait; want 0", got)
+	}
+}
