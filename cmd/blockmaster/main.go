@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -80,9 +81,19 @@ type flags struct {
 	auth           authFlags
 }
 
+// errRemovedInV1 refuses a flag that v1 removed, at start: a unit or script
+// still passing it fails with the reason and what replaces it, rather than
+// starting with the setting silently ignored.
+var errRemovedInV1 = errors.New("blockmaster: flag removed in v1")
+
 func parseFlags(args []string) (flags, error) {
 	var f flags
 	fs := flag.NewFlagSet("blockmaster", flag.ContinueOnError)
+	removedHeadBase := false
+	fs.Func("workspace-head-base-url", "removed in v1, refused at start: blockmaster reads HEAD through the layout catalog (--chunk-filer, --chunk-path)", func(string) error {
+		removedHeadBase = true
+		return nil
+	})
 	fs.StringVar(&f.authorityStore, "authority-store", "", "durable authority store directory (required)")
 	fs.StringVar(&f.lifecycleStore, "lifecycle-store", "", "optional G9D product lifecycle registration store directory (desired volumes, node inventory, placement intents); read-only with respect to assignment publication")
 	fs.StringVar(&f.lifecyclePlacementSeed, "lifecycle-placement-seed", "", "placement-only seed JSON; lifecycle volumes must already be registered (CreateVolume)")
@@ -137,6 +148,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	if removedHeadBase {
+		return flags{}, fmt.Errorf("%w: --workspace-head-base-url; blockmaster reads HEAD through the layout catalog: set --chunk-filer (and --chunk-path) instead", errRemovedInV1)
 	}
 	if f.version {
 		return f, nil
