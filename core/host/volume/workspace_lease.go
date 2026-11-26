@@ -68,6 +68,15 @@ type WorkspaceLeaseGuard struct {
 // revocation to its ACK also includes that renewal, the drain and the ACK.
 const stopPendingPoll = 250 * time.Millisecond
 
+// WorkspaceAckTimeout bounds the holder's revocation ACK call (within the
+// lease deadline). It must exceed what the master spends before it answers
+// (core/host/master AckWorkspaceRevoked): its 2 s bounded HEAD read, then the
+// ACK's durable write and the bindings' reconcile (about 0.3 s together,
+// measured), behind its workspace lock. 5 s leaves about 2.7 s for that lock
+// and for slower disks. A shorter bound lets a slow but successful ACK fail
+// here (the holder exits 75 although the master may have recorded it).
+const WorkspaceAckTimeout = 5 * time.Second
+
 // WorkspaceDrainTimeout is the existing fail-closed lease drain bound.
 // INV-WS-STARTUP-RETRY-001 also bounds the process cleanup by this duration.
 const WorkspaceDrainTimeout = 5 * time.Second
@@ -398,7 +407,7 @@ func (g *WorkspaceLeaseGuard) drain(parent context.Context, ack bool) error {
 		}
 		leaseCtx, leaseCancel := context.WithDeadline(parent, until)
 		defer leaseCancel()
-		ctx, cancel := context.WithTimeout(leaseCtx, 2*time.Second)
+		ctx, cancel := context.WithTimeout(leaseCtx, WorkspaceAckTimeout)
 		defer cancel()
 		_, err := g.client.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: &g.id, HeadGen: g.headGen})
 		return err
