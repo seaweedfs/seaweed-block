@@ -155,6 +155,13 @@ func (h *Host) probeAnswer(round uint64) *control.ProbeAnswer {
 	if roles, ok := h.probeRoles.Load().(probeRoleSource); ok && roles != nil {
 		a.ReplicaReady, a.PrimaryReady = roles()
 	}
+	// A replica refused a rebuild for a retained BASE holds an image the
+	// primary could not bring up to date: never ready for promotion, so no
+	// fencing round or planned move can make it primary (it reports
+	// rebuild_retained_base until a rebuild completes).
+	if h.rebuildRetainedBase() {
+		a.ReplicaReady = false
+	}
 	// Not serving only because the creation wait of this line still holds:
 	// said so, with the line's epoch, so the master does not take the
 	// not-ready answer for a failure (and no other line can borrow it).
