@@ -28,7 +28,7 @@ func (f *markHookFiler) UpdateEntry(ctx context.Context, dir string, e *filerpb.
 }
 
 // headNamesMissing reports a name some root in HEAD (current or snapshot)
-// names that is absent from the pool: K6 broken.
+// names that is absent from the pool: a root names a removed chunk.
 func headNamesMissing(ctx context.Context, c *BCatalog, v VolumeRef) error {
 	s, r, err := c.open(v)
 	if err != nil {
@@ -56,14 +56,16 @@ func headNamesMissing(ctx context.Context, c *BCatalog, v VolumeRef) error {
 }
 
 // The operator deletes a snapshot while the holder's cleaning is open, after
-// the cleaning took its HEAD view (OssSnap r4, osssnap4d witness
-// WitDeleteDuringClean; Safe = K6). The delete is one HEAD update by nobody's
-// lease and lands in the clean activity without ending it. The cleaning
+// the cleaning took its HEAD view (model SnapshotRemoval.DeleteSnap during a
+// cleaning; its safety property: every chunk a root names exists). The
+// delete is one HEAD update by nobody's lease and lands in the clean
+// activity without ending it. The cleaning
 // keeps every chunk its view named (the deleted snapshot's chunk survives
 // this pass), never marks a chunk a root still names, and ends normally;
 // the next cleaning removes the chunk only the deleted snapshot named.
 // Must violate: a cleaning that counts only the current root (the model's
-// LiveCurOnly) marks the snapshot's chunk while the snapshot still names it.
+// must-violate variant) marks the snapshot's chunk while the snapshot still
+// names it.
 func TestBCatalog_OperatorSnapshotDeleteDuringACleaning(t *testing.T) {
 	ctx := context.Background()
 	f := &markHookFiler{MemFiler: NewMemFiler()}
@@ -100,8 +102,8 @@ func TestBCatalog_OperatorSnapshotDeleteDuringACleaning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// At the pass's first MARK (its HEAD view is taken): check K6 for the
-	// name being marked, then the operator deletes s1.
+	// At the pass's first MARK (its HEAD view is taken): check that no root
+	// names the name being marked, then the operator deletes s1.
 	deleted := false
 	var hookErr error
 	f.hook = func(ctx context.Context, name string) error {
