@@ -1545,6 +1545,8 @@ kubectl apply -f "$STACK_RENDERED" | tee "$ARTIFACT_DIR/apply-block-stack.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --timeout=120s
 
 log "apply CSI manifests"
+kubectl apply -f "$ROOT/charts/seaweed-block/crds/swblockreplicafailbacks.block.seaweedfs.com.yaml" | tee "$ARTIFACT_DIR/apply-failback-crd.log"
+kubectl apply -f "$ROOT/deploy/k8s/alpha/failback-executor.yaml" | tee "$ARTIFACT_DIR/apply-failback-executor.log"
 kubectl apply -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" | tee "$ARTIFACT_DIR/apply-csidriver.log"
 kubectl apply -f "$CSI_CONTROLLER_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-controller.log"
 kubectl apply -f "$CSI_NODE_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-node.log"
