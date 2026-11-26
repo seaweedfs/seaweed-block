@@ -1,7 +1,12 @@
 package master
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"log"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -206,12 +211,44 @@ func TestRF1RefreshDecidedBeforeACrossHostMoveIsNotApplied(t *testing.T) {
 		t.Fatalf("a refresh %+v (expecting %+v) was decided for the source after the move", refresh, refresh.ExpectCurrent)
 	}
 
-	// Then the stale refresh is submitted.
+	// Then the stale refresh is submitted. Witness: the publisher's own
+	// refusal of exactly this ask (its run loop logs every rejected ask),
+	// within a bound; a refresh never dequeued fails here, not silently.
+	witness := &syncLogBuffer{}
+	prevLog := log.Writer()
+	log.SetOutput(io.MultiWriter(prevLog, witness))
+	defer log.SetOutput(prevLog)
 	if err := h.ctrl.SubmitAssignmentAsk(stale); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	refused := func() bool {
+		out := witness.String()
+		return strings.Contains(out, "authority: rejected ask") && strings.Contains(out, "Incarnation:proc-b") && strings.Contains(out, src.DataAddr)
+	}
+	for deadline := time.Now().Add(5 * time.Second); !refused(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the stale refresh was not refused by the publication path within 5 s; log: %s", witness.String())
+		}
+	}
 	if after, _ := h.Publisher().VolumeAuthorityLine("rt"); after.Epoch != moved.Epoch || after.EndpointVersion != moved.EndpointVersion || after.DataAddr != dst.DataAddr || after.CtrlAddr != dst.CtrlAddr {
 		t.Fatalf("line %+v after the stale refresh; want the moved line %+v (the target's addresses)", after, moved)
 	}
+}
+
+// syncLogBuffer is a log sink safe for the publisher's goroutine.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

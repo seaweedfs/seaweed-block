@@ -756,7 +756,18 @@ func sameAsk(a, b AssignmentAsk) bool {
 		a.DataAddr == b.DataAddr &&
 		a.CtrlAddr == b.CtrlAddr &&
 		a.Intent == b.Intent &&
-		a.Incarnation == b.Incarnation
+		a.Incarnation == b.Incarnation &&
+		sameExpectedLine(a.ExpectCurrent, b.ExpectCurrent)
+}
+
+// sameExpectedLine: two asks conditional on different lines are different
+// asks (one refused because the line moved is asked again against the new
+// line, not suppressed as a duplicate).
+func sameExpectedLine(a, b *ExpectedLine) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // plannedEvidence is a rebalance's evidence: the gate's probe of the target,

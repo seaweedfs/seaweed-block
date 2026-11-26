@@ -3,6 +3,7 @@ package authority
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
@@ -55,5 +56,37 @@ func TestControllerRefreshNamesTheLineItWasDecidedAgainst(t *testing.T) {
 	ask := refreshAsk("v1", ReplicaCandidate{ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Incarnation: "proc-b"}, line)
 	if e := ask.ExpectCurrent; e == nil || e.ReplicaID != "r1" || e.Epoch != 3 || e.DataAddr != "d" || e.CtrlAddr != "c" {
 		t.Fatalf("refresh expects %+v; want the line r1@3 at d/c", ask.ExpectCurrent)
+	}
+}
+
+// A conditional refresh refused because an earlier refresh changed the line
+// is asked again against the new line: line D0; a refresh to D1 (expecting
+// D0) is dequeued; a newer report queues one to D2 (expecting D0); D1 mints,
+// so the D2 refresh is refused. The next snapshot (line D1, reported D2)
+// must emit a refresh to D2 expecting D1: an ask that differs only in its
+// expected line is not "the same ask".
+func TestControllerReasksARefreshRefusedAfterTheLineMoved(t *testing.T) {
+	g := newBootGraceRig(t)
+	g.reissued = false
+	g.steadyPrimary()
+	g.submit(r1Slot("r1-a", "d1", "c1", true))
+	d1 := nextAskOrFail(t, g.ctrl)
+	if d1.Intent != IntentRefreshEndpoint || d1.DataAddr != "d1" || d1.ExpectCurrent == nil || d1.ExpectCurrent.DataAddr != "d1-old" {
+		t.Fatalf("first refresh %+v; want d1 expecting the line at d1-old", d1)
+	}
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-a", "d2", "c2", true))
+	d2 := nextAskOrFail(t, g.ctrl)
+	if d2.DataAddr != "d2" || d2.ExpectCurrent == nil || d2.ExpectCurrent.DataAddr != "d1-old" {
+		t.Fatalf("second refresh %+v; want d2 expecting the line at d1-old", d2)
+	}
+	// D1 mints (the publisher would refuse the d2 refresh: d1-old is gone).
+	g.line.DataAddr, g.line.CtrlAddr, g.line.EndpointVersion = "d1", "c1", g.line.EndpointVersion+1
+	g.reader.Set("v1", "r1", g.line)
+	g.now = g.now.Add(time.Second)
+	g.submit(r1Slot("r1-a", "d2", "c2", true))
+	again := nextAskOrFail(t, g.ctrl)
+	if again.DataAddr != "d2" || again.ExpectCurrent == nil || again.ExpectCurrent.DataAddr != "d1" {
+		t.Fatalf("re-ask %+v (expecting %+v); want d2 expecting the line now at d1", again, again.ExpectCurrent)
 	}
 }

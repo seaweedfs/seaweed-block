@@ -255,6 +255,7 @@ stateDiagram-v2
   [*] --> Unbound
   Unbound --> Bound: IntentBind (epoch 1)
   Bound --> Bound: same assignment republished
+  Bound --> Bound: IntentRefreshEndpoint (endpoint version + 1), only on the line it was decided against
   Bound --> Reassigned: IntentReassign (max epoch + 1)
   Reassigned --> Bound: new primary serves at the new epoch
   Bound --> Deleting: deletion reservation (id never reused)

@@ -187,8 +187,11 @@ func (h *Host) restartedHolderRefresh(ask authority.AssignmentAsk) (authority.As
 	if h.obs == nil {
 		return authority.AssignmentAsk{}, false
 	}
+	// One read decides and conditions the refresh: the line must be this
+	// replica's at exactly the addresses the refresh writes, so its
+	// expectation can never name a line a move put elsewhere.
 	line, ok := h.Publisher().VolumeAuthorityLine(ask.VolumeID)
-	if !ok {
+	if !ok || !line.Assigned || line.ReplicaID != ask.ReplicaID || line.DataAddr != ask.DataAddr || line.CtrlAddr != ask.CtrlAddr {
 		return authority.AssignmentAsk{}, false
 	}
 	slot, ok := h.obs.Store().SlotFactAt(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr)
