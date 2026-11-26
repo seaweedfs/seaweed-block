@@ -71,7 +71,7 @@ func TestAdapter_ProbeReplica_MintsTransientSessionID(t *testing.T) {
 
 // TestAdapter_ProbeReplica_MintsDistinctSessionIDs pins that two
 // successive probe-emit triggers receive distinct, non-zero sessionIDs.
-// The mint itself is monotonic (sessionIDCounter.Add(1)), but the probe
+// The mint itself is monotonic (the adapter's session order), but the probe
 // runs in a goroutine so capture order is not stable — assert
 // distinctness, not arrival ordering.
 func TestAdapter_ProbeReplica_MintsDistinctSessionIDs(t *testing.T) {
