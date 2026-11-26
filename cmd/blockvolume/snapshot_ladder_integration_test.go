@@ -651,11 +651,12 @@ func TestSnapshotLadderC2IncrementalRestore(t *testing.T) {
 }
 
 // TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt: a restored volume,
-// once its status says independent, is written and snapshotted itself, then
-// written again; that snapshot holds its first writes and not the later
-// ones, and the source's snapshot, also written past, still restores
-// unchanged. Every write to the restored volume comes after it is
-// independent.
+// once every chunk is local, is written and snapshotted itself, then
+// written again. Its snapshot still names the source's chunks for the
+// chunks it did not write (filling makes bytes local; it does not take the
+// source's chunks over), so a restore from it is refused, naming another
+// volume's chunks. The restored volume reads its own image, and the
+// source's snapshot, also written past, still restores unchanged.
 func TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt(t *testing.T) {
 	env := startLadderEnv(t, "v2", "v3", "v4")
 	src := ladderImage("c3src", []uint64{0, 3}, 4)
@@ -672,9 +673,12 @@ func TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt(t *testing.T) {
 	ownLater := ladderImage("c3ownlater", []uint64{0, 11, 25}, 2)
 	env.writeImage(t, "n-v2", ownLater)
 
-	env.restoreInto(t, "v2", "mine", "v3")
-	env.hydrate(t, "v3")
-	env.requireImage(t, "n-v3", mergeImages(src, own), ownLater, srcLater)
+	out, errOut, code := env.h.run(t, "ops", "chunk", "restore", "--master", env.h.masterAddr, "--source", "v2", "--snapshot", "mine", "--target", "v3",
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	if code == 0 || !strings.Contains(out, `"code":"not_admitted"`) || !strings.Contains(out, "names another volume's chunks") {
+		t.Fatalf("restore from the restored volume's snapshot: exit %d, want not_admitted naming another volume's chunks\n%s\n%s", code, out, errOut)
+	}
+	env.requireImage(t, "n-v2", mergeImages(src, own, ownLater), srcLater)
 	env.restoreInto(t, "v1", "base", "v4") // the source's snapshot is unchanged
 	env.hydrate(t, "v4")
 	env.requireImage(t, "n-v4", src, srcLater, own, ownLater)

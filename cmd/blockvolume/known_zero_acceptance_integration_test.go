@@ -75,7 +75,7 @@ func TestKnownZeroAcceptance(t *testing.T) {
 	var vols []headSzVol
 	for _, fs := range fss {
 		vols = append(vols, headSzVol{id: "kz" + fs, bytes: bytes},
-			headSzVol{id: "kz" + fs + "r", bytes: bytes, server: "t-" + fs + "r", host: targetHost})
+			headSzVol{id: "kz" + fs + "r", bytes: bytes, server: "t-" + fs + "r", host: targetHost, restoreTarget: true})
 	}
 	// step 5: up to kzCrashTries fresh volumes (a try whose stop lands after the
 	// attach commit has committed that store, so a retry needs a new one)
@@ -285,6 +285,12 @@ func kzTarget(t *testing.T, env *handoffEnv, rep *kzReport, src kzVolume, kind s
 	t.Helper()
 	r := kzTargetRecord{Volume: tb.volume, Kind: kind, Source: src.Volume, Snapshot: src.S1Name,
 		NQN: fmt.Sprintf("nqn.2026-11.io.seaweedfs:kz-%s-%s", run, tb.volume)}
+	// The target is placement only: before its restore the master has no
+	// record of it, so the restore creates it.
+	if out, errOut, code := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", tb.volume,
+		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath); code == 0 || !strings.Contains(out+errOut, "resolve --volume") || !strings.Contains(out+errOut, "not found") {
+		t.Fatalf("restore target %s has a volume record before its restore: exit %d %s %s", tb.volume, code, out, errOut)
+	}
 	env.h.command(t, "ops", "chunk", "restore", "--source", src.Volume, "--snapshot", src.S1Name, "--target", tb.volume,
 		"--master", env.h.masterAddr, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath, "--request-id", "kz-"+kind+"-"+tb.volume)
 	d, refusal := headSzStartVolume(t, env, tb, bytes, "--nvme-subsysnqn", r.NQN)
