@@ -3,6 +3,23 @@
 # admin-only ExecuteFailback over mutual TLS (client Secret
 # sw-block-failback-executor-tls from scripts/k8s-alpha-certs.sh). The CRD is
 # charts/seaweed-block/crds/swblockreplicafailbacks.block.seaweedfs.com.yaml.
+#
+# Who may fail over: the executor holds a full admin client certificate and
+# executes what a SwBlockReplicaFailback object says, so the right to create or
+# change those objects in kube-system IS the right to fail over any volume.
+# Grant it only to the cluster administrators who would run
+# `sw-block ops failover` by hand. blockmaster still decides every move (the
+# fencing round for an unreachable primary) and publishes the target at its
+# own record of the replica's addresses, never the object's.
+#
+# The object field that asserts the old primary's frontend is fenced
+# (frontendFencedBeforeFailback) is the operator's confirmation that the old
+# node is off or cut from its clients (the fencing round stops its writes,
+# not its reads). Automation must never set it.
+#
+# Limit, dated 2026-11-26: the certificate carries the admin role although the
+# executor makes one call (ExecuteFailback); a role limited to that call is
+# not in this release.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

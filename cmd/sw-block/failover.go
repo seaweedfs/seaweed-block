@@ -33,8 +33,9 @@ The operator's failover of volume V's primary to replica R, for a standalone
 (systemd) deployment. blockmaster decides: when the current primary is
 unreachable it runs the fencing round (every other replica fenced at E+1) and
 moves the line only to a ready replica holding the highest fenced end; a
-reachable primary's move is a planned move under its guard. A refusal changes
-nothing.
+reachable primary's move is a planned move under its guard. --target-data
+and --target-ctrl must be blockmaster's record of the replica (its heartbeat);
+other addresses are refused. A refusal changes nothing.
 
 The fencing round stops the old primary's writes, not its reads: power the
 old node off or cut it from its clients first, then confirm with
@@ -88,8 +89,10 @@ func runOpsFailover(args []string, stdout, stderr io.Writer) int {
 		TargetCtrlAddr:           ctrl,
 		ExpectedCurrentReplicaID: curReplica,
 		ExpectedCurrentEpoch:     curEpoch,
-		// The operator's assertions the runtime requires; blockmaster's gate
-		// (the fencing round for an unreachable primary) decides the move.
+		// Required by the runtime but decide nothing (they are not evidence):
+		// blockmaster's gate (the fencing round for an unreachable primary)
+		// decides the move, and the target is published at blockmaster's own
+		// record of its addresses (a request naming others is refused).
 		AckEligible:                  true,
 		FrontendFencedBeforeFailback: true, // --confirm-old-node-off
 		DurableFrontierCovered:       true,
