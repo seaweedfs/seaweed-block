@@ -163,12 +163,12 @@ func TestPrecopyFinalFreezeDeadlineAbortsSlowRemote(t *testing.T) {
 		}
 	})
 	started := time.Now()
-	_, _, err = p.DetachVolume(context.Background(), "v1")
+	_, _, err := p.DetachVolume(context.Background(), "v1")
 	elapsed := time.Since(started)
 	if !remote.pending || remote.abortCalls.Load() == 0 {
 		t.Fatal("fixture did not hold the real layout commit and settle its session")
 	}
-	if !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(err, context.DeadlineExceeded) {
+	if !errors.Is(err, durable.ErrDetachAborted) || !errors.Is(remote.cutCause, context.DeadlineExceeded) {
 		t.Fatalf("held final commit: %v; want aborted stop at the deadline", err)
 	}
 	if cutDeadline.IsZero() || cutDeadline.Sub(started) > 4*time.Second {
