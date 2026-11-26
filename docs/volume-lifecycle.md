@@ -24,7 +24,7 @@ Snapshots, retention and restore are in
   new **HEAD** (the volume's root record in the object store, one per volume,
   with a generation number that grows with every change).
 - **Seal:** the final cut of a volume that takes no more writes. The sealed
-  HEAD has `state: "detached"` and names the holder, epoch and generation.
+  HEAD has `State: "detached"` and names the holder, epoch, claim id and position.
 - **ACK:** the old holder's acknowledgement, recorded by blockmaster, that it
   stopped and read the sealed HEAD at generation G.
 
@@ -33,8 +33,15 @@ Snapshots, retention and restore are in
 | Record | How to read it | What it proves |
 |---|---|---|
 | The lease | `sw-block ops workspace show --master MASTER --volume v1`: `replica:`, `epoch:`, `lease state:`, `holder: r1@E` | Which holder blockmaster lets serve. `granted`, `revoking` or `expired` is the host validity at query time, not permission to move |
-| HEAD | `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER`: `head.gen`, `head.epoch`, `head.holder`, `head.remoteLSN`, `head.state`, `head.detachedBy` | What any host can start from: every write up to `remoteLSN`. `state` `detached` with `detachedBy` means sealed by that holder |
+| HEAD | `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER`: `head.Gen`, `head.Epoch`, `head.Holder`, `head.ClaimID`, `head.Position`, `head.State`, `head.Current` | The committed image through `Position`. `State` `detached` names the holder's stopped image; there is no separate `detachedBy` field |
 | The ACK | the same `show`: `recorded ACK: r1@E HEAD generation G` | The old holder drained and closed after reading the sealed HEAD G. A clean move needs it |
+
+`ops chunk show` prints JSON with `volume` and `head` objects. The HEAD view
+uses the field spellings above (capitalized); it is not the on-store HEAD
+encoding. A live HEAD has `State: ""`; a stopped HEAD has `State: "detached"`.
+`Position` is the committed write position, `ClaimID` identifies the claim,
+and `Current` names the committed root (null before an image is committed).
+`Gen` is the current record generation, not the holder's identity.
 
 `MASTER` is blockmaster's `--listen` address, `FILER` the SeaweedFS filer gRPC
 address (`--chunk-filer`), `STATUS` a blockvolume's `--status-addr` (with
@@ -75,6 +82,23 @@ volumes:
         replica_id: r1
 ```
 
+A restore target is the one exception: list it with `id`,
+`replication_factor` and `placements` only, **without `size_bytes`**. Such an
+entry places the volume but creates no record; `sw-block ops chunk restore`
+creates the record, with the source snapshot's geometry. With `size_bytes` the
+entry creates an ordinary empty volume, and the restore into it is refused
+with `target_exists`. Use a new name: a name that was ever deleted is never
+created again. blockmaster reads the cluster spec only at start, so adding the
+target means restarting it: see [what that does to serving volumes](standalone-deployment.md#restoring-a-snapshot-into-a-new-volume).
+
+```yaml
+  - id: v2                     # restore target: no size_bytes
+    replication_factor: 1
+    placements:
+      - server_id: s2
+        replica_id: r1
+```
+
 In a multi-host cluster, register each node by the address it connects to
 blockmaster from, never loopback. One server id names one host: a volume host whose
 server id is registered on `127.0.0.1` is refused with `server id s1 is registered on
@@ -93,6 +117,11 @@ blockmaster --authority-store /var/lib/sw-block-master/authority \
   --listen 127.0.0.1:9180 --workspace-rpc \
   --chunk-filer FILER_GRPC --chunk-path /swblock/chunks
 ```
+
+This page's volumes have one replica. A volume with `replication_factor`
+above 1 also needs `--lifecycle-product-loop-interval 100ms` (the shipped
+chart's value; the default `0` turns the loop off and such a volume never gets
+a primary): see [the replicated start](standalone-deployment.md).
 
 With the example units: `SWB_MASTER_TOPOLOGY=` (empty), `SWB_MASTER_EXPECTED_SLOTS=1`,
 `SWB_MASTER_WORKSPACE_RPC=true`, and `--lifecycle-store`, `--cluster-spec`,
@@ -124,7 +153,7 @@ The lock covers one host. Two hosts are kept apart by blockmaster's assignment
 and the lease, not by this lock.
 
 An existing local root attaches only if its durable position reaches the
-`remoteLSN` of HEAD. A root that is behind (a copy taken before a later cut)
+`Position` of HEAD. A root that is behind (a copy taken before a later cut)
 is refused, never serves, and its process exits 78 (no automatic restart) with
 `reason=superseded cure="remove or quarantine the local root to attach fresh
 from HEAD"`. A power loss does not cause this: a cut makes its position durable
@@ -152,10 +181,12 @@ These are rules for the operator. The product does not detect every breach.
   A copy older than the last cut is refused. A copy taken after the last cut is NOT
   detected: it attaches and loses the writes acknowledged after the copy was taken. To go
   back, start from the remote image with a fresh root.
-- **After a forced move, stop and disable the old host's unit.** Until you do, it
-  starts, refuses, exits 75 and is started again, and cannot serve. The shipped unit
-  gives up after 10 starts in 10 minutes (`StartLimitBurst=10`,
-  `StartLimitIntervalSec=600`) and then stays failed until you reset it.
+- **After a forced move, stop and disable the old host's unit.** Until you do, a
+  start of it is refused by blockmaster: it logs `exiting status=78 reason=moved`,
+  exits 78 and cannot serve. The shipped unit does not restart a process that exits
+  78, so it stays failed; disable it so that a reboot does not start it again.
+  This refusal can happen before any assignment is delivered to the old host;
+  its `reason=moved` exit is the evidence that the start was refused.
 - **Before moving a volume back to a host that held it earlier, move that host's old
   root aside** (after the check above). The old root is stale; the new holder must start
   on a fresh one.
@@ -187,12 +218,11 @@ Each procedure below runs as written on this page, with the real binaries, two
 | Same host: restart inside the lease | `TestProcedureSameHostRestartInsideTheLease` | runs |
 | After a crash: return after a lapsed lease (started 65 s after the stop) | `TestProcedureReturnAfterALapsedLease` | runs |
 | Revoke without the ACK, then forced move to another node | `TestProcedureRevokeWithoutACKThenForcedMove` | runs |
-| Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | runs: the returning old host does not take the new host's assignment, does not report ready and does not listen for I/O; it logs the refusal and exits 75, on its old local root and on a fresh one, each time the unit starts it; the new host keeps serving |
+| Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | runs: the returning old host does not take the new host's assignment, does not report ready and does not listen for I/O; it logs `exiting status=78 reason=moved` and exits 78, on its old local root and on a fresh one; the new host keeps serving |
 | Same host: restart after a crash inside the lease | `TestProcedureSameHostCrashRestartInsideTheLease` | runs |
 | After a crash: started 40 s after the stop, the barrier passes inside the start wait | `TestProcedureStartInsideTheBarrierWaitIsReGranted` | runs: does not serve while renewals are refused, serves once re-granted |
-| After a crash: started too early (the start wait ends before the barrier) | `TestProcedureStartTooEarlyExitsAndARestartServes` | runs: exits 75 with `reason=assignment_timeout`; a later start serves |
-| Delete a volume: seal, revoke, ACK, delete the snapshots, volume-delete | `TestProcedureDeleteAVolume` | runs: refused while a snapshot exists, with nothing deleted; completes after the snapshot is deleted; a rerun with the same request id completes again |
-| Delete after the process was stopped by a signal (start again, revoke, ACK, delete) | `TestProcedureDeleteAfterASignalStop` | runs: refused for the missing ACK, with nothing deleted; completes after the restart, the revoke and the ACK |
+| Delete a volume: seal, revoke, ACK, wait for the lease horizon, remove restored-volume dependents, volume-delete | `TestProcedureDeleteAVolume` | the ACK alone does not bypass the lease horizon; a snapshot with a restored-volume dependent refuses deletion without changing HEAD or the pool; after deleting the dependent, ordinary snapshots are deleted with the volume; a rerun with the same request id completes again |
+| Delete a sealed volume after its holder was stopped by a signal | `TestProcedureDeleteAfterASignalStop` | holder stays down; first delete refuses the live lease with `live until <T>`, then the same request completes at or after T without an ACK; a repeated delete completes and a late start cannot serve |
 | After a crash: the process is killed while the guest writes, restart inside the lease | `TestProcedureCrashWithIOInFlight` | runs: every write acknowledged by a flush reads back |
 | The holder cannot reach blockmaster, then a forced move | `TestProcedureMasterUnreachableFencesBeforeForcedMove` | runs: the forced move is refused while the holder is alive and admitted only after it exited 75 (`reason=lease_expired`) |
 | Hand-over between two machines | none | not run (the tests use one machine's loopback) |
@@ -228,7 +258,9 @@ the table below). Repeating the command is safe: it answers from the sealed
 HEAD.
 
 To check: `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
-`head.state` `detached` and `head.detachedBy` `{"holder":"s1/R","epoch":E,"gen":G}`.
+`head.State` `detached`, `head.Holder` `s1/R`, `head.Epoch` E, a nonempty
+`head.ClaimID`, `head.Gen` G and a non-null `head.Current`. Its `head.Position`
+is the sealed position L; the HEAD itself is the stop proof, with no `detachedBy`.
 
 **4. Revoke**, giving the generation you copied:
 
@@ -280,12 +312,13 @@ predates another host's HEAD refuses it, see the table). If you start it
 later, its first renewal waits until 65 seconds after the move: start it after
 that, as in [after a crash](#after-a-crash).
 
-**8. Verify.** The new holder logs `durable: HEAD claim for volume=v1 done in
-...: gen=... epoch=E2 holder="S2/R"` and `blockvolume: volume v1 adopted as
-PRIMARY at R@E2`. `ops workspace show` prints `holder: R@E2` and a line
+**8. Verify.** The new holder logs `blockvolume: volume v1 adopted as
+PRIMARY at R@E2`. Its completed claim is observable in HEAD. `ops workspace show`
+prints `holder: R@E2` and a line
 `move: request=move-v1-1 kind=clean issued=true ...`. `ops chunk show` shows
-`head.state` `active`, `head.epoch` E2 and `head.remoteLSN` L. Reconnect the
-guest to the new host.
+`head.State` `""` (live), `head.Epoch` E2, `head.Holder` `S2/R`, a nonempty
+`head.ClaimID`, `head.Gen` above the sealed generation G, a non-null `head.Current`
+and `head.Position` L. Reconnect the guest to the new host.
 
 ## Same host
 
@@ -334,10 +367,12 @@ and logs `blockvolume: waiting for the master: <reason> since <time> (no bound)`
 the reason changes and every 10 minutes (`/status` shows the same as `MasterWait`).
 The wait ends 30 seconds after the first answer received once the local store is
 open and recovered, or 30 seconds after the master's barrier time when that is later
-(fixed, no flag): a slow open does not use up the wait. If the
-grant comes inside the wait, the process serves. If it does not, the process logs
+(fixed, no flag): a slow open does not use up the wait, and a start before the
+barrier waits through it and serves once re-granted
+(`TestProcedureStartInsideTheBarrierWaitIsReGranted`). Only when blockmaster keeps
+answering without a grant for 30 seconds past its barrier does the process log
 `durable: chunk authority wait for volume=v1 ended after ...: assignment unavailable,
-not serving (...)` and exits with `blockvolume: exiting status=75
+not serving (...)` and exit with `blockvolume: exiting status=75
 reason=assignment_timeout`; the unit starts it again. A master outage therefore costs
 at most one restart (the holder's lease fence), not the unit's start limit (10 starts
 in 10 minutes). A master that answers and drops in turn postpones the 30 seconds for
@@ -371,10 +406,13 @@ serving when its lease ends. Make sure it stays down.
 
 ## Delete a volume
 
-A volume is deleted only after its holder has given it up: sealed, revoked and
-acknowledged, exactly as in steps 2 to 5 of the planned hand-over, and after its
-snapshots are deleted. Sealing and stopping the process is not enough: until the
-ACK is recorded, blockmaster still counts the volume as in use.
+For a running holder, seal, revoke and wait for its ACK as in the planned
+hand-over. Deletion also waits until the lease horizon (expiry plus clock skew)
+has passed, about 60 seconds with default flags. An ACK alone does not bypass
+that wait. A sealed holder already stopped by a signal follows the recovery
+path below: it stays down and needs no ACK after its lease horizon. A snapshot
+with restore dependents blocks deletion; ordinary snapshots are deleted with
+the volume.
 
 **1. Stop the writer and seal** (hand-over steps 2 and 3):
 
@@ -395,14 +433,26 @@ sw-block ops workspace show   --master MASTER --volume v1
 
 `show` must print `lease state: revoking` and `recorded ACK: R@E HEAD generation G`.
 
-**3. Delete every snapshot of the volume:**
+**3. Check snapshots and remove their restore dependents.** Delete each restored
+volume that depends on a snapshot before deleting its source. Ordinary snapshots
+can remain: they are deleted with the volume. To list snapshots or optionally
+remove an ordinary snapshot:
 
 ```bash
 sw-block ops chunk snapshots       --master MASTER --volume v1 --chunk-filer FILER
 sw-block ops chunk snapshot-delete --master MASTER --volume v1 --chunk-filer FILER --name s1
 ```
 
-Each delete answers `{"volumeID":"v1","name":"s1","state":"deleting"}`.
+`snapshots` answers a JSON array with one entry per published snapshot, in name
+order: `[{"name":"s1","root":"<64 hex>"}]`. An entry also lists
+`"dependents":["v2-<id8>"]` while restore targets depend on that snapshot. An
+entry has no state or cut position: a listed snapshot is published. Each delete
+answers `{"volume":"v1-<id8>","name":"s1","state":"absent"}`. Here `v1-<id8>` is
+the volume's store directory: its name and the first 8 hex digits of its layout id.
+A delete is one conditional update of HEAD. If another change of HEAD (the
+holder's cleaning, which runs after a delete, or a snapshot) lands between its
+read and its write, it exits 1 with `"code":"conflict"` and `"retryable":true`
+and changes nothing: run it again.
 
 **4. Delete the volume:**
 
@@ -410,15 +460,38 @@ Each delete answers `{"volumeID":"v1","name":"s1","state":"deleting"}`.
 sw-block ops chunk volume-delete --volume v1 --chunk-filer FILER --master MASTER --request-id del-v1
 ```
 
-It answers with `"admitted":true,"committed":true,"headMarked":true,"completed":true`.
+On completion it answers `{"volume":"v1-<id8>","state":"deleted"}`, where
+`<id8>` is the first eight hex digits of the volume's layout id. `volume` in
+this result is the store directory; subsequent commands still use the public
+name `--volume v1`.
+On a completed retry, an optional `already_deleted_roots` array names roots
+already removed by the earlier completion; `state` remains `deleted`. A missing
+root of a volume not already deleted is still an error.
 Keep the `--request-id` and use the same one if you have to run the command again.
 Afterwards `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
-`"state": "deleted"` and `"chunkCount": 0`.
+`head.State` `deleted`. The HEAD view has no `chunkCount` field; use the
+volume's object listing or verification report to check its remaining objects.
 
-**If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
-and step 4 is refused with `live authority requires clean revocation ACK`. Nothing
-was deleted. Start `blockvolume` again with the same flags and local root, then do
-step 2 and continue. This recovery runs as written (`TestProcedureDeleteAfterASignalStop`).
+**If you sealed and then stopped `blockvolume` with a signal, keep it stopped**
+and disable its unit so it cannot restart. Run step 4 without restarting,
+revoking or waiting for an ACK. Before the lease horizon it exits 1 with typed
+`code: not_admitted` and a message naming `live until <T>`; nothing is deleted.
+Retry with the **same request id** at or after T until it completes, within the
+original horizon plus a bounded margin. Do not issue a start or move during the
+wait: a new lease starts a new wait. A restarted sealed holder is replay-only,
+cannot ACK, and its renewals push the horizon out. This recovery is exercised by
+`TestProcedureDeleteAfterASignalStop`, including repeated deletion and the fence
+against a late start.
+
+**A volume that never served** has no holder to seal or ACK: its blockvolume
+was stopped at its first lease grant, or a clean move went to a host that
+never started. Run step 4 without steps 1-3. While the lease that start was
+granted could still be live, step 4 is refused with `workspace delete: live
+until <time>: ... lease expiry plus clock-skew margin has not elapsed`, and
+nothing is deleted. Nobody renews that lease, so run the same command (the same
+`--request-id`) after `<time>`, about 60 seconds later with default flags;
+it then completes. In this release the delete waits for that time
+(`TestNeverStartedLineIsDeletableWithoutARevoke`).
 
 ## Snapshot names and retries
 

@@ -132,6 +132,65 @@ Do these steps before you start blockvolume:
    `SWB_MASTER_EXPECTED_SLOTS`. blockmaster reads the file only at start:
    after you change it, run `sudo systemctl restart sw-blockmaster`.
 
+   **A replicated cluster** (volumes with `replication_factor` above 1, in a
+   `--cluster-spec`) needs two flags that are off by default:
+   - `--lifecycle-product-loop-interval 100ms` (the shipped chart's value):
+     a replicated volume gets its primary from this loop. With the default
+     `0` the loop is off:
+     - blockmaster refuses to start when its cluster spec lists a replicated
+       volume (`cluster spec volume v1 has replication factor 3 but
+       --lifecycle-product-loop-interval is 0 (off): ...`);
+     - creating a replicated volume is refused (`create volume: v1 has
+       replication factor 3 but --lifecycle-product-loop-interval is 0
+       (off): ...`).
+   - `--failback-runtime-rpc`: the operator's failover (`sw-block ops
+     failover`, below) calls it. Without it there is no manual failover.
+
+   The failover needs an admin client certificate, so this blockmaster runs
+   with authentication: the four mutual-TLS flags and `--audit-log`, which is
+   required with them (see
+   [Authenticate the control API](operator-guide.md#authenticate-the-control-api)).
+   The single-replica start above needs none of these.
+
+   ```bash
+   blockmaster --authority-store /var/lib/sw-block-master/authority \
+     --lifecycle-store /var/lib/sw-block-master/lifecycle \
+     --cluster-spec /etc/sw-block/cluster-spec.yaml --expected-slots-per-volume 3 \
+     --lifecycle-product-loop-interval 100ms --failback-runtime-rpc \
+     --tls-cert /etc/sw-block/tls/master.crt --tls-key /etc/sw-block/tls/master.key \
+     --tls-client-ca /etc/sw-block/tls/ca.crt --role-file /etc/sw-block/tls/roles \
+     --audit-log /var/lib/sw-block-master/audit.log \
+     --listen 192.0.2.10:9180
+   ```
+
+   **Replicated volumes in this release:**
+   - **One replicated factor per cluster.** `--expected-slots-per-volume` is one
+     number for the whole cluster, and blockmaster decides only replicated
+     volumes of that factor.
+     - Under `--cluster-spec`, a replicated volume of another factor is
+       refused: at start when the cluster spec lists it (`cluster spec volume
+       v1 has replication factor 2 but --expected-slots-per-volume is 3: ...`),
+       and at its create (`create volume: v1 has replication factor 2, but
+       this master decides replicated volumes of 3 replicas ...`).
+     - Single-replica volumes can share a `--cluster-spec` cluster with
+       3-replica volumes (`--expected-slots-per-volume 3`); 2-replica and
+       3-replica volumes cannot share one.
+     - A static `--topology` holds one factor only, and is not checked at
+       start: one volume with another slot count stops assignment for all of
+       them, and shows only as a controller error on every tick.
+   - **Failover.** blockmaster replaces a primary by itself only when that
+     primary answers that it is not ready.
+     - A primary whose host is off or unreachable does not answer. It is shown
+       as unreachable and is not replaced, at every replica count, with the
+       loop on or off.
+     - Then the operator powers the old node off or cuts it from its clients,
+       and runs `sw-block ops failover` with `--confirm-old-node-off`.
+     - The failover needs blockmaster started with `--failback-runtime-rpc`
+       and an admin client certificate (`SW_BLOCK_TLS_CERT`,
+       `SW_BLOCK_TLS_KEY`, `SW_BLOCK_TLS_CA`).
+     - If its fencing round is refused, run the command again.
+       `sw-block ops failover -h` describes the round and its exit codes.
+
 3. **Start blockvolume with the identity of one slot.** `--volume-id`,
    `--replica-id` and `--server-id` (`SWB_VOLUME_ID`, `SWB_REPLICA_ID`,
    `SWB_SERVER_ID`) must equal one slot of the file: `v1`, `r1`, `s1` here.
@@ -525,6 +584,8 @@ sw-block ops chunk snapshots --master MASTER --volume v1 --chunk-filer FILER    
 sw-block ops chunk snapshot --volume v1 --name before-upgrade --status-addr STATUS   # take one now
 ```
 
+The list is a JSON array, one entry per published snapshot in name order: `[{"name":"sched-20261120T031204Z","root":"<64 hex>"}]`, with `"dependents":["v2-<id8>"]` on a snapshot that restore targets depend on.
+
 ### Deleting snapshots and getting space back
 
 Space comes back in two steps. Neither is immediate.
@@ -595,7 +656,20 @@ Retiring the source of a template is not supported in this release either: a res
 
 A restore makes a new volume from a snapshot. The new volume reads every chunk it has not made local from the source's snapshot, so the snapshot stays in use for as long as the new volume exists.
 
-1. **Add the target to blockmaster.** Add the target volume (for example `v2`) to blockmaster's topology, with the source's geometry.
+1. **Add the target to blockmaster's cluster spec as placement only.** A restore needs blockmaster's lifecycle store, so blockmaster runs with `--cluster-spec` (see [the volume record](volume-lifecycle.md#setup)). Add the target (for example `v2`) with its id, replication factor and placement, and **no `size_bytes`**:
+
+   ```yaml
+   volumes:
+     - id: v2                   # a new name: never used, never deleted
+       replication_factor: 1
+       placements:
+         - server_id: s2
+           replica_id: r1
+   ```
+
+   Restart blockmaster to read it (it reads the cluster spec only at start). Volumes already serving keep serving through a short restart: each holder renews every 10 s or less and may serve until 20 s after its last renewal (the 30 s lease less half the 20 s clock-skew margin, with defaults), so a blockmaster that answers again within 10 s interrupts nothing (`TestPhase0BaselineMasterKilledAndRestartedUnderWrites`: killed and back after 5 s, no guest write fails). A longer restart is fail-closed: a holder whose lease ends stops I/O, exits 75 (`reason=lease_expired`), is started again by the unit and waits, and serves again once blockmaster is back and its barrier has passed, at least 50 s after the restart (`TestPhase0BaselineMasterDown60sOneVolume`, `TestUnitSurvivesTenMinuteMasterOutage`). Add restore targets ahead of time, several at once, to restart less often.
+
+   An entry without `size_bytes` creates no volume record; the restore creates it, with the snapshot's geometry. An entry with `size_bytes` creates an ordinary empty volume, and the restore into it is then refused with `target_exists` (`v2 is bound to another restore request`).
 2. **Create the restore:**
 
    ```bash
@@ -603,9 +677,12 @@ A restore makes a new volume from a snapshot. The new volume reads every chunk i
    ```
 
    This creates `v2` from the snapshot and prints one JSON document. It is idempotent by `--request-id` (a generated id is printed when you omit it); reuse it to retry an uncertain result. `--master` is required: it resolves each volume's layout id.
-3. **Start v2's blockvolume** with the normal standalone command, its own volume id, endpoints and local root, and the same chunk settings as the source (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`). v2 serves at once.
+
+   The JSON `target` is the store directory, `"target":"v2-<id8>"`, where `<id8>` is the first eight hex digits of v2's layout id. The public volume name remains `v2`: keep using `--volume v2`, `--source v2`, `blockvolume --volume-id v2` and status queries with `volume=v2`. The directory printed in the result is not a replacement name for those arguments. Resolve v2's full layout id through the master for `blockvolume --layout-id` as described [above](#resolve-the-local-volumes-layout-id).
+3. **Start v2's blockvolume** with the normal standalone command, its own volume id, endpoints and local root, the source's geometry (`--durable-blocks` and `--durable-blocksize`, for example `65536` and `4096`), and the same chunk settings as the source (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`). v2 serves at once. A start with other geometry flags is refused with `geometry_mismatch` and exits 78, creating no local store; the refusal names the record's values.
 4. **Reads fill v2.** A block in a chunk that v2 does not hold yet is read from the source's snapshot; the read waits for that chunk, which is then kept locally. There is no background copy: a chunk that is never read stays in the source's snapshot.
    - Progress is the volume's count of chunks still absent: `Chunk.Stats.AbsentChunks` in `GET http://STATUS_OF_V2/status/durable?volume=v2` (0 means every chunk is local).
+   - That progress is written to v2's local store at its next checkpoint. If v2's blockvolume is killed before then, the chunks it made local since are absent again after the restart and are fetched again from the source's snapshot on their next read. No data is lost: the source's snapshot still holds them.
    - To make every chunk local, read the whole device once (for example with `dd` to `/dev/null`).
    - **A restored volume takes no scheduled snapshot until its whole device has been read once**: while any chunk is absent, each scheduled snapshot is skipped and counted as `restoring`.
    - A manual snapshot (`ops chunk snapshot`) is taken in that state too. It names the source's chunks for every chunk v2 has not made local, so, like any snapshot of v2, it cannot be restored (below).
@@ -613,7 +690,7 @@ A restore makes a new volume from a snapshot. The new volume reads every chunk i
 #### Lifetime of a restore target
 
 - **The source snapshot cannot be deleted** while v2 exists: `ops chunk snapshot-delete` is refused with `snapshot_has_dependents`. Delete v2 first (see [Delete a volume](volume-lifecycle.md#delete-a-volume)); the snapshot can be deleted after that.
-- **A snapshot of v2 cannot be restored:** it names the source's chunks, and the restore is refused with `restore_source_not_own`. Restore from the source's snapshot instead.
+- **A snapshot of v2 cannot be restored:** it names the source's chunks. The restore exits 1 with `"code":"not_admitted"` and a message ending in `snapshot names another volume's chunks: "<snapshot>"`. The refused request still leaves the target's name bound to it, so a later restore under that name from another snapshot is refused with `target_exists`: restore from the source's snapshot under a new target name.
 - **v2's own writes stay in v2:** the source's snapshot never changes.
 - **Deleting v2 releases the source snapshot:** `ops chunk volume-delete` of v2 removes it from the snapshot's dependents.
 - **`ops chunk release` is a repair step, not part of this procedure.** `sw-block ops chunk release --master MASTER --source v1 --target v2 --chunk-filer FILER` removes a restore target from its source snapshot's dependents. It works only when the target no longer names the source's chunks (it was deleted), or when the target never got its first HEAD (an interrupted restore). In the second case it first tombstones the target's name, so that name can never be created. A live target is refused with `target_live`.
