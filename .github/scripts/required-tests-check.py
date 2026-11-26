@@ -15,16 +15,20 @@ also has exactly one line and that status is 0: a test that reports PASS and
 then fails, panics or hangs on its way out is not a pass. Prints one line per named test with its outcome and elapsed
 seconds, then the total.
 
-For every named test that did not pass, the last lines of its output follow the
+For every named test that did not pass, its own reported lines (the test's
+file:line messages, not the harness's log dumps) and its last lines follow the
 table, so a run's log carries its own reasons.
 
 Exit 0: every named test passed. 1: at least one did not. 2: usage or an
 unreadable input.
 """
 import json
+import re
 import sys
 
-TAIL = 40  # output lines shown per failed test
+OWN = 12   # a failed test's own file:line messages shown (the last ones)
+TAIL = 5   # and its last output lines
+OWN_LINE = re.compile(r'^    [^ \t]+\.go:\d+: ')   # the test's own t.Log/t.Error lines
 
 
 def names_of(path):
@@ -131,9 +135,10 @@ def main(argv):
             why = got[0][0].upper()
         print('%-8s %-70s %7.1fs' % ('FAIL', name, secs) + '  ' + why)
     for name in failed:
-        lines = ''.join(output.get(name, [])).splitlines()[-TAIL:]
-        print('---- %s: last %d output lines' % (name, len(lines)))
-        for line in lines:
+        text = ''.join(output.get(name, [])).splitlines()
+        own = [l for l in text if OWN_LINE.match(l)][-OWN:]
+        print('---- %s: its own messages (%d), then its last %d lines' % (name, len(own), min(TAIL, len(text))))
+        for line in own + ['    ...'] + text[-TAIL:]:
             print('    ' + line[:300])
     if pkg_fail:
         print('FAIL     the test binary reported %d package-level failure(s)' % pkg_fail)
