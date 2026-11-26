@@ -25,6 +25,7 @@ func TestHostFailbackAuthorityRuntimeUsesLivePublisher(t *testing.T) {
 		t.Fatalf("product tick: %v", err)
 	}
 	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	establishVolume(t, h, "vol-a")
 	if current.ReplicaID != "r2" {
 		t.Fatalf("current line=%+v want r2", current)
 	}

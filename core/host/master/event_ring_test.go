@@ -48,6 +48,7 @@ func TestMasterTimeline_RecordsPromotionCandidateEvaluation(t *testing.T) {
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "pvc-a")
+	establishVolume(t, h, "pvc-a")
 	h.SetPromotionEvidenceProvider(staticPromotionProbe{
 		result: PromotionProbeResult{
 			AckProfile:   "sync-quorum",

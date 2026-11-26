@@ -117,6 +117,7 @@ func TestMountedFailover_ProductLoopRF2UsesAuthorityControllerForFailover(t *tes
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf2")
+	establishVolume(t, h, "vol-rf2")
 	if initial.ReplicaID != "r1" || initial.Epoch != 1 || initial.EndpointVersion != 1 {
 		t.Fatalf("initial line=%+v want r1@1/1", initial)
 	}
@@ -194,6 +195,7 @@ func TestMountedFailover_ProductLoopRF3BlocksFailoverWithoutFreshPromotionProbe(
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
@@ -239,6 +241,7 @@ func TestMountedFailover_ProductLoopRF3BlocksHealthyCurrentRebalanceWithoutProbe
 		}
 	}
 	initialA := waitAuthorityLine(t, h.Publisher(), "vol-rf3-a")
+	establishVolume(t, h, "vol-rf3-a")
 	initialB := waitAuthorityLine(t, h.Publisher(), "vol-rf3-b")
 	if initialA.ReplicaID != "r1" || initialB.ReplicaID != "r1" {
 		t.Fatalf("initial lines=%+v %+v want both r1", initialA, initialB)
@@ -288,6 +291,7 @@ func TestMountedFailover_ProductLoopRF3PromotesCandidateCoveringSyncAckProbe(t *
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
@@ -328,6 +332,7 @@ func TestMountedFailover_ProductLoopRF3PrefersHighestDurableLSNAboveRequired(t *
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
@@ -367,6 +372,7 @@ func TestMountedFailover_ProductLoopRF3UnknownRequiredLSNFallsBackToHighestDurab
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
@@ -406,6 +412,7 @@ func TestMountedFailover_ProductLoopRF3BestEffortUnknownRequiredLSNCanSelectHigh
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
@@ -493,6 +500,7 @@ func TestMountedFailover_ProductLoopRF3DoesNotPromoteWhenCurrentProbeIsReady(t *
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	ingestRF3Observation(t, h, true, true, true)
 	result, err := h.RunLifecycleProductTick()
 	if err != nil {
@@ -534,6 +542,7 @@ func TestMountedFailover_ProductLoopRF3ProbeCanAuthorizeStaleHeartbeatReadiness(
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
@@ -576,6 +585,7 @@ func TestMountedFailover_ProductLoopRF3DoesNotReassignWhenCurrentSlotMissing(t *
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 	if initial.ReplicaID != "r1" {
 		t.Fatalf("initial line=%+v want r1", initial)
 	}
@@ -621,6 +631,7 @@ func TestMountedFailover_ProductLoopRF3RejectsBestEffortProbeForHA(t *testing.T)
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 
 	ingestRF3Observation(t, h, false, true, true)
 	result, err := h.RunLifecycleProductTick()
@@ -661,6 +672,7 @@ func TestMountedFailover_ProductLoopRF3UnknownProbeCandidateCountsBlocked(t *tes
 		t.Fatalf("initial product tick: %v", err)
 	}
 	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	establishVolume(t, h, "vol-rf3")
 
 	ingestRF3Observation(t, h, false, true, true)
 	result, err := h.RunLifecycleProductTick()

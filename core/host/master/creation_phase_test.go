@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // supportedCreatingTick ingests r1 (as given) and two ready replicas, checks
@@ -89,4 +90,30 @@ func TestCreatingVolumeIsNotReplacedWhenItsPrimaryIsSilent(t *testing.T) {
 		t.Fatalf("%d fencing rounds against a creating volume with a silent primary", fences)
 	}
 	expectLineStaysR1(t, h, "a creating volume whose primary is silent")
+}
+
+// establishVolume records the current primary's attestation of every
+// replica's store, as a primary's first heartbeat after its bind does, so
+// the volume has left the creation phase (an established volume). Fixtures
+// that exercise promotion on an established volume call it after the first
+// line is published.
+func establishVolume(t *testing.T, h *Host, volumeID string) {
+	t.Helper()
+	line := waitAuthorityLine(t, h.Publisher(), volumeID)
+	p, ok := h.Lifecycle().Placements.GetPlacement(volumeID)
+	if !ok {
+		t.Fatalf("establish %s: no placement", volumeID)
+	}
+	stores := map[string]storage.StoreID{}
+	for _, s := range p.Slots {
+		stores[s.ReplicaID] = storeOf(s.ReplicaID)
+	}
+	published, _ := h.Publisher().PublishedAuthorityLine(volumeID)
+	server := h.workspaceLineOwner(published, volumeID, line.ReplicaID, line.Epoch)
+	if err := h.ingestStoreAttestation(server, attestation(volumeID, line.ReplicaID, line.Epoch, stores)); err != nil {
+		t.Fatalf("establish %s: %v", volumeID, err)
+	}
+	if h.creatingByRecord(volumeID) {
+		t.Fatalf("establish %s: still creating after the attestation (line %+v, server %q)", volumeID, line, server)
+	}
 }
