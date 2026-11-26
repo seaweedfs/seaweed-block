@@ -343,6 +343,9 @@ type volHandle struct {
 	// cutWait is the automatic-cut timer's host slot waits, nil when the
 	// timer is off.
 	cutWait *cutWaitSlot
+	// maintKick asks the running maintenance loop for one pass now (one
+	// buffered token: kicks coalesce); nil when the loop is off.
+	maintKick chan struct{}
 }
 
 // VolumeStatus is a read-only diagnostic snapshot of one durable volume

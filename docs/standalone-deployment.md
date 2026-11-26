@@ -504,13 +504,13 @@ sw-block ops chunk snapshot --volume v1 --name before-upgrade --status-addr STAT
 Space comes back in two steps. Neither is immediate.
 
 1. **The holder's cleaning deletes the chunks.**
-   - Cleaning runs only on the volume server that holds the volume, in its maintenance pass (`--chunk-maintenance-interval`, hourly by default), and only with `--chunk-maintenance-gc`. It is off by default. There is no operator command.
+   - Cleaning runs only on the volume server that holds the volume, in its maintenance pass: right after each snapshot delete through that server, and every `--chunk-maintenance-interval` (hourly by default). It is on by default; `--chunk-maintenance-gc=false` turns it off. There is no operator command.
    - A pass removes the volume's own chunks that no root in HEAD names: not the current image, not a snapshot. A chunk that a restore target still names stays, because the source's snapshot keeps it while the target depends on it.
-   - A deleted snapshot's unshared chunks are therefore removed by the first pass after the delete. A pass waits while a snapshot is being taken, and a server that no longer holds the volume removes nothing.
+   - A deleted snapshot's unshared chunks are therefore removed by the first pass after the delete. A pass waits while a snapshot is being taken (it is tried again shortly), a cut cancels a pass in progress, and a server that no longer holds the volume removes nothing. A snapshot deleted with `sw-block ops chunk` (not through the holder) is cleaned at the next periodic pass.
 
    ```bash
    sw-block ops chunk snapshot-delete --volume v1 --name sched-20261120T031204Z --chunk-filer FILER
-   # with --chunk-maintenance-gc on the holder, the next maintenance pass removes the chunks only it named;
+   # the holder's next maintenance pass removes the chunks only it named;
    # each pass logs "maintenance volume=... removed=N"
    ```
 2. **SeaweedFS vacuum compacts the volume files.** Reclaimed chunks are deleted needles.

@@ -407,8 +407,9 @@ depth 9, with the same TLC/jar. Its three negative configs narrow
 the root domain, widen reclamation or import namespace coverage. Native tests
 exercise the persisted mark records and real catalog root traversal; the finite
 model abstracts the complete mark and grace, whose timing remains in S9.
-No 50/200-volume density or metadata-RPC qualification is claimed; automatic GC
-remains opt-in, while periodic HEAD capture and retention are enabled by the CLI.
+No 50/200-volume density or metadata-RPC qualification is claimed. Automatic
+cleaning is on by default (owner decision, 2026-11-25), as are periodic HEAD capture
+and retention in the CLI.
 
 The unchanged S9 timing models were replayed with the same TLC/jar:
 `cfg/S9_rule_G4.cfg` (`RetentionGCTiming`, D=2/G=4/MD=1/MaxT=10)

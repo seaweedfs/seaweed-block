@@ -25,6 +25,12 @@ type fakeChunkProvider struct {
 	lastMin      uint64
 	snapshotMeta layout.SnapshotMeta
 	snapshotName string
+	kicks        []string
+}
+
+func (f *fakeChunkProvider) KickMaintenance(volumeID string) bool {
+	f.kicks = append(f.kicks, volumeID)
+	return true
 }
 
 type adapterManifestFiler struct {

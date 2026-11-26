@@ -453,10 +453,15 @@ snapshot lifetime; local persistence does not bypass it.
 ### M8. Attached-volume maintenance
 
 `PendingAttach -> Armed -> Due -> Running -> Armed`; elapsed ticks coalesce.
-A stable volume phase staggers the one-hour retention schedule. GC is opt-in
-pending density qualification. Detach/fence/Close cancels and joins before
+A stable volume phase staggers the one-hour retention schedule. A kick (a
+snapshot deleted through the holder's control route) also moves `Armed -> Due`;
+kicks coalesce, and a kicked pass the volume refused as busy (a cut session
+open) re-arms after 30 s instead of the interval. The cleaning is on by default
+(owner decision, 2026-11-25; `--chunk-maintenance-gc=false` turns it off).
+Tests: `TestMaintenanceKickRunsAPassNow`, `TestMaintenanceKickedBusyPassRetriesSoon`,
+`TestDefaultConfigCleansAfterEachSnapshotDelete`. Detach/fence/Close cancels and joins before
 catalog/storage release; only a still-current handle may re-arm after safe abort.
-A pass has one minute for retention and optional GC; retention failure skips GC.
+A pass has one minute for retention and the cleaning; retention failure skips the cleaning.
 A scoped GC pass traces the whole catalog but mutates only its target volume,
 with a separate scope/config-bound mark. Incomplete marks carry no coverage.
 
