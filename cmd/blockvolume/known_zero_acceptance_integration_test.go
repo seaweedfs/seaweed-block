@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // TestKnownZeroAcceptance is the KNOWN-ZERO acceptance test of a fresh volume,
@@ -446,10 +448,34 @@ func kzHoldBin(t *testing.T, rep *kzReport) string {
 	return p
 }
 
+// kzFreshAtStop reads, after the held first start was killed, whether b's
+// store is still fresh: the fresh state is in the store's descriptor
+// (WALStore.LayoutIdentity), set before the first claim and cleared only by
+// the attach commit; the .chunkfresh sidecar the step once looked for no
+// longer exists. The store is the one under b's layout directory
+// (<root>/<volume>-<id8>/, --layout-id), or under b's root without one. The
+// returned record (markers_at_stop) names the store read and what it held.
+func kzFreshAtStop(b bvHost) (bool, []string) {
+	stores, _ := filepath.Glob(filepath.Join(b.root, b.volume+"-*", b.volume+".bin"))
+	if len(stores) == 0 {
+		stores, _ = filepath.Glob(filepath.Join(b.root, b.volume+".bin"))
+	}
+	if len(stores) != 1 {
+		return false, []string{fmt.Sprintf("%d stores for %s under %s", len(stores), b.volume, b.root)}
+	}
+	ws, err := storage.OpenWALStore(stores[0])
+	if err != nil {
+		return false, []string{fmt.Sprintf("%s: open: %v", stores[0], err)}
+	}
+	defer ws.Close()
+	claim, fresh, ok := ws.LayoutIdentity()
+	return ok && fresh, []string{fmt.Sprintf("%s layout_identity set=%t fresh=%t claim=%s", stores[0], ok, fresh, claim)}
+}
+
 // kzCrashFirstStart is step 5:
 // the first start of a fresh volume runs the kzhold test binary, which holds
-// at the boundary before the fresh marker is retired; the test requires the
-// .chunkfresh marker present there, then SIGKILLs it. More than one try fails
+// at the boundary before the fresh marker is retired; the test SIGKILLs it
+// there and requires the store still fresh (kzFreshAtStop). More than one try fails
 // the step. Then restart that volume and
 // repeat steps 1-2: nothing certified known-zero (KnownZeroChunks 0, no
 // fresh-attach line), the first cut scans every chunk once, the next cut only
@@ -497,11 +523,9 @@ func kzCrashFirstStart(t *testing.T, env *handoffEnv, rep *kzReport, bytes uint6
 		if err := d.proc.Signal(syscall.SIGSTOP); err != nil {
 			t.Fatalf("SIGSTOP %s: %v", b.id, err)
 		}
-		markers, _ := filepath.Glob(filepath.Join(b.root, "*.chunkfresh"))
-		more, _ := filepath.Glob(b.root + "*.chunkfresh")
-		markers = append(markers, more...)
 		d.kill(t)
-		try := kzCrashTry{Volume: b.volume, Markers: markers, Before: len(markers) > 0}
+		fresh, markers := kzFreshAtStop(b)
+		try := kzCrashTry{Volume: b.volume, Markers: markers, Before: fresh}
 		r.Tries = append(r.Tries, try)
 		if try.Before {
 			break
