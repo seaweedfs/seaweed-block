@@ -25,7 +25,26 @@ func (p ackedFenceProbe) AckProfile() string { return p.plain.AckProfile }
 // product tick.
 func rf3LineOnR1(t *testing.T) (*Host, authority.AuthorityBasis) {
 	t.Helper()
-	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3})
+	return rf3LineOnR1With(t, newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3}))
+}
+
+// rf3MasterShortGrace is a master whose observation store reports a partial
+// inventory at once (no startup pending grace), so a fresh server that omits
+// a slot makes the volume unsupported.
+func rf3MasterShortGrace(t *testing.T) *Host {
+	t.Helper()
+	h, err := New(Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0",
+		ControllerConfig: authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3},
+		Freshness:        authority.FreshnessConfig{PendingGrace: time.Millisecond}})
+	if err != nil {
+		t.Fatalf("master.New: %v", err)
+	}
+	h.Start()
+	return h
+}
+
+func rf3LineOnR1With(t *testing.T, h *Host) (*Host, authority.AuthorityBasis) {
+	t.Helper()
 	h.SetPromotionEvidenceProvider(staticPromotionProbe{result: PromotionProbeResult{
 		AckProfile: "sync_quorum",
 		Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true, DurableLSN: 1}, {ReplicaID: "r3", Ready: true, DurableLSN: 1}},
@@ -518,7 +537,7 @@ func TestManualFailoverPublicationFailureIsHealedByTheNextTick(t *testing.T) {
 // partial inventory: unsupported). A normal product tick publishes r1 at
 // e+1, and a further tick adds no epoch.
 func TestManualFailoverRefusedFenceIsHealedByTheNextTickOnTheUnsupportedPath(t *testing.T) {
-	h, line := rf3LineOnR1(t)
+	h, line := rf3LineOnR1With(t, rf3MasterShortGrace(t))
 	defer closeTestMaster(t, h)
 	ingestRF3Observation(t, h, false, true, true)
 	e := line.Epoch
@@ -534,6 +553,11 @@ func TestManualFailoverRefusedFenceIsHealedByTheNextTickOnTheUnsupportedPath(t *
 	}
 
 	back(t, h, true)
+	time.Sleep(5 * time.Millisecond) // past the pending grace
+	topo, _ := acceptedTopologyFromPlacementIntents(h.Lifecycle().Placements.ListPlacements())
+	if b := authority.BuildSnapshot(h.obs.Store().Snapshot(), topo, h.Publisher()); len(b.Report.Unsupported["vol-rf3"].Reasons) == 0 {
+		t.Fatalf("vol-rf3 is not unsupported (report %+v): the test would not reach the unsupported gate", b.Report.Unsupported)
+	}
 	p.plain = PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true},
 		Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", DurableLSN: 10}}}
 	p.heal = healedR1
