@@ -210,6 +210,24 @@ A snapshot can be refused with `host_slot_busy` / `no background slot` (retryabl
 other volumes' cuts; retry with the same request id. With many volumes on a host, a snapshot may wait for a slot:
 measured up to 15 s at 32 volumes with the default 3 slots.
 
+## Add a host
+
+blockmaster registers nodes from the cluster spec only when it starts. Adding a host is a cluster-spec edit and a
+blockmaster restart; registering a host online, without a restart, is planned for 1.1.
+
+1. Add the host under `nodes` in the cluster spec, with the address it connects to blockmaster from (never loopback
+   in a multi-host cluster; see [the volume record](volume-lifecycle.md#setup)). To create new volumes on it, add
+   them under `volumes` with `placements` on its `server_id` in the same edit. Leave the placements of existing
+   volumes as they are: they reach the new host by a move (step 4).
+2. Restart blockmaster with the same flags. Volumes already serving keep serving if blockmaster answers again within
+   about 10 s. A longer restart pauses them: a holder whose lease ends (about 20 s after its last renewal, with
+   default flags) stops I/O, exits 75 and waits, and serves again once blockmaster is back and its barrier has
+   passed. See [what a restart does to serving volumes](standalone-deployment.md#restoring-a-snapshot-into-a-new-volume).
+3. Start the `blockvolume` unit of each new volume placed on the host, with `--server-id` equal to the host's
+   `server_id`.
+4. Move existing volumes onto it with the planned hand-over (or the forced move when their host is lost), naming the
+   new host as `--target-host`, then start the volume's unit there: see [moving a volume](volume-lifecycle.md).
+
 ## Moving a volume, and returning it
 
 [Volume lifecycle](volume-lifecycle.md):
@@ -251,7 +269,8 @@ and the volume does not serve. A monitor that only watches for failed units does
 - `identity refused: unregistered` or `wrong_host`: blockmaster does not know the unit's `--server-id`, or the
   node calls from another address than the one registered for it in the cluster spec. The check compares the
   address exactly: an address change, another outgoing interface, IPv4 against IPv6, or a host name in the cluster
-  spec all refuse the right host. Fix the cluster spec or the unit; the next call passes without a restart.
+  spec all refuse the right host. Fix the unit (the next call passes without a restart), or fix the cluster
+  spec and restart blockmaster, which reads it only at start (see [add a host](#add-a-host)).
 
 ## Limits
 
