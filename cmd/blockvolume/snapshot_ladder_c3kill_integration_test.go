@@ -95,11 +95,11 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 	return d
 }
 
-// readInBackground reads one block of each of chunks of target, in order,
+// readConcurrently reads one block of each of chunks of target, in order,
 // on its own connection: v1 fills a restore target only on access, so this
 // is the fill the test kills into. It stops at the first error (the kill)
 // or when the returned stop is called, and stop waits for it.
-func (env *handoffEnv) readInBackground(t *testing.T, target string, chunks []uint64) (stop func()) {
+func (env *handoffEnv) readConcurrently(t *testing.T, target string, chunks []uint64) (stop func()) {
 	t.Helper()
 	c := dialNVMe(t, env.hosts["n-"+target].nvme, plannedHandoffNQN)
 	done := make(chan struct{})
@@ -156,7 +156,7 @@ func TestSnapshotLadderC3KilledHydrating(t *testing.T) {
 
 	// (1) killed mid-fill
 	partly := func(absent int) bool { return absent > 0 && absent < len(chunks) }
-	stop := env.readInBackground(t, "v2", chunks)
+	stop := env.readConcurrently(t, "v2", chunks)
 	absent := env.awaitAbsent(t, "v2", "a partly filled volume", 120*time.Second, partly)
 	target.kill(t)
 	stop()
@@ -178,14 +178,14 @@ func TestSnapshotLadderC3KilledHydrating(t *testing.T) {
 	for c := uint64(1); c < 32; c += 2 {
 		odd = append(odd, c)
 	}
-	stop = env.readInBackground(t, "v2", odd)
+	stop = env.readConcurrently(t, "v2", odd)
 	env.awaitAbsent(t, "v2", "a fill still running after the write", 60*time.Second, func(a int) bool { return a > 0 })
 	target.kill(t)
 	stop()
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-write-kill")
 	env.requireBlocksOf(t, "n-v2", w1) // every acknowledged write survived the kill
 
-	// (3) completes
+	// (3) every chunk made local
 	w2 := ladderImage("c3kw2", []uint64{17, 44, 60}, 2) // not chunk 40: requireEdges keeps it untouched
 	env.writeImage(t, "n-v2", w2)
 	env.hydrate(t, "v2")
