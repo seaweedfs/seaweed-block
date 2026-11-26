@@ -54,6 +54,9 @@ type DurableRecord struct {
 	// carries what the first publication carried. Omitting nil preserves the
 	// checksum of records written before it.
 	Primary *adapter.PrimaryEvidence `json:",omitempty"`
+	// Incarnation is the primary process the line was issued for. Omitting
+	// "" preserves the checksum of records written before it.
+	Incarnation string `json:",omitempty"`
 }
 
 // AuthorityStore is the narrow durable-authority interface. The

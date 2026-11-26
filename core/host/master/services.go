@@ -1177,6 +1177,7 @@ func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.Assignme
 		EvidenceDurableLsn: info.Primary.DurableLSN,
 		EvidenceEpoch:      info.Primary.DataEpoch,
 		EvidenceFirstLsn:   info.Primary.DataFirstLSN,
+		LineIncarnation:    info.Incarnation,
 	}
 	if info.Primary.StoreID != ([16]byte{}) {
 		id := info.Primary.StoreID

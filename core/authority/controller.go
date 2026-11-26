@@ -432,7 +432,8 @@ func desiredObserved(desired DesiredAssignment, vol VolumeTopologySnapshot, curr
 	switch desired.Ask.Intent {
 	case IntentRefreshEndpoint:
 		return vol.Authority.DataAddr == desired.Ask.DataAddr &&
-			vol.Authority.CtrlAddr == desired.Ask.CtrlAddr
+			vol.Authority.CtrlAddr == desired.Ask.CtrlAddr &&
+			(desired.Ask.Incarnation == "" || currentLine.Incarnation == desired.Ask.Incarnation)
 	case IntentBind, IntentReassign:
 		return true
 	default:
@@ -471,11 +472,12 @@ func (c *TopologyController) decideVolume(
 		}
 		best := choosePlacementCandidate(cands, projectedLoad)
 		return AssignmentAsk{
-			VolumeID:  vol.VolumeID,
-			ReplicaID: best.ReplicaID,
-			DataAddr:  best.DataAddr,
-			CtrlAddr:  best.CtrlAddr,
-			Intent:    IntentBind,
+			VolumeID:    vol.VolumeID,
+			ReplicaID:   best.ReplicaID,
+			DataAddr:    best.DataAddr,
+			CtrlAddr:    best.CtrlAddr,
+			Intent:      IntentBind,
+			Incarnation: best.Incarnation,
 		}, "initial placement", true
 	}
 
@@ -485,14 +487,8 @@ func (c *TopologyController) decideVolume(
 	}
 
 	if candidateAcceptable(current, serverIndex) {
-		if current.DataAddr != currentLine.DataAddr || current.CtrlAddr != currentLine.CtrlAddr {
-			return AssignmentAsk{
-				VolumeID:  vol.VolumeID,
-				ReplicaID: current.ReplicaID,
-				DataAddr:  current.DataAddr,
-				CtrlAddr:  current.CtrlAddr,
-				Intent:    IntentRefreshEndpoint,
-			}, "endpoint refresh", true
+		if endpointStale(current, currentLine) {
+			return refreshAsk(vol.VolumeID, current), "endpoint refresh", true
 		}
 		if target, ok := chooseRebalanceCandidate(vol, current, serverIndex, currentLoad, projectedLoad, c.config.RebalanceSkew); ok {
 			// A primary change goes out only with the promotion gate's
@@ -503,12 +499,13 @@ func (c *TopologyController) decideVolume(
 				return AssignmentAsk{}, "", false
 			}
 			return AssignmentAsk{
-				VolumeID:  vol.VolumeID,
-				ReplicaID: target.ReplicaID,
-				DataAddr:  target.DataAddr,
-				CtrlAddr:  target.CtrlAddr,
-				Intent:    IntentReassign,
-				Evidence:  plannedEvidence(target.PromotionEvidence),
+				VolumeID:    vol.VolumeID,
+				ReplicaID:   target.ReplicaID,
+				DataAddr:    target.DataAddr,
+				CtrlAddr:    target.CtrlAddr,
+				Intent:      IntentReassign,
+				Evidence:    plannedEvidence(target.PromotionEvidence),
+				Incarnation: target.Incarnation,
 			}, "rebalance", true
 		}
 		return AssignmentAsk{}, "", false
@@ -518,14 +515,8 @@ func (c *TopologyController) decideVolume(
 	// keeps its authority through its boot grace; only its endpoint
 	// may be refreshed.
 	if hold, superseded := c.primaryBootGraceLocked(vol.VolumeID, current, candidatePlaceable(current, serverIndex)); hold {
-		if !superseded && (current.DataAddr != currentLine.DataAddr || current.CtrlAddr != currentLine.CtrlAddr) {
-			return AssignmentAsk{
-				VolumeID:  vol.VolumeID,
-				ReplicaID: current.ReplicaID,
-				DataAddr:  current.DataAddr,
-				CtrlAddr:  current.CtrlAddr,
-				Intent:    IntentRefreshEndpoint,
-			}, "endpoint refresh (primary boot grace)", true
+		if !superseded && endpointStale(current, currentLine) {
+			return refreshAsk(vol.VolumeID, current), "endpoint refresh (primary boot grace)", true
 		}
 		return AssignmentAsk{}, "", false
 	}
@@ -537,29 +528,45 @@ func (c *TopologyController) decideVolume(
 		// its target (one decider): no evidence, no promotion.
 		if best.PromotionEvidence.Kind == adapter.PrimaryKindPromotion {
 			return AssignmentAsk{
-				VolumeID:  vol.VolumeID,
-				ReplicaID: best.ReplicaID,
-				DataAddr:  best.DataAddr,
-				CtrlAddr:  best.CtrlAddr,
-				Intent:    IntentReassign,
-				Evidence:  best.PromotionEvidence,
+				VolumeID:    vol.VolumeID,
+				ReplicaID:   best.ReplicaID,
+				DataAddr:    best.DataAddr,
+				CtrlAddr:    best.CtrlAddr,
+				Intent:      IntentReassign,
+				Evidence:    best.PromotionEvidence,
+				Incarnation: best.Incarnation,
 			}, "failover", true
 		}
 	}
 	// No promotion-ready peer exists. Keep the current authority endpoint fresh
 	// when the current replica is still reachable/eligible; this preserves
 	// authority continuity without treating that replica as a failover candidate.
-	if candidatePlaceable(current, serverIndex) &&
-		(current.DataAddr != currentLine.DataAddr || current.CtrlAddr != currentLine.CtrlAddr) {
-		return AssignmentAsk{
-			VolumeID:  vol.VolumeID,
-			ReplicaID: current.ReplicaID,
-			DataAddr:  current.DataAddr,
-			CtrlAddr:  current.CtrlAddr,
-			Intent:    IntentRefreshEndpoint,
-		}, "endpoint refresh", true
+	if candidatePlaceable(current, serverIndex) && endpointStale(current, currentLine) {
+		return refreshAsk(vol.VolumeID, current), "endpoint refresh", true
 	}
 	return AssignmentAsk{}, "", false
+}
+
+// endpointStale reports whether the current primary's line needs a new
+// endpoint version: its addresses changed, or the process reporting it is
+// not the one the line was issued for (a restarted primary, compared for
+// equality only; the order stays the endpoint version).
+func endpointStale(current ReplicaCandidate, line AuthorityBasis) bool {
+	return current.DataAddr != line.DataAddr || current.CtrlAddr != line.CtrlAddr ||
+		current.Incarnation != "" && current.Incarnation != line.Incarnation
+}
+
+// refreshAsk re-issues the current primary's line at its reported
+// addresses for its reported incarnation.
+func refreshAsk(volumeID string, current ReplicaCandidate) AssignmentAsk {
+	return AssignmentAsk{
+		VolumeID:    volumeID,
+		ReplicaID:   current.ReplicaID,
+		DataAddr:    current.DataAddr,
+		CtrlAddr:    current.CtrlAddr,
+		Intent:      IntentRefreshEndpoint,
+		Incarnation: current.Incarnation,
+	}
 }
 
 func volumeIncludesReplica(vol VolumeTopologySnapshot, replicaID string) bool {

@@ -9,21 +9,29 @@ import (
 // but not ready yet keeps its authority for one bounded grace.
 
 type bootGraceRig struct {
-	t    *testing.T
-	ctrl *TopologyController
-	now  time.Time
-	rev  uint64
+	t      *testing.T
+	ctrl   *TopologyController
+	reader *fakeBasisReader
+	now    time.Time
+	rev    uint64
+	// reissued models the publisher having re-issued r1's line for the
+	// process that reports it (the restart refresh already applied), so a
+	// test of the grace sees only the grace. Off, the line stays with the
+	// process it was first issued for (r1-a).
+	reissued bool
+	line     AuthorityBasis
 }
 
 const testBootGrace = 30 * time.Second
 
 func newBootGraceRig(t *testing.T) *bootGraceRig {
 	reader := newFakeBasisReader()
-	reader.Set("v1", "r1", AuthorityBasis{
+	line := AuthorityBasis{
 		Assigned: true, ReplicaID: "r1", Epoch: 1, EndpointVersion: 1,
-		DataAddr: "d1-old", CtrlAddr: "c1-old",
-	})
-	g := &bootGraceRig{t: t, now: time.Unix(1000, 0)}
+		DataAddr: "d1-old", CtrlAddr: "c1-old", Incarnation: "r1-a",
+	}
+	reader.Set("v1", "r1", line)
+	g := &bootGraceRig{t: t, now: time.Unix(1000, 0), reader: reader, reissued: true, line: line}
 	g.ctrl = NewTopologyController(TopologyControllerConfig{PrimaryBootGrace: testBootGrace}, reader)
 	g.ctrl.SetNowForTest(func() time.Time { return g.now })
 	return g
@@ -37,6 +45,10 @@ func (g *bootGraceRig) submit(r1 ReplicaCandidate) {
 	if r1.ObservedAt.IsZero() {
 		r1.ObservedAt = g.now
 	}
+	if g.reissued && r1.Incarnation != "" && r1.Incarnation != g.line.Incarnation {
+		g.line.Incarnation = r1.Incarnation
+		g.reader.Set("v1", "r1", g.line)
+	}
 	r2 := candidate("r2", "s2", "d2", "c2", 20)
 	r2.Incarnation = "r2-a"
 	r3 := candidate("r3", "s3", "d3", "c3", 10)
@@ -48,9 +60,7 @@ func (g *bootGraceRig) submit(r1 ReplicaCandidate) {
 			{ServerID: "s2", Reachable: true, Eligible: true},
 			{ServerID: "s3", Reachable: true, Eligible: true},
 		},
-		Volumes: []VolumeTopologySnapshot{clusterVolume("v1",
-			AuthorityBasis{Assigned: true, ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d1-old", CtrlAddr: "c1-old"},
-			r1, r2, r3)},
+		Volumes: []VolumeTopologySnapshot{clusterVolume("v1", g.line, r1, r2, r3)},
 	}
 	if err := g.ctrl.SubmitClusterSnapshot(snap); err != nil {
 		g.t.Fatalf("SubmitClusterSnapshot: %v", err)

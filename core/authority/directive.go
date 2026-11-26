@@ -74,6 +74,11 @@ type AssignmentAsk struct {
 	// target (a bind is always a bootstrap); see adapter.PrimaryEvidence. It
 	// is a probe fact about the target, never an authority fact.
 	Evidence adapter.PrimaryEvidence
+	// Incarnation is the target's reported process incarnation in the facts
+	// the decision used ("" = not reported). A refresh whose incarnation
+	// differs from the line's is a restarted primary: a new endpoint version
+	// even at the same addresses.
+	Incarnation string
 }
 
 // ErrReassignWithoutKind: a primary change was asked without a kind (no

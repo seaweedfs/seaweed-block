@@ -288,6 +288,7 @@ func (p *Publisher) reloadFromStore() {
 				EndpointVersion: rec.EndpointVersion,
 				DataAddr:        rec.DataAddr,
 				CtrlAddr:        rec.CtrlAddr,
+				Incarnation:     rec.Incarnation,
 			},
 			present: true,
 		}
@@ -540,6 +541,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
 			Primary:         adapter.PrimaryEvidence{Kind: adapter.PrimaryKindBootstrap},
+			Incarnation:     ask.Incarnation,
 		}
 
 	case IntentRefreshEndpoint:
@@ -547,16 +549,23 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			return ErrRefreshNotBound
 		}
-		if prev.info.DataAddr == ask.DataAddr && prev.info.CtrlAddr == ask.CtrlAddr {
+		restarted := ask.Incarnation != "" && ask.Incarnation != prev.info.Incarnation
+		if prev.info.DataAddr == ask.DataAddr && prev.info.CtrlAddr == ask.CtrlAddr && !restarted {
 			// Idempotent no-op. Do not fan out, do not log as
 			// rejection — the directive is allowed to retry.
 			p.mu.Unlock()
 			return nil
 		}
+		// New addresses, or a restarted primary process at the same ones:
+		// a new endpoint version, so every session the new process opens
+		// outranks the dead process's on each replica.
 		next = prev.info
 		next.EndpointVersion = prev.info.EndpointVersion + 1
 		next.DataAddr = ask.DataAddr
 		next.CtrlAddr = ask.CtrlAddr
+		if ask.Incarnation != "" {
+			next.Incarnation = ask.Incarnation
+		}
 
 	case IntentReassign:
 		// A primary change carries how it was decided (a kind, and for a
@@ -594,6 +603,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
 			Primary:         ask.Evidence,
+			Incarnation:     ask.Incarnation,
 		}
 		if reservedEpoch != 0 {
 			next.Epoch = reservedEpoch
@@ -642,6 +652,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			CtrlAddr:        next.CtrlAddr,
 			WriteSeq:        nextSeq,
 			Workspace:       cloneWorkspace(p.workspace[ask.VolumeID]),
+			Incarnation:     next.Incarnation,
 		}
 		if next.Primary != (adapter.PrimaryEvidence{}) {
 			pe := next.Primary

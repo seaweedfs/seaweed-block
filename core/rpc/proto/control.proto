@@ -318,6 +318,11 @@ message AssignmentFact {
     uint32 replica_stores_awaited = 15;
     // The number of initial replicas (the N of "n of N" in its status).
     uint32 replica_stores_initial = 16;
+    // The primary process this line was issued for (its reported
+    // incarnation; "" = not recorded). A primary whose own incarnation is
+    // another one is a restarted process: it opens no replica session on
+    // this line, whose sessions belong to the dead process.
+    string line_incarnation = 17;
 }
 
 // PrimaryKind is how a line made its primary the primary.
