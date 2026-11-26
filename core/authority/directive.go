@@ -79,18 +79,24 @@ type AssignmentAsk struct {
 	// differs from the line's is a restarted primary: a new endpoint version
 	// even at the same addresses.
 	Incarnation string
-	// ExpectCurrent, when set, makes a reassign conditional on the volume's
-	// line being exactly this replica at this epoch when the publisher mints
+	// ExpectCurrent, when set, makes a reassign or an endpoint refresh
+	// conditional on the volume's line being exactly this replica at this
+	// epoch (and, when given, at these addresses) when the publisher mints
 	// (under its lock): an operator's move never lands on a line it did not
-	// see.
+	// see, and a refresh decided against a line never rewrites the line a
+	// move put in its place.
 	ExpectCurrent *ExpectedLine
 }
 
-// ExpectedLine is the line a conditional reassign was decided against.
+// ExpectedLine is the line a conditional reassign or refresh was decided
+// against. DataAddr and CtrlAddr are checked only when set.
 type ExpectedLine struct {
 	ReplicaID string
 	Epoch     uint64
+	DataAddr  string
+	CtrlAddr  string
 }
+
 
 // ErrExpectedLineMoved: a conditional reassign found the volume's line no
 // longer the one it was decided against; the publisher mints nothing.

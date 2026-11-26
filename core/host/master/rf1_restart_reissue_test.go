@@ -112,3 +112,99 @@ func rf1ReissueCase(t *testing.T, first string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// A refresh decided before a move (a holder restarted at the source after a
+// lost ACK answer, the tick building its refresh) and applied after the
+// operator's clean move to another host never rewrites the moved line: it is
+// submitted through the normal publication path and refused there, so the
+// line stays the target's, at the move's epoch.
+func TestRF1RefreshDecidedBeforeACrossHostMoveIsNotApplied(t *testing.T) {
+	head := authority.WorkspaceHead{Gen: 9, Epoch: 1, Holder: "node-a/r1", RemoteLSN: 1, Detached: true}
+	h, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume,
+		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) { return head, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Start()
+	defer closeTestMaster(t, h)
+	conn, err := grpc.NewClient(h.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ws := control.NewWorkspaceServiceClient(conn)
+	if _, err = control.NewLifecycleServiceClient(conn).CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "rt", SizeBytes: 1 << 20, ReplicationFactor: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []lifecycle.NodeRegistration{{ServerID: "node-a", DataAddr: "127.0.0.1:9201", CtrlAddr: "127.0.0.1:9101"}, {ServerID: "node-b", DataAddr: "127.0.0.1:9202", CtrlAddr: "127.0.0.1:9102"}} {
+		if _, err = h.Lifecycle().Nodes.RegisterNode(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := &control.WorkspaceBinding{VolumeId: "rt", ServerId: "node-a", DataAddr: "127.0.0.1:19201", CtrlAddr: "127.0.0.1:19101"}
+	dst := &control.WorkspaceBinding{VolumeId: "rt", ServerId: "node-b", DataAddr: "127.0.0.1:19202", CtrlAddr: "127.0.0.1:19102"}
+	if _, err = ws.RegisterWorkspaceBinding(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ws.PlaceWorkspace(ctx, &control.WorkspacePlacement{VolumeId: "rt", ServerId: "node-a", ReplicaId: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	report := func(server string, b *control.WorkspaceBinding, incarnation string) {
+		t.Helper()
+		if _, err := control.NewObservationServiceClient(conn).ReportHeartbeat(ctx, &control.HeartbeatReport{ServerId: server, SentAt: timestamppb.Now(), Reachable: true, Eligible: true,
+			Slots: []*control.HeartbeatSlot{{VolumeId: "rt", ReplicaId: "r1", DataAddr: b.DataAddr, CtrlAddr: b.CtrlAddr, Incarnation: incarnation}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report("node-a", src, "proc-a")
+	if _, err = h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	line := waitAuthorityLine(t, h.Publisher(), "rt")
+	id := &control.WorkspaceIdentity{ServerId: "node-a", VolumeId: "rt", ReplicaId: "r1", Epoch: line.Epoch}
+	if _, err = ws.RenewWorkspaceLease(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ws.RevokeWorkspace(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ws.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: id, HeadGen: 9}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The source holder restarts (a lost ACK answer, exit 75) and reports a
+	// new process at the source; the tick decides its refresh now.
+	report("node-a", src, "proc-b")
+	stale, restarted := h.restartedHolderRefresh(authority.AssignmentAsk{VolumeID: "rt", ReplicaID: "r1", DataAddr: src.DataAddr, CtrlAddr: src.CtrlAddr, Intent: authority.IntentBind})
+	if !restarted {
+		t.Fatal("fixture: no refresh decided for the restarted source")
+	}
+
+	// The operator's clean move lands first.
+	if _, err = ws.RegisterWorkspaceBinding(ctx, dst); err != nil {
+		t.Fatal(err)
+	}
+	grant, err := ws.MoveWorkspace(ctx, &control.WorkspaceMove{RequestId: "clean-1", VolumeId: "rt", ExpectedReplicaId: "r1", ExpectedEpoch: line.Epoch,
+		TargetReplicaId: "r1", TargetServerId: "node-b", TargetDataAddr: dst.DataAddr, TargetCtrlAddr: dst.CtrlAddr, Kind: "clean"})
+	if err != nil || !grant.Issued {
+		t.Fatalf("clean move: %v %v", grant, err)
+	}
+	moved := waitAuthorityReplica(t, h.Publisher(), "rt", "r1")
+	for deadline := time.Now().Add(5 * time.Second); moved.Epoch != grant.NewEpoch && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		moved, _ = h.Publisher().VolumeAuthorityLine("rt")
+	}
+	if moved.Epoch != grant.NewEpoch || moved.DataAddr != dst.DataAddr {
+		t.Fatalf("moved line %+v; want r1@%d at the target", moved, grant.NewEpoch)
+	}
+
+	// Then the stale refresh is submitted.
+	if err := h.ctrl.SubmitAssignmentAsk(stale); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if after, _ := h.Publisher().VolumeAuthorityLine("rt"); after.Epoch != moved.Epoch || after.EndpointVersion != moved.EndpointVersion || after.DataAddr != dst.DataAddr || after.CtrlAddr != dst.CtrlAddr {
+		t.Fatalf("line %+v after the stale refresh; want the moved line %+v (the target's addresses)", after, moved)
+	}
+}

@@ -492,7 +492,7 @@ func (c *TopologyController) decideVolume(
 
 	if candidateAcceptable(current, serverIndex) {
 		if endpointStale(current, currentLine) {
-			return refreshAsk(vol.VolumeID, current), "endpoint refresh", true
+			return refreshAsk(vol.VolumeID, current, currentLine), "endpoint refresh", true
 		}
 		if target, ok := chooseRebalanceCandidate(vol, current, serverIndex, currentLoad, projectedLoad, c.config.RebalanceSkew); ok {
 			// A primary change goes out only with the promotion gate's
@@ -520,7 +520,7 @@ func (c *TopologyController) decideVolume(
 	// may be refreshed.
 	if hold, superseded := c.primaryBootGraceLocked(vol.VolumeID, current, candidatePlaceable(current, serverIndex)); hold {
 		if !superseded && endpointStale(current, currentLine) {
-			return refreshAsk(vol.VolumeID, current), "endpoint refresh (primary boot grace)", true
+			return refreshAsk(vol.VolumeID, current, currentLine), "endpoint refresh (primary boot grace)", true
 		}
 		return AssignmentAsk{}, "", false
 	}
@@ -546,7 +546,7 @@ func (c *TopologyController) decideVolume(
 	// when the current replica is still reachable/eligible; this preserves
 	// authority continuity without treating that replica as a failover candidate.
 	if candidatePlaceable(current, serverIndex) && endpointStale(current, currentLine) {
-		return refreshAsk(vol.VolumeID, current), "endpoint refresh", true
+		return refreshAsk(vol.VolumeID, current, currentLine), "endpoint refresh", true
 	}
 	return AssignmentAsk{}, "", false
 }
@@ -561,15 +561,16 @@ func endpointStale(current ReplicaCandidate, line AuthorityBasis) bool {
 }
 
 // refreshAsk re-issues the current primary's line at its reported
-// addresses for its reported incarnation.
-func refreshAsk(volumeID string, current ReplicaCandidate) AssignmentAsk {
+// addresses for its reported incarnation, only while the volume's line is
+// still line (the one the refresh was decided against).
+func refreshAsk(volumeID string, current ReplicaCandidate, line AuthorityBasis) AssignmentAsk {
 	return AssignmentAsk{
-		VolumeID:    volumeID,
-		ReplicaID:   current.ReplicaID,
-		DataAddr:    current.DataAddr,
-		CtrlAddr:    current.CtrlAddr,
-		Intent:      IntentRefreshEndpoint,
-		Incarnation: current.Incarnation,
+		VolumeID:      volumeID,
+		ReplicaID:     current.ReplicaID,
+		DataAddr:      current.DataAddr,
+		CtrlAddr:      current.CtrlAddr,
+		Intent:        IntentRefreshEndpoint,
+		Incarnation:   current.Incarnation,
 	}
 }
 
