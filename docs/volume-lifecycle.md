@@ -433,10 +433,17 @@ the volume's store directory: its name and the first 8 hex digits of its layout 
 sw-block ops chunk volume-delete --volume v1 --chunk-filer FILER --master MASTER --request-id del-v1
 ```
 
-It answers with `"admitted":true,"committed":true,"headMarked":true,"completed":true`.
+On completion it answers `{"volume":"v1-<id8>","state":"deleted"}`, where
+`<id8>` is the first eight hex digits of the volume's layout id. `volume` in
+this result is the store directory; subsequent commands still use the public
+name `--volume v1`.
 Keep the `--request-id` and use the same one if you have to run the command again.
 Afterwards `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
-`"state": "deleted"` and `"chunkCount": 0`.
+a JSON object containing `volume` (the volume record) and `head` (the typed
+HEAD). The HEAD fields use capitalized names: `head.State` is `"deleted"`,
+`head.Epoch` is its epoch and `head.Holder` is its holder. A fresh unclaimed
+target has epoch 0 and an empty holder. This output is an inspection object;
+the on-filer HEAD uses the layout's canonical encoding instead.
 
 **If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
 and step 4 is refused with `live authority requires clean revocation ACK`. Nothing
