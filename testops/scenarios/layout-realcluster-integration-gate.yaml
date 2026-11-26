@@ -22,6 +22,9 @@
 #                kill, restart, restore)
 #   cutover-create  TestCutoverCreateFromSnapshot (the master creates the
 #                target identity and its restored image in one request)
+#   planned-move TestPlannedMoveCommandInterruptEveryStep (six command kills,
+#                same-id resume, one move receipt, every ACKed block exact).
+#                Optional 1.0.1 entry; not part of the default six.
 #   fence-heal   TestFencingRoundHealContinuesThePrimary (a failed fencing
 #                round heals by continuing the primary). Not in the default
 #                set until the promotion fence is on the base.
@@ -89,7 +92,7 @@ phases:
           case "$GATE_TESTS" in *[!0-9a-z\ -]*|'') fail 'tests must be entry names separated by spaces' ;; esac
           n=0
           for t in $GATE_TESTS; do
-            case "$t" in move|lease|systemd|catalog|cutover-e2e|cutover-create|fence-heal|fence-rejoin|double-failover) ;; *) fail "unknown entry: $t" ;; esac
+            case "$t" in move|lease|systemd|catalog|cutover-e2e|cutover-create|planned-move|fence-heal|fence-rejoin|double-failover) ;; *) fail "unknown entry: $t" ;; esac
             n=$((n + 1))
           done
           [ "$n" -gt 0 ] || fail 'tests names no entry'
@@ -188,6 +191,7 @@ phases:
               catalog)     pkg=core/frontend/chunkstore bin=chunkstore.test name=TestIntegration_CatalogRestoreAndDelete to=9m ;;
               cutover-e2e) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverWriteSnapshotKillRestartRestore to=40m ;;
               cutover-create) pkg=cmd/blockvolume bin=blockvolume.test name=TestCutoverCreateFromSnapshot to=20m ;;
+              planned-move) pkg=cmd/blockvolume bin=blockvolume.test name=TestPlannedMoveCommandInterruptEveryStep to=20m ;;
               fence-heal)  pkg=cmd/blockvolume bin=blockvolume.test name=TestFencingRoundHealContinuesThePrimary to=10m ;;
               fence-rejoin) pkg=cmd/blockvolume bin=blockvolume.test name=TestFencingRoundSurvivorRejoins to=10m ;;
               double-failover) pkg=cmd/blockvolume bin=blockvolume.test name=TestDoubleFailoverReadsBackEveryAckedWrite to=15m ;;

@@ -245,6 +245,33 @@ Copy `replica:` (`R`) and `epoch:` (`E`). `lease state:` must be `granted`.
 **2. Stop the writer.** Stop the guest or unmount the file system, so that no
 I/O is in flight. Leave `blockvolume` running: the seal runs inside it.
 
+The optional `ops workspace planned-move` command performs steps 3 through 6
+in one invocation for RF1 workspace volumes. Keep the guest quiesced and start
+the target's unit first, waiting for its grant. Blockmaster must report that
+host's live per-volume binding; otherwise the command refuses before sealing.
+For example:
+
+```bash
+sw-block ops workspace planned-move --master MASTER --volume v1 --replica R --epoch E \
+  --source-host s1 --source-status SOURCE_STATUS --target-host s2 --target-status TARGET_STATUS \
+  --request-id move-v1-1 --timeout 5m
+```
+
+Add `--claim-id C` if the source claim is known. Both status URLs are the
+operator-configured endpoints of those hosts. The command always sends a
+conditional seal and verifies the returned holder/epoch before revoking. It
+never creates an ACK, starts a remote service, or writes a local journal.
+Only the target's own `FrontendPrimaryReady` status for the new epoch permits
+`COMPLETE` (exit 0); reconnect the guest then. A recorded move with a target
+not yet serving returns `MOVED-TARGET-NOT-SERVING` (exit 6), with the next step.
+`REFUSED` is exit 1, `UNKNOWN` exit 3 (bad usage remains exit 2). On interruption,
+UNKNOWN, or exit 6, keep the guest quiesced and rerun the same arguments with
+the **same request ID**. An issued move is read from blockmaster and reused;
+the command does not seal the old source again. The timeout stops waiting,
+never proves that a seal, ACK, move or target readiness happened.
+
+The individual commands remain available:
+
 **3. Seal (plain detach)**, while the lease is granted:
 
 ```bash
