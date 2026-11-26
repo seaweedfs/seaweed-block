@@ -143,6 +143,9 @@ func guardFindings(code map[string]map[string]bool, decl, tests map[string]bool)
 	if got := owners(code["UpdateHead"]); !reflect.DeepEqual(got, []string{"runTransition"}) {
 		bad = append(bad, "UpdateHead used by "+strings.Join(got, ", ")+"; want only runTransition")
 	}
+	if got := owners(code["CreateVolumeRecord"]); !reflect.DeepEqual(got, []string{"createVolume"}) {
+		bad = append(bad, "CreateVolumeRecord used by "+strings.Join(got, ", ")+"; want only createVolume")
+	}
 	var runs []string
 	for _, fn := range owners(code["runTransition"]) {
 		x, ok := strings.CutPrefix(fn, "Run")
@@ -426,7 +429,10 @@ func TestGuard_Controls(t *testing.T) {
 	// A control with a file name replaces that real file (a changed
 	// claim.go); otherwise it is added beside the real sources.
 	for name, c := range map[string]struct{ src, want, file string }{
-		"direct call": {src: `func w(ctx context.Context, st HeadStore, h Head) error { return st.UpdateHead(ctx, h.Gen, h) }`, want: "UpdateHead used by"},
+		"second VOLUME writer":     {src: `func w(ctx context.Context, st NewVolumeStore, v Volume) error { return st.CreateVolumeRecord(ctx,v) }`, want: "CreateVolumeRecord used by"},
+		"VOLUME method alias":      {src: `func w(st NewVolumeStore) { write := st.CreateVolumeRecord; _ = write }`, want: "CreateVolumeRecord used by"},
+		"VOLUME method expression": {src: `var write = NewVolumeStore.CreateVolumeRecord`, want: "CreateVolumeRecord used by"},
+		"direct call":              {src: `func w(ctx context.Context, st HeadStore, h Head) error { return st.UpdateHead(ctx, h.Gen, h) }`, want: "UpdateHead used by"},
 		"method value alias": {src: `func w(ctx context.Context, st HeadStore, h Head) error {
 	update := st.UpdateHead
 	return update(ctx, h.Gen, h)
