@@ -1,0 +1,117 @@
+name: cells
+
+# The must-pass table's 1/2/3-volume cells (.github/cell-tests.txt): each test
+# group x each volume count is one job on a GitHub-hosted runner. A cell needs
+# every named test to PASS (required-tests-check.py: a skip, a failure, a test
+# that never ran or was cut off fails it) AND, with 2 or 3 volumes, every
+# sibling volume to read back every acknowledged write (cell-record.py). Each
+# job uploads its record: product head, binary sha256s, and per test the
+# subtests executed and skipped and the sibling lines.
+
+on:
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "core/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/cell-tests.txt"
+      - ".github/scripts/cell-record*.py"
+      - ".github/scripts/run-named-tests.sh"
+      - ".github/scripts/required-tests-check.py"
+      - ".github/workflows/cells.yml"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cells-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cell:
+    name: cells ${{ matrix.group }} x ${{ matrix.volumes }} volume(s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [ladder, lifecycle, fault]
+        volumes: [1, 2, 3]
+    env:
+      CGO_ENABLED: "0"
+      SWBLOCK_TEST_VOLUMES: ${{ matrix.volumes }}
+      SWBLOCK_TEST_VOLUME_BYTES: "104857600"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Self-test of the gates
+        run: |
+          python3 -I .github/scripts/required-tests-check-test.py
+          python3 -I .github/scripts/cell-record-test.py
+
+      - name: Pinned SeaweedFS
+        # Checked against its sha256 before every use; a mismatch fails the step.
+        env:
+          WEED_VERSION: "4.53"
+          WEED_SHA256: d1a7dec9f48d8b33895a0ea8951971defc2dc5312906dcc76fa5a5f74a6ee90d
+        run: |
+          set -euo pipefail
+          tgz="$RUNNER_TEMP/linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$tgz" "https://github.com/seaweedfs/seaweedfs/releases/download/$WEED_VERSION/linux_amd64.tar.gz"
+          echo "$WEED_SHA256  $tgz" | sha256sum -c -
+          bin="$RUNNER_TEMP/weed-$WEED_VERSION"
+          mkdir -p "$bin"
+          tar -xzf "$tgz" -C "$bin" weed
+          echo "CHUNKSTORE_WEED=$bin/weed" >>"$GITHUB_ENV"
+
+      - name: Build the binaries and the test binary once
+        run: |
+          set -euo pipefail
+          bins="$RUNNER_TEMP/swblock-bins"
+          mkdir -p "$bins"
+          for b in blockmaster blockvolume sw-block; do go build -o "$bins/$b" "./cmd/$b"; done
+          go test -c -tags 'subprocess chunkstore_integration' -o "$bins/blockvolume.test" ./cmd/blockvolume
+          echo "SWBLOCK_TEST_BINS=$bins" >>"$GITHUB_ENV"
+
+      - name: Run the group's tests
+        env:
+          GROUP: ${{ matrix.group }}
+          TEST_TIMEOUT: 15m
+        run: |
+          set -euo pipefail
+          names="$RUNNER_TEMP/cell-$GROUP.txt"
+          sed 's/#.*//' .github/cell-tests.txt | awk -v g="$GROUP" '$1 == g { print $2 }' >"$names"
+          test -s "$names"
+          bash .github/scripts/run-named-tests.sh "$SWBLOCK_TEST_BINS/blockvolume.test" "$names" \
+            "$RUNNER_TEMP/cell.json" "$RUNNER_TEMP/cell.status" "$TEST_TIMEOUT" cmd/blockvolume
+          rc=0
+          python3 -I .github/scripts/required-tests-check.py --status "$RUNNER_TEMP/cell.status" \
+            "$names" "$RUNNER_TEMP/cell.json" || rc=1
+          python3 -I .github/scripts/cell-record.py "$SWBLOCK_TEST_VOLUMES" "$names" "$RUNNER_TEMP/cell.json" \
+            "$SWBLOCK_TEST_BINS"/blockmaster "$SWBLOCK_TEST_BINS"/blockvolume "$SWBLOCK_TEST_BINS"/sw-block \
+            "$SWBLOCK_TEST_BINS"/blockvolume.test "$CHUNKSTORE_WEED" >"$RUNNER_TEMP/cell-record.json" || rc=1
+          exit "$rc"
+
+      - name: Upload the cell record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cell-${{ matrix.group }}-${{ matrix.volumes }}
+          path: |
+            ${{ runner.temp }}/cell-record.json
+            ${{ runner.temp }}/cell.status
+            ${{ runner.temp }}/cell.json
+          if-no-files-found: warn
