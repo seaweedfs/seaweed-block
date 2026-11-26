@@ -21,10 +21,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/rpc/lifecycleclient"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TestStandalonePlannedHandoffToTheSameHost runs the planned hand-over back
@@ -349,11 +352,22 @@ func (env *handoffEnv) layoutID(volume string) string {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	id, err := lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), volume)
-	if err != nil {
-		t.Fatalf("resolve layout identity for %s: %v", volume, err)
+	// blockmaster logs "lock acquired" before it imports the cluster spec
+	// (each volume's layout created on the filer) and only serves after
+	// that, so a lookup right after that line can find it not serving yet:
+	// retry while it is unavailable, within 60 s. Any other answer (not
+	// found, refused) fails at once.
+	var id layout.VolumeID
+	for end := time.Now().Add(60 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		id, err = lifecycleclient.ResolveVolume(ctx, control.NewLifecycleServiceClient(conn), volume)
+		cancel()
+		if err == nil {
+			break
+		}
+		if c := status.Code(err); (c != codes.Unavailable && c != codes.DeadlineExceeded) || time.Now().After(end) {
+			t.Fatalf("resolve layout identity for %s: %v", volume, err)
+		}
 	}
 	if env.layoutIDs == nil {
 		env.layoutIDs = make(map[string]string)
