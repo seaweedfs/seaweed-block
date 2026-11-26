@@ -60,6 +60,12 @@ func TestHost_ApplyFact_UnnamedLineIsNotAdoptedWhereLinesNameTheirProcess(t *tes
 	if r.callCount.Load() != 0 || a.callCount.Load() != 0 {
 		t.Fatalf("an unnamed line was adopted: replica sets %d, assignments %d", r.callCount.Load(), a.callCount.Load())
 	}
+	h.ownAssignmentMu.RLock()
+	recorded := h.ownAssignmentEpoch
+	h.ownAssignmentMu.RUnlock()
+	if recorded != 0 {
+		t.Fatalf("an unnamed line was recorded as this process's assignment (epoch %d)", recorded)
+	}
 	h.applyFixtureFact(fact(2, "p1"))
 	if a.callCount.Load() != 1 || a.lastInfo.EndpointVersion != 2 {
 		t.Fatalf("the line re-issued for this process: assignments %d (EV %d); want 1 at EV 2", a.callCount.Load(), a.lastInfo.EndpointVersion)
