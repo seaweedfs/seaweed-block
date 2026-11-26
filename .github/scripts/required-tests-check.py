@@ -29,6 +29,9 @@ import sys
 OWN = 12   # a failed test's own file:line messages shown (the last ones)
 TAIL = 5   # and its last output lines
 OWN_LINE = re.compile(r'^    [^ \t]+\.go:\d+: ')   # the test's own t.Log/t.Error lines
+# Not reasons: the harness's cleanup headers ("<process> log:", "---- <x> log
+# tail ----") and the echo of a command that succeeded ("...: exit 0").
+NOISE = re.compile(r' log:\s*$|---- .* ----\s*$|: exit 0\s*$')
 
 
 def names_of(path):
@@ -136,7 +139,7 @@ def main(argv):
         print('%-8s %-70s %7.1fs' % ('FAIL', name, secs) + '  ' + why)
     for name in failed:
         text = ''.join(output.get(name, [])).splitlines()
-        own = [l for l in text if OWN_LINE.match(l)][-OWN:]
+        own = [l for l in text if OWN_LINE.match(l) and not NOISE.search(l)][-OWN:]
         print('---- %s: its own messages (%d), then its last %d lines' % (name, len(own), min(TAIL, len(text))))
         for line in own + ['    ...'] + text[-TAIL:]:
             print('    ' + line[:300])

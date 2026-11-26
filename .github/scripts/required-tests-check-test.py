@@ -85,7 +85,7 @@ def main():
         if got != want:
             print('FAIL %s: exit %d, want %d\n%s' % (name, got, want, out))
             fail = 1
-    got, out = run('TestA\n', [ev('run', 'TestA'), json.dumps({'Action': 'output', 'Test': 'TestA', 'Output': '    x_test.go:7: the reason\n'})] + [json.dumps({'Action': 'output', 'Test': 'TestA', 'Output': '        I1126 harness log line %d\n' % i}) for i in range(60)] + [ev('fail', 'TestA', 1)])
+    got, out = run('TestA\n', [ev('run', 'TestA'), json.dumps({'Action': 'output', 'Test': 'TestA', 'Output': '    x_test.go:7: the reason\n'})] + [json.dumps({'Action': 'output', 'Test': 'TestA', 'Output': '    h_test.go:578: blockvolume-r%d log:\n' % i}) for i in range(20)] + [json.dumps({'Action': 'output', 'Test': 'TestA', 'Output': '    w_test.go:128: ---- master log tail ----\n'})] + [json.dumps({'Action': 'output', 'Test': 'TestA', 'Output': '        I1126 harness log line %d\n' % i}) for i in range(60)] + [ev('fail', 'TestA', 1)])
     if got != 1 or 'x_test.go:7: the reason' not in out:
         print('FAIL a failed test''s output is shown: %s' % out)
         fail = 1
