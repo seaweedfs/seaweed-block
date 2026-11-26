@@ -197,6 +197,9 @@ type headSzVol struct {
 	// its spec data and ctrl addresses are host:<port> (ports picked here, not
 	// probed there), and the test running on that host uses the same ones.
 	host string
+	// restoreTarget lists the volume with its placement only, no size_bytes:
+	// it has no volume record until a restore creates it.
+	restoreTarget bool
 }
 
 // headSzStartCluster starts one weed cluster (the filer's default store, no
@@ -229,7 +232,11 @@ func headSzStartCluster(t *testing.T, prefix string, vols []headSzVol) (*handoff
 		if v.server != "" {
 			nodes += fmt.Sprintf("  - server_id: %s\n    data_addr: %s\n    ctrl_addr: %s\n", server, b.data, b.ctrl)
 		}
-		fmt.Fprintf(&spec, "  - id: %s\n    size_bytes: %d\n    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: %s\n", v.id, v.bytes, server, replica)
+		size := fmt.Sprintf("    size_bytes: %d\n", v.bytes)
+		if v.restoreTarget {
+			size = ""
+		}
+		fmt.Fprintf(&spec, "  - id: %s\n%s    replication_factor: 1\n    placements:\n      - server_id: %s\n        replica_id: %s\n", v.id, size, server, replica)
 	}
 	specPath := filepath.Join(h.dir, "cluster-spec.yaml")
 	if err := os.WriteFile(specPath, []byte("nodes:\n"+nodes+"volumes:\n"+spec.String()), 0o644); err != nil {

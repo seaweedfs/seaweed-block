@@ -5,6 +5,7 @@ package main_test
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 )
@@ -95,33 +96,80 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 	return d
 }
 
-// readConcurrently reads one block of each of chunks of target, in order,
-// on its own connection: v1 fills a restore target only on access, so this
-// is the fill the test kills into. It stops at the first error (the kill)
-// or when the returned stop is called, and stop waits for it.
-func (env *handoffEnv) readConcurrently(t *testing.T, target string, chunks []uint64) (stop func()) {
+// fillReader reads one block of each of its chunks, in order, on its own
+// connection: v1 fills a restore target only on access, so this is the fill
+// the test kills into. It stops at its first error (the kill, or a failure
+// before it, which state reports) or at stop, which waits for it.
+type fillReader struct {
+	mu       sync.Mutex
+	reads    int64
+	err      error
+	finished bool
+	quit     chan struct{}
+	done     chan struct{}
+	close    func()
+}
+
+func (env *handoffEnv) readConcurrently(t *testing.T, target string, chunks []uint64) *fillReader {
 	t.Helper()
 	c := dialNVMe(t, env.hosts["n-"+target].nvme, plannedHandoffNQN)
-	done := make(chan struct{})
-	quit := make(chan struct{})
+	r := &fillReader{quit: make(chan struct{}), done: make(chan struct{}), close: c.close}
 	go func() {
-		defer close(done)
+		defer close(r.done)
 		for _, ch := range chunks {
 			select {
-			case <-quit:
+			case <-r.quit:
 				return
 			default:
 			}
 			_ = c.io.SetDeadline(time.Now().Add(60 * time.Second))
-			if _, err := c.tryRead(ch*ladderChunkBlocks, 4096); err != nil {
+			_, err := c.tryRead(ch*ladderChunkBlocks, 4096)
+			r.mu.Lock()
+			if err != nil {
+				r.err = err
+			} else {
+				r.reads++
+			}
+			r.mu.Unlock()
+			if err != nil {
 				return
 			}
 		}
+		r.mu.Lock()
+		r.finished = true
+		r.mu.Unlock()
 	}()
-	return func() {
-		close(quit)
-		c.close()
-		<-done
+	return r
+}
+
+// progress is the reader's state against baseline absent chunks and absent now.
+func (r *fillReader) progress(baseline, absent int) fillProgress {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return fillProgress{baseline: baseline, absent: absent, reads: r.reads, readerErr: r.err, finished: r.finished}
+}
+
+func (r *fillReader) stop() {
+	close(r.quit)
+	r.close()
+	<-r.done
+}
+
+// awaitFill waits until fillWitness accepts the reader's progress on target
+// (a fill observably running) and fails the test with the last reason when
+// it does not within bound.
+func (env *handoffEnv) awaitFill(t *testing.T, target string, r *fillReader, baseline int, bound time.Duration) fillProgress {
+	t.Helper()
+	var p fillProgress
+	var why error
+	for end := time.Now().Add(bound); ; time.Sleep(20 * time.Millisecond) {
+		p = r.progress(baseline, kzReadStats(t, env.hosts["n-"+target]).AbsentChunks)
+		if why = fillWitness(p); why == nil {
+			return p
+		}
+		if p.readerErr != nil || p.finished || time.Now().After(end) {
+			t.Fatalf("%s: no running fill to kill into within %v: %v (%+v)", target, bound, why, p)
+		}
 	}
 }
 
@@ -156,10 +204,13 @@ func TestSnapshotLadderC3KilledHydrating(t *testing.T) {
 
 	// (1) killed mid-fill
 	partly := func(absent int) bool { return absent > 0 && absent < len(chunks) }
-	stop := env.readConcurrently(t, "v2", chunks)
+	reader := env.readConcurrently(t, "v2", chunks)
 	absent := env.awaitAbsent(t, "v2", "a partly filled volume", 120*time.Second, partly)
+	if p := reader.progress(len(chunks), absent); p.readerErr != nil {
+		t.Fatalf("the first fill's reader failed before the kill: %v", p.readerErr)
+	}
 	target.kill(t)
-	stop()
+	reader.stop()
 	t.Logf("killed with %d of %d chunks absent", absent, len(chunks))
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-fill-kill")
 	if after := kzReadStats(t, env.hosts["n-v2"]).AbsentChunks; after >= len(chunks) {
@@ -178,10 +229,12 @@ func TestSnapshotLadderC3KilledHydrating(t *testing.T) {
 	for c := uint64(1); c < 32; c += 2 {
 		odd = append(odd, c)
 	}
-	stop = env.readConcurrently(t, "v2", odd)
-	env.awaitAbsent(t, "v2", "a fill still running after the write", 60*time.Second, func(a int) bool { return a > 0 })
+	baseline := kzReadStats(t, env.hosts["n-v2"]).AbsentChunks
+	reader = env.readConcurrently(t, "v2", odd)
+	p := env.awaitFill(t, "v2", reader, baseline, 60*time.Second)
 	target.kill(t)
-	stop()
+	reader.stop()
+	t.Logf("killed again with a fill running: %d absent (%d when its reader started), %d reads done", p.absent, p.baseline, p.reads)
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-write-kill")
 	env.requireBlocksOf(t, "n-v2", w1) // every acknowledged write survived the kill
 
