@@ -222,7 +222,7 @@ Each procedure below runs as written on this page, with the real binaries, two
 | Same host: restart after a crash inside the lease | `TestProcedureSameHostCrashRestartInsideTheLease` | runs |
 | After a crash: started 40 s after the stop, the barrier passes inside the start wait | `TestProcedureStartInsideTheBarrierWaitIsReGranted` | runs: does not serve while renewals are refused, serves once re-granted |
 | Delete a volume: seal, revoke, ACK, delete the snapshots, volume-delete | `TestProcedureDeleteAVolume` | runs: refused while a snapshot exists, with nothing deleted; completes after the snapshot is deleted; a rerun with the same request id completes again |
-| Delete after the process was stopped by a signal (start again, revoke, ACK, delete) | `TestProcedureDeleteAfterASignalStop` | runs: refused for the missing ACK, with nothing deleted; completes after the restart, the revoke and the ACK |
+| Delete a sealed volume after its holder was stopped by a signal | `TestProcedureDeleteAfterASignalStop` | holder stays down; first delete refuses the live lease with `live until <T>`, then the same request completes at or after T without an ACK; a repeated delete completes and a late start cannot serve |
 | After a crash: the process is killed while the guest writes, restart inside the lease | `TestProcedureCrashWithIOInFlight` | runs: every write acknowledged by a flush reads back |
 | The holder cannot reach blockmaster, then a forced move | `TestProcedureMasterUnreachableFencesBeforeForcedMove` | runs: the forced move is refused while the holder is alive and admitted only after it exited 75 (`reason=lease_expired`) |
 | Hand-over between two machines | none | not run (the tests use one machine's loopback) |
@@ -406,10 +406,13 @@ serving when its lease ends. Make sure it stays down.
 
 ## Delete a volume
 
-A volume is deleted only after its holder has given it up: sealed, revoked and
-acknowledged, exactly as in steps 2 to 5 of the planned hand-over, and after its
-snapshots are deleted. Sealing and stopping the process is not enough: until the
-ACK is recorded, blockmaster still counts the volume as in use.
+For a running holder, seal, revoke and wait for its ACK as in the planned
+hand-over. Deletion also waits until the lease horizon (expiry plus clock skew)
+has passed, about 60 seconds with default flags. An ACK alone does not bypass
+that wait. A sealed holder already stopped by a signal follows the recovery
+path below: it stays down and needs no ACK after its lease horizon. A snapshot
+with restore dependents blocks deletion; ordinary snapshots are deleted with
+the volume.
 
 **1. Stop the writer and seal** (hand-over steps 2 and 3):
 
@@ -430,7 +433,10 @@ sw-block ops workspace show   --master MASTER --volume v1
 
 `show` must print `lease state: revoking` and `recorded ACK: R@E HEAD generation G`.
 
-**3. Delete every snapshot of the volume:**
+**3. Check snapshots and remove their restore dependents.** Delete each restored
+volume that depends on a snapshot before deleting its source. Ordinary snapshots
+can remain: they are deleted with the volume. To list snapshots or optionally
+remove an ordinary snapshot:
 
 ```bash
 sw-block ops chunk snapshots       --master MASTER --volume v1 --chunk-filer FILER
@@ -458,15 +464,24 @@ On completion it answers `{"volume":"v1-<id8>","state":"deleted"}`, where
 `<id8>` is the first eight hex digits of the volume's layout id. `volume` in
 this result is the store directory; subsequent commands still use the public
 name `--volume v1`.
+On a completed retry, an optional `already_deleted_roots` array names roots
+already removed by the earlier completion; `state` remains `deleted`. A missing
+root of a volume not already deleted is still an error.
 Keep the `--request-id` and use the same one if you have to run the command again.
 Afterwards `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
 `head.State` `deleted`. The HEAD view has no `chunkCount` field; use the
 volume's object listing or verification report to check its remaining objects.
 
-**If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
-and step 4 is refused with `live authority requires clean revocation ACK`. Nothing
-was deleted. Start `blockvolume` again with the same flags and local root, then do
-step 2 and continue. This recovery runs as written (`TestProcedureDeleteAfterASignalStop`).
+**If you sealed and then stopped `blockvolume` with a signal, keep it stopped**
+and disable its unit so it cannot restart. Run step 4 without restarting,
+revoking or waiting for an ACK. Before the lease horizon it exits 1 with typed
+`code: not_admitted` and a message naming `live until <T>`; nothing is deleted.
+Retry with the **same request id** at or after T until it completes, within the
+original horizon plus a bounded margin. Do not issue a start or move during the
+wait: a new lease starts a new wait. A restarted sealed holder is replay-only,
+cannot ACK, and its renewals push the horizon out. This recovery is exercised by
+`TestProcedureDeleteAfterASignalStop`, including repeated deletion and the fence
+against a late start.
 
 **A volume that never served** has no holder to seal or ACK: its blockvolume
 was stopped at its first lease grant, or a clean move went to a host that
