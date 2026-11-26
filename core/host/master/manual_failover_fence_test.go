@@ -28,21 +28,6 @@ func rf3LineOnR1(t *testing.T) (*Host, authority.AuthorityBasis) {
 	return rf3LineOnR1With(t, newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3}))
 }
 
-// rf3MasterShortGrace is a master whose observation store reports a partial
-// inventory at once (no startup pending grace), so a fresh server that omits
-// a slot makes the volume unsupported.
-func rf3MasterShortGrace(t *testing.T) *Host {
-	t.Helper()
-	h, err := New(Config{AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), Listen: "127.0.0.1:0",
-		ControllerConfig: authority.TopologyControllerConfig{ExpectedSlotsPerVolume: 3},
-		Freshness:        authority.FreshnessConfig{PendingGrace: time.Millisecond}})
-	if err != nil {
-		t.Fatalf("master.New: %v", err)
-	}
-	h.Start()
-	return h
-}
-
 func rf3LineOnR1With(t *testing.T, h *Host) (*Host, authority.AuthorityBasis) {
 	t.Helper()
 	h.SetPromotionEvidenceProvider(staticPromotionProbe{result: PromotionProbeResult{
@@ -531,13 +516,15 @@ func TestManualFailoverPublicationFailureIsHealedByTheNextTick(t *testing.T) {
 	waitLine(t, h, "vol-rf3", "r1", e+1)
 }
 
-// End to end on the unsupported path: the operator's failover is refused (the
-// target is below the highest fenced end), so its survivors are fenced at e+1
-// and nothing is published. r1 is back while r3's server reports no slot (a
-// partial inventory: unsupported). A normal product tick publishes r1 at
-// e+1, and a further tick adds no epoch.
-func TestManualFailoverRefusedFenceIsHealedByTheNextTickOnTheUnsupportedPath(t *testing.T) {
-	h, line := rf3LineOnR1With(t, rf3MasterShortGrace(t))
+// The unsupported path: the operator's failover is refused (the target is
+// below the highest fenced end), so its survivors are fenced at e+1 and
+// nothing is published. r1 is back while the volume is unsupported (a
+// partial inventory: the report is built as the other unsupported-gate tests
+// build it). The gate's heal ask goes through the tick's own dispatch
+// (SubmitAssignmentAsk) and r1 is published at e+1; a further gate pass
+// asks nothing (the pending fence is cleared by that line).
+func TestManualFailoverRefusedFenceIsHealedAndPublishedOnTheUnsupportedPath(t *testing.T) {
+	h, line := rf3LineOnR1(t)
 	defer closeTestMaster(t, h)
 	ingestRF3Observation(t, h, false, true, true)
 	e := line.Epoch
@@ -553,21 +540,24 @@ func TestManualFailoverRefusedFenceIsHealedByTheNextTickOnTheUnsupportedPath(t *
 	}
 
 	back(t, h, true)
-	time.Sleep(5 * time.Millisecond) // past the pending grace
-	topo, _ := acceptedTopologyFromPlacementIntents(h.Lifecycle().Placements.ListPlacements())
-	if b := authority.BuildSnapshot(h.obs.Store().Snapshot(), topo, h.Publisher()); len(b.Report.Unsupported["vol-rf3"].Reasons) == 0 {
-		t.Fatalf("vol-rf3 is not unsupported (report %+v): the test would not reach the unsupported gate", b.Report.Unsupported)
-	}
 	p.plain = PromotionProbeResult{AckProfile: "sync_quorum", SyncAckKnown: true, CurrentKnown: true, Current: PromotionCandidateEvidence{ReplicaID: "r1", Ready: true},
 		Candidates: []PromotionCandidateEvidence{{ReplicaID: "r2", DurableLSN: 10}}}
 	p.heal = healedR1
-	if _, err := h.RunLifecycleProductTick(); err != nil {
-		t.Fatalf("product tick: %v", err)
+	report := authority.SupportabilityReport{Unsupported: map[string]authority.VolumeUnsupportedEvidence{
+		"vol-rf3": {VolumeID: "vol-rf3", Reasons: []string{authority.ReasonPartialInventory}},
+	}}
+	_, _, asks := h.applyUnsupportedPromotionEvidenceGate(h.Lifecycle().Placements.ListPlacements(), report, nil)
+	if len(asks) != 1 {
+		t.Fatalf("asks %+v; want the heal of r1", asks)
+	}
+	for _, a := range asks {
+		if err := h.ctrl.SubmitAssignmentAsk(a); err != nil {
+			t.Fatalf("dispatch %+v: %v", a, err)
+		}
 	}
 	waitLine(t, h, "vol-rf3", "r1", e+1)
-	if _, err := h.RunLifecycleProductTick(); err != nil {
-		t.Fatalf("product tick: %v", err)
+	if _, _, again := h.applyUnsupportedPromotionEvidenceGate(h.Lifecycle().Placements.ListPlacements(), report, nil); len(again) != 0 {
+		t.Fatalf("a second pass asks %+v; want none (the line reached the fenced epoch)", again)
 	}
-	time.Sleep(200 * time.Millisecond)
 	waitLine(t, h, "vol-rf3", "r1", e+1)
 }
