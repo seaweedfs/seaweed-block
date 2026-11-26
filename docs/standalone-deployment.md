@@ -178,18 +178,34 @@ Do these steps before you start blockvolume:
      - A static `--topology` holds one factor only, and is not checked at
        start: one volume with another slot count stops assignment for all of
        them, and shows only as a controller error on every tick.
-   - **Failover.** blockmaster replaces a primary by itself only when that
-     primary answers that it is not ready.
-     - A primary whose host is off or unreachable does not answer. It is shown
-       as unreachable and is not replaced, at every replica count, with the
-       loop on or off.
-     - Then the operator powers the old node off or cuts it from its clients,
-       and runs `sw-block ops failover` with `--confirm-old-node-off`.
-     - The failover needs blockmaster started with `--failback-runtime-rpc`
-       and an admin client certificate (`SW_BLOCK_TLS_CERT`,
-       `SW_BLOCK_TLS_KEY`, `SW_BLOCK_TLS_CA`).
-     - If its fencing round is refused, run the command again.
+   - **Failover.** Under `--cluster-spec` with the lifecycle loop on,
+     blockmaster replaces a lost primary by itself
+     (`core/host/master/product_loop.go`, `applyPromotionEvidenceGate`).
+     - A primary whose heartbeat is stale (its host is off, or blockmaster
+       cannot reach it), or that answers that it is not ready, is replaced
+       through a fencing round. blockmaster fences the other replicas at the
+       next epoch and promotes one only when enough of them answer. The new
+       primary holds every write the old one acknowledged.
+     - A primary whose heartbeat is fresh but that does not answer the probe
+       is unknown, not failed: it is not replaced by itself. Nor is a
+       restarted primary inside its start grace.
+     - When the round cannot decide (too few replicas answer), the volume
+       waits and is shown as `fence_round_incomplete`. The operator then
+       powers the old node off or cuts it from its clients, and runs
+       `sw-block ops failover` with `--confirm-old-node-off`.
+     - On a static `--topology` nothing is replaced by itself: the operator's
+       failover is the only way.
+     - The operator's failover needs blockmaster started with
+       `--failback-runtime-rpc` and an admin client certificate
+       (`SW_BLOCK_TLS_CERT`, `SW_BLOCK_TLS_KEY`, `SW_BLOCK_TLS_CA`). If its
+       fencing round is refused, run the command again.
        `sw-block ops failover -h` describes the round and its exit codes.
+   - **Reads during a partition.** An old primary cut off from blockmaster
+     but still reachable by its clients can serve reads of its old data until
+     the partition ends. Its writes are refused, because the replicas it
+     replicates to are fenced at the new epoch. The same holds after the
+     operator's failover. Power the old node off or cut it from its clients to
+     end this window.
 
 3. **Start blockvolume with the identity of one slot.** `--volume-id`,
    `--replica-id` and `--server-id` (`SWB_VOLUME_ID`, `SWB_REPLICA_ID`,
