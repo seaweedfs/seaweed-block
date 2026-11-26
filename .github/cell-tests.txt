@@ -1,5 +1,5 @@
-# The 1/2/3-volume cells of the must-pass table that run on GitHub-hosted
-# runners (.github/workflows/cells.yml). One line per test: GROUP TEST, then
+# The 1/2/3-volume cells of the must-pass table that run on the team runners
+# on demand (.github/workflows/cells.yml). One line per test: GROUP TEST, then
 # the table row. Each GROUP runs as one job per volume count (1, 2, 3), with
 # SWBLOCK_TEST_VOLUMES set (multi_volume_harness_test.go). Rows that need root
 # or systemd are not here: B5's systemd first start and B6's disk full (two
