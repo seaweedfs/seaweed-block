@@ -15,11 +15,16 @@ also has exactly one line and that status is 0: a test that reports PASS and
 then fails, panics or hangs on its way out is not a pass. Prints one line per named test with its outcome and elapsed
 seconds, then the total.
 
+For every named test that did not pass, the last lines of its output follow the
+table, so a run's log carries its own reasons.
+
 Exit 0: every named test passed. 1: at least one did not. 2: usage or an
 unreadable input.
 """
 import json
 import sys
+
+TAIL = 40  # output lines shown per failed test
 
 
 def names_of(path):
@@ -58,7 +63,7 @@ def outcomes(paths):
     """Test name -> list of (action, elapsed) for its terminal events, the
     names that started (action run), and the number of package-level
     failure events."""
-    ends, started, pkg_fail = {}, set(), 0
+    ends, started, pkg_fail, output = {}, set(), 0, {}
     for path in paths:
         with open(path, encoding='utf-8', errors='replace') as f:
             for raw in f:
@@ -75,11 +80,14 @@ def outcomes(paths):
                         pkg_fail += 1  # the binary failed outside any test (or after one)
                     continue  # other package events; a subtest's name never matches a top-level one
                 action = ev.get('Action')
+                if action == 'output':
+                    output.setdefault(test.split('/')[0], []).append(ev.get('Output', ''))
+                    continue
                 if action == 'run':
                     started.add(test)
                 elif action in ('pass', 'fail', 'skip'):
                     ends.setdefault(test, []).append((action, ev.get('Elapsed')))
-    return ends, started, pkg_fail
+    return ends, started, pkg_fail, output
 
 
 def main(argv):
@@ -95,12 +103,12 @@ def main(argv):
         return 2
     try:
         names = names_of(args[0])
-        ends, started, pkg_fail = outcomes(args[1:])
+        ends, started, pkg_fail, output = outcomes(args[1:])
         statuses = statuses_of(status_file) if status_file else None
     except (OSError, ValueError) as e:
         print('required-tests: %s' % e, file=sys.stderr)
         return 2
-    bad, total = 0, 0.0
+    bad, total, failed = 0, 0.0, []
     for name in names:
         got = ends.get(name, [])
         actions = {a for a, _ in got}
@@ -111,6 +119,7 @@ def main(argv):
             print('PASS     %-70s %7.1fs' % (name, secs))
             continue
         bad += 1
+        failed.append(name)
         if actions == {'pass'} and len(got) == 1:
             why = ('NO EXIT STATUS' if not rcs else
                    'PASSED, THEN EXIT %s' % ','.join(str(r) for r in rcs))
@@ -121,6 +130,11 @@ def main(argv):
         else:
             why = got[0][0].upper()
         print('%-8s %-70s %7.1fs' % ('FAIL', name, secs) + '  ' + why)
+    for name in failed:
+        lines = ''.join(output.get(name, [])).splitlines()[-TAIL:]
+        print('---- %s: last %d output lines' % (name, len(lines)))
+        for line in lines:
+            print('    ' + line[:300])
     if pkg_fail:
         print('FAIL     the test binary reported %d package-level failure(s)' % pkg_fail)
     print('required-tests: %d named, %d not passed, %.1fs in named tests' % (len(names), bad, total))

@@ -85,12 +85,16 @@ def main():
         if got != want:
             print('FAIL %s: exit %d, want %d\n%s' % (name, got, want, out))
             fail = 1
+    got, out = run('TestA\n', [ev('run', 'TestA'), json.dumps({'Action': 'output', 'Test': 'TestA', 'Output': 'x_test.go:7: the reason\n'}), ev('fail', 'TestA', 1)])
+    if got != 1 or 'x_test.go:7: the reason' not in out:
+        print('FAIL a failed test''s output is shown: %s' % out)
+        fail = 1
     got, out = run('TestA\n', ran('TestA', secs=2.25))
     if got != 0 or '2.2s' not in out and '2.3s' not in out:
         print('FAIL the elapsed time is reported: %s' % out)
         fail = 1
     if not fail:
-        print('required-tests-check: %d cases ok' % (len(CASES) + len(STATUS) + 1))
+        print('required-tests-check: %d cases ok' % (len(CASES) + len(STATUS) + 2))
     return fail
 
 
