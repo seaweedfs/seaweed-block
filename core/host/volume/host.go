@@ -30,6 +30,10 @@ import (
 type Config struct {
 	// MasterAddr is the gRPC address of the block master daemon.
 	MasterAddr string
+	// AckProfile is this volume's replication ACK profile in canonical form
+	// (best_effort, sync_quorum, sync_all), answered on every promotion
+	// probe; empty answers none (the master then holds the volume).
+	AckProfile string
 	// LinesNameTheirProcess: the master stamps every primary line with the
 	// process it was issued for, so a line that names no process is not this
 	// process's either and is not adopted until re-issued. Off, a line that

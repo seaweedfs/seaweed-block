@@ -53,6 +53,9 @@ type PromotionCandidateEvidence struct {
 	// Floor is the candidate's durable epoch floor when it answered; in a
 	// fencing round it is counted only at the round's FencedEpoch.
 	Floor uint64
+	// AckProfile is the replica's own ack profile as it answered (empty: it
+	// did not say).
+	AckProfile string
 }
 
 type PromotionProbeResult struct {
@@ -60,7 +63,11 @@ type PromotionProbeResult struct {
 	// probe).
 	FencedEpoch uint64
 	AckProfile  string
-	SyncAckLSN  uint64
+	// ProfileMismatch names the answers of this round whose ack profile is
+	// missing or differs from AckProfile, or says AckProfile is unknown;
+	// empty when every answer runs AckProfile. The gates hold on it.
+	ProfileMismatch string
+	SyncAckLSN      uint64
 	// SyncAckKnown reports that SyncAckLSN is a known required
 	// acknowledgement frontier, which may be zero. A nonzero SyncAckLSN
 	// is always a known frontier; a zero SyncAckLSN without SyncAckKnown

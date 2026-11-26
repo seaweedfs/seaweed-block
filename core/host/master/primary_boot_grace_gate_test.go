@@ -80,6 +80,8 @@ type switchProbe struct {
 	awaitingEpoch uint64
 	// profile is the answered ack profile ("" = sync-quorum).
 	profile string
+	// mismatch is the round's ProfileMismatch ("" = every answer agrees).
+	mismatch string
 	// When hold is set, a probe signals entered and then blocks until
 	// release is closed.
 	hold    bool
@@ -112,14 +114,16 @@ func (p *switchProbe) ProbePromotionCandidates(volumeID string, current authorit
 	defer p.mu.Unlock()
 	if p.empty {
 		return PromotionProbeResult{
-			AckProfile:   p.ackProfile(),
-			CurrentKnown: !p.currentUnknown,
+			AckProfile:      p.ackProfile(),
+			ProfileMismatch: p.mismatch,
+			CurrentKnown:    !p.currentUnknown,
 			Current:      PromotionCandidateEvidence{ReplicaID: "r1", Ready: p.currentReady, AwaitingReplicaStoresEpoch: p.awaitingEpoch},
 			Candidates:   []PromotionCandidateEvidence{{ReplicaID: "r2", Ready: true}, {ReplicaID: "r3"}},
 		}, nil
 	}
 	return PromotionProbeResult{
-		AckProfile: p.ackProfile(),
+		AckProfile:      p.ackProfile(),
+		ProfileMismatch: p.mismatch,
 		// Only r2 is ready, so its promotion needs a known frontier it
 		// covers (#181); r3 answers but lags. A fencing round counts both.
 		SyncAckLSN:   70,

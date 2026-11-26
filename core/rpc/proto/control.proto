@@ -626,6 +626,11 @@ message ProbeAnswer {
     // not serve: primary_ready is false by design, not because it failed.
     // 0: not awaiting. It names its line, so it never excuses another.
     uint64 awaiting_replica_stores_epoch = 14;
+    // The volume's own replication ACK profile (its --replication-ack, in
+    // canonical form: best_effort, sync_quorum or sync_all). Empty: an
+    // older volume that does not say. The promotion gate holds a volume
+    // whose answers disagree with the master's profile or do not say.
+    string ack_profile = 15;
 }
 
 message ProbeAck {}
