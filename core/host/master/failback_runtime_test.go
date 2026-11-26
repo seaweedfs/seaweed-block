@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/ops"
@@ -25,6 +26,7 @@ func TestHostFailbackAuthorityRuntimeUsesLivePublisher(t *testing.T) {
 		t.Fatalf("product tick: %v", err)
 	}
 	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	recordFailbackTargetR1(t, h) // the master knows the target replica's addresses
 	if current.ReplicaID != "r2" {
 		t.Fatalf("current line=%+v want r2", current)
 	}
@@ -73,6 +75,7 @@ func TestHostFrontendPublicationRuntimeHTTPConfirmsPostFailbackAuthorityLine(t *
 		t.Fatalf("product tick: %v", err)
 	}
 	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	recordFailbackTargetR1(t, h) // the master knows the target replica's addresses
 	if _, err := h.FailbackAuthorityRuntime().ExecuteFailback(context.Background(), authority.FailbackRuntimeRequest{
 		VolumeID:                     "vol-a",
 		ReplicaID:                    "r1",
@@ -204,6 +207,7 @@ func TestFailbackServiceEnabledUsesHostRuntime(t *testing.T) {
 		t.Fatalf("product tick: %v", err)
 	}
 	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	recordFailbackTargetR1(t, h) // the master knows the target replica's addresses
 
 	resp, err := newServices(h).ExecuteFailback(context.Background(), &control.FailbackRequest{
 		VolumeId:                     "vol-a",
@@ -247,6 +251,7 @@ func TestFailbackExecutorGRPCRuntimeUsesRealMasterService(t *testing.T) {
 		t.Fatalf("product tick: %v", err)
 	}
 	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	recordFailbackTargetR1(t, h) // the master knows the target replica's addresses
 	if current.ReplicaID != "r2" {
 		t.Fatalf("current line=%+v want r2", current)
 	}
@@ -380,4 +385,22 @@ func installPlannedMoveGate(h *Host) {
 		AckProfile: "sync_all",
 		Candidates: []PromotionCandidateEvidence{{ReplicaID: "r1", Ready: true, DurableLSN: 1}},
 	}})
+}
+
+// recordFailbackTargetR1 gives the master its own record of the failback
+// target r1 (a heartbeat at the addresses the requests name): a failback is
+// published at the master's record of the target, never the caller's.
+func recordFailbackTargetR1(t *testing.T, h *Host) {
+	t.Helper()
+	if err := h.ObservationHost().Ingest(authority.Observation{
+		ServerID:   "node-b",
+		ObservedAt: time.Now().UTC(),
+		Server:     authority.ServerFact{Reachable: true, Eligible: true},
+		Slots: []authority.SlotFact{{
+			VolumeID: "vol-a", ReplicaID: "r1", DataAddr: "127.0.0.1:9201", CtrlAddr: "127.0.0.1:9101",
+			Reachable: true, ReadyForPrimary: true, Eligible: true,
+		}},
+	}); err != nil {
+		t.Fatalf("ingest r1: %v", err)
+	}
 }
