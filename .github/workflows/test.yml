@@ -95,11 +95,7 @@ jobs:
     # skips, fails, never starts or is cut off by the timeout fails the job.
     # Tests that need root or systemd are not in the list (see its header).
     if: github.event_name == 'push' || !github.event.pull_request.draft
-    # A GitHub-hosted runner (free for this public repository): the named
-    # tests need no root, and the team's runners stay free for the Go suite
-    # and the lab. Nothing is assumed of a runner cache: SeaweedFS is fetched
-    # and sha256-checked each run.
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
     # 44 tests in sequence; measured at 15 to 170 s each on a 4-core test host
     # (about 40 to 50 min in all).
     timeout-minutes: 90
