@@ -623,6 +623,7 @@ A restore makes a new volume from a snapshot. The new volume reads every chunk i
 3. **Start v2's blockvolume** with the normal standalone command, its own volume id, endpoints and local root, and the same chunk settings as the source (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`). v2 serves at once.
 4. **Reads fill v2.** A block in a chunk that v2 does not hold yet is read from the source's snapshot; the read waits for that chunk, which is then kept locally. There is no background copy: a chunk that is never read stays in the source's snapshot.
    - Progress is the volume's count of chunks still absent: `Chunk.Stats.AbsentChunks` in `GET http://STATUS_OF_V2/status/durable?volume=v2` (0 means every chunk is local).
+   - That progress is written to v2's local store at its next checkpoint. If v2's blockvolume is killed before then, the chunks it made local since are absent again after the restart and are fetched again from the source's snapshot on their next read. No data is lost: the source's snapshot still holds them.
    - To make every chunk local, read the whole device once (for example with `dd` to `/dev/null`).
    - **A restored volume takes no scheduled snapshot until its whole device has been read once**: while any chunk is absent, each scheduled snapshot is skipped and counted as `restoring`.
    - A manual snapshot (`ops chunk snapshot`) is taken in that state too. It names the source's chunks for every chunk v2 has not made local, so, like any snapshot of v2, it cannot be restored (below).
