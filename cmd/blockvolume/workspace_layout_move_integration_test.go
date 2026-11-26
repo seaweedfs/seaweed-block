@@ -134,17 +134,7 @@ func TestIntegrationWorkspaceLayoutMove(t *testing.T) {
 	if os.Getenv("CHUNKSTORE_WEED") == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
 	}
-	// A gate run supplies its prebuilt, hashed binaries (SWBLOCK_TEST_BINS);
-	// a local run builds a race-enabled one.
-	exe := filepath.Join(os.Getenv("SWBLOCK_TEST_BINS"), "blockvolume")
-	if os.Getenv("SWBLOCK_TEST_BINS") == "" {
-		exe = filepath.Join(t.TempDir(), "blockvolume")
-		if out, err := exec.Command("go", "build", "-race", "-p", "4", "-o", exe, ".").CombinedOutput(); err != nil {
-			t.Fatalf("build: %v %s", err, out)
-		}
-	} else if _, err := os.Stat(exe); err != nil {
-		t.Fatalf("SWBLOCK_TEST_BINS has no blockvolume: %v", err)
-	}
+	exe := blockvolumeUnderTest(t)
 	cluster := startWorkspaceWeed(t)
 	for _, kind := range []string{"clean", "forced"} {
 		t.Run(kind, func(t *testing.T) { layoutMove(t, exe, cluster, kind) })
@@ -177,29 +167,7 @@ func layoutMove(t *testing.T, exe string, cluster *w4WeedCluster, kind string) {
 		defer c()
 		_ = h.Close(ctx)
 	})
-	// The lifecycle product loop runs as blockmaster runs it
-	// (--lifecycle-product-loop-interval): a line is issued for the process
-	// at its endpoints, and a line minted before a process reported itself
-	// (the initial one below, a move's target) is re-issued once it does.
-	// LAYOUT_MOVE_NO_PRODUCT_LOOP=1 leaves it off: the source then refuses
-	// the line that names no process and never serves (the control).
-	if os.Getenv("LAYOUT_MOVE_NO_PRODUCT_LOOP") != "1" {
-		stop, done := make(chan struct{}), make(chan struct{})
-		go func() {
-			defer close(done)
-			tick := time.NewTicker(100 * time.Millisecond)
-			defer tick.Stop()
-			for {
-				select {
-				case <-stop:
-					return
-				case <-tick.C:
-					_, _ = h.RunLifecycleProductTick()
-				}
-			}
-		}()
-		t.Cleanup(func() { close(stop); <-done })
-	}
+	runProductLoop(t, h)
 	src, dst := newMoveHost(t, "node-a", "nqn.2026-11.test:move-src-"+kind), newMoveHost(t, "node-b", "nqn.2026-11.test:move-dst-"+kind)
 	// The master's create writes VOLUME and the unclaimed HEAD, then marks
 	// the record store-ready; only a store-ready volume gets a placement.

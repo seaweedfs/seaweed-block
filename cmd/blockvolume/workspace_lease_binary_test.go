@@ -57,15 +57,58 @@ func leaseBinaryPost(addr, op string) (int, []byte, error) {
 	return resp.StatusCode, b, err
 }
 
+// blockvolumeUnderTest is the blockvolume a test starts: a gate run's
+// prebuilt, hashed binary (SWBLOCK_TEST_BINS), or a race-enabled build for a
+// local run.
+func blockvolumeUnderTest(t *testing.T) string {
+	t.Helper()
+	if d := os.Getenv("SWBLOCK_TEST_BINS"); d != "" {
+		exe := filepath.Join(d, "blockvolume")
+		if _, err := os.Stat(exe); err != nil {
+			t.Fatalf("SWBLOCK_TEST_BINS has no blockvolume: %v", err)
+		}
+		return exe
+	}
+	exe := filepath.Join(t.TempDir(), "blockvolume")
+	if out, err := exec.Command("go", "build", "-race", "-p", "4", "-o", exe, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v %s", err, out)
+	}
+	return exe
+}
+
+// runProductLoop runs h's lifecycle product loop for the rest of the test,
+// as blockmaster runs it (--lifecycle-product-loop-interval): a line is
+// issued for the process at its endpoints, and a line minted before a
+// process reported itself (a hand-published initial line, a move's target)
+// is re-issued once it does. SWBLOCK_TEST_NO_PRODUCT_LOOP=1 leaves it off:
+// the holder then refuses a line that names no process (the control).
+func runProductLoop(t *testing.T, h *master.Host) {
+	t.Helper()
+	if os.Getenv("SWBLOCK_TEST_NO_PRODUCT_LOOP") == "1" {
+		return
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				_, _ = h.RunLifecycleProductTick()
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-done })
+}
+
 func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 	if os.Getenv("CHUNKSTORE_WEED") == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
 	}
-	exe := filepath.Join(t.TempDir(), "blockvolume")
-	build := exec.Command("go", "build", "-race", "-p", "4", "-o", exe, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
-	}
+	exe := blockvolumeUnderTest(t)
 	cluster := startWorkspaceWeed(t)
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("workspace-rpc-%v", enabled), func(t *testing.T) {
@@ -93,6 +136,7 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 				defer c()
 				_ = h.Close(ctx)
 			})
+			runProductLoop(t, h)
 			dataAddr, ctrlAddr, statusAddr, nvmeAddr := leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t)
 			// The master's create writes VOLUME and the unclaimed HEAD, then
 			// marks the record store-ready; only a store-ready volume gets a placement.
