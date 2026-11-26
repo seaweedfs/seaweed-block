@@ -67,7 +67,7 @@ func (env *handoffEnv) requireSnapshotNames(t *testing.T, vol string, names ...s
 func (env *handoffEnv) restoreChecked(t *testing.T, snap, target string, img map[uint64][]byte, later ...map[uint64][]byte) {
 	t.Helper()
 	env.restoreInto(t, "v1", snap, target)
-	env.waitHydrated(t, target)
+	env.hydrate(t, target)
 	env.requireImage(t, "n-"+target, img, later...)
 }
 

@@ -67,7 +67,7 @@ func TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot(t *testing.T) {
 	env.requireImage(t, "n-v3", img)
 
 	// Blast radius, v2 still refused: delete the source's snapshot, then the source volume.
-	out, errOut, code := env.h.run(t, "ops", "chunk", "snapshot-delete", "--volume", "v1", "--name", "base",
+	out, errOut, code := env.h.run(t, "ops", "chunk", "snapshot-delete", "--master", env.h.masterAddr, "--volume", "v1", "--name", "base",
 		"--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	if code != 0 || !strings.Contains(out, `"state":"deleting"`) {
 		t.Fatalf("snapshot-delete of the source snapshot while a restore target is refused: exit %d %s %s; want deleting", code, out, errOut)
@@ -165,8 +165,8 @@ func TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC(t *testing.T) 
 	}
 	poll(t, 60*time.Second, "v2 never reported its frontend ready", func() bool { return volumeFrontendReady(b2.status, "v2") })
 	requireImageExact(t, env, "n-v2", img, "after its source was deleted and collected")
-	env.waitHydrated(t, "v2")
-	requireImageExact(t, env, "n-v2", img, "after it hydrated")
+	env.hydrate(t, "v2")
+	requireImageExact(t, env, "n-v2", img, "after it was read in full (hydrated)")
 }
 
 // requireImageExact reads every block of img on the host and fails, marked

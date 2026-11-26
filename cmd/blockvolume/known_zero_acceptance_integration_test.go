@@ -317,9 +317,8 @@ func kzTarget(t *testing.T, env *handoffEnv, rep *kzReport, src kzVolume, kind s
 		kind, r.Reads, r.ReadsEqual, r.ReadsZero, r.Before.AbsentChunks, r.After.AbsentChunks, waited,
 		r.After.Hydration.Fetches-r.Before.Hydration.Fetches))
 
-	// (3) contents equal + first snapshot without a full scan (a restore
-	// target hydrates in the background; the reads below wait for any chunk
-	// still absent)
+	// (3) contents equal + first snapshot without a full scan (v1 fills a
+	// restore target on access: the reads below fetch any chunk still absent)
 	if device {
 		r.Identity, r.FilesEqual = kzDeviceVerify(t, tb, r.NQN, src, run)
 	} else {

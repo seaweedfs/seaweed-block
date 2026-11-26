@@ -95,17 +95,48 @@ func (env *handoffEnv) startTarget(t *testing.T, target, name string) *daemon {
 	return d
 }
 
+// readInBackground reads one block of each of chunks of target, in order,
+// on its own connection: v1 fills a restore target only on access, so this
+// is the fill the test kills into. It stops at the first error (the kill)
+// or when the returned stop is called, and stop waits for it.
+func (env *handoffEnv) readInBackground(t *testing.T, target string, chunks []uint64) (stop func()) {
+	t.Helper()
+	c := dialNVMe(t, env.hosts["n-"+target].nvme, plannedHandoffNQN)
+	done := make(chan struct{})
+	quit := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, ch := range chunks {
+			select {
+			case <-quit:
+				return
+			default:
+			}
+			_ = c.io.SetDeadline(time.Now().Add(60 * time.Second))
+			if _, err := c.tryRead(ch*ladderChunkBlocks, 4096); err != nil {
+				return
+			}
+		}
+	}()
+	return func() {
+		close(quit)
+		c.close()
+		<-done
+	}
+}
+
 // TestSnapshotLadderC3KilledHydrating: a restore of a snapshot of 32 full
-// chunks of incompressible data into v2 (128 MiB its background fill makes
-// local), its blockvolume killed (SIGKILL) while the fill is under way.
+// chunks of incompressible data into v2 (128 MiB), its blockvolume killed
+// (SIGKILL) while chunks are being made local. v1 fills a restore target only
+// on access, so a reader drives the fill.
 //
-//  1. Killed with some chunks local and some not, then started again. Every
-//     other chunk is read back: each is the snapshot's (a partly filled
-//     chunk is never served), and reading makes it local.
-//  2. The fill resumes from what is local: still some chunks absent, then
-//     fewer. The guest writes (acknowledged); killed again before the fill
-//     ends and restarted, every acknowledged write reads back.
-//  3. The guest writes once more and the fill completes (no chunk absent).
+//  1. Killed with some chunks local and some not, then started again: what
+//     was local survives (fewer than 32 absent). Every other chunk is read
+//     back: each is the snapshot's (a partly filled chunk is never served).
+//  2. The guest writes (acknowledged); killed again while a fill is running
+//     and restarted, every acknowledged write reads back.
+//  3. The guest writes once more and every chunk is made local (no chunk
+//     absent).
 //     v2 holds the snapshot with every acknowledged write over it, read back
 //     in full, and the source's snapshot, restored again into v3, is
 //     unchanged (none of v2's writes in it).
@@ -125,32 +156,39 @@ func TestSnapshotLadderC3KilledHydrating(t *testing.T) {
 
 	// (1) killed mid-fill
 	partly := func(absent int) bool { return absent > 0 && absent < len(chunks) }
+	stop := env.readInBackground(t, "v2", chunks)
 	absent := env.awaitAbsent(t, "v2", "a partly filled volume", 120*time.Second, partly)
 	target.kill(t)
+	stop()
 	t.Logf("killed with %d of %d chunks absent", absent, len(chunks))
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-fill-kill")
+	if after := kzReadStats(t, env.hosts["n-v2"]).AbsentChunks; after >= len(chunks) {
+		t.Fatalf("after the restart %d of %d chunks are absent: nothing made local survived the kill", after, len(chunks))
+	}
 	var even []uint64
 	for c := uint64(0); c < 32; c += 2 {
 		even = append(even, c)
 	}
 	env.requireBlocksOf(t, "n-v2", subsetOf(src, even)) // no partly filled chunk is served
 
-	// (2) the fill resumes; written and killed again before it ends
-	resumed := env.awaitAbsent(t, "v2", "the resumed fill", 60*time.Second, func(a int) bool { return a > 0 })
-	if resumed >= len(chunks) {
-		t.Fatalf("after the restart %d of %d chunks are absent: nothing local survived the kill", resumed, len(chunks))
-	}
+	// (2) written, then killed again while a fill is running
 	w1 := ladderImage("c3kw1", []uint64{3, 17, 50}, 3)
 	env.writeImage(t, "n-v2", w1)
-	env.awaitAbsent(t, "v2", "the fill still running after the write", time.Second, func(a int) bool { return a > 0 })
+	var odd []uint64
+	for c := uint64(1); c < 32; c += 2 {
+		odd = append(odd, c)
+	}
+	stop = env.readInBackground(t, "v2", odd)
+	env.awaitAbsent(t, "v2", "a fill still running after the write", 60*time.Second, func(a int) bool { return a > 0 })
 	target.kill(t)
+	stop()
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-write-kill")
 	env.requireBlocksOf(t, "n-v2", w1) // every acknowledged write survived the kill
 
 	// (3) completes
 	w2 := ladderImage("c3kw2", []uint64{17, 44, 60}, 2) // not chunk 40: requireEdges keeps it untouched
 	env.writeImage(t, "n-v2", w2)
-	env.waitHydrated(t, "v2")
+	env.hydrate(t, "v2")
 	env.requireImage(t, "n-v2", mergeImages(src, w1, w2))
 	env.restoreChecked(t, "base", "v3", src, w1, w2)
 }

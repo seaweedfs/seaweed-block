@@ -95,7 +95,7 @@ func startSourceWithSnapshot(t *testing.T, targets ...string) *handoffEnv {
 
 // headOf is the first line of `sw-block ops chunk show --volume v`.
 func (env *handoffEnv) headOf(t *testing.T, v string) string {
-	out, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	out, _, _ := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	return firstLine(out)
 }
 

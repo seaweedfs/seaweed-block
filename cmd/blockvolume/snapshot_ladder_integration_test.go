@@ -494,14 +494,22 @@ func volumeFrontendReady(statusAddr, vol string) bool {
 	return frontendReady(b)
 }
 
-// waitHydrated waits until target holds every chunk its HEAD names locally
-// (its chunk status shows none absent). A restored volume keeps its
-// references to the source's snapshot; hydration only makes it read them
-// locally.
-func (env *handoffEnv) waitHydrated(t *testing.T, target string) {
+// hydrate makes every chunk of target local and checks that none is left
+// absent. v1 has no background fill: a restore target fetches a chunk from
+// its source's snapshot only when the guest touches it, so this reads one
+// block of every chunk (which brings the whole chunk local), then waits for
+// the chunk status to show no chunk absent. A restored volume keeps its
+// references to the source's snapshot; hydration only makes it read locally.
+func (env *handoffEnv) hydrate(t *testing.T, target string) {
 	t.Helper()
-	const bound = 120 * time.Second
 	b := env.hosts["n-"+target]
+	c := dialNVMe(t, b.nvme, plannedHandoffNQN)
+	for lba := uint64(0); lba <= ladderLastBlock; lba += ladderChunkBlocks {
+		_ = c.io.SetDeadline(time.Now().Add(60 * time.Second))
+		c.read(t, lba, 4096)
+	}
+	c.close()
+	const bound = 60 * time.Second
 	end := time.Now().Add(bound)
 	last := -1
 	for time.Now().Before(end) {
@@ -510,7 +518,7 @@ func (env *handoffEnv) waitHydrated(t *testing.T, target string) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("%s never hydrated within %v: %d chunks still absent", target, bound, last)
+	t.Fatalf("%s: every chunk was read, yet %d are still absent after %v", target, last, bound)
 }
 
 // runCLI runs sw-block under ctx and returns its output and exit status. It
@@ -611,7 +619,7 @@ func TestSnapshotLadderC1FullRestore(t *testing.T) {
 	later := mergeImages(ladderImage("c1later", []uint64{1, 20}, 8), ladderImage("c1new", []uint64{9, 33}, 3))
 	env.writeImage(t, "s1", later)
 	env.restoreInto(t, "v1", "full", "v2")
-	env.waitHydrated(t, "v2")
+	env.hydrate(t, "v2")
 	env.requireImage(t, "n-v2", img, later)
 }
 
@@ -631,10 +639,10 @@ func TestSnapshotLadderC2IncrementalRestore(t *testing.T) {
 	env.snapshot(t, "s1", "v1", "s3")
 
 	env.restoreInto(t, "v1", "s2", "v2")
-	env.waitHydrated(t, "v2")
+	env.hydrate(t, "v2")
 	env.requireImage(t, "n-v2", mergeImages(img1, img2), img3) // nothing written after s2, chunk 30 included
 	env.restoreInto(t, "v1", "s3", "v3")
-	env.waitHydrated(t, "v3")
+	env.hydrate(t, "v3")
 	env.requireImage(t, "n-v3", mergeImages(img1, img2, img3))
 }
 
@@ -653,7 +661,7 @@ func TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt(t *testing.T) {
 	env.writeImage(t, "s1", srcLater)
 
 	env.restoreInto(t, "v1", "base", "v2")
-	env.waitHydrated(t, "v2")
+	env.hydrate(t, "v2")
 	own := ladderImage("c3own", []uint64{3, 11}, 3)
 	env.writeImage(t, "n-v2", own)
 	env.snapshot(t, "n-v2", "v2", "mine")
@@ -661,9 +669,9 @@ func TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt(t *testing.T) {
 	env.writeImage(t, "n-v2", ownLater)
 
 	env.restoreInto(t, "v2", "mine", "v3")
-	env.waitHydrated(t, "v3")
+	env.hydrate(t, "v3")
 	env.requireImage(t, "n-v3", mergeImages(src, own), ownLater, srcLater)
 	env.restoreInto(t, "v1", "base", "v4") // the source's snapshot is unchanged
-	env.waitHydrated(t, "v4")
+	env.hydrate(t, "v4")
 	env.requireImage(t, "n-v4", src, srcLater, own, ownLater)
 }

@@ -62,7 +62,7 @@ type opsInvocation struct {
 	args  []string
 }
 
-// literalOpsInvocations returns every `<x>.command(t, "ops", ...)` and
+// literalOpsInvocations returns every `<x>.command(t, "ops", ...)`, `<x>.run(t, "ops", ...)` and
 // `runCLI(ctx, h, "ops", ...)` call in
 // dir's test files whose arguments are listed (not spread from a slice),
 // with each non-literal argument replaced by a placeholder for its flag.
@@ -119,7 +119,7 @@ func opsArg(call *ast.CallExpr) int {
 	case *ast.Ident:
 		name = f.Name
 	}
-	at := map[string]int{"command": 1, "runCLI": 2}[name]
+	at := map[string]int{"command": 1, "run": 1, "runCLI": 2}[name]
 	if at == 0 || len(call.Args) <= at || literal(call.Args[at]) != "ops" {
 		return -1
 	}

@@ -38,7 +38,7 @@ func TestNeverAttachedRestoreTargetIsDeletable(t *testing.T) {
 	if code != 0 || json.Unmarshal([]byte(out), &del) != nil || !del.Completed {
 		t.Fatalf("volume-delete of a never-attached target must complete; exit %d:\n%s\n%s", code, out, errOut)
 	}
-	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	if !strings.Contains(shown, `"state":"deleted"`) {
 		t.Fatalf("the deleted target's HEAD is not a deleted tombstone:\n%s", shown)
 	}
@@ -73,7 +73,7 @@ func TestNeverStartedDeleteFencesALateStart(t *testing.T) {
 	late := env.h.start(t, "blockvolume-v2-late", env.h.volume, env.volArgsFor(b)...)
 	err := late.wait(60 * time.Second)
 	served := late.has("durable: HEAD claim for volume=v2 done") || volumeFrontendReady(b.status, "v2")
-	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+	shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", "v2", "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 	t.Logf("late start after the delete: exit %v, served %v, HEAD %s", err, served, firstLine(shown))
 	if served || err == nil || strings.Contains(fmt.Sprint(err), "still running") || !strings.Contains(shown, `"state":"deleted"`) {
 		t.Fatalf("1.0.1: a start after the delete must exit without claiming or serving and leave the volume deleted; exit %v, served %v, HEAD:\n%s", err, served, shown)
@@ -118,7 +118,7 @@ func TestNeverStartedDeleteRacesAStart(t *testing.T) {
 		// claim) or its frontend became ready; adopting the assignment comes
 		// before the claim and is not serving.
 		served := d.has("durable: HEAD claim for volume="+v+" done") || volumeFrontendReady(b.status, v)
-		shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
+		shown, _, _ := env.h.run(t, "ops", "chunk", "show", "--master", env.h.masterAddr, "--volume", v, "--chunk-filer", env.cluster.filerGRPC, "--chunk-path", env.chunkPath)
 		isDeleted := strings.Contains(shown, `"state":"deleted"`)
 		t.Logf("%s: delete exit %d, served %v, HEAD deleted %v: %s", v, r.code, served, isDeleted, firstLine(r.out))
 		switch {
