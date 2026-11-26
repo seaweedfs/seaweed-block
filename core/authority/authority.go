@@ -120,6 +120,11 @@ type Publisher struct {
 
 	nextSubID atomic.Uint64
 
+	// incarnationOf is the latest process incarnation a replica reports
+	// (SetIncarnationSource); its own lock, never taken under mu.
+	incarnationMu sync.RWMutex
+	incarnationOf func(volumeID, replicaID, dataAddr, ctrlAddr string) string
+
 	mu    sync.Mutex
 	state map[subKey]assignmentState
 	subs  map[subKey][]*subscription
@@ -288,6 +293,7 @@ func (p *Publisher) reloadFromStore() {
 				EndpointVersion: rec.EndpointVersion,
 				DataAddr:        rec.DataAddr,
 				CtrlAddr:        rec.CtrlAddr,
+				Incarnation:     rec.Incarnation,
 			},
 			present: true,
 		}
@@ -464,6 +470,16 @@ func (p *Publisher) closeAllSubscriptions() {
 // production code that constructs an adapter.AssignmentInfo with a
 // non-zero Epoch. The structural non-forgeability test in
 // authority_test.go enforces this boundary at repo scope.
+// SetIncarnationSource gives the publisher the latest process incarnation
+// reported by the slot an ask targets (its replica at its endpoints), for
+// asks that do not name one (see AssignmentAsk.Incarnation). nil (the
+// default) records what asks name.
+func (p *Publisher) SetIncarnationSource(of func(volumeID, replicaID, dataAddr, ctrlAddr string) string) {
+	p.incarnationMu.Lock()
+	p.incarnationOf = of
+	p.incarnationMu.Unlock()
+}
+
 func (p *Publisher) apply(ask AssignmentAsk) error {
 	if p.publicationAdmission != nil {
 		return p.publicationAdmission(ask, func() error { return p.applyWithWorkspaceMove(ask, nil) })
@@ -474,6 +490,19 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGrant) error {
 	if err := validateAsk(ask); err != nil {
 		return err
+	}
+	// An ask built without the target's process (a heal, a planned move, a
+	// workspace move, an operator's request) records the one the target
+	// reports now, so its line is issued for that process and its first
+	// report re-issues nothing. Read before p.mu: the source is the
+	// observation store, which reads the publisher.
+	if ask.Incarnation == "" {
+		p.incarnationMu.RLock()
+		of := p.incarnationOf
+		p.incarnationMu.RUnlock()
+		if of != nil {
+			ask.Incarnation = of(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr)
+		}
 	}
 
 	p.beforeWorkspaceGrantLock("publication")
@@ -540,6 +569,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
 			Primary:         adapter.PrimaryEvidence{Kind: adapter.PrimaryKindBootstrap},
+			Incarnation:     ask.Incarnation,
 		}
 
 	case IntentRefreshEndpoint:
@@ -547,16 +577,23 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			return ErrRefreshNotBound
 		}
-		if prev.info.DataAddr == ask.DataAddr && prev.info.CtrlAddr == ask.CtrlAddr {
+		restarted := ask.Incarnation != "" && ask.Incarnation != prev.info.Incarnation
+		if prev.info.DataAddr == ask.DataAddr && prev.info.CtrlAddr == ask.CtrlAddr && !restarted {
 			// Idempotent no-op. Do not fan out, do not log as
 			// rejection — the directive is allowed to retry.
 			p.mu.Unlock()
 			return nil
 		}
+		// New addresses, or a restarted primary process at the same ones:
+		// a new endpoint version, so every session the new process opens
+		// outranks the dead process's on each replica.
 		next = prev.info
 		next.EndpointVersion = prev.info.EndpointVersion + 1
 		next.DataAddr = ask.DataAddr
 		next.CtrlAddr = ask.CtrlAddr
+		if ask.Incarnation != "" {
+			next.Incarnation = ask.Incarnation
+		}
 
 	case IntentReassign:
 		// A primary change carries how it was decided (a kind, and for a
@@ -586,6 +623,12 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			return ErrReassignNotBound
 		}
+		if exp := ask.ExpectCurrent; exp != nil {
+			if cur, ok := p.volumeLineLocked(ask.VolumeID); !ok || cur.ReplicaID != exp.ReplicaID || cur.Epoch != exp.Epoch {
+				p.mu.Unlock()
+				return fmt.Errorf("%w: volume %s expected %s@%d, the line is %s@%d", ErrExpectedLineMoved, ask.VolumeID, exp.ReplicaID, exp.Epoch, cur.ReplicaID, cur.Epoch)
+			}
+		}
 		next = adapter.AssignmentInfo{
 			VolumeID:        ask.VolumeID,
 			ReplicaID:       ask.ReplicaID,
@@ -594,6 +637,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
 			Primary:         ask.Evidence,
+			Incarnation:     ask.Incarnation,
 		}
 		if reservedEpoch != 0 {
 			next.Epoch = reservedEpoch
@@ -642,6 +686,7 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			CtrlAddr:        next.CtrlAddr,
 			WriteSeq:        nextSeq,
 			Workspace:       cloneWorkspace(p.workspace[ask.VolumeID]),
+			Incarnation:     next.Incarnation,
 		}
 		if next.Primary != (adapter.PrimaryEvidence{}) {
 			pe := next.Primary

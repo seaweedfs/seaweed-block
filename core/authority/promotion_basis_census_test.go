@@ -26,7 +26,7 @@ func TestPromotionBasisCensus(t *testing.T) {
 	want := []string{
 		"core/authority/controller.go plannedEvidence BasisPlanned",
 		"core/authority/workspace.go MoveWorkspace BasisPlanned",
-		"core/host/master/planned_move.go plannedMoveEvidence BasisPlanned",
+		"core/host/master/planned_move.go plannedMoveEvidenceAt BasisPlanned",
 		"core/host/master/product_loop.go healAfterFailedFence BasisHeal",
 		"core/host/master/product_loop.go promotionEvidenceFor BasisFenced",
 	}

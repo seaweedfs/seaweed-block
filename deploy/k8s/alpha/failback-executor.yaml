@@ -1,0 +1,99 @@
+# The admin's manual failover in the alpha stack: the failback executor reads
+# SwBlockReplicaFailback objects in kube-system and calls blockmaster's
+# admin-only ExecuteFailback over mutual TLS (client Secret
+# sw-block-failback-executor-tls from scripts/k8s-alpha-certs.sh). The CRD is
+# charts/seaweed-block/crds/swblockreplicafailbacks.block.seaweedfs.com.yaml.
+#
+# Who may fail over: the executor holds a full admin client certificate and
+# executes what a SwBlockReplicaFailback object says, so the right to create or
+# change those objects in kube-system IS the right to fail over any volume.
+# Grant it only to the cluster administrators who would run
+# `sw-block ops failover` by hand. blockmaster still decides every move (the
+# fencing round for an unreachable primary) and publishes the target at its
+# own record of the replica's addresses, never the object's.
+#
+# The object field that asserts the old primary's frontend is fenced
+# (frontendFencedBeforeFailback) is the operator's confirmation that the old
+# node is off or cut from its clients (the fencing round stops its writes,
+# not its reads). Automation must never set it.
+#
+# Limit, dated 2026-11-26: the certificate carries the admin role although the
+# executor makes one call (ExecuteFailback); a role limited to that call is
+# not in this release.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sw-block-failback-executor
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sw-block-failback-executor
+rules:
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicafailbacks"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicafailbacks/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sw-block-failback-executor
+subjects:
+  - kind: ServiceAccount
+    name: sw-block-failback-executor
+    namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sw-block-failback-executor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-failback-executor
+  namespace: kube-system
+  labels:
+    app: sw-block-failback-executor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-failback-executor
+  template:
+    metadata:
+      labels:
+        app: sw-block-failback-executor
+    spec:
+      serviceAccountName: sw-block-failback-executor
+      containers:
+        - name: failback-executor
+          image: sw-block:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/sw-block"]
+          args:
+            - "ops"
+            - "failback-executor"
+            - "--namespace=kube-system"
+            - "--enable-execution"
+            - "--execution-policy"
+            - "--failback-runtime-grpc-addr=blockmaster.kube-system.svc.cluster.local:9333"
+            - "--interval=5s"
+          env:
+            - name: SW_BLOCK_TLS_CERT
+              value: /etc/sw-block/master-tls/tls.crt
+            - name: SW_BLOCK_TLS_KEY
+              value: /etc/sw-block/master-tls/tls.key
+            - name: SW_BLOCK_TLS_CA
+              value: /etc/sw-block/master-tls/ca.crt
+          volumeMounts:
+            - name: master-tls
+              mountPath: /etc/sw-block/master-tls
+              readOnly: true
+      volumes:
+        - name: master-tls
+          secret:
+            secretName: sw-block-failback-executor-tls

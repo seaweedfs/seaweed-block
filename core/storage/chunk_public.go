@@ -60,6 +60,7 @@ var (
 	ErrChunkLayerClosed       = errChunkLayerClosed
 	ErrChunkBaseInstalling    = errChunkBaseInstalling
 	ErrChunkRemoteUnavailable = errChunkRemoteUnavailable
+	ErrChunkContentMismatch   = errChunkContentMismatch
 	ErrChunkLSNBehind         = errChunkLSNBehind
 )
 

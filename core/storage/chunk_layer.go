@@ -478,7 +478,7 @@ func (l *chunkLayerImpl) fillOnce(ctx context.Context, idx, gen uint64, ref chun
 		return false, fmt.Errorf("storage: chunk %d fetch: %w", idx, err)
 	}
 	if sha256.Sum256(data) != ref.SHA256 || len(data) != int(l.chunkBlocks)*l.blockSize {
-		return false, fmt.Errorf("storage: chunk %d fetch: content does not match HEAD", idx)
+		return false, fmt.Errorf("storage: chunk %d fetch: %w", idx, errChunkContentMismatch)
 	}
 	first := idx * l.chunkBlocks
 	for i := uint64(0); i < l.chunkBlocks; i++ {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 )
 
@@ -73,4 +74,12 @@ func TestPlannedMoveOneGuardForFailbackAndRebalance(t *testing.T) {
 			})
 		}
 	}
+}
+
+// plannedMoveEvidence is plannedMoveEvidenceAt against the volume's line as
+// it is now (the tests' shorthand; the failback runtime passes the line its
+// request was checked against).
+func (h *Host) plannedMoveEvidence(volumeID, target string) (adapter.PrimaryEvidence, error) {
+	current, _ := h.Publisher().VolumeAuthorityLine(volumeID)
+	return h.plannedMoveEvidenceAt(volumeID, target, current)
 }

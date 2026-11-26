@@ -23,6 +23,11 @@ var (
 	ErrSnapshotExists = errors.New("layout: snapshot name taken")
 	// ErrTooManySnapshots: HEAD already holds MaxSnapshots.
 	ErrTooManySnapshots = errors.New("layout: snapshot limit reached")
+	// ErrForeignRefAdded: the new manifest holds another volume's chunk at
+	// an index where the previous manifest did not hold that same chunk. A
+	// restore target keeps or drops its source's references, never gains
+	// one, so a dependency is never deeper than one step.
+	ErrForeignRefAdded = errors.New("layout: commit adds a reference to another volume's chunk")
 )
 
 // CommitRequest is what a snapshot session commits: the image at
@@ -63,6 +68,22 @@ func newOwn(vol string, prev, next map[uint64]Ref) map[uint64]Ref {
 		}
 	}
 	return out
+}
+
+// addedForeign returns an index of next holding another volume's chunk
+// that prev does not hold at that index (the smallest, for a stable
+// refusal). Another volume is told by identity, name and id: a volume
+// re-created under this name is another volume.
+func addedForeign(vol string, id VolumeID, prev, next map[uint64]Ref) (uint64, bool) {
+	var found bool
+	var at uint64
+	for i, r := range next {
+		own := r.Owner == vol && r.OwnerID == id
+		if !own && prev[i] != r && (!found || i < at) {
+			found, at = true, i
+		}
+	}
+	return at, found
 }
 
 // Commit is transition 4 as a pure step on HEAD: for the holder at HEAD's
@@ -164,6 +185,9 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 			if base != *h.Current {
 				return Head{}, false, ErrStaleBase
 			}
+		}
+		if i, ok := addedForeign(vol, h.VolumeID, req.Prev, req.Next); ok {
+			return Head{}, false, fmt.Errorf("%w: index %d names %s's chunk", ErrForeignRefAdded, i, req.Next[i].Owner)
 		}
 		var rels []string
 		chunks := newOwn(vol, req.Prev, req.Next)
