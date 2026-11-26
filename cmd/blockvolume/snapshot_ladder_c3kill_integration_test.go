@@ -184,9 +184,10 @@ func (env *handoffEnv) awaitFill(t *testing.T, target string, r *fillReader, bas
 // (SIGKILL) while chunks are being made local. v1 fills a restore target only
 // on access, so a reader drives the fill.
 //
-//  1. Killed with some chunks local and some not, then started again: what
-//     was local survives (fewer than 32 absent). Every other chunk is read
-//     back: each is the snapshot's (a partly filled chunk is never served).
+//  1. Killed with some chunks local and some not, then started again (fill
+//     progress not yet written at a checkpoint may be lost: those chunks
+//     are fetched again). Every other chunk is read back: each is the
+//     snapshot's (a partly filled chunk is never served).
 //  2. The guest writes (acknowledged); killed again while a fill is running
 //     and restarted, every acknowledged write reads back.
 //  3. The guest writes once more and every chunk is made local (no chunk
@@ -219,9 +220,10 @@ func TestSnapshotLadderC3KilledHydrating(t *testing.T) {
 	reader.stop()
 	t.Logf("killed with %d of %d chunks absent", absent, len(chunks))
 	target = env.startTarget(t, "v2", "blockvolume-v2-after-fill-kill")
-	if after := kzReadStats(t, env.hosts["n-v2"]).AbsentChunks; after >= len(chunks) {
-		t.Fatalf("after the restart %d of %d chunks are absent: nothing made local survived the kill", after, len(chunks))
-	}
+	// Fill progress is written at the store's next checkpoint, so a kill
+	// may lose some or all of it (standalone-deployment.md, restore step 4):
+	// such chunks are absent again and are fetched again on their next read.
+	t.Logf("after the restart %d of %d chunks are absent", kzReadStats(t, env.hosts["n-v2"]).AbsentChunks, len(chunks))
 	var even []uint64
 	for c := uint64(0); c < 32; c += 2 {
 		even = append(even, c)
