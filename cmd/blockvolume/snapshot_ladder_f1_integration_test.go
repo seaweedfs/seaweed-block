@@ -43,7 +43,9 @@ import (
 // write period, so writes run before, during and after the snapshots),
 // F1_HOST_LIMIT_DIR (a local, non-temporary directory; required for the
 // limiter checks, a smoke may leave it unset), F1_HOST_LIMIT_SLOTS
-// (the limiter's normal slots; default hostlimit's), F1_REPORT.
+// (the limiter's normal slots; default hostlimit's), F1_REPORT,
+// F1_NVME_RETRIES (5: the load writers retry a refused command as the Linux
+// NVMe host does, see retryLikeHost; 0 turns the retries off).
 //
 // Each volume has two regions. The ledger region is written and flushed
 // before a round's snapshot, so the snapshot must hold it exactly. The load
@@ -60,6 +62,7 @@ type f1Config struct {
 	LedgerBlocksPerRnd int
 	LoadSpan           int
 	ControlPauseSecs   int
+	NVMeRetries        int
 }
 
 func f1ConfigFromEnv(t *testing.T) f1Config {
@@ -87,7 +90,8 @@ func f1ConfigFromEnv(t *testing.T) f1Config {
 	}
 	c := f1Config{Volumes: num("F1_VOLUMES", 10), Rounds: num("F1_ROUNDS", 3), WriteSeconds: num("F1_WRITE_SECONDS", 120),
 		HostLimitDir: os.Getenv("F1_HOST_LIMIT_DIR"), Slots: num("F1_HOST_LIMIT_SLOTS", hostlimit.DefaultConfig("").NormalSlots),
-		Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: num("F1_LOAD_SPAN", 8192), SlotRetryBound: time.Duration(retry) * time.Second}
+		Report: os.Getenv("F1_REPORT"), LedgerBlocksPerRnd: 64, LoadSpan: num("F1_LOAD_SPAN", 8192), SlotRetryBound: time.Duration(retry) * time.Second,
+		NVMeRetries: num("F1_NVME_RETRIES", nvmeHostMaxRetries)}
 	if v := os.Getenv("F1_CONTROL_PAUSE_SECONDS"); v != "" {
 		c.ControlPauseSecs = num("F1_CONTROL_PAUSE_SECONDS", 0)
 	}
@@ -111,17 +115,22 @@ type f1Sample struct {
 
 // f1Round is one volume's measurements in one round.
 type f1Round struct {
-	Volume         string  `json:"volume"`
-	Round          int     `json:"round"`
-	SnapshotMs     float64 `json:"snapshot_request_to_commit_ms"`
-	CutTotalMs     float64 `json:"cut_total_ms"`
-	BarrierPauseMs float64 `json:"cut_barrier_pause_ms"`
-	UploadedChunks int     `json:"uploaded_chunks"`
-	UploadedBytes  int64   `json:"uploaded_bytes"`
-	HostSlotWaits  uint64  `json:"host_slot_waits"`
-	SlotRetries    int     `json:"snapshot_slot_refusals_retried"`
-	SlotWaitMs     float64 `json:"snapshot_slot_wait_ms"`
-	RestoreMs      float64 `json:"restore_ms"`
+	Volume string `json:"volume"`
+	Round  int    `json:"round"`
+	// BusyRefusals counts the load writer's commands refused with a
+	// retryable status (and retried); MaxConsecutiveBusy is the longest run
+	// of such refusals of one command.
+	BusyRefusals       int     `json:"busy_refusals"`
+	MaxConsecutiveBusy int     `json:"max_consecutive_busy"`
+	SnapshotMs         float64 `json:"snapshot_request_to_commit_ms"`
+	CutTotalMs         float64 `json:"cut_total_ms"`
+	BarrierPauseMs     float64 `json:"cut_barrier_pause_ms"`
+	UploadedChunks     int     `json:"uploaded_chunks"`
+	UploadedBytes      int64   `json:"uploaded_bytes"`
+	HostSlotWaits      uint64  `json:"host_slot_waits"`
+	SlotRetries        int     `json:"snapshot_slot_refusals_retried"`
+	SlotWaitMs         float64 `json:"snapshot_slot_wait_ms"`
+	RestoreMs          float64 `json:"restore_ms"`
 	// RestoreExact is true or false for a snapshot that ran, "not_run" for
 	// one that was never admitted.
 	RestoreExact    any     `json:"restore_exact"`
@@ -338,10 +347,12 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 		c.close()
 	}
 	type writer struct {
-		mu      sync.Mutex
-		samples []f1Sample
-		written int
-		err     error
+		mu         sync.Mutex
+		samples    []f1Sample
+		written    int
+		err        error
+		busy       int // commands refused with a retryable status, retried
+		maxBusyRun int // the longest run of refusals of one command
 	}
 	stop := make(chan struct{})
 	ws := make([]*writer, len(vols))
@@ -372,14 +383,22 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 				}
 				lba := first + uint64(n)
 				s := time.Now()
-				// Per command: dialNVMe's deadline is 60 s from the dial,
+				// Per attempt: dialNVMe's deadline is 60 s from the dial,
 				// shorter than the write period.
-				_ = c.io.SetDeadline(s.Add(f1CommandDeadline))
-				err := c.tryWrite(lba, f1Block(vol, round, "load", lba))
+				refused, err := retryLikeHost(cfg.NVMeRetries, func() error {
+					_ = c.io.SetDeadline(time.Now().Add(f1CommandDeadline))
+					return c.tryWrite(lba, f1Block(vol, round, "load", lba))
+				})
+				flushRefused := 0
 				if err == nil && n%16 == 15 {
-					err = c.tryFlush()
+					flushRefused, err = retryLikeHost(cfg.NVMeRetries, func() error {
+						_ = c.io.SetDeadline(time.Now().Add(f1CommandDeadline))
+						return c.tryFlush()
+					})
 				}
 				w.mu.Lock()
+				w.busy += refused + flushRefused
+				w.maxBusyRun = max(w.maxBusyRun, refused, flushRefused)
 				w.samples = append(w.samples, f1Sample{start: s, d: time.Since(s)})
 				if err != nil {
 					w.err = err
@@ -437,6 +456,7 @@ func f1RunRound(t *testing.T, env *handoffEnv, cfg f1Config, vols []f1Volume, ro
 	for i, v := range vols {
 		r := f1Round{Volume: v.id, Round: round, RestoreExact: "not_run", SlotRetries: res[i].retries}
 		w := ws[i]
+		r.BusyRefusals, r.MaxConsecutiveBusy = w.busy, w.maxBusyRun
 		if w.err != nil {
 			rep.WriteErrors++
 			rep.Failures = append(rep.Failures, fmt.Sprintf("%s round %d: write error: %v", v.id, round, w.err))
@@ -738,7 +758,7 @@ func (c *nvmeInitiator) tryStatus(op string) error {
 		return fmt.Errorf("nvme %s response body: %w", op, err)
 	}
 	if resp.Status != 0 {
-		return fmt.Errorf("nvme %s status 0x%04x", op, resp.Status)
+		return &nvmeStatusError{op: op, status: resp.Status}
 	}
 	return nil
 }
