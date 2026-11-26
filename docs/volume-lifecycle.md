@@ -221,7 +221,7 @@ Each procedure below runs as written on this page, with the real binaries, two
 | Forced move, then the old host returns | `TestProcedureForcedMoveWithTheOldHostReturning` | runs: the returning old host does not take the new host's assignment, does not report ready and does not listen for I/O; it logs `exiting status=78 reason=moved` and exits 78, on its old local root and on a fresh one; the new host keeps serving |
 | Same host: restart after a crash inside the lease | `TestProcedureSameHostCrashRestartInsideTheLease` | runs |
 | After a crash: started 40 s after the stop, the barrier passes inside the start wait | `TestProcedureStartInsideTheBarrierWaitIsReGranted` | runs: does not serve while renewals are refused, serves once re-granted |
-| Delete a volume: seal, revoke, ACK, delete the snapshots, volume-delete | `TestProcedureDeleteAVolume` | runs: refused while a snapshot exists, with nothing deleted; completes after the snapshot is deleted; a rerun with the same request id completes again |
+| Delete a volume: seal, revoke, ACK, wait for the lease horizon, release dependents, volume-delete | `TestProcedureDeleteAVolume` | refuses a live lease and a snapshot with a restored-volume dependent; completes after the dependent is deleted, with a plain snapshot still present; same-request replay completes again |
 | Delete after the process was stopped by a signal (start again, revoke, ACK, delete) | `TestProcedureDeleteAfterASignalStop` | runs: refused for the missing ACK, with nothing deleted; completes after the restart, the revoke and the ACK |
 | After a crash: the process is killed while the guest writes, restart inside the lease | `TestProcedureCrashWithIOInFlight` | runs: every write acknowledged by a flush reads back |
 | The holder cannot reach blockmaster, then a forced move | `TestProcedureMasterUnreachableFencesBeforeForcedMove` | runs: the forced move is refused while the holder is alive and admitted only after it exited 75 (`reason=lease_expired`) |
@@ -406,10 +406,11 @@ serving when its lease ends. Make sure it stays down.
 
 ## Delete a volume
 
-A volume is deleted only after its holder has given it up: sealed, revoked and
-acknowledged, exactly as in steps 2 to 5 of the planned hand-over, and after its
-snapshots are deleted. Sealing and stopping the process is not enough: until the
-ACK is recorded, blockmaster still counts the volume as in use.
+Seal, revoke and obtain the recorded ACK, exactly as in steps 2 to 5 of the
+planned hand-over. The ACK is required; the delete then completes once the lease
+horizon has passed (about 60 seconds with default flags). A plain snapshot is
+deleted with its volume. A snapshot that a restored volume depends on blocks the
+delete until that restored volume is deleted.
 
 **1. Stop the writer and seal** (hand-over steps 2 and 3):
 
@@ -429,20 +430,28 @@ sw-block ops workspace show   --master MASTER --volume v1
 ```
 
 `show` must print `lease state: revoking` and `recorded ACK: R@E HEAD generation G`.
+Stop AND disable the unit after this clean exit so it stays down. Do not start it
+between the ACK and the delete: a recorded ACK prevents re-grant to the restarted
+holder. Do nothing else to the volume during the wait; a move or start that grants
+a new lease starts a new horizon and a new wait.
 
-**3. Delete every snapshot of the volume:**
+**3. Remove snapshot dependents:**
 
 ```bash
 sw-block ops chunk snapshots       --master MASTER --volume v1 --chunk-filer FILER
-sw-block ops chunk snapshot-delete --master MASTER --volume v1 --chunk-filer FILER --name s1
+# If s1 lists a restored volume v2 as a dependent, delete v2 first:
+sw-block ops chunk volume-delete --master MASTER --volume v2 --chunk-filer FILER --request-id del-v2
 ```
 
 `snapshots` answers a JSON array with one entry per published snapshot, in name
 order: `[{"name":"s1","root":"<64 hex>"}]`. An entry also lists
 `"dependents":["v2-<id8>"]` while restore targets depend on that snapshot. An
-entry has no state or cut position: a listed snapshot is published. Each delete
-answers `{"volume":"v1-<id8>","name":"s1","state":"absent"}`. Here `v1-<id8>` is
-the volume's store directory: its name and the first 8 hex digits of its layout id.
+entry has no state or cut position: a listed snapshot is published. A delete of
+v1 with a dependent is refused with code `snapshot_has_dependents`; nothing in
+v1 is deleted. Delete the restored volume using its own seal/revoke/ACK and lease
+horizon if it served; its deletion releases the dependent. A never-started target
+uses the procedure below. A plain snapshot needs no separate snapshot-delete:
+leave it in place and step 4 deletes it with v1.
 
 **4. Delete the volume:**
 
@@ -455,13 +464,20 @@ On completion it answers `{"volume":"v1-<id8>","state":"deleted"}`, where
 this result is the store directory; subsequent commands still use the public
 name `--volume v1`.
 Keep the `--request-id` and use the same one if you have to run the command again.
+Before the lease horizon, exit 1 has JSON code `not_admitted` and a message
+containing `live until <T>`. Retry with the SAME request id at or after the printed
+T; poll until completion within T plus a bounded operational margin. Do not
+replace T with a fixed sleep or extend the deadline when another refusal arrives.
+`restart required` means the uncertainty latch remains until blockmaster restarts.
+If authority records were skipped at load, deletion remains refused until
+recovery establishes their leases; neither case is evidence of lease absence.
 Afterwards `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
 `head.State` `deleted`. The HEAD view has no `chunkCount` field; use the
 volume's object listing or verification report to check its remaining objects.
 
 **If you sealed and then stopped `blockvolume` with a signal,** the ACK was skipped
-and step 4 is refused with `live authority requires clean revocation ACK`. Nothing
-was deleted. Start `blockvolume` again with the same flags and local root, then do
+and the immediate step 4 is refused (a live lease is reported as
+`not_admitted ... live until <T>`). Nothing was deleted. Start `blockvolume` again with the same flags and local root, then do
 step 2 and continue. This recovery runs as written (`TestProcedureDeleteAfterASignalStop`).
 
 **A volume that never served** has no holder to seal or ACK: its blockvolume
@@ -505,8 +521,8 @@ follow from that order:
 | `sw-block ops chunk detach: plain_detach_busy: durable: plain detach requires idle frontend I/O` | I/O was in flight; nothing changed | Stop the writer, retry step 3 |
 | detach answers `detach_aborted` | Nothing was published; the volume serves here again | Retry step 3 |
 | detach answers `outcome_unknown` | The seal may have landed; I/O stays stopped | Retry step 3: it settles the outcome |
-| volume-delete: `volume_in_use: ... live authority requires clean revocation ACK` | The volume was sealed (or only stopped) but never revoked and acknowledged; nothing was deleted | "Delete a volume", step 2 |
-| volume-delete: `volume v1 has snapshots (s1); delete them first` | Snapshots still exist, or a name is held by an unfinished request (such a name is not in the list); nothing was deleted | "Delete a volume", step 3; for a name that is not listed, "Snapshot names and retries" |
+| volume-delete: `not_admitted ... live until <T>` | The lease horizon has not passed, even if the ACK is recorded; nothing was deleted | "Delete a volume", steps 2 and 4 |
+| volume-delete: `snapshot_has_dependents` | A restored volume still depends on a snapshot; a plain snapshot alone does not block deletion | "Delete a volume", step 3 |
 | snapshot: `snapshot_exists ... this request's attempt was aborted; delete the name to reuse it` | An earlier attempt of this request did not finish and was swept | `snapshot-delete` the name, then take the snapshot again |
 | snapshot: `snapshot_deleting ... is being deleted; wait for the delete to finish, then reuse the name` | The request was repeated while its snapshot is being deleted | Wait for the delete to finish; take the snapshot again if it is still wanted |
 | revoke: `workspace revoke: no matching lease` | `--replica`/`--epoch` are not the current holder | Read them again with `show` |
