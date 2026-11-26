@@ -187,38 +187,48 @@ func (c *BCatalog) ReleaseTarget(ctx context.Context, src, target VolumeRef) (la
 // released from are the volumes its roots name chunks of (read from its
 // references, never from a name given); its objects are every pool,
 // segment and root entry in its directory, listed after HEAD is deleting.
-// A re-run on a deleted volume sweeps any object that landed late.
-func (c *BCatalog) DeleteVolume(ctx context.Context, v VolumeRef, auth layout.DeleteAuthority) error {
+// A re-run on a deleted volume sweeps any object that landed late, and a
+// re-run after an interruption at any step completes it. It returns the
+// roots HEAD names that were already deleted and so were not read (see
+// foreignOwners).
+func (c *BCatalog) DeleteVolume(ctx context.Context, v VolumeRef, auth layout.DeleteAuthority) ([]layout.RootName, error) {
 	s, r, err := c.open(v)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	h, found, err := s.ReadHead(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !found {
-		return layout.ErrHeadAbsent
+		return nil, layout.ErrHeadAbsent
 	}
-	owners, err := foreignOwners(ctx, r, h)
+	owners, skipped, err := foreignOwners(ctx, r, h)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var sources []layout.HeadStore
 	for _, o := range owners {
 		ss, err := c.Store(o)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		sources = append(sources, ss)
 	}
 	list := func(ctx context.Context) ([]string, error) { return c.listObjects(ctx, v) }
-	return layout.DeleteVolume(ctx, s, auth, v.ID, sources, s, list)
+	return skipped, layout.DeleteVolume(ctx, s, auth, v.ID, sources, s, list)
 }
 
 // foreignOwners returns the volumes, other than h's own, whose chunks a
 // root in h names, from the references themselves.
-func foreignOwners(ctx context.Context, r *layout.Reader, h layout.Head) ([]VolumeRef, error) {
+//
+// A delete removes a volume's root objects only after it released the
+// volume from every source (layout.DeleteVolume's order), so on a HEAD that
+// is deleting or deleted a root whose objects are already gone
+// (layout.ErrMissing) has nothing left to release: it is skipped and
+// returned. Anything else (a corrupt object, an I/O error), and a missing
+// root of a live HEAD, is an error.
+func foreignOwners(ctx context.Context, r *layout.Reader, h layout.Head) ([]VolumeRef, []layout.RootName, error) {
 	roots := map[layout.RootName]bool{}
 	if h.Current != nil {
 		roots[*h.Current] = true
@@ -226,11 +236,17 @@ func foreignOwners(ctx context.Context, r *layout.Reader, h layout.Head) ([]Volu
 	for _, s := range h.Snapshots {
 		roots[s.Root] = true
 	}
+	deleting := h.State == layout.StateDeleting || h.State == layout.StateDeleted
 	seen := map[VolumeRef]bool{}
+	var skipped []layout.RootName
 	for rn := range roots {
 		refs, err := rootRefs(ctx, r, rn)
 		if err != nil {
-			return nil, err
+			if deleting && errors.Is(err, layout.ErrMissing) {
+				skipped = append(skipped, rn)
+				continue
+			}
+			return nil, nil, err
 		}
 		for _, ref := range refs {
 			if ref.OwnerID != h.VolumeID {
@@ -243,7 +259,8 @@ func foreignOwners(ctx context.Context, r *layout.Reader, h layout.Head) ([]Volu
 		out = append(out, o)
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].Dir() < out[b].Dir() })
-	return out, nil
+	sort.Slice(skipped, func(a, b int) bool { return skipped[a].String() < skipped[b].String() })
+	return out, skipped, nil
 }
 
 // rootRefs returns every chunk reference the root names.

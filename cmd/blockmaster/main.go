@@ -227,6 +227,10 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 2
 	}
+	if err := requireProductLoop(f.lifecycleLoop, f.expectedSlotsPerVol, clusterImport); err != nil {
+		fmt.Fprintln(os.Stderr, "blockmaster:", err)
+		return 2
+	}
 	if len(topo.Volumes) == 0 && len(clusterImport.Nodes) == 0 {
 		// Without a topology the observation host classifies every
 		// volume UnknownReplicaClaim; controller can never mint.
@@ -245,6 +249,7 @@ func run(f flags) int {
 		ControllerConfig:                 authority.TopologyControllerConfig{ExpectedSlotsPerVolume: f.expectedSlotsPerVol},
 		WorkspaceMaxClockSkew:            f.workspaceMaxClockSkew,
 		FailbackRuntimeRPC:               f.failbackRuntimeRPC,
+		LifecycleProductLoop:             f.lifecycleLoop > 0,
 		FrontendPublicationRuntimeHTTP:   f.frontendPublicationRuntimeHTTP,
 		FrontendPublicationRuntimeListen: f.frontendPublicationRuntimeListen,
 		StrictJournalIsolation:           f.strictJournalIsolation,

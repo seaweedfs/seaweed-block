@@ -120,7 +120,7 @@ func TestIntegration_CatalogRestoreAndDelete(t *testing.T) {
 	if _, err := cat.DeleteSnapshot(ctx, src, "daily"); !errors.Is(err, layout.ErrHasDependents) {
 		t.Fatalf("delete a depended-on snapshot: %v", err)
 	}
-	if err := cat.DeleteVolume(ctx, tgt, okDeleteAuthority{}); err != nil {
+	if _, err := cat.DeleteVolume(ctx, tgt, okDeleteAuthority{}); err != nil {
 		t.Fatalf("delete the target: %v", err)
 	}
 	if objs, err := cat.listObjects(ctx, tgt); err != nil || len(objs) != 0 {
