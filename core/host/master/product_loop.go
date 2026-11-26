@@ -529,6 +529,17 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		// and every start counts toward flap history (#128). The
 		// promotion rules below are unchanged.
 		h.recordCurrentBootFact(placement.VolumeID)
+		// A fencing round fenced survivors above this line and nothing was
+		// published (e.g. the operator's refused failover): continue the
+		// line's own primary at e+1 when it is back and answers ready,
+		// before any candidate check, as the supported gate does.
+		if line, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID); ok && line.Assigned &&
+			h.pendingFence(placement.VolumeID, line.Epoch) && h.freshPrimaryAcceptable(placement.VolumeID, line.ReplicaID) {
+			if heal, healed := h.healAfterFailedFence(placement.VolumeID, line); healed {
+				directAsks = append(directAsks, heal)
+				continue
+			}
+		}
 		if len(placement.Slots) < 2 || !placementIsConcreteExistingReplica(placement) || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
 			continue
 		}
@@ -1058,6 +1069,13 @@ func (h *Host) recordCurrentBootFact(volumeID string) {
 
 // freshCurrentSlot returns the replica's own fresh heartbeat slot from
 // the observation store (server facts folded in).
+// freshPrimaryAcceptable: the replica has a fresh heartbeat slot that is
+// reachable, eligible and not withdrawn.
+func (h *Host) freshPrimaryAcceptable(volumeID, replicaID string) bool {
+	s, ok := h.freshCurrentSlot(volumeID, replicaID)
+	return ok && s.Reachable && s.Eligible && !s.Withdrawn
+}
+
 func (h *Host) freshCurrentSlot(volumeID, replicaID string) (authority.ReplicaCandidate, bool) {
 	if h.obs == nil {
 		return authority.ReplicaCandidate{}, false
