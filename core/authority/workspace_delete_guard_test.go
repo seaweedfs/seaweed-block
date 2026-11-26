@@ -13,7 +13,7 @@ import (
 func TestDeletionReservationGuardSites(t *testing.T) {
 	// A new field access or grant-bound writer must join the causal controls.
 	flagSites := map[string]bool{
-		"ReserveWorkspaceDeletion": true, "NoLiveWorkspaceLease": true,
+		"reserveWorkspaceDeletion": true, "NoLiveWorkspaceLease": true,
 		"applyWithWorkspaceMove": true, "MoveWorkspace": true,
 		"RenewWorkspaceLease": true, "firstWorkspaceGrant": true,
 		"regrantWorkspaceLease": true, "extendWorkspaceLease": true,
