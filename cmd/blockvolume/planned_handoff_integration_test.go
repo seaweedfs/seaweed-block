@@ -577,19 +577,7 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 // test's own output keeps only the log's tail, and a bring-up decision is
 // at its head.
 func keepFullLog(t *testing.T, d *daemon) {
-	dir := os.Getenv("SWBLOCK_TEST_LOG_DIR")
-	if dir == "" {
-		return
-	}
-	data, err := os.ReadFile(d.log)
-	if err == nil {
-		err = os.MkdirAll(dir, 0o755)
-	}
-	if err == nil {
-		name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()) + "-" + d.name + ".log"
-		err = os.WriteFile(filepath.Join(dir, name), data, 0o644)
-	}
-	if err != nil {
+	if err := keepLogCopy(t.Name(), d.name, d.log); err != nil {
 		t.Logf("%s: full log not kept: %v", d.name, err)
 	}
 }
