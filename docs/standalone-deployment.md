@@ -140,14 +140,21 @@ Do these steps before you start blockvolume:
    - `--failback-runtime-rpc`: the operator's failover (`sw-block ops
      failover`, below) calls it. Without it there is no manual failover.
 
-   The single-replica start above needs neither.
+   The failover needs an admin client certificate, so this blockmaster runs
+   with authentication: the four mutual-TLS flags and `--audit-log`, which is
+   required with them (see
+   [Authenticate the control API](operator-guide.md#authenticate-the-control-api)).
+   The single-replica start above needs none of these.
 
    ```bash
    blockmaster --authority-store /var/lib/sw-block-master/authority \
      --lifecycle-store /var/lib/sw-block-master/lifecycle \
      --cluster-spec /etc/sw-block/cluster-spec.yaml --expected-slots-per-volume 3 \
      --lifecycle-product-loop-interval 100ms --failback-runtime-rpc \
-     --listen 127.0.0.1:9180
+     --tls-cert /etc/sw-block/tls/master.crt --tls-key /etc/sw-block/tls/master.key \
+     --tls-client-ca /etc/sw-block/tls/ca.crt --role-file /etc/sw-block/tls/roles \
+     --audit-log /var/lib/sw-block-master/audit.log \
+     --listen 192.0.2.10:9180
    ```
 
    **Replicated volumes in this release:**

@@ -54,7 +54,9 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 ## Authenticate the control API
 
 `blockmaster` authenticates every gRPC call with mutual TLS when it starts with all four of `--tls-cert`,
-`--tls-key`, `--tls-client-ca` and `--role-file`. Without them it is in development mode: plaintext, loopback only,
+`--tls-key`, `--tls-client-ca` and `--role-file`. With them `--audit-log <path>` is required: without it blockmaster
+refuses to start (`authentication needs --audit-log: every changing call is recorded before it runs, and is refused
+when it cannot be`). Without the four it is in development mode: plaintext, loopback only,
 and it logs `UNAUTHENTICATED CONTROL API on <addr> (development mode)` once a minute. **Upgrading:** `--insecure-external-bind`
 is refused at start; drop it, and give a blockmaster that listens off-host the four mutual-TLS flags.
 
@@ -62,7 +64,7 @@ is refused at start; drop it, and give a blockmaster that listens off-host the f
 `viewer`, `operator`, `admin` (people and tools; each includes the one before it) or `node` (a volume host; its id is
 its `--server-id`). A certificate's CN must equal its line's id. A node may act only for its own server id. Two lines with one node id are two keys of one server (for a rotation: add the new line, move the host to the new certificate, remove the old line), never two hosts: one server id names one host. A forced
 move needs `admin`. `kill -HUP` reloads the file. A removed line is refused from the next call, and its open streams
-end at the reload. A malformed file keeps the previous table and says so in the log. `--audit-log <path>` appends
+end at the reload. A malformed file keeps the previous table and says so in the log. The audit log appends
 one JSON line per person's call, per role-file reload and per refused node call (at most once a minute per
 certificate and method). A changing call (create, delete, place, revoke, move, register a binding, failback) is
 written as an attempt before it runs: if the line cannot be written within 2 s the call is refused as "audit
