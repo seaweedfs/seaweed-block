@@ -38,6 +38,12 @@ type attestedStores struct {
 	// (creation ended). A record written before this field existed has none,
 	// so an established volume is never reopened.
 	AwaitingFirstReady bool `json:"awaiting_first_ready,omitempty"`
+	// DeleteWithoutAck: a delete without the holder's acknowledgement was
+	// admitted while the volume's stores were still awaited (stage 1),
+	// written before the delete's reservation. It freezes the record in
+	// stage 1: the wait never ends after it, so the primary, whose
+	// assignment keeps awaiting the stores, never serves.
+	DeleteWithoutAck bool `json:"delete_without_ack,omitempty"`
 }
 
 // storeAttestations is the master's record of which store each replica
@@ -159,6 +165,10 @@ func (s *storeAttestations) awaited(volumeID string, current []string) (waiting,
 	if waiting > 0 || len(current) == 0 {
 		return waiting, len(current)
 	}
+	if v.DeleteWithoutAck {
+		// A delete without acknowledgement froze the wait: it never ends.
+		return 1, len(current)
+	}
 	vols := make(map[string]attestedStores, len(s.vols))
 	for k, x := range s.vols {
 		vols[k] = x
@@ -188,7 +198,7 @@ func (s *storeAttestations) awaitingFirstReady(volumeID string) bool {
 }
 
 // noteFirstReady records, durably and for good, that the volume's creation
-// ended. It reports whether creation has ended (false: it may not end now).
+// ended. It reports whether creation has ended.
 func (s *storeAttestations) noteFirstReady(volumeID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -208,6 +218,53 @@ func (s *storeAttestations) noteFirstReady(volumeID string) (bool, error) {
 	s.vols = vols
 	s.notifyLocked(volumeID)
 	return true, nil
+}
+
+// markDeleteWithoutAck admits, durably, a delete without the holder's
+// acknowledgement of a volume whose stores are still awaited (stage 1: its
+// primary has served nothing), in the same lock as the end of the wait:
+// the wait cannot end between the check and the mark, and never ends after
+// it. false: the volume is past stage 1 (or never waited), and the
+// ordinary delete, refused while a lease is live, applies.
+func (s *storeAttestations) markDeleteWithoutAck(volumeID string, current []string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, had := s.vols[volumeID]
+	if !had || len(v.Initial) == 0 {
+		return false, nil
+	}
+	if v.DeleteWithoutAck {
+		return true, nil
+	}
+	waiting := 0
+	for _, id := range current {
+		if _, ok := v.Stores[id]; !ok {
+			waiting++
+		}
+	}
+	if waiting == 0 || len(current) == 0 {
+		return false, nil // every store recorded: the wait ends at its next read
+	}
+	vols := make(map[string]attestedStores, len(s.vols))
+	for k, x := range s.vols {
+		vols[k] = x
+	}
+	v.DeleteWithoutAck = true
+	vols[volumeID] = v
+	if err := s.persist(vols); err != nil {
+		return false, err
+	}
+	s.vols = vols
+	s.notifyLocked(volumeID)
+	return true, nil
+}
+
+// deleteWithoutAck: a delete without the holder's acknowledgement was
+// admitted for the volume.
+func (s *storeAttestations) deleteWithoutAck(volumeID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.vols[volumeID].DeleteWithoutAck
 }
 
 // record merges att into the volume's record, in one write: each replica it
@@ -244,6 +301,7 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 	}
 	next.Initial = cur.Initial                       // cleared only by awaited
 	next.AwaitingFirstReady = cur.AwaitingFirstReady // cleared only by noteFirstReady
+	next.DeleteWithoutAck = cur.DeleteWithoutAck     // set only by markDeleteWithoutAck, never cleared
 	if had && sameAttestation(cur, next) {
 		return nil
 	}
@@ -261,7 +319,7 @@ func (s *storeAttestations) record(att *control.StoreAttestation) error {
 }
 
 func sameAttestation(a, b attestedStores) bool {
-	if a.Primary != b.Primary || a.Epoch != b.Epoch || len(a.Stores) != len(b.Stores) || len(a.Initial) != len(b.Initial) || a.AwaitingFirstReady != b.AwaitingFirstReady {
+	if a.Primary != b.Primary || a.Epoch != b.Epoch || len(a.Stores) != len(b.Stores) || len(a.Initial) != len(b.Initial) || a.AwaitingFirstReady != b.AwaitingFirstReady || a.DeleteWithoutAck != b.DeleteWithoutAck {
 		return false
 	}
 	for k, v := range a.Stores {

@@ -24,6 +24,20 @@ func (p *Publisher) beforeWorkspaceGrantLock(site string) {
 // not reenter Publisher. A replay does no I/O. On startup, call this for every
 // reloaded committed reservation before serving requests (persist is then nil).
 func (p *Publisher) ReserveWorkspaceDeletion(ctx context.Context, volume string, persist func() error) error {
+	return p.reserveWorkspaceDeletion(ctx, volume, true, persist)
+}
+
+// ReserveNeverCreatedWorkspaceDeletion is the delete reservation of a volume
+// whose creation never completed (the master's record of it never left the
+// creation phase): it served nothing and acknowledged nothing, and its
+// creating holder may be broken, so a lease still live now does not refuse
+// it. The reservation stops every grant for the volume from then on, and the
+// delete's HEAD update still waits until no lease is live (NoLiveWorkspaceLease).
+func (p *Publisher) ReserveNeverCreatedWorkspaceDeletion(ctx context.Context, volume string, persist func() error) error {
+	return p.reserveWorkspaceDeletion(ctx, volume, false, persist)
+}
+
+func (p *Publisher) reserveWorkspaceDeletion(ctx context.Context, volume string, refuseLive bool, persist func() error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -39,7 +53,7 @@ func (p *Publisher) ReserveWorkspaceDeletion(ctx context.Context, volume string,
 	// irreversible step: nothing is persisted while a lease is live now.
 	// This decides nothing for safety (the closed grant writers and the
 	// check at the delete's HEAD update do); it stops an outage by mistake.
-	if persist != nil {
+	if persist != nil && refuseLive {
 		if err := p.liveLeaseLocked(volume); err != nil {
 			return fmt.Errorf("%w: %w", ErrWorkspaceDeleteRefused, err)
 		}

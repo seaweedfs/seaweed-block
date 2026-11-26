@@ -270,3 +270,28 @@ func TestDeleteReservationContextAndPersistenceFailuresStayUnknown(t *testing.T)
 		})
 	}
 }
+
+// A volume whose creation never completed is reserved for delete although
+// its holder's lease is live now (it served nothing; its holder may be
+// broken): the reservation stops the holder's renewals, and the HEAD update
+// still waits until the lease has lapsed.
+func TestNeverCreatedDeleteIsReservedUnderALiveLease(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClock()
+	p := newLeasePublisher(t, &deleteGrantStore{}, 30*time.Second, c)
+	bindAndGrant(t, p, "v", "r")
+	persisted := false
+	if err := p.ReserveNeverCreatedWorkspaceDeletion(ctx, "v", func() error { persisted = true; return nil }); err != nil || !persisted {
+		t.Fatalf("reserve of a never-created volume under a live lease: %v (persisted %t)", err, persisted)
+	}
+	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err == nil {
+		t.Fatal("the never-created volume's holder renewed after the reservation")
+	}
+	if err := p.NoLiveWorkspaceLease(ctx, "v"); err == nil {
+		t.Fatal("the HEAD update was admitted while the lease may still be live")
+	}
+	c.at(1000)
+	if err := p.NoLiveWorkspaceLease(ctx, "v"); err != nil {
+		t.Fatalf("after the lease lapsed: %v", err)
+	}
+}
