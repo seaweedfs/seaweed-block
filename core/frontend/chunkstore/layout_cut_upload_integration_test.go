@@ -13,6 +13,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -119,30 +120,58 @@ func TestIntegration_CutUploadLeavesNoEntryOrACompleteOne(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
-		began := -1
-		sc := bufio.NewScanner(stdout)
-		for sc.Scan() {
-			line := sc.Text()
-			if strings.HasPrefix(line, "CUT-ERR") {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-				t.Fatalf("round %d: the child's upload failed before the cut: %s", round, line)
+		// Every line the child writes is read until its stdout closes, so an
+		// upload it began during the delay or the kill is counted, and a
+		// CUT-ERR at any point fails the round.
+		lines := make(chan string, 64)
+		go func() {
+			sc := bufio.NewScanner(stdout)
+			for sc.Scan() {
+				lines <- sc.Text()
+			}
+			close(lines)
+		}()
+		began, cutErr := -1, ""
+		note := func(line string) {
+			if strings.HasPrefix(line, "CUT-ERR") && cutErr == "" {
+				cutErr = line
 			}
 			if n, ok := strings.CutPrefix(line, "CUT-BEGIN "); ok {
-				began, _ = strconv.Atoi(n)
-				if began == target {
-					break
+				if i, err := strconv.Atoi(n); err == nil && i > began {
+					began = i
 				}
+			}
+		}
+		for line := range lines {
+			note(line)
+			if began >= target || cutErr != "" {
+				break
 			}
 		}
 		time.Sleep(delay)
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		for line := range lines { // to EOF: the child is gone
+			note(line)
+		}
+		waitErr := cmd.Wait()
+		if cutErr != "" {
+			t.Fatalf("round %d: the child's upload failed on its own, not by the cut: %s", round, cutErr)
+		}
+		ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+		if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+			t.Fatalf("round %d: the child did not die by the cut (SIGKILL): %v; stderr: %s", round, waitErr, stderr.String())
+		}
 		if began < 0 {
 			t.Fatalf("round %d: the child began no upload: %s", round, stderr.String())
 		}
-		// Every object the child began: absent, or exactly the bytes its name hashes.
-		for i := 0; i <= began; i++ {
+		// Objects 0..last: every one the child began is absent (only the last,
+		// the one in flight) or exactly the bytes its name hashes; one it never
+		// began is absent. At least the first four are checked every round.
+		last := began
+		if last < 3 {
+			last = 3
+		}
+		for i := 0; i <= last; i++ {
 			rel, data := cutObject(seed, i)
 			_, found, err := f.Stat(ctx, rel)
 			if err != nil {
@@ -152,8 +181,13 @@ func TestIntegration_CutUploadLeavesNoEntryOrACompleteOne(t *testing.T) {
 				if i < began {
 					t.Fatalf("round %d object %d: a completed upload left no entry", round, i)
 				}
-				absent++
+				if i == began {
+					absent++
+				}
 				continue
+			}
+			if i > began {
+				t.Fatalf("round %d object %d: an entry exists for an upload the child never began", round, i)
 			}
 			raw, ok, err := f.Fetch(ctx, path.Join(root, rel))
 			if err != nil || !ok {
@@ -166,8 +200,8 @@ func TestIntegration_CutUploadLeavesNoEntryOrACompleteOne(t *testing.T) {
 				complete++
 			}
 		}
-		// A new session completes whatever the cut left.
-		for i := 0; i <= began; i++ {
+		// A new session completes every object 0..last, whatever the cut left.
+		for i := 0; i <= last; i++ {
 			rel, data := cutObject(seed, i)
 			if err := layout.EnsureObject(ctx, f, rel, data, fmt.Sprintf("recover-%d", round)); err != nil {
 				t.Fatalf("round %d object %d: recovery upload: %v", round, i, err)

@@ -34,6 +34,18 @@ func damageSeed(t *testing.T, r *fakeChunkRemote, idx int, damage func([]byte) [
 	}
 }
 
+// chunkExtent reads every block of chunk idx straight from the extent file,
+// below any cache or WAL, so a refusal that wrote the extent is caught even
+// if absent and localBlocks look untouched.
+func chunkExtent(t *testing.T, s *WALStore, idx int) []byte {
+	t.Helper()
+	var out []byte
+	for b := uint32(idx * ctChunkBlocks); b < uint32((idx+1)*ctChunkBlocks); b++ {
+		out = append(out, extentBytes(t, s, b)...)
+	}
+	return out
+}
+
 var readVerifyDamages = map[string]func([]byte) []byte{
 	"flipped byte in the read block": func(b []byte) []byte { b[7] ^= 0xff; return b },
 	"flipped byte elsewhere":         func(b []byte) []byte { b[len(b)-1] ^= 0xff; return b },
@@ -47,6 +59,7 @@ func TestPoolReadVerify_GuestReadMissRefusesAChunkOffItsName(t *testing.T) {
 			s, layer, remote, _ := hydrationFixture(t, 2, 64)
 			restore := damageSeed(t, remote, 1, damage)
 			lba := uint32(1 * ctChunkBlocks) // first block of chunk 1
+			before := chunkExtent(t, s, 1)
 			got, err := s.ReadContext(boundedCtx(t, context.Background()), lba)
 			if !errors.Is(err, ErrChunkContentMismatch) {
 				t.Fatalf("read of a damaged chunk: %v; want ErrChunkContentMismatch", err)
@@ -64,6 +77,9 @@ func TestPoolReadVerify_GuestReadMissRefusesAChunkOffItsName(t *testing.T) {
 			if !absent || installed {
 				t.Fatalf("after the refusal: chunk absent %v, a block installed %v; want absent, none", absent, installed)
 			}
+			if !bytes.Equal(chunkExtent(t, s, 1), before) {
+				t.Fatal("the refused fill changed the chunk's extent bytes")
+			}
 			restore()
 			got, err = s.ReadContext(boundedCtx(t, context.Background()), lba)
 			if err != nil || !bytes.Equal(got, makeBlock(ctBlockSize, byte(0x40+lba))) {
@@ -79,6 +95,7 @@ func TestPoolReadVerify_HydrationRefusesAChunkOffItsName(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, layer, remote, _ := hydrationFixture(t, 2, 64)
 			restore := damageSeed(t, remote, 2, damage)
+			before := chunkExtent(t, s, 2)
 			_, err := layer.HydrateAll(boundedCtx(t, bgFill()))
 			if !errors.Is(err, ErrChunkContentMismatch) {
 				t.Fatalf("hydration over a damaged chunk: %v; want ErrChunkContentMismatch", err)
@@ -88,6 +105,9 @@ func TestPoolReadVerify_HydrationRefusesAChunkOffItsName(t *testing.T) {
 			layer.stMu.Unlock()
 			if !absent {
 				t.Fatal("hydration installed a chunk whose bytes do not match HEAD")
+			}
+			if !bytes.Equal(chunkExtent(t, s, 2), before) {
+				t.Fatal("the refused hydration changed the chunk's extent bytes")
 			}
 			restore()
 			if p, err := layer.HydrateAll(boundedCtx(t, bgFill())); err != nil || p.Remaining != 0 {
