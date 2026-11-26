@@ -1210,17 +1210,25 @@ var ErrPlainDetachBusy = errors.New("durable: plain detach requires idle fronten
 // closing an idle frontend (including a closed handle). M5 PlainStop -> Quiesce uses
 // only the caller context, not the live-serving freeze timer.
 func (p *DurableProvider) DetachVolumePlain(ctx context.Context, volumeID string) (storage.ChunkCutResult, uint64, error) {
-	result, last, err := p.detachVolume(ctx, volumeID, true)
+	return p.detachVolumePlain(ctx, volumeID, nil)
+}
+
+func (p *DurableProvider) detachVolumePlain(ctx context.Context, volumeID string, want *SealExpectation) (storage.ChunkCutResult, uint64, error) {
+	result, last, err := p.detachVolumeExpected(ctx, volumeID, true, want)
 	if err != nil && !errors.Is(err, ErrNotChunkVolume) && !errors.Is(err, ErrChunkAwaitingAuthority) {
 		return result, last, err
 	}
 	// INV-WS-SEAL-REPLAY-001: success is always a fresh remote proof, also
 	// after restart when no layer exists, including deferred authority startup.
 	// A cached result is not sufficient.
-	return p.replayPlainSeal(ctx, volumeID, result)
+	return p.replayPlainSeal(ctx, volumeID, result, want)
 }
 
 func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, plain bool) (storage.ChunkCutResult, uint64, error) {
+	return p.detachVolumeExpected(ctx, volumeID, plain, nil)
+}
+
+func (p *DurableProvider) detachVolumeExpected(ctx context.Context, volumeID string, plain bool, want *SealExpectation) (storage.ChunkCutResult, uint64, error) {
 	p.mu.Lock()
 	h, ok := p.volumes[volumeID]
 	p.mu.Unlock()
@@ -1229,6 +1237,9 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	}
 	h.attachMu.Lock()
 	defer h.attachMu.Unlock()
+	if err := p.checkSealExpectation(volumeID, h, want); err != nil {
+		return storage.ChunkCutResult{}, 0, err
+	}
 	if h.settling {
 		return storage.ChunkCutResult{}, 0, ErrDetachOutcomeUnknown
 	}

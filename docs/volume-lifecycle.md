@@ -257,6 +257,18 @@ the volume refuses I/O on this host. Do not go on after any other answer (see
 the table below). Repeating the command is safe: it answers from the sealed
 HEAD.
 
+The HTTP plain-seal request can additionally bind the intended holder:
+`"expectedHolder":{"replicaID":"R","epoch":E,"claimID":"C"}`.
+`replicaID` and a positive `epoch` are required when this object is present;
+`claimID` is optional when unknown. The receiver checks its own assignment
+before stopping, and checks the expected identity again under attachment
+serialization before closing admission. A different replica, epoch or supplied
+claim returns HTTP 409 `holder_changed`, `retryable:false`; it does not stop
+the replacement. A successful conditional reply also contains the actual
+sealed `holder` (host/replica) alongside `headEpoch`. The caller must compare
+both to its request before revoking. Omitting `expectedHolder` preserves the
+existing request and response shape. This form requires `plain:true`.
+
 To check: `sw-block ops chunk show --master MASTER --volume v1 --chunk-filer FILER` shows
 `head.State` `detached`, `head.Holder` `s1/R`, `head.Epoch` E, a nonempty
 `head.ClaimID`, `head.Gen` G and a non-null `head.Current`. Its `head.Position`
