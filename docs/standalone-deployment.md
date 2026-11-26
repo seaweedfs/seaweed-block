@@ -152,11 +152,17 @@ Do these steps before you start blockvolume:
    [Authenticate the control API](operator-guide.md#authenticate-the-control-api)).
    The single-replica start above needs none of these.
 
+   Set `--launcher-replication-ack` to the same mode as every replicated
+   volume's blockvolume `--replication-ack`; the examples use `sync-quorum`.
+   Both default to `best-effort`, which acknowledges a write with no replica
+   (see Failover below).
+
    ```bash
    blockmaster --authority-store /var/lib/sw-block-master/authority \
      --lifecycle-store /var/lib/sw-block-master/lifecycle \
      --cluster-spec /etc/sw-block/cluster-spec.yaml --expected-slots-per-volume 3 \
      --lifecycle-product-loop-interval 100ms --failback-runtime-rpc \
+     --launcher-replication-ack sync-quorum \
      --tls-cert /etc/sw-block/tls/master.crt --tls-key /etc/sw-block/tls/master.key \
      --tls-client-ca /etc/sw-block/tls/ca.crt --role-file /etc/sw-block/tls/roles \
      --audit-log /var/lib/sw-block-master/audit.log \
@@ -184,8 +190,16 @@ Do these steps before you start blockvolume:
      - A primary whose heartbeat is stale (its host is off, or blockmaster
        cannot reach it), or that answers that it is not ready, is replaced
        through a fencing round. blockmaster fences the other replicas at the
-       next epoch and promotes one only when enough of them answer. The new
-       primary holds every write the old one acknowledged.
+       next epoch and promotes one only when enough of them answer. With
+       `--replication-ack` `sync-quorum` or `sync-all`, the new primary holds
+       every write the old one acknowledged.
+     - With `best-effort` (the default of `--replication-ack`) a write is
+       acknowledged after the primary's own sync, with no replica. An
+       automatic failover can then lose the writes acknowledged last, and an
+       old primary that is only partitioned keeps accepting writes that the
+       new primary never sees. Do not use it for a replicated volume whose
+       acknowledged writes must survive a failover: set `--replication-ack`
+       to `sync-quorum` (or `sync-all`).
      - A primary whose heartbeat is fresh but that does not answer the probe
        is unknown, not failed: it is not replaced by itself. Nor is a
        restarted primary inside its start grace.
@@ -202,9 +216,10 @@ Do these steps before you start blockvolume:
        `sw-block ops failover -h` describes the round and its exit codes.
    - **Reads during a partition.** An old primary cut off from blockmaster
      but still reachable by its clients can serve reads of its old data until
-     the partition ends. Its writes are refused, because the replicas it
-     replicates to are fenced at the new epoch. The same holds after the
-     operator's failover. Power the old node off or cut it from its clients to
+     the partition ends. With `sync-quorum` or `sync-all` its writes are
+     refused, because the replicas it replicates to are fenced at the new
+     epoch; with `best-effort` it keeps accepting them (above). The same holds
+     after the operator's failover. Power the old node off or cut it from its clients to
      end this window.
 
 3. **Start blockvolume with the identity of one slot.** `--volume-id`,
