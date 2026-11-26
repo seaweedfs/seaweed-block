@@ -1093,6 +1093,18 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		return
 	}
 
+	// A line issued for another process of this replica is the dead
+	// process's: its sessions (endpoint version, session id) are the ones
+	// each replica still holds, and a session this process opened on it
+	// could equal one of them. Nothing is adopted or recorded (no
+	// assignment, watchdog, replica set or role) until the master re-issues
+	// the line for this process (a new endpoint version).
+	if inc := fact.GetLineIncarnation(); inc != "" && inc != h.incarnation {
+		h.log.Printf("blockvolume: volume %s line epoch=%d EV=%d was issued for process %s, this is %s: NOT adopting until it is re-issued",
+			h.cfg.VolumeID, fact.Epoch, fact.EndpointVersion, inc, h.incarnation)
+		return
+	}
+
 	h.recordSelfAssignment(fact)
 	// A fact that awaits replica stores closes the frontend at once; one
 	// that carries them all opens it only after the peers' expected stores
@@ -1127,17 +1139,6 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 				h.cfg.VolumeID, fact.Epoch, refused)
 			return
 		}
-	}
-
-	// A line issued for another process of this replica is the dead
-	// process's: its sessions (endpoint version, session id) are the ones
-	// each replica still holds, and a session this process opened on it
-	// could equal one of them. Nothing is adopted until the master
-	// re-issues the line for this process (a new endpoint version).
-	if inc := fact.GetLineIncarnation(); inc != "" && inc != h.incarnation {
-		h.log.Printf("blockvolume: volume %s line epoch=%d EV=%d was issued for process %s, this is %s: NOT adopting until it is re-issued",
-			h.cfg.VolumeID, fact.Epoch, fact.EndpointVersion, inc, h.incarnation)
-		return
 	}
 
 	// The target's own store must still show what the master probed before

@@ -28,6 +28,12 @@ func TestHost_ApplyFact_LineIssuedForAnotherProcessIsNotAdopted(t *testing.T) {
 	if r.callCount.Load() != 0 || a.callCount.Load() != 0 {
 		t.Fatalf("the dead process's line was adopted: replica sets %d, assignments %d", r.callCount.Load(), a.callCount.Load())
 	}
+	h.ownAssignmentMu.RLock()
+	recorded := h.ownAssignmentEpoch
+	h.ownAssignmentMu.RUnlock()
+	if recorded != 0 {
+		t.Fatalf("the dead process's line was recorded as this process's assignment (epoch %d)", recorded)
+	}
 	h.applyFixtureFact(fact(2, "p2"))
 	if r.callCount.Load() != 1 || a.callCount.Load() != 1 || a.lastInfo.EndpointVersion != 2 {
 		t.Fatalf("the line re-issued for this process: replica sets %d, assignments %d (EV %d); want both at EV 2", r.callCount.Load(), a.callCount.Load(), a.lastInfo.EndpointVersion)

@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 )
 
 // A restarted primary process (a new incarnation at the same addresses)
@@ -197,5 +199,39 @@ func TestWorkspaceRestartReissueTouchesOnlyTheEndpointVersion(t *testing.T) {
 	}
 	if _, err := p.RenewWorkspaceLease(ctx, "v", "r", 1); err != nil {
 		t.Fatalf("the holder no longer renews at its epoch: %v", err)
+	}
+}
+
+// An ask built outside the controller names no process (the heal after a
+// failed fencing round, a planned or workspace move, an operator's
+// request). The publisher issues its line for the process the target
+// reports now, so that process's first report as primary re-issues
+// nothing: one endpoint version, not a second right after the promotion.
+func TestPublisher_AskWithoutAProcessIsIssuedForTheReportedOne(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil))
+	reported := map[string]string{"r1": "p1", "r2": "q7"}
+	pub.SetIncarnationSource(func(volumeID, replicaID string) string { return reported[replicaID] })
+	if err := pub.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d1", CtrlAddr: "c1", Intent: IntentBind}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := pub.LastPublished("v1", "r1"); got.Incarnation != "p1" {
+		t.Fatalf("bind without a process: issued for %q; want the reported p1", got.Incarnation)
+	}
+	heal := AssignmentAsk{VolumeID: "v1", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentReassign,
+		Evidence: adapter.PrimaryEvidence{Kind: adapter.PrimaryKindForced}}
+	if err := pub.apply(heal); err != nil {
+		t.Fatal(err)
+	}
+	line, _ := pub.LastPublished("v1", "r2")
+	if line.Incarnation != "q7" {
+		t.Fatalf("reassign without a process: issued for %q; want the reported q7", line.Incarnation)
+	}
+	// q7's first report: the controller's refresh names q7, the line's own
+	// process, and the publisher re-issues nothing.
+	if err := pub.apply(AssignmentAsk{VolumeID: "v1", ReplicaID: "r2", DataAddr: "d2", CtrlAddr: "c2", Intent: IntentRefreshEndpoint, Incarnation: "q7"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := pub.LastPublished("v1", "r2"); got.EndpointVersion != line.EndpointVersion {
+		t.Fatalf("the promoted process's first report re-issued its line: EV %d -> %d", line.EndpointVersion, got.EndpointVersion)
 	}
 }

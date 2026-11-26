@@ -120,6 +120,11 @@ type Publisher struct {
 
 	nextSubID atomic.Uint64
 
+	// incarnationOf is the latest process incarnation a replica reports
+	// (SetIncarnationSource); its own lock, never taken under mu.
+	incarnationMu sync.RWMutex
+	incarnationOf func(volumeID, replicaID string) string
+
 	mu    sync.Mutex
 	state map[subKey]assignmentState
 	subs  map[subKey][]*subscription
@@ -465,6 +470,15 @@ func (p *Publisher) closeAllSubscriptions() {
 // production code that constructs an adapter.AssignmentInfo with a
 // non-zero Epoch. The structural non-forgeability test in
 // authority_test.go enforces this boundary at repo scope.
+// SetIncarnationSource gives the publisher the latest process incarnation
+// each replica reports, for asks that do not name one (see
+// AssignmentAsk.Incarnation). nil (the default) records what asks name.
+func (p *Publisher) SetIncarnationSource(of func(volumeID, replicaID string) string) {
+	p.incarnationMu.Lock()
+	p.incarnationOf = of
+	p.incarnationMu.Unlock()
+}
+
 func (p *Publisher) apply(ask AssignmentAsk) error {
 	if p.publicationAdmission != nil {
 		return p.publicationAdmission(ask, func() error { return p.applyWithWorkspaceMove(ask, nil) })
@@ -475,6 +489,19 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGrant) error {
 	if err := validateAsk(ask); err != nil {
 		return err
+	}
+	// An ask built without the target's process (a heal, a planned move, a
+	// workspace move, an operator's request) records the one the target
+	// reports now, so its line is issued for that process and its first
+	// report re-issues nothing. Read before p.mu: the source is the
+	// observation store, which reads the publisher.
+	if ask.Incarnation == "" {
+		p.incarnationMu.RLock()
+		of := p.incarnationOf
+		p.incarnationMu.RUnlock()
+		if of != nil {
+			ask.Incarnation = of(ask.VolumeID, ask.ReplicaID)
+		}
 	}
 
 	p.beforeWorkspaceGrantLock("publication")

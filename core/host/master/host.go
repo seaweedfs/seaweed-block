@@ -292,6 +292,15 @@ func New(cfg Config) (*Host, error) {
 		Sink:      sink,
 		Reader:    boot.Publisher,
 	})
+	// An ask built outside the controller (a heal, a planned or workspace
+	// move, an operator's request) is issued for the process its target
+	// reports now.
+	boot.Publisher.SetIncarnationSource(func(volumeID, replicaID string) string {
+		if f, ok := obs.Store().SlotFact(volumeID, replicaID); ok {
+			return f.Incarnation
+		}
+		return ""
+	})
 
 	lifecycleStores, err := openLifecycleStores(cfg.LifecycleStoreDir)
 	if err != nil {
