@@ -521,7 +521,7 @@ The commands below use these placeholders:
 - **Status:** `GET STATUS/status/durable?volume=<id>` shows the schedule under `Chunk.ScheduledSnapshot`: `lastOkNs`, `nextDueNs`, `lastFailure`, `skipped` and `snapshot_overdue`.
 
 ```bash
-sw-block ops chunk snapshots --volume v1 --chunk-filer FILER          # list
+sw-block ops chunk snapshots --master MASTER --volume v1 --chunk-filer FILER          # list
 sw-block ops chunk snapshot --volume v1 --name before-upgrade --status-addr STATUS   # take one now
 ```
 
@@ -535,7 +535,7 @@ Space comes back in two steps. Neither is immediate.
    - A deleted snapshot's unshared chunks are therefore removed by the first pass after the delete. A pass waits while a snapshot is being taken (it is tried again shortly), a cut cancels a pass in progress, and a server that no longer holds the volume removes nothing. A snapshot deleted with `sw-block ops chunk` (not through the holder) is cleaned at the next periodic pass.
 
    ```bash
-   sw-block ops chunk snapshot-delete --volume v1 --name sched-20261120T031204Z --chunk-filer FILER
+   sw-block ops chunk snapshot-delete --master MASTER --volume v1 --name sched-20261120T031204Z --chunk-filer FILER
    # the holder's next maintenance pass removes the chunks only it named;
    # each pass logs "maintenance volume=... removed=N"
    ```
@@ -585,70 +585,32 @@ therefore see every chunk of every volume and snapshot as unreferenced.
 - Space is returned only by the two steps above (the holder's cleaning, then a SeaweedFS vacuum). `volume.vacuum`
   is safe: it compacts needles that were already deleted.
 
-### Forking a snapshot into a new volume
+### Fork and template retirement
 
-A fork creates a new volume sharing the snapshot's immutable chunks and segments:
+Fork is not supported in this release; the command is removed. Restore from a snapshot instead (below).
 
-```bash
-sw-block ops chunk fork --source v1 --snapshot before-upgrade --target v2 --chunk-filer FILER --request-id fork-v2
-```
-
-Keep the request id to retry an uncertain result. The new HEAD contains a complete image map; reads do not walk back through parent volumes or snapshots. A fork of a fork preserves the original object owners without adding a backing chain. Deleting the source snapshot does not delete objects still referenced by the fork. Use restore when the target must eventually own its data independently.
-
-### Retiring the source of a template
-
-A template is an ordinary immutable snapshot, not a separate volume kind. Keep the volume holding an offered template snapshot: volume deletion refuses while any snapshot name exists. To retire the original source instead, first move the template image into a dedicated holder using existing fork and snapshot operations.
-
-Prerequisites: `v1` is serving, its only snapshot is `seed`, and the standalone cluster spec has new volume placements for `template-holder` and `consumer`. Neither target blockvolume has started yet. Use the same filer and chunk namespace throughout.
-
-1. Create the holder:
-
-   ```bash
-   sw-block ops chunk fork --source v1 --snapshot seed --target template-holder --chunk-filer FILER --request-id fork-template-holder
-   ```
-
-2. Start `template-holder` with the normal standalone blockvolume command and its own volume id, endpoints and local root. Wait for its frontend readiness; read back the seed's known data before proceeding. Take the template snapshot:
-
-   ```bash
-   sw-block ops chunk snapshot --volume template-holder --status-addr HOLDER_STATUS --name template-v1
-   ```
-
-3. Create a consumer, start its blockvolume on its own placement and root, and verify its known data:
-
-   ```bash
-   sw-block ops chunk fork --source template-holder --snapshot template-v1 --target consumer --chunk-filer FILER --request-id fork-consumer
-   ```
-
-4. Stop the source writer. Follow [Delete a volume](volume-lifecycle.md#delete-a-volume) for `v1`: plain detach, revoke its exact replica/epoch/sealed generation, wait for its recorded ACK and natural exit, delete `seed`, then delete `v1`. Do not signal the process in place of waiting for its ACK. Require the completed delete answer and `show` state `deleted` before continuing.
-
-5. Verify both surviving images, including the holder's template snapshot:
-
-   ```bash
-   sw-block ops chunk verify --volume template-holder --all-snapshots --depth data --timeout 2m --chunk-filer FILER
-   sw-block ops chunk verify --volume consumer --all-snapshots --depth data --timeout 2m --chunk-filer FILER
-   ```
-
-   Read back the known data again and repeat both verify commands after the holder's next maintenance pass. Each holder cleans only its own volume; the objects of a deleted volume are removed by the volume delete itself.
-
-Keep `template-holder/template-v1` while it is offered for new consumers. Retiring that snapshot later does not delete objects still referenced by existing consumers. Deleting the holder volume itself still requires the ordinary seal/revoke/ACK and snapshot-deletion procedure; do not remove its backing filer directory or object bindings by hand.
+Retiring the source of a template is not supported in this release either: a restore target depends on its source snapshot for its whole life (see [Lifetime](#lifetime-of-a-restore-target)), so the source snapshot, and therefore its volume, cannot be deleted while any target exists.
 
 ### Restoring a snapshot into a new volume
 
-A restore makes a new, independent volume from a snapshot. The source volume and its snapshot can be deleted afterwards.
+A restore makes a new volume from a snapshot. The new volume reads every chunk it has not made local from the source's snapshot, so the snapshot stays in use for as long as the new volume exists.
 
-1. **Add the target to blockmaster.** Add the target volume (for example `v2`) to blockmaster's topology, and start a blockvolume for it with the same chunk settings (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`) and the source's geometry.
-2. **Create the restore and start it:**
+1. **Add the target to blockmaster.** Add the target volume (for example `v2`) to blockmaster's topology, with the source's geometry.
+2. **Create the restore:**
 
    ```bash
-   sw-block ops chunk restore --source v1 --snapshot sched-20261120T031204Z --target v2      --chunk-filer FILER --status-addr STATUS_OF_V2
+   sw-block ops chunk restore --master MASTER --source v1 --snapshot sched-20261120T031204Z --target v2      --chunk-filer FILER --request-id restore-v2
    ```
 
-   This creates `v2` from the snapshot (idempotent by `--request-id`; the generated id is printed, so reuse it to retry) and starts the restore driver in v2's blockvolume.
-   - **Before the target is attached:** run the same command without `--status-addr` to create `v2`. Once its blockvolume is up, run `sw-block ops chunk restore --volume v2 --status-addr STATUS_OF_V2` to start the driver.
-3. **v2 serves at once.** It reads chunks it does not hold yet from the source's snapshot.
-   - Meanwhile the driver fetches every chunk and re-uploads them under v2's own keys.
-   - It then marks v2 independent: phases `hydrating`, then `owning`, then `independent`.
-   - Follow it with `sw-block ops chunk restore --volume v2 --status-addr STATUS_OF_V2 --status`.
-   - Until v2 is independent, a snapshot of v2 is refused (`restore_incomplete`).
-   - While v2 still fetches chunks, its scheduled snapshots are skipped and counted as `restoring`. After that, until it is independent, they are refused like any snapshot and show as failed attempts with that code.
+   This creates `v2` from the snapshot and prints one JSON document. It is idempotent by `--request-id` (a generated id is printed when you omit it); reuse it to retry an uncertain result. `--master` is required: it resolves each volume's layout id.
+3. **Start v2's blockvolume** with the normal standalone command, its own volume id, endpoints and local root, and the same chunk settings as the source (`--chunk-filer`, `--chunk-path`, `--chunk-control-endpoint`). v2 serves at once.
+4. **Reads fill v2.** A block in a chunk that v2 does not hold yet is read from the source's snapshot; the read waits for that chunk, which is then kept locally. There is no background copy: a chunk that is never read stays in the source's snapshot.
+   - Progress is the volume's count of chunks still absent: `Chunk.Stats.AbsentChunks` in `GET http://STATUS_OF_V2/status/durable?volume=v2` (0 means every chunk is local).
+   - To make every chunk local, read the whole device once (for example with `dd` to `/dev/null`).
+   - While any chunk is absent, v2's scheduled snapshots are skipped and counted as `restoring`.
 
+#### Lifetime of a restore target
+
+- **The source snapshot cannot be deleted** while v2 exists: `ops chunk snapshot-delete` is refused with `snapshot_has_dependents`. Delete v2 first (see [Delete a volume](volume-lifecycle.md#delete-a-volume)); the snapshot can be deleted after that.
+- **A snapshot of v2 cannot be restored:** it names the source's chunks, and the restore is refused with `restore_source_not_own`. Restore from the source's snapshot instead.
+- **v2's own writes stay in v2:** the source's snapshot never changes.

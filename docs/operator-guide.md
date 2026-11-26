@@ -117,7 +117,7 @@ named like an admin client's or blockmaster's, but it cannot see a certificate's
   or recreate the record, then start it.
   A wrong-size local store left by an earlier release's first start is different: its log repeats `chunk attach check:
   chunkstore: geometry_mismatch` and it exits; waiting or restarting with the right flags does not help. In one sitting: stop the unit first; then check that the volume never served:
-  `sw-block ops chunk show --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
+  `sw-block ops chunk show --master <master> --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
   `"holder":""` in its head; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
   `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. If the head shows an epoch above 0 or
   a holder, do not remove these files; if the volume served before, its local store has its original size: correct the
@@ -144,7 +144,7 @@ named like an admin client's or blockmaster's, but it cannot see a certificate's
   refusal names both numbers), and warns at start when the free space is below its remaining growth plus the WAL;
   there is no override. The refusal ends the process with status 1 (`blockvolume: durable storage open: ... needs
   N (size S + WAL W)`), so the shipped unit starts it again every 5 s, refusing each time, until its start limit stops
-  it; free space on that file system, then start the unit again. A restore or fork target refused this way exists in
+  it; free space on that file system, then start the unit again. A restore target refused this way exists in
   the catalog but cannot start, and it can be neither deleted nor moved until it has started once: a delete wants
   it sealed, revoked and acknowledged, and a forced move is refused because the master knows no holder of it. To
   recover it, free space on that file system, or start it again on the same host with `--durable-root` on a local
@@ -199,10 +199,10 @@ A late upload by a dead holder into a deleted volume can remain; rerun volume-de
 - scheduled and manual snapshots;
 - deleting snapshots, and getting space back:
   - GC deletes the chunks after the grace (`--grace`, 1 hour by default), so a deleted snapshot's space is
-    reclaimed about 2 hours after the delete unless still referenced by a snapshot, fork or restore;
+    reclaimed about 2 hours after the delete unless still referenced by a snapshot or a restore target;
   - then the asynchronous SeaweedFS vacuum compacts the volume files;
 - `ops chunk verify`;
-- forking a snapshot into a new volume that shares immutable objects, or restoring it into a new, independent volume.
+- restoring a snapshot into a new volume, which reads the chunks it has not made local from that snapshot (fork is not supported in this release).
 
 A snapshot can be refused with `host_slot_busy` / `no background slot` (retryable) while every host slot is held by
 other volumes' cuts; retry with the same request id. With many volumes on a host, a snapshot may wait for a slot:
@@ -290,7 +290,7 @@ Every command on the pages above, and the test that runs it.
 | `blockvolume` under systemd: exit 75 after an expired start, restart, re-grant | `TestSystemdExpiredStartupExits75ThenRegrantServes` (`cmd/blockvolume`, a real systemd manager, tag `systemd_integration`) | binary |
 | The shipped units' start limits (`StartLimitIntervalSec=600`, `StartLimitBurst=10`, `RestartPreventExitStatus=78`) | `TestBlockvolumeUnitsBoundStartupRetries` (`internal/testops`, reads the unit files) | unit files |
 | `systemctl enable`, `stop`, `disable`, `reset-failed`, `systemd-tmpfiles --create` as written on these pages | not run: the tests above start transient units, not the installed ones | not run |
-| Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesARestoreAndAForkTargetThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
+| Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesRestoreTargetsThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
 | A snapshot refused with `host_slot_busy` / `no background slot` while every host slot is held, retried with the same request id | `TestSnapshotLadderF1VolumesOneHost` (`cmd/blockvolume`, `F1_RUN=1`, `F1_HOST_LIMIT_DIR` set, 3 slots; `F1_SLOT_RETRY_SECONDS=0` is its negative control) | binary |
 | Full local disk; full `--host-limit-dir` | `TestProcedureLocalDiskFull` (`cmd/blockvolume`, root, `testdata/diskfull.sh`); what a Linux guest sees: `TestProcedureLocalDiskFullKernelInitiator` (kernel NVMe/TCP host) | binary |
 | A first start with the wrong `--durable-blocks`: refused before any local store is created (exit 78) | `TestWrongGeometryFlagIsRefusedBeforeTheStoreIsCreated` (`cmd/blockvolume`) | binary |
