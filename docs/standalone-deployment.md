@@ -193,7 +193,10 @@ and the other startup flags. For the example systemd units, add
 volume separately; do not mint an id or copy another volume's value.
 
 This is a read-only query of the master's volume record, using the same
-TLS and token environment settings as `ops chunk`. A missing volume, an
+TLS and token environment settings as `ops chunk`. For a replicated installation
+using mutual TLS, set all three file paths: `SW_BLOCK_TLS_CERT` (client
+certificate), `SW_BLOCK_TLS_KEY` (client private key) and `SW_BLOCK_TLS_CA`
+(CA that verifies the master). A missing volume, an
 invalid identity or an unreachable master returns nonzero and prints no id;
 fix that error before starting blockvolume. The query does not create a
 volume or prove frontend readiness.
