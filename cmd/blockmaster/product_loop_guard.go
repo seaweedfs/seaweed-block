@@ -18,21 +18,24 @@ import (
 // A static --topology (whose observation controller mints) and
 // single-replica volumes are untouched.
 func requireProductLoop(interval time.Duration, expectedSlots int, spec clusterSpecImport) error {
-	for _, v := range spec.Volumes {
-		if v.ReplicationFactor > 1 && v.ReplicationFactor != expectedSlots {
+	// Every cluster-spec volume has a placement intent (a placement-only
+	// entry, without size_bytes, has no volume spec), so the placements are
+	// what is read.
+	for _, p := range spec.Placements {
+		if p.DesiredRF > 1 && p.DesiredRF != expectedSlots {
 			return fmt.Errorf("cluster spec volume %s has replication factor %d but --expected-slots-per-volume is %d: "+
 				"the master decides replicated volumes of one slot count only (one replicated factor per cluster)",
-				v.VolumeID, v.ReplicationFactor, expectedSlots)
+				p.VolumeID, p.DesiredRF, expectedSlots)
 		}
 	}
 	if interval > 0 {
 		return nil
 	}
-	for _, v := range spec.Volumes {
-		if v.ReplicationFactor > 1 {
+	for _, p := range spec.Placements {
+		if p.DesiredRF > 1 {
 			return fmt.Errorf("cluster spec volume %s has replication factor %d but --lifecycle-product-loop-interval is 0 (off): "+
 				"with --cluster-spec a replicated volume is bound and promoted only by that loop; set --lifecycle-product-loop-interval (for example 100ms)",
-				v.VolumeID, v.ReplicationFactor)
+				p.VolumeID, p.DesiredRF)
 		}
 	}
 	return nil

@@ -11,14 +11,22 @@ import (
 
 // clusterSpecWithRF writes a cluster spec of three nodes and one volume v1
 // with the given replication factor (placements on the first rf nodes).
-func clusterSpecWithRF(t *testing.T, rf int) string {
+func clusterSpecWithRF(t *testing.T, rf int) string { return clusterSpecText(t, rf, true) }
+
+// clusterSpecText is clusterSpecWithRF with or without size_bytes (without:
+// a placement-only entry, which has a placement intent and no volume spec).
+func clusterSpecText(t *testing.T, rf int, sized bool) string {
 	t.Helper()
 	var b strings.Builder
 	b.WriteString("nodes:\n")
 	for i := 1; i <= 3; i++ {
 		b.WriteString("  - server_id: s" + string(rune('0'+i)) + "\n    data_addr: 127.0.0.1:1" + string(rune('0'+i)) + "601\n    ctrl_addr: 127.0.0.1:1" + string(rune('0'+i)) + "602\n")
 	}
-	b.WriteString("volumes:\n  - id: v1\n    size_bytes: 268435456\n    replication_factor: " + string(rune('0'+rf)) + "\n    placements:\n")
+	b.WriteString("volumes:\n  - id: v1\n")
+	if sized {
+		b.WriteString("    size_bytes: 268435456\n")
+	}
+	b.WriteString("    replication_factor: " + string(rune('0'+rf)) + "\n    placements:\n")
 	for i := 1; i <= rf; i++ {
 		b.WriteString("      - server_id: s" + string(rune('0'+i)) + "\n        replica_id: r" + string(rune('0'+i)) + "\n")
 	}
@@ -109,5 +117,31 @@ func TestAClusterSpecVolumeOfAnotherReplicationFactorIsRefused(t *testing.T) {
 	}
 	if err := requireProductLoop(100*time.Millisecond, 2, spec); err != nil {
 		t.Fatalf("an RF2 volume on an expected-2 master: refused: %v", err)
+	}
+}
+
+// A placement-only replicated entry (no size_bytes: no volume spec, only a
+// placement intent) is checked the same way: RF2 on an expected-3 master is
+// refused, and RF3 with the loop off is refused.
+func TestAPlacementOnlyClusterSpecVolumeIsChecked(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		rf       int
+		interval time.Duration
+		want     string
+	}{
+		{"rf2 on expected 3", 2, 100 * time.Millisecond, "--expected-slots-per-volume is 3"},
+		{"rf3 with the loop off", 3, 0, "--lifecycle-product-loop-interval is 0"},
+	} {
+		spec, err := loadClusterSpec(clusterSpecText(t, c.rf, false))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if len(spec.Volumes) != 0 || len(spec.Placements) != 1 {
+			t.Fatalf("%s: fixture: %d volume specs, %d placements; want a placement-only entry", c.name, len(spec.Volumes), len(spec.Placements))
+		}
+		if err := requireProductLoop(c.interval, 3, spec); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: %v; want a refusal with %q", c.name, err, c.want)
+		}
 	}
 }
