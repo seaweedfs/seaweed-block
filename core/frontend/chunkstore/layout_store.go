@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path"
 	"strconv"
 	"strings"
@@ -64,7 +65,9 @@ func (s *LayoutStore) ReadHeadObserved(ctx context.Context) (h layout.Head, mtim
 	if err != nil {
 		return layout.Head{}, 0, false, err
 	}
-	if sec := e.GetAttributes().GetMtime(); sec > 0 {
+	// A time not representable in nanoseconds (past 2262) is unknown, as is
+	// none: it never wraps to a wrong value.
+	if sec := e.GetAttributes().GetMtime(); sec > 0 && sec <= math.MaxInt64/int64(1e9) {
 		mtimeNS = sec * int64(1e9)
 	}
 	return h, mtimeNS, true, nil

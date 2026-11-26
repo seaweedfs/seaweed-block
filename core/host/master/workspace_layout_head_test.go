@@ -123,6 +123,7 @@ func TestWorkspaceLayoutHEADRefusalsAndStates(t *testing.T) {
 		{name: "detached", valid: true},
 		{name: "live", state: "live", valid: true},
 		{name: "unknown mtime", valid: true, alter: func(e *filerpb.Entry) { e.Attributes = nil }},
+		{name: "out-of-range mtime", valid: true, alter: func(e *filerpb.Entry) { e.Attributes = &filerpb.FuseAttributes{Mtime: 253402300799} }}, // year 9999
 		{name: "unclaimed", state: "unclaimed", sentinel: authority.ErrWorkspaceHeadUnclaimed},
 		{name: "deleted", state: layout.StateDeleted, sentinel: authority.ErrWorkspaceHeadDeleting},
 		{name: "missing generation", alter: func(e *filerpb.Entry) { delete(e.Extended, "swb.layout.gen") }},
@@ -182,7 +183,7 @@ func TestWorkspaceLayoutHEADRefusalsAndStates(t *testing.T) {
 			}
 			got, err := read(ctx, "v")
 			wantTime := int64(100e9)
-			if tc.name == "unknown mtime" {
+			if tc.name == "unknown mtime" || tc.name == "out-of-range mtime" {
 				wantTime = 0
 			}
 			switch {
