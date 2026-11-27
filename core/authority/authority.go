@@ -577,6 +577,13 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			p.mu.Unlock()
 			return ErrRefreshNotBound
 		}
+		if exp := ask.ExpectCurrent; exp != nil {
+			cur, ok := p.volumeLineLocked(ask.VolumeID)
+			if why := expectedLineMoved(exp, cur, ok); why != "" {
+				p.mu.Unlock()
+				return fmt.Errorf("%w: volume %s %s", ErrExpectedLineMoved, ask.VolumeID, why)
+			}
+		}
 		restarted := ask.Incarnation != "" && ask.Incarnation != prev.info.Incarnation
 		if prev.info.DataAddr == ask.DataAddr && prev.info.CtrlAddr == ask.CtrlAddr && !restarted {
 			// Idempotent no-op. Do not fan out, do not log as
@@ -624,9 +631,10 @@ func (p *Publisher) applyWithWorkspaceMove(ask AssignmentAsk, grant *workspaceGr
 			return ErrReassignNotBound
 		}
 		if exp := ask.ExpectCurrent; exp != nil {
-			if cur, ok := p.volumeLineLocked(ask.VolumeID); !ok || cur.ReplicaID != exp.ReplicaID || cur.Epoch != exp.Epoch {
+			cur, ok := p.volumeLineLocked(ask.VolumeID)
+			if why := expectedLineMoved(exp, cur, ok); why != "" {
 				p.mu.Unlock()
-				return fmt.Errorf("%w: volume %s expected %s@%d, the line is %s@%d", ErrExpectedLineMoved, ask.VolumeID, exp.ReplicaID, exp.Epoch, cur.ReplicaID, cur.Epoch)
+				return fmt.Errorf("%w: volume %s %s", ErrExpectedLineMoved, ask.VolumeID, why)
 			}
 		}
 		next = adapter.AssignmentInfo{

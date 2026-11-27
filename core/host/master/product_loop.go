@@ -168,8 +168,12 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 				continue
 			}
 			if h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
-				result.SkippedCurrent++
-				continue
+				refresh, restarted := h.restartedHolderRefresh(ask)
+				if !restarted {
+					result.SkippedCurrent++
+					continue
+				}
+				ask = refresh
 			}
 			if err := h.ctrl.SubmitAssignmentAsk(ask); err != nil {
 				return result, err
@@ -178,6 +182,40 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 		}
 	}
 	return result, nil
+}
+
+// restartedHolderRefresh: the current line is this RF1 slot's at these
+// addresses, but the process reporting the slot there now is not the one
+// the line was issued for (a restarted holder, which refuses the dead
+// process's line). It returns the endpoint refresh that re-issues the line
+// for the reported process, as the topology controller does for a volume of
+// its static topology (endpointStale, refreshAsk).
+func (h *Host) restartedHolderRefresh(ask authority.AssignmentAsk) (authority.AssignmentAsk, bool) {
+	if h.obs == nil {
+		return authority.AssignmentAsk{}, false
+	}
+	// One read decides and conditions the refresh: the line must be this
+	// replica's at exactly the addresses the refresh writes, so its
+	// expectation can never name a line a move put elsewhere.
+	line, ok := h.Publisher().VolumeAuthorityLine(ask.VolumeID)
+	if !ok || !line.Assigned || line.ReplicaID != ask.ReplicaID || line.DataAddr != ask.DataAddr || line.CtrlAddr != ask.CtrlAddr {
+		return authority.AssignmentAsk{}, false
+	}
+	slot, ok := h.obs.Store().SlotFactAt(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr)
+	if !ok || slot.Incarnation == "" || slot.Incarnation == line.Incarnation {
+		return authority.AssignmentAsk{}, false
+	}
+	return authority.AssignmentAsk{
+		VolumeID:    ask.VolumeID,
+		ReplicaID:   ask.ReplicaID,
+		DataAddr:    ask.DataAddr,
+		CtrlAddr:    ask.CtrlAddr,
+		Intent:      authority.IntentRefreshEndpoint,
+		Incarnation: slot.Incarnation,
+		// Conditional on the line read here: a move that lands before the
+		// publisher mints is never rewritten back to these addresses.
+		ExpectCurrent: &authority.ExpectedLine{ReplicaID: line.ReplicaID, Epoch: line.Epoch, DataAddr: line.DataAddr, CtrlAddr: line.CtrlAddr},
+	}, true
 }
 
 func (h *Host) submitPlacementSnapshots(placements []lifecycle.PlacementIntent) (bool, int, int, []authority.AssignmentAsk, error) {
