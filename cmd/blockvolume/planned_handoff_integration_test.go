@@ -613,24 +613,28 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 	d := &daemon{name: name, log: log.Name(), done: make(chan struct{}), cancel: cancel}
 	started := false
 	t.Cleanup(func() {
+		// The teardown is deferred so it also runs when a beforeStop hook
+		// ends this cleanup with t.Fatal.
+		defer func() {
+			cancel()
+			if started {
+				select {
+				case <-d.done:
+				case <-time.After(10 * time.Second):
+					t.Errorf("%s did not exit after cancellation", name)
+				}
+			}
+			_ = log.Close()
+			if t.Failed() {
+				keepFullLog(t, d)
+				data, _ := os.ReadFile(d.log)
+				if len(data) > 16000 {
+					data = data[len(data)-16000:]
+				}
+				t.Logf("%s log:\n%s", name, data)
+			}
+		}()
 		h.runBeforeStop()
-		cancel()
-		if started {
-			select {
-			case <-d.done:
-			case <-time.After(10 * time.Second):
-				t.Errorf("%s did not exit after cancellation", name)
-			}
-		}
-		_ = log.Close()
-		if t.Failed() {
-			keepFullLog(t, d)
-			data, _ := os.ReadFile(d.log)
-			if len(data) > 16000 {
-				data = data[len(data)-16000:]
-			}
-			t.Logf("%s log:\n%s", name, data)
-		}
 	})
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start %s: %v", name, err)
@@ -814,11 +818,24 @@ func dialNVMe(t testing.TB, addr, subNQN string) *nvmeInitiator {
 	c := &nvmeInitiator{}
 	cd := nvme.ConnectData{HostID: [16]byte{0x5e, 0xa1}, SubNQN: subNQN, HostNQN: "nqn.2026-11.io.seaweedfs:handoff-test"}
 	var cntlID uint16
+	// The caller owns the connections only once both queues are connected:
+	// a failure part-way (t.Fatalf, or a recovered softTB panic) closes every
+	// socket opened so far.
+	var opened []net.Conn
+	owned := false
+	defer func() {
+		if !owned {
+			for _, conn := range opened {
+				_ = conn.Close()
+			}
+		}
+	}()
 	for qid := uint32(0); qid <= 1; qid++ {
 		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 		if err != nil {
 			t.Fatalf("nvme dial %s: %v", addr, err)
 		}
+		opened = append(opened, conn)
 		_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 		r, w := nvme.NewReader(conn), nvme.NewWriter(conn)
 		if err := w.SendHeaderOnly(0x0, &nvme.ICRequest{PDUMaxR2T: 1}, 120); err != nil {
@@ -852,6 +869,7 @@ func dialNVMe(t testing.TB, addr, subNQN string) *nvmeInitiator {
 			c.io, c.r, c.w = conn, r, w
 		}
 	}
+	owned = true
 	return c
 }
 

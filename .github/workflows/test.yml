@@ -19,7 +19,17 @@ concurrency:
 
 jobs:
   test:
-    name: go test (linux)
+    # One job, two suites, one runner selection. 'unit' is the Go suite below;
+    # 'process' runs the process-level tests: real blockmaster, blockvolume and
+    # sw-block against a pinned SeaweedFS release. Those tests are named in
+    # .github/process-level-tests.txt, and every one must PASS, so a test that
+    # skips, fails, never starts or is cut off by the timeout fails the suite.
+    # Tests that need root or systemd are not in the list (see its header).
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, process]
+    name: ${{ matrix.suite == 'unit' && 'go test (linux)' || 'process-level tests (real binaries)' }}
     # The suite writes heavily to the runner disk (real files, fsync), so a
     # Draft PR skips it; its author tests locally until the PR is ready.
     if: github.event_name == 'push' || !github.event.pull_request.draft
@@ -27,7 +37,8 @@ jobs:
     # capped at 8 cores / 8 GiB). Fork PRs never reach it: they stay on a
     # GitHub-hosted runner.
     runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
-    timeout-minutes: 40
+    # process: 44 tests in sequence, 15 to 550 s each (about 55 min in all).
+    timeout-minutes: ${{ matrix.suite == 'unit' && 40 || 90 }}
     env:
       # Pure-Go build: no package in the default build needs cgo, and the
       # hosted runner should not depend on a C toolchain being present.
@@ -53,15 +64,19 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Go version
+        if: matrix.suite == 'unit'
         run: go version
 
       - name: Build
+        if: matrix.suite == 'unit'
         run: go build ./...
 
       - name: Vet
+        if: matrix.suite == 'unit'
         run: go vet ./...
 
       - name: Test default configuration
+        if: matrix.suite == 'unit'
         # The runner disk is shared, so the long, disk-heavy, timing-sensitive
         # packages do not run here on main or on train PRs: every train runs the
         # whole suite (both configurations) on a separate test VM before it
@@ -86,35 +101,8 @@ jobs:
           # (2026-11-22), past the old 10m, so any PR touching it failed.
           go test -p=1 -short -count=1 -timeout 20m $pkgs
 
-  process-level:
-    name: process-level tests (real binaries)
-    # The release's process-level evidence (cmd/blockvolume, build tags
-    # subprocess and chunkstore_integration): real blockmaster, blockvolume and
-    # sw-block against a pinned SeaweedFS release. The tests are named in
-    # .github/process-level-tests.txt; every one must PASS, so a test that
-    # skips, fails, never starts or is cut off by the timeout fails the job.
-    # Tests that need root or systemd are not in the list (see its header).
-    if: github.event_name == 'push' || !github.event.pull_request.draft
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
-    # 44 tests in sequence; measured at 15 to 170 s each on a 4-core test host
-    # (about 40 to 50 min in all).
-    timeout-minutes: 90
-    env:
-      CGO_ENABLED: "0"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: go.mod
-          cache: ${{ runner.environment == 'github-hosted' }}
-          cache-dependency-path: go.sum
-
       - name: Self-test of the required-tests gate
+        if: matrix.suite == 'process'
         # The gate must fail on a skip, a failure, a test that never ran, one
         # cut off mid-run, and one that reports PASS and then exits nonzero or
         # hangs; this proves it before it judges the real run.
@@ -123,6 +111,7 @@ jobs:
           bash .github/scripts/run-named-tests-test.sh
 
       - name: Pinned SeaweedFS
+        if: matrix.suite == 'process'
         # The release archive is checked against its sha256 before every use,
         # also when taken from the runner's cache; a mismatch fails the step.
         # Nothing else is fetched.
@@ -146,6 +135,7 @@ jobs:
           echo "CHUNKSTORE_WEED=$bin/weed" >>"$GITHUB_ENV"
 
       - name: Build the binaries and the test binary once
+        if: matrix.suite == 'process'
         run: |
           set -euo pipefail
           bins="$RUNNER_TEMP/swblock-bins"
@@ -159,6 +149,7 @@ jobs:
           echo "KZ_HOLD_BIN=$RUNNER_TEMP/blockvolume-kzhold" >>"$GITHUB_ENV"
 
       - name: Run the named process-level tests
+        if: matrix.suite == 'process'
         # Each named test in its own process of the one test binary, in
         # sequence, so a panic or a hang in one cannot hide the others; each
         # is bounded (TEST_TIMEOUT, then killed) and its exit status is kept:

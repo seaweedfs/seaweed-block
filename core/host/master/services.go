@@ -1176,6 +1176,18 @@ func (h *Host) ingestHeartbeatRecordingHealth(msg authority.HeartbeatMessage) er
 	return nil
 }
 
+// lineAckProfile is the master's ack profile in canonical form, as every
+// assignment names it ("" when the promotion gate has none configured).
+func (h *Host) lineAckProfile() string {
+	h.promotionMu.RLock()
+	prober := h.promotionProber
+	h.promotionMu.RUnlock()
+	if ap, ok := prober.(ackProfiled); ok {
+		return canonicalAckProfile(ap.AckProfile())
+	}
+	return ""
+}
+
 // assignmentFact encodes one captured publication at the stream boundary.
 func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.AssignmentFact {
 	fact := &control.AssignmentFact{
@@ -1191,6 +1203,7 @@ func (s *services) assignmentFact(info adapter.AssignmentInfo) *control.Assignme
 		EvidenceEpoch:      info.Primary.DataEpoch,
 		EvidenceFirstLsn:   info.Primary.DataFirstLSN,
 		LineIncarnation:    info.Incarnation,
+		AckProfile:         s.host.lineAckProfile(),
 	}
 	if info.Primary.StoreID != ([16]byte{}) {
 		id := info.Primary.StoreID

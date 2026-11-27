@@ -55,6 +55,9 @@ type flusher struct {
 	// taken and the publication lock released: the window in which a
 	// concurrent append is not in this cycle's checkpoint. Tests only.
 	afterSnapshotForTest func()
+	// beforeSnapshotForTest, when set, runs after a cycle's entry checks
+	// and before it takes store.mu for the dirty-map snapshot.
+	beforeSnapshotForTest func()
 	// Pauses after materialization/fsync, before map proof preparation. Tests only.
 	afterExtentSyncForTest func()
 	// Pauses after checkpoint/reuse publication, before the outer DM cleanup.
@@ -167,8 +170,22 @@ func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 		return fmt.Errorf("flusher: pressure WAL sync: %w", err)
 	}
 
+	if f.beforeSnapshotForTest != nil {
+		f.beforeSnapshotForTest()
+	}
 	store.mu.RLock()
 	if store.closed && !allowClosed {
+		store.mu.RUnlock()
+		return nil
+	}
+	// A store opened for chunk use drains nothing before its chunk layer
+	// attaches: the dirty blocks stay in the WAL (replayed again after a
+	// crash) and are served from the dirty map; the first drain after
+	// attach marks them local (OnExtentWrite). This includes the final
+	// flush of a stop. Checked under store.mu, with the snapshot: the owner
+	// sets the hold before Recover, which takes store.mu, so a cycle that
+	// started before the hold and snapshots the recovered dirty map sees it.
+	if store.drainHeld.Load() {
 		store.mu.RUnlock()
 		return nil
 	}

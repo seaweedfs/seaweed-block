@@ -53,6 +53,9 @@ type PromotionCandidateEvidence struct {
 	// Floor is the candidate's durable epoch floor when it answered; in a
 	// fencing round it is counted only at the round's FencedEpoch.
 	Floor uint64
+	// AckProfile is the replica's own ack profile as it answered (empty: it
+	// did not say).
+	AckProfile string
 }
 
 type PromotionProbeResult struct {
@@ -60,7 +63,11 @@ type PromotionProbeResult struct {
 	// probe).
 	FencedEpoch uint64
 	AckProfile  string
-	SyncAckLSN  uint64
+	// ProfileMismatch names the answers of this round whose ack profile is
+	// missing or differs from AckProfile, or says AckProfile is unknown;
+	// empty when every answer runs AckProfile. The gates hold on it.
+	ProfileMismatch string
+	SyncAckLSN      uint64
 	// SyncAckKnown reports that SyncAckLSN is a known required
 	// acknowledgement frontier, which may be zero. A nonzero SyncAckLSN
 	// is always a known frontier; a zero SyncAckLSN without SyncAckKnown
@@ -161,8 +168,12 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 				continue
 			}
 			if h.assignmentAskAlreadyCurrent(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr) {
-				result.SkippedCurrent++
-				continue
+				refresh, restarted := h.restartedHolderRefresh(ask)
+				if !restarted {
+					result.SkippedCurrent++
+					continue
+				}
+				ask = refresh
 			}
 			if err := h.ctrl.SubmitAssignmentAsk(ask); err != nil {
 				return result, err
@@ -171,6 +182,40 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 		}
 	}
 	return result, nil
+}
+
+// restartedHolderRefresh: the current line is this RF1 slot's at these
+// addresses, but the process reporting the slot there now is not the one
+// the line was issued for (a restarted holder, which refuses the dead
+// process's line). It returns the endpoint refresh that re-issues the line
+// for the reported process, as the topology controller does for a volume of
+// its static topology (endpointStale, refreshAsk).
+func (h *Host) restartedHolderRefresh(ask authority.AssignmentAsk) (authority.AssignmentAsk, bool) {
+	if h.obs == nil {
+		return authority.AssignmentAsk{}, false
+	}
+	// One read decides and conditions the refresh: the line must be this
+	// replica's at exactly the addresses the refresh writes, so its
+	// expectation can never name a line a move put elsewhere.
+	line, ok := h.Publisher().VolumeAuthorityLine(ask.VolumeID)
+	if !ok || !line.Assigned || line.ReplicaID != ask.ReplicaID || line.DataAddr != ask.DataAddr || line.CtrlAddr != ask.CtrlAddr {
+		return authority.AssignmentAsk{}, false
+	}
+	slot, ok := h.obs.Store().SlotFactAt(ask.VolumeID, ask.ReplicaID, ask.DataAddr, ask.CtrlAddr)
+	if !ok || slot.Incarnation == "" || slot.Incarnation == line.Incarnation {
+		return authority.AssignmentAsk{}, false
+	}
+	return authority.AssignmentAsk{
+		VolumeID:    ask.VolumeID,
+		ReplicaID:   ask.ReplicaID,
+		DataAddr:    ask.DataAddr,
+		CtrlAddr:    ask.CtrlAddr,
+		Intent:      authority.IntentRefreshEndpoint,
+		Incarnation: slot.Incarnation,
+		// Conditional on the line read here: a move that lands before the
+		// publisher mints is never rewritten back to these addresses.
+		ExpectCurrent: &authority.ExpectedLine{ReplicaID: line.ReplicaID, Epoch: line.Epoch, DataAddr: line.DataAddr, CtrlAddr: line.CtrlAddr},
+	}, true
 }
 
 func (h *Host) submitPlacementSnapshots(placements []lifecycle.PlacementIntent) (bool, int, int, []authority.AssignmentAsk, error) {
@@ -307,7 +352,15 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 				directAsks = append(directAsks, heal)
 			}
 		}
-		if (len(allowed) > 0 || emptyVolumeSurvivors(result, ok)) && replacing {
+		holdReason, holdWhy := "", ""
+		if replacing && ok {
+			holdReason, holdWhy = automaticFailoverHold(result)
+		}
+		if holdReason != "" {
+			allowed = map[string]bool{}
+			h.log.Printf("blockmaster: promotion gate volume=%s current=%s %s: no automatic failover", vol.VolumeID, vol.Authority.ReplicaID, holdWhy)
+			h.recordVolumeBlockedEvent(vol.VolumeID, holdReason)
+		} else if (len(allowed) > 0 || emptyVolumeSurvivors(result, ok)) && replacing {
 			result, allowed = h.fencedDecision(vol.VolumeID, vol.Authority, result, len(candidates))
 			if len(allowed) == 0 {
 				h.noteFencePending(vol.VolumeID, vol.Authority.Epoch+1)
@@ -399,6 +452,14 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d failed: %v", volumeID, current.Epoch+1, err)
 		return plain, map[string]bool{}
 	}
+	// The fencing round's answers are the evidence the decision uses, so
+	// their profiles are checked again: a survivor reconfigured between the
+	// two rounds holds the volume like a mismatch in the plain round.
+	if fenced.ProfileMismatch != "" {
+		h.log.Printf("blockmaster: promotion gate volume=%s fencing round at %d: ack profile mismatch (%s); nothing published", volumeID, fenced.FencedEpoch, fenced.ProfileMismatch)
+		h.recordVolumeBlockedEvent(volumeID, ops.ReasonAckProfileMismatch)
+		return fenced, map[string]bool{}
+	}
 	fenced.AckProfile, fenced.SyncAckLSN, fenced.SyncAckKnown = plain.AckProfile, plain.SyncAckLSN, plain.SyncAckKnown
 	fenced.CurrentKnown, fenced.Current = plain.CurrentKnown, plain.Current
 	counted := map[string]bool{}
@@ -437,6 +498,35 @@ func (h *Host) fencedDecision(volumeID string, current authority.AuthorityBasis,
 		h.recordVolumeWaitingEvent(volumeID, ops.ReasonHighestEndNotReady, fmt.Sprintf("the highest fenced end %d is held by %v, not ready for primary", highest, holders))
 	}
 	return fenced, allowed
+}
+
+// automaticFailoverHold is the profile rule that holds a lost primary's
+// volume before any fencing round, as a blocked-event reason and a log
+// phrase ("" when none holds): the round's answers disagree with the
+// master's profile or do not name one, the master's profile is unknown, or
+// it is best_effort (a write may be on the primary alone, the same reason
+// the operator's move refuses it, plannedMoveAllowed).
+func automaticFailoverHold(result PromotionProbeResult) (reason, why string) {
+	switch {
+	case result.ProfileMismatch != "":
+		return ops.ReasonAckProfileMismatch, "ack profile mismatch (" + result.ProfileMismatch + ")"
+	case !isKnownAckProfile(result.AckProfile):
+		return ops.ReasonAckProfileMismatch, fmt.Sprintf("ack_profile=%q unknown", result.AckProfile)
+	case isBestEffortProfile(result.AckProfile):
+		return ops.ReasonBestEffortNoAutomaticFailover, "ack_profile=best_effort"
+	}
+	return "", ""
+}
+
+// isBestEffortProfile: the ack profile acknowledges a write without any
+// replica (planned_move.go's ErrPlannedMoveBestEffort).
+func isBestEffortProfile(profile string) bool {
+	return canonicalAckProfile(profile) == "best_effort"
+}
+
+// canonicalAckProfile: best-effort and best_effort are the same profile.
+func canonicalAckProfile(profile string) string {
+	return strings.ToLower(strings.ReplaceAll(profile, "-", "_"))
 }
 
 // emptyVolumeSurvivors: the plain round saw a ready replica and every answer
@@ -595,6 +685,16 @@ func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.Plac
 		} else {
 			h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s probe_unavailable reasons=%v", vol.VolumeID, current.ReplicaID, evidence.Reasons)
 			h.recordPromotionProbeUnavailableEvent(vol.VolumeID, current.ReplicaID)
+		}
+		// A lost primary is held before its candidates are read when the
+		// profile rules forbid an automatic failover (best_effort, a profile
+		// mismatch or an unknown profile), so the volume shows why.
+		if probeOK && result.CurrentKnown && !result.Current.Ready {
+			if reason, why := automaticFailoverHold(result); reason != "" {
+				h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s %s: no automatic failover", vol.VolumeID, current.ReplicaID, why)
+				h.recordVolumeBlockedEvent(vol.VolumeID, reason)
+				continue
+			}
 		}
 		enabledCandidate := false
 		for _, slot := range vol.Slots {

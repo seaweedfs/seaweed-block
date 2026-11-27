@@ -42,6 +42,7 @@ const (
 	CodeNotChunkVolume    = "not_chunk_volume"
 	CodeInvalidName       = "invalid_name"
 	CodeSnapshotExists    = "snapshot_exists"
+	CodeSnapshotLimit     = "snapshot_limit"
 	CodeSnapshotNotFound  = "snapshot_not_found"
 	CodeSnapshotDeleting  = "snapshot_deleting"
 	CodeTargetExists      = "target_exists"
