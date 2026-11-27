@@ -27,8 +27,10 @@ var snapshotLocks sync.Map // volume -> *sync.Mutex
 // commit (the engine's barrier gives the image at H); when the cut had
 // nothing to publish, the current image is named by a commit of its own.
 // A replay of a name already in HEAD returns the facts recorded there. A
-// name or facts the kernel refuses is the typed refusal; the cut itself
-// still commits unnamed. It returns HEAD with the name recorded
+// HEAD already at layout.MaxSnapshots refuses a new name before the cut
+// opens a session, so the refusal writes nothing. A name the commit itself
+// refuses (the backstop) is the typed refusal and the cut still commits
+// unnamed. It returns HEAD with the name recorded
 // (chunkstore.SnapshotInfoFromHead makes the request's answer).
 func (p *DurableProvider) SnapshotVolume(ctx context.Context, volumeID, name string, meta layout.SnapshotMeta) (layout.Head, error) {
 	if err := layout.CheckSnapshot(name, meta); err != nil {
@@ -52,6 +54,11 @@ func (p *DurableProvider) SnapshotVolume(ctx context.Context, volumeID, name str
 	}
 	if _, ok := h.Snapshots[name]; ok {
 		return h, nil
+	}
+	// Only this path adds a name, under the volume's lock, so the count read
+	// here is the one the commit would check.
+	if len(h.Snapshots) >= layout.MaxSnapshots {
+		return layout.Head{}, fmt.Errorf("%w: at most %d per volume; delete a snapshot, or let retention prune", layout.ErrTooManySnapshots, layout.MaxSnapshots)
 	}
 	sr.SetSnapshot(name, meta)
 	// A request that fails withdraws its name: the cut may keep its session

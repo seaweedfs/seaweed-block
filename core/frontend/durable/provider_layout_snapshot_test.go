@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -90,13 +91,26 @@ func TestLayoutProviderSnapshotVolume(t *testing.T) {
 	if _, err := p.SnapshotVolume(ctx, "v1", strings.Repeat("n", layout.MaxSnapshotNameBytes+1), layout.SnapshotMeta{}); !errors.Is(err, layout.ErrMalformed) {
 		t.Fatalf("too-long name: %v; want ErrMalformed", err)
 	}
-	// The cap: snapshots up to it are named; past it, the cut still commits
-	// (new data reaches HEAD, unnamed) and the request gets the typed error.
+	// The cap: snapshots up to it are named; past it the request gets the
+	// typed error before its cut opens a session, so HEAD is unchanged (same
+	// generation, activity idle, same root and position), with nothing new
+	// to publish and with new data waiting.
 	for i := len(head().Snapshots); i < layout.MaxSnapshots; i++ {
 		if _, err := p.SnapshotVolume(ctx, "v1", "s"+string(rune('a'+i)), layout.SnapshotMeta{CreatedNs: int64(20 + i)}); err != nil {
 			t.Fatalf("snapshot %d: %v", i+1, err)
 		}
 	}
+	refusedPastCap := func(what string) {
+		t.Helper()
+		before := head()
+		if _, err := p.SnapshotVolume(ctx, "v1", "over", layout.SnapshotMeta{CreatedNs: 50}); !errors.Is(err, layout.ErrTooManySnapshots) {
+			t.Fatalf("%s: snapshot past the cap: %v; want ErrTooManySnapshots", what, err)
+		}
+		if after := head(); !reflect.DeepEqual(after, before) || after.Activity.Kind != layout.ActIdle {
+			t.Fatalf("%s: a refused snapshot changed HEAD: before %+v, after %+v", what, before, after)
+		}
+	}
+	refusedPastCap("nothing new")
 	before := head()
 	if _, err = ws.Write(1, bytes.Repeat([]byte{'B'}, 4096)); err != nil {
 		t.Fatal(err)
@@ -104,12 +118,13 @@ func TestLayoutProviderSnapshotVolume(t *testing.T) {
 	if _, err = ws.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.SnapshotVolume(ctx, "v1", "over", layout.SnapshotMeta{CreatedNs: 50}); !errors.Is(err, layout.ErrTooManySnapshots) {
-		t.Fatalf("snapshot past the cap: %v; want ErrTooManySnapshots", err)
+	refusedPastCap("new data waiting")
+	// The waiting data reaches HEAD by the next ordinary cut.
+	if _, err := p.CutVolume(ctx, "v1", 0); err != nil {
+		t.Fatalf("cut after the refusal: %v", err)
 	}
-	after := head()
-	if _, named := after.Snapshots["over"]; named || after.Position <= before.Position || *after.Current == *before.Current {
-		t.Fatalf("past the cap: named %t, position %d -> %d; want the cut committed unnamed", named, before.Position, after.Position)
+	if after := head(); after.Position <= before.Position || *after.Current == *before.Current || len(after.Snapshots) != layout.MaxSnapshots {
+		t.Fatalf("cut after the refusal: position %d -> %d, %d snapshots", before.Position, after.Position, len(after.Snapshots))
 	}
 	// A replay after later cuts answers with the facts recorded when the
 	// name was taken, not HEAD's current position or root.

@@ -302,6 +302,10 @@ func chunkErrorCode(err error) (int, string, bool) {
 		return http.StatusServiceUnavailable, chunkstore.CodeOutcomeUnknown, true
 	case errors.Is(err, layout.ErrGeometryMismatch):
 		return http.StatusConflict, chunkstore.CodeGeometryMismatch, false
+	case errors.Is(err, layout.ErrTooManySnapshots):
+		return http.StatusConflict, chunkstore.CodeSnapshotLimit, false
+	case errors.Is(err, layout.ErrSnapshotExists):
+		return http.StatusConflict, chunkstore.CodeSnapshotExists, false
 	case errors.Is(err, layout.ErrHeadAbsent), errors.Is(err, layout.ErrNoSnapshot):
 		return http.StatusNotFound, "not_found", false
 	case errors.Is(err, layout.ErrHasDependents), errors.Is(err, layout.ErrVolumeDeleting), errors.Is(err, layout.ErrDetached), errors.Is(err, layout.ErrIdentity):

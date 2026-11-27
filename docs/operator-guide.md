@@ -206,6 +206,13 @@ A late upload by a dead holder into a deleted volume can remain; rerun volume-de
 - `ops chunk verify`;
 - restoring a snapshot into a new volume, which reads the chunks it has not made local from that snapshot (fork is not supported in this release).
 
+A volume holds at most 10 snapshots. The next one is refused with `snapshot_limit` (HTTP 409, not retryable;
+`at most 10 per volume; delete a snapshot, or let retention prune`) and nothing changes: no snapshot, no cut, HEAD
+as it was (`TestChunkSnapshotPastTheLimitIsRefusedWithHEADUnchanged`). Delete a snapshot, or let retention prune,
+then take it again. A scheduled snapshot refused this way still publishes the volume's image by an ordinary cut,
+and `GET STATUS/status/durable?volume=<id>` shows `Chunk.ScheduledSnapshot.lastFailure.code: snapshot_limit`, then
+`snapshot_overdue` (`TestScheduledSnapshotAtTheLimitStillPublishes`).
+
 A snapshot can be refused with `host_slot_busy` / `no background slot` (retryable) while every host slot is held by
 other volumes' cuts; retry with the same request id. With many volumes on a host, a snapshot may wait for a slot:
 measured up to 15 s at 32 volumes with the default 3 slots.
