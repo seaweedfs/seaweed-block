@@ -348,6 +348,10 @@ func startStallEnv(t *testing.T) *stallEnv {
 	e := &stallEnv{t: t, ack: ack, out: out, bins: buildG54Binaries(t)}
 	e.h = &plannedHandoffHarness{dir: t.TempDir(), t: t}
 	e.h.masterAddr = handoffAddress(t)
+	// Registered before any daemon starts, so it runs after every daemon has
+	// stopped and before the temp dir is removed: the logs outlive the run.
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	t.Cleanup(func() { e.keepLogs(stamp) })
 	var nodes, placements strings.Builder
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("s%d", i+1)
@@ -382,6 +386,21 @@ func startStallEnv(t *testing.T) *stallEnv {
 	waitPeersHealthyAt(t, r1.status, 1, "r2", "r3")
 	e.gateSawReady(r1)
 	return e
+}
+
+// keepLogs copies every daemon log of the run into SWBLOCK_STALL_OUT.
+func (e *stallEnv) keepLogs(stamp string) {
+	logs, _ := filepath.Glob(filepath.Join(e.h.dir, "*.log"))
+	dir := filepath.Join(e.out, fmt.Sprintf("logs-%s-%s-%s", strings.ReplaceAll(e.t.Name(), "/", "_"), e.ack, stamp))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		e.t.Logf("keep logs: %v", err)
+		return
+	}
+	for _, l := range logs {
+		if data, err := os.ReadFile(l); err == nil {
+			_ = os.WriteFile(filepath.Join(dir, filepath.Base(l)), data, 0o644)
+		}
+	}
 }
 
 func (e *stallEnv) startHost(b *stallHost, suffix string) {
