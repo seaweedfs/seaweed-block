@@ -234,14 +234,23 @@ planned for 1.0.1.
 
 ## Replicated volumes (preview)
 
-Replicated volumes (`replication_factor` above 1) are a preview in v1.0: they keep acknowledged data, but under a
-writing guest a single fault can stop writes until an operator acts. The limits, as they show on a running system:
+Replicated volumes (`replication_factor` above 1) are a preview in v1.0. In the acknowledging modes (`sync-quorum`,
+`sync-all`) they keep acknowledged data; the default `best-effort` acknowledges a write with no replica and can lose
+the writes acknowledged last in a failover. Under a writing guest a single fault can stop writes until an operator
+acts. The limits, as they show on a running system:
 
 - **A replica that misses writes is not caught up by itself.** While the guest writes, the primary keeps only a few
   write-ahead-log entries beyond its last checkpoint. A replica that falls behind them (it was restarted, or a
   failover fenced it) needs a rebuild, and a rebuild onto the data it already has is refused
-  (`re-add with a retained base is not supported in v1`). The replica stays out (`degraded`) until you wipe its data
-  directory and add it again.
+  (`re-add with a retained base is not supported in v1`). The replica stays out (`degraded`) until it is wiped and
+  added again. `--wal-retention-lsns` does not help in this release: with it set, a lagging replica still always
+  needed a rebuild.
+  - **Wipe and add again (not a tested procedure in this preview):** on the replica's host, stop its `blockvolume`
+    unit, remove everything under its `--durable-root`, and start the unit again with the same flags. It then
+    starts empty and takes a full rebuild from the primary; until that ends, the primary's status lists it as not
+    healthy, and the volume keeps serving while the remaining replicas meet the ack mode.
+  - **If the re-add stops midway** (the rebuild is interrupted), the replica refuses every later rebuild: wipe it
+    and add it again.
 - **A durability shortfall is an immediate I/O error, not a wait.** When the replicas that must acknowledge a write
   cannot (`sync-quorum`: a quorum; `sync-all`: every replica), the write fails at once and the guest gets `EIO`.
   With three replicas and `sync-quorum`, one replica left out as above plus one more fault loses the quorum; a
@@ -251,10 +260,11 @@ writing guest a single fault can stop writes until an operator acts. The limits,
   answers with a status the guest does not retry: its I/O fails with `EIO` instead of moving to another path. There is
   no multipath for replicated volumes in v1.0; after a failover the guest is started on the new primary's host (see
   [host connect settings](#host-connect-settings)).
-- **The same holds on Kubernetes** for RF3 volumes.
+- **The same holds on Kubernetes** for RF3 volumes. This preview has no remedy for a pod-backed replica that is
+  left out: it stays out, and the volume serves while the remaining replicas meet the ack mode.
 
-Acknowledged writes were read back intact in every run that found these limits. What the release supports without
-these limits is the single-replica volume.
+In the acknowledging modes, acknowledged writes were read back intact in every run that found these limits. What the
+release supports without these limits is the single-replica volume.
 
 ## When a host is lost
 
