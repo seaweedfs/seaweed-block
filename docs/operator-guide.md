@@ -224,6 +224,23 @@ the snapshot name exists only after a request for it succeeds (check with `sw-bl
 (`TestKnownDefectSnapshotRetryAfterAGenuineConflictCommitsTheDataUnnamed`). A retry that names the snapshot at once is
 planned for 1.0.1.
 
+A snapshot's time grows with the data changed since the volume's last cut: 64 GiB changed took 122 s (about 2 s
+per GiB). `sw-block ops chunk snapshot` waits 60 s by default, so pass `--timeout` above the expected time; the
+server bounds one request at 5 minutes whatever `--timeout` says. A request that runs
+out of time answers a retryable code: `remote_unavailable` or `deadline_exceeded` when it ran out before its commit,
+`outcome_unknown` when it ran out during the commit. Before the commit, the name is withdrawn and no later cut
+publishes it; the volume's data is unchanged and stays queued for the next cut.
+After `outcome_unknown`, the commit may have landed with the name.
+Rerun the snapshot with the same name and a larger `--timeout`: a name already in HEAD is answered with the
+snapshot it names, so a rerun never takes a second one. A rerun keeps what a timed-out request already
+uploaded: it finds those chunks and sends only the rest. A longer or derived default is planned for 1.0.1.
+
+With `--host-limit-dir` set (it is off by default), uploads are paced at `--host-limit-upload-bytes-sec` (64 MiB/s by
+default) shared by the host's 4 slots, about 16 MiB/s per volume, and the pacing is charged for chunks already
+uploaded too. A cut or snapshot with more than about 4.7 GiB changed then cannot finish within the 5 minutes, and a
+rerun does not help: the volume is stuck. Do not use `--host-limit-dir` in 1.0.0 for volumes that change more than
+about 4 GiB between snapshots. A fix is planned for 1.0.1.
+
 ## Moving a volume, and returning it
 
 [Volume lifecycle](volume-lifecycle.md):
