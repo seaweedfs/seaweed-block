@@ -13,7 +13,8 @@ writing guest:
 1. **A replica that misses writes is not caught up by itself.** Under steady writes the primary retains only a few
    log entries beyond its checkpoint; a replica that falls behind (restarted, or fenced by a failover) needs a
    rebuild, and a rebuild onto its retained data is refused in v1. It stays degraded until the operator wipes its
-   data directory and re-adds it (not a tested procedure in this preview; an interrupted re-add needs another wipe).
+   data directory and re-adds it, after confirming from the primary's status which server it is; never on the
+   primary's host (not a tested procedure in this preview; an interrupted re-add needs another wipe).
    `--wal-retention-lsns` does not help in this release. On Kubernetes there is no remedy in this preview.
 2. **A durability shortfall reaches the guest as an immediate I/O error.** When the required replicas cannot
    acknowledge (`sync-quorum`: a quorum, `sync-all`: all), the write fails at once (`EIO`). With three replicas and

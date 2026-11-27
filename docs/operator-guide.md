@@ -254,7 +254,8 @@ acts. The limits, as they show on a running system:
   (`re-add with a retained base is not supported in v1`). The replica stays out (`degraded`) until it is wiped and
   added again. `--wal-retention-lsns` does not help in this release: with it set, a lagging replica still always
   needed a rebuild.
-  - **Wipe and add again (not a tested procedure in this preview):** on the replica's host, stop its `blockvolume`
+  - **Wipe and add again (not a tested procedure in this preview):** first confirm from the primary's status which
+    server is the left-out replica; never run this on the primary's host. On the replica's host, stop its `blockvolume`
     unit, remove everything under its `--durable-root`, and start the unit again with the same flags. It then
     starts empty and takes a full rebuild from the primary; until that ends, the primary's status lists it as not
     healthy, and the volume keeps serving while the remaining replicas meet the ack mode.
