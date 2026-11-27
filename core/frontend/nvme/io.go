@@ -78,7 +78,14 @@ type IOResult struct {
 	retryable bool // transient pressure or readiness refusal clears wire DNR
 }
 
-func (r IOResult) completionStatus() uint16 { return MakeStatusField(r.SCT, r.SC, !r.retryable) }
+// completionStatus encodes the wire status. A path-related status (ANA
+// transition or inaccessible: a stale lineage, a closed backend, a
+// metadata-only path) never carries DNR: the host must be free to fail the
+// command over to another path or retry it after an ANA change, and a Linux
+// host completes a DNR command before it considers failover.
+func (r IOResult) completionStatus() uint16 {
+	return MakeStatusField(r.SCT, r.SC, !r.retryable && r.SCT != SCTPathRelated)
+}
 
 // AsError returns a non-nil *StatusError iff Status != Success.
 func (r IOResult) AsError() *StatusError {

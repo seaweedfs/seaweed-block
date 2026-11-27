@@ -31,6 +31,10 @@ func TestBackendRetryClassClearsWireDNR(t *testing.T) {
 		{"not-ready", frontend.ErrNotReady, false},
 		{"unknown", errors.New("unrecognized backend cause"), true},
 		{"busy", frontend.ErrBackendBusy, false},
+		// Path statuses let multipath fail over: never DNR.
+		{"stale-ana-transition", frontend.ErrStalePrimary, false},
+		{"closed-ana-inaccessible", frontend.ErrBackendClosed, false},
+		{"stale-with-media-error", errors.Join(frontend.ErrStalePrimary, syscall.EIO), true},
 		{"permanent", syscall.EIO, true},
 		{"deadline-busy", errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy), false},
 		{"deadline-not-ready", errors.Join(context.DeadlineExceeded, frontend.ErrNotReady), false},
@@ -106,6 +110,32 @@ func TestSyncAndFUALatchedFaultOverridesBusy(t *testing.T) {
 					t.Fatalf("durability seam not reached once: writes=%d syncs=%d", b.writes, b.syncs)
 				}
 			})
+		}
+	}
+}
+
+type nonOptimizedANA struct{}
+
+func (nonOptimizedANA) ANAState() ANAState     { return ANANonOptimized }
+func (nonOptimizedANA) ANAGroupID() uint32     { return 1 }
+func (nonOptimizedANA) ANAChangeCount() uint64 { return 1 }
+
+// A metadata-only (non-optimized) path refuses data commands as ANA
+// inaccessible. Without DNR, so the host fails them over to the optimized
+// path instead of failing them.
+func TestMetadataOnlyPathRefusalClearsWireDNR(t *testing.T) {
+	h := NewIOHandler(HandlerConfig{
+		Backend:      testback.NewRecordingBackend(frontend.Identity{VolumeID: "v"}),
+		ANA:          nonOptimizedANA{},
+		MetadataOnly: true,
+	})
+	for _, op := range []uint8{ioRead, ioWrite, ioFlush} {
+		result := h.Handle(context.Background(), IOCommand{Opcode: op, NSID: 1, NLB: 1, Data: make([]byte, 512)})
+		if result.SCT != SCTPathRelated || result.SC != SCPathAsymAccessInaccessible {
+			t.Fatalf("op %d: status (%d,0x%02x), want path/inaccessible", op, result.SCT, result.SC)
+		}
+		if result.completionStatus()&(1<<15) != 0 {
+			t.Fatalf("op %d: a path status went out with DNR set", op)
 		}
 	}
 }
