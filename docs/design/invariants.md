@@ -393,8 +393,8 @@ stateDiagram-v2
 
 Not reachable in this release: the frozen detach and the pre-copy detach. `/chunk/detach` refuses a valid `frozen` request with `frozen_detach_unsupported` before any provider call (`INV-CUT-FROZEN-DETACH-REFUSED-001`), and blockvolume refuses to start with `--chunk-detach-precopy` (`INV-CUT-PRECOPY-FLAG-REFUSED-001`). So the transitions Admit → FrozenForecast, FrozenForecast → Refused, FrozenForecast → Quiesce, Quiesce → Refused (guest-frozen recheck), Quiesce → FinalFreeze and FinalFreeze → OpenWindow, and the rows Pre-copy admission, Pre-copy detach, Guest-frozen detach (apart from its HTTP400 validation) and Pre-copy host drain, are not reached by a released process. Their code is kept and still tested below the HTTP handler; the text above is unchanged.
 
-Periodic HEAD cuts default to 15 minutes in blockvolume (OSS minimum 5 minutes;
-0 explicitly disables); they do not create named snapshots. One five-minute
+Periodic HEAD cuts are off by default in blockvolume (`--chunk-capture-interval`
+0; when set, at least 5 minutes); they do not create named snapshots. One five-minute
 context covers a cut, including uploads. Deadline-aborted uploads remain rooted
 and reusable only while their chunk version and HEAD generation match.
 
