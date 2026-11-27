@@ -336,8 +336,15 @@ func TestABehindPeerHealsOnlyThroughItsRecovery(t *testing.T) {
 	if s := r.peer.State(); s == replication.ReplicaHealthy {
 		t.Fatal("a peer two entries behind was healed by the healthy verdict")
 	}
-	if res := r.catchUp(t); !res.Success {
+	_, _, head := r.primary.Boundaries()
+	res := r.catchUp(t)
+	if !res.Success {
 		t.Fatalf("the catch-up failed: %s", res.FailReason)
+	}
+	// The registered close advanced the live shipper's cursor to the
+	// recovered frontier, before any later append could repair it.
+	if c := r.peer.Executor().WalShipperFor("r2").Cursor(); c != head || res.AchievedLSN != head {
+		t.Fatalf("after the close the shipper cursor is %d (achieved %d); want the recovered frontier %d", c, res.AchievedLSN, head)
 	}
 	if s := r.peer.State(); s != replication.ReplicaHealthy {
 		t.Fatalf("peer %s after a completed catch-up; want healthy", s)
@@ -352,9 +359,13 @@ func TestABehindPeerHealsOnlyThroughItsRecovery(t *testing.T) {
 }
 
 // sessionOrderSites counts every reference to the peer's session order in
-// the given files (the sessionIDs field, a SessionIDs() call, or a draw
-// from either), keyed by the enclosing function and, inside a type switch,
-// its case: "prepareQueuedCommands/FenceAtEpoch".
+// the given files, keyed by its site: the enclosing function and, inside a
+// type switch, its case ("prepareQueuedCommands/FenceAtEpoch"), or
+// "<package level>" for a declaration initializer. A reference is the
+// sessionIDs field (read, written, or a composite-literal key), a
+// SessionIDs() call, or a draw (Next, NextAfter) through a local alias of
+// either: an alias's binding counts once and each draw through it once
+// more, so a second draw in a listed case changes its count.
 func sessionOrderSites(files []*ast.File) map[string]int {
 	sites := map[string]int{}
 	isRef := func(n ast.Node) bool {
@@ -365,37 +376,86 @@ func sessionOrderSites(files []*ast.File) map[string]int {
 			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
 				return sel.Sel.Name == "SessionIDs"
 			}
+		case *ast.KeyValueExpr:
+			if id, ok := x.Key.(*ast.Ident); ok {
+				return id.Name == "sessionIDs"
+			}
 		}
 		return false
 	}
+	// containsRef reports whether expression e references the order.
+	containsRef := func(e ast.Node) bool {
+		found := false
+		ast.Inspect(e, func(m ast.Node) bool {
+			if isRef(m) {
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
+	// visit counts node n (and, recursively, its children) at site; a case
+	// clause of a type switch opens the site of its case.
+	var visit func(n ast.Node, fn, site string, aliases map[string]bool)
+	visit = func(n ast.Node, fn, site string, aliases map[string]bool) {
+		if n == nil {
+			return
+		}
+		if cc, ok := n.(*ast.CaseClause); ok && fn != "" {
+			name := site
+			for _, e := range cc.List {
+				if sel, ok := e.(*ast.SelectorExpr); ok {
+					name = fn + "/" + sel.Sel.Name
+				}
+			}
+			for _, st := range cc.Body {
+				visit(st, fn, name, aliases)
+			}
+			return
+		}
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for i, rhs := range x.Rhs {
+				if i < len(x.Lhs) && containsRef(rhs) {
+					if id, ok := x.Lhs[i].(*ast.Ident); ok {
+						aliases[id.Name] = true
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, v := range x.Values {
+				if i < len(x.Names) && containsRef(v) {
+					aliases[x.Names[i].Name] = true
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Next" || sel.Sel.Name == "NextAfter") {
+				if id, ok := sel.X.(*ast.Ident); ok && aliases[id.Name] {
+					sites[site]++ // a draw through an alias
+				}
+			}
+		}
+		if isRef(n) {
+			sites[site]++
+		}
+		ast.Inspect(n, func(m ast.Node) bool {
+			if m == n {
+				return true
+			}
+			visit(m, fn, site, aliases)
+			return false
+		})
+	}
 	for _, f := range files {
 		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+			switch d := decl.(type) {
+			case *ast.GenDecl:
+				visit(d, "", "<package level>", map[string]bool{})
+			case *ast.FuncDecl:
+				if d.Body != nil {
+					visit(d.Body, d.Name.Name, d.Name.Name, map[string]bool{})
+				}
 			}
-			var walk func(n ast.Node, site string)
-			walk = func(n ast.Node, site string) {
-				ast.Inspect(n, func(m ast.Node) bool {
-					if cc, ok := m.(*ast.CaseClause); ok && m != n {
-						name := site
-						for _, e := range cc.List {
-							if sel, ok := e.(*ast.SelectorExpr); ok {
-								name = fn.Name.Name + "/" + sel.Sel.Name
-							}
-						}
-						for _, st := range cc.Body {
-							walk(st, name)
-						}
-						return false
-					}
-					if isRef(m) {
-						sites[site]++
-					}
-					return true
-				})
-			}
-			walk(fn.Body, fn.Name.Name)
 		}
 	}
 	return sites
@@ -411,7 +471,7 @@ func sessionOrderSites(files []*ast.File) map[string]int {
 // is classified.
 func TestEverySessionDrawIsFollowedByALiveRedraw(t *testing.T) {
 	want := map[string]int{
-		"NewVolumeReplicaAdapter":             3, // binds the executor's order (a.sessionIDs = src.SessionIDs())
+		"NewVolumeReplicaAdapter":             4, // the field's own order (sessionIDs: &SessionIDs{}), then the executor's (a.sessionIDs = src.SessionIDs())
 		"prepareQueuedCommands/StartCatchUp":  1, // recovery session: afterSessionClose re-draws
 		"prepareQueuedCommands/StartRebuild":  1, // recovery session: afterSessionClose re-draws
 		"prepareQueuedCommands/StartRecovery": 1, // recovery session: afterSessionClose re-draws
@@ -441,17 +501,25 @@ func TestEverySessionDrawIsFollowedByALiveRedraw(t *testing.T) {
 		}
 	}
 
-	// Negative controls: a helper that draws, an alias drawn from, and a
-	// draw outside any case are each a site of their own.
+	// Negative controls, each a changed count or a site of its own: a
+	// helper that draws, a second direct draw in a listed case, an alias
+	// drawn from twice inside a listed case, a draw outside any case, a
+	// composite literal writing the field, and a package-level initializer.
 	src := `package adapter
+var pkgOrder = defaultExec.SessionIDs()
 func (a *A) helperDraw() uint64 { return a.sessionIDs.Next() }
-func (a *A) aliasDraw() uint64 { ids := a.sessionIDs; return ids.Next() }
+func helperLiteral() *A { return &A{sessionIDs: &SessionIDs{}} }
 func (a *A) prepareQueuedCommands(cmds []any) {
 	_ = a.sessionIDs.Next()
 	for _, c := range cmds {
 		switch c.(type) {
 		case engine.FenceAtEpoch:
 			_ = a.sessionIDs.Next()
+			_ = a.sessionIDs.Next()
+		case engine.ProbeReplica:
+			ids := a.sessionIDs
+			_ = ids.Next()
+			_ = ids.Next()
 		}
 	}
 }
@@ -461,7 +529,17 @@ func (a *A) prepareQueuedCommands(cmds []any) {
 		t.Fatal(err)
 	}
 	c := sessionOrderSites([]*ast.File{f})
-	if c["helperDraw"] != 1 || c["aliasDraw"] != 1 || c["prepareQueuedCommands"] != 1 || c["prepareQueuedCommands/FenceAtEpoch"] != 1 {
-		t.Fatalf("the census missed or misattributed a control site: %v", c)
+	wantControl := map[string]int{
+		"<package level>":                    1,
+		"helperDraw":                         1,
+		"helperLiteral":                      1,
+		"prepareQueuedCommands":              1,
+		"prepareQueuedCommands/FenceAtEpoch": 2,
+		"prepareQueuedCommands/ProbeReplica": 3,
+	}
+	for site, n := range wantControl {
+		if c[site] != n {
+			t.Errorf("control site %s counted %d, want %d (all: %v)", site, c[site], n, c)
+		}
 	}
 }
