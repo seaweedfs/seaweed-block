@@ -81,18 +81,8 @@ func (p *PeerCommandExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
 // session ID.
 func (p *PeerCommandExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	p.inner.SetOnSessionClose(func(r adapter.SessionCloseResult) {
-		if r.Success {
-			if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, r.AchievedLSN, "recovery session completed"); err != nil {
-				r.Success = false
-				r.FailReason = err.Error()
-				p.peer.Invalidate("live session refresh failed: " + err.Error())
-			} else {
-				ctx, cancel := context.WithTimeout(context.Background(), healReconcileTimeout)
-				p.peer.HealIfInSync(ctx, "recovery session completed")
-				cancel()
-			}
-		}
-		// Failure path: the adapter feeds engine
+		r = p.afterSessionClose(r)
+		// Failure path (after the re-draw above): the adapter feeds engine
 		// SessionClosedFailed which (per FailureKind) may emit
 		// PublishDegraded; that lands at our PublishDegraded
 		// override and calls peer.Invalidate. We do NOT
@@ -104,11 +94,64 @@ func (p *PeerCommandExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	})
 }
 
-// SetOnFenceComplete delegates verbatim to the inner executor.
-// Fence completion does not directly drive peer state; it advances
-// engine Reachability.FencedEpoch which is the ack-gate for Healthy.
+// afterSessionClose re-draws the peer's live session above the closed
+// recovery session, whatever its outcome: a session the replica admitted
+// moved its held lineage even when its close failed (a lost final ack),
+// and a live frame below it would be refused as stale. A completed one
+// also advances the cursor and heals the peer when it is in sync.
+func (p *PeerCommandExecutor) afterSessionClose(r adapter.SessionCloseResult) adapter.SessionCloseResult {
+	if !r.Success {
+		if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, 0, "recovery session failed"); err != nil {
+			p.peer.Invalidate("live session refresh failed: " + err.Error())
+		}
+		return r
+	}
+	if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, r.AchievedLSN, "recovery session completed"); err != nil {
+		r.Success = false
+		r.FailReason = err.Error()
+		p.peer.Invalidate("live session refresh failed: " + err.Error())
+		return r
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), healReconcileTimeout)
+	p.peer.HealIfInSync(ctx, "recovery session completed")
+	cancel()
+	return r
+}
+
+// SetOnFenceComplete wraps the adapter-supplied callback so a completed
+// fence first re-draws the peer's live session above the fence's, then
+// lets the engine advance Reachability.FencedEpoch (the ack-gate for
+// Healthy). A fence mints its own session from the peer's one session
+// order, and the replica holds the fence's lineage once it acknowledges
+// it: the live session, drawn earlier, would be below it, and every later
+// barrier or ship on it refused as stale. The re-draw runs only once the
+// fence's exchange is over (this callback), so the replica never holds a
+// live lineage above an in-flight fence; and it runs on a failed fence too,
+// since the replica may have admitted the fence and only its reply was lost.
 func (p *PeerCommandExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
-	p.inner.SetOnFenceComplete(fn)
+	p.inner.SetOnFenceComplete(func(r adapter.FenceResult) {
+		r = p.afterFence(r)
+		if fn != nil {
+			fn(r)
+		}
+	})
+}
+
+// afterFence re-draws the peer's live session above the fence's session,
+// whatever the fence's outcome.
+func (p *PeerCommandExecutor) afterFence(r adapter.FenceResult) adapter.FenceResult {
+	reason := "fence completed"
+	if !r.Success {
+		reason = "fence failed"
+	}
+	if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, 0, reason); err != nil {
+		p.peer.Invalidate("live session refresh after fence failed: " + err.Error())
+		if r.Success {
+			r.Success = false
+			r.FailReason = err.Error()
+		}
+	}
+	return r
 }
 
 // --- Wire-level command delegation (verbatim to inner) ---
