@@ -339,11 +339,11 @@ func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 	v.syncWait.Add(replicationDurationNanos(time.Since(lockStart)))
 	if v.closed {
 		v.mu.Unlock()
-		return fmt.Errorf("replication: Sync: volume %s closed", v.volumeID)
+		return fmt.Errorf("%w: Sync: volume %s", ErrVolumeClosed, v.volumeID)
 	}
 	if v.membershipUpdating {
 		v.mu.Unlock()
-		return fmt.Errorf("replication: Sync: volume %s membership transition in progress", v.volumeID)
+		return fmt.Errorf("%w: Sync: volume %s", ErrMembershipUpdating, v.volumeID)
 	}
 	mode := v.durabilityMode
 	localResult := make(chan localSyncResult, 1)
@@ -842,7 +842,7 @@ func (v *ReplicationVolume) enqueueLocalWrite(w LocalWrite) (*orderedLocalWrite,
 	v.orderMu.Lock()
 	if v.orderClosed {
 		v.orderMu.Unlock()
-		return nil, fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)
+		return nil, fmt.Errorf("%w: OnLocalWrite: volume %s", ErrVolumeClosed, v.volumeID)
 	}
 	if w.LSN < v.nextShipLSN {
 		next := v.nextShipLSN
@@ -947,7 +947,7 @@ func (v *ReplicationVolume) waitUntilShipped(ctx context.Context, targetLSN uint
 		}
 		if v.orderClosed {
 			v.orderMu.Unlock()
-			return fmt.Errorf("replication: Sync: volume %s closed", v.volumeID)
+			return fmt.Errorf("%w: Sync: volume %s", ErrVolumeClosed, v.volumeID)
 		}
 		progress := v.progress
 		v.orderMu.Unlock()
@@ -976,11 +976,11 @@ func (v *ReplicationVolume) dispatchLocalWrite(w LocalWrite) writeAckSet {
 	v.writeWait.Add(replicationDurationNanos(time.Since(lockStart)))
 	if v.closed {
 		v.mu.Unlock()
-		return writeAckSet{directErr: fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)}
+		return writeAckSet{directErr: fmt.Errorf("%w: OnLocalWrite: volume %s", ErrVolumeClosed, v.volumeID)}
 	}
 	if v.membershipUpdating {
 		v.mu.Unlock()
-		return writeAckSet{directErr: fmt.Errorf("replication: OnLocalWrite: volume %s membership transition in progress", v.volumeID)}
+		return writeAckSet{directErr: fmt.Errorf("%w: OnLocalWrite: volume %s", ErrMembershipUpdating, v.volumeID)}
 	}
 	mode := v.durabilityMode
 	peerCount := len(v.peerQueues)
@@ -1065,7 +1065,7 @@ func (v *ReplicationVolume) Close() error {
 		v.orderClosed = true
 		close(v.progress)
 		for lsn, req := range v.pending {
-			req.result <- fmt.Errorf("replication: OnLocalWrite: volume %s closed before LSN %d shipped", v.volumeID, lsn)
+			req.result <- fmt.Errorf("%w: OnLocalWrite: volume %s closed before LSN %d shipped", ErrVolumeClosed, v.volumeID, lsn)
 			delete(v.pending, lsn)
 		}
 	}

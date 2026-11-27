@@ -19,6 +19,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/frontend/testback"
+	"github.com/seaweedfs/seaweed-block/core/replication"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -80,6 +81,9 @@ func TestBackendErrorClassesAcrossFrontends(t *testing.T) {
 		{name: "read-only", err: errors.Join(frontend.ErrBackendBusy, syscall.EROFS), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
 		{name: "hydration-short-remote-body", err: errors.Join(frontend.ErrBackendBusy, storage.ErrChunkHydrationPending, io.ErrUnexpectedEOF), status: 0x08, sct: 0, sc: 0x82},
 		{name: "not-ready", err: frontend.ErrNotReady, status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82},
+		{name: "sync-quorum-shortfall", err: fmt.Errorf("%w: %w: acknowledgements 1/2", durable.ErrReplicationAckUnavailable, replication.ErrDurabilityQuorumLost), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82},
+		{name: "sync-all-shortfall", err: fmt.Errorf("%w: sync target LSN 9 acknowledgements 2/3", replication.ErrDurabilityBarrierFailed), status: 0x02, key: 0x02, asc: 0x04, ascq: 0x01, sct: 0, sc: 0x82},
+		{name: "shortfall-with-media-error", err: errors.Join(replication.ErrDurabilityQuorumLost, syscall.EIO), status: 0x02, key: 0x03, asc: 0x11, sct: 0, sc: 6},
 		{name: "busy", err: frontend.ErrBackendBusy, status: 0x08, sct: 0, sc: 0x82},
 		{name: "stale", err: frontend.ErrStalePrimary, status: 0x02, key: 0x02, asc: 0x04, ascq: 0x0a, sct: 3, sc: 3},
 		{name: "closed", err: frontend.ErrBackendClosed, status: 0x02, key: 0x02, asc: 0x04, ascq: 0x03, sct: 3, sc: 2},
