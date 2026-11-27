@@ -58,16 +58,20 @@ jobs:
         # A pull request that changes only files under docs/ runs no product
         # code the process-level tests could exercise, so they are skipped and
         # the job still reports success. HEAD is the merge commit, HEAD^1 its
-        # base parent (fetch-depth 2 above). Pushes to main always run them.
+        # base parent (fetch-depth 2 above). Pushes to main always run them, and
+        # so does any error of the check (.github/scripts/docs-only-scope.sh).
         run: |
           set -euo pipefail
-          changed=$(git diff --name-only --no-renames HEAD^1 HEAD)
-          n=$(printf '%s\n' "$changed" | grep -c . || true)
-          if [ "$n" -gt 0 ] && ! printf '%s\n' "$changed" | grep -qv '^docs/'; then
-            echo "skipped: docs only ($n files under docs/); the process-level tests run on the merge to main"
-            echo "docs_only=1" >>"$GITHUB_OUTPUT"
+          bash .github/scripts/docs-only-scope-test.sh
+          if out=$(bash .github/scripts/docs-only-scope.sh HEAD^1 HEAD); then
+            case $out in
+            "docs_only "*)
+              echo "skipped: docs only (${out#docs_only } files under docs/); the process-level tests run on the merge to main"
+              echo "docs_only=1" >>"$GITHUB_OUTPUT" ;;
+            *) echo "process-level tests run: $out" ;;
+            esac
           else
-            echo "process-level tests run: $n changed files, not all under docs/"
+            echo "process-level tests run: the docs-only check failed"
           fi
 
       - name: Set up Go
