@@ -8,7 +8,9 @@ import (
 	"go/token"
 	"io/fs"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // A synced guest write into an absent chunk, then a crash: on reopen the
@@ -144,39 +146,60 @@ func TestABaseInstallIsRefusedWhileTheDrainIsHeld(t *testing.T) {
 	}
 }
 
-// extentWriterSites counts, per enclosing function, every reference to the
-// extent writer: a call, a method value (an alias such as w :=
-// s.writeExtentUnlocked) or a method expression.
+// extentWriterSites counts every reference to the extent writer (a call,
+// a method value such as w := s.writeExtentUnlocked, a method expression),
+// keyed by its receiver-qualified owner: "(*WALStore).installFetchedBlock",
+// a plain function name, or "<package level>" for a declaration
+// initializer (var w = (*WALStore).writeExtentUnlocked, or a closure).
 func extentWriterSites(files []*ast.File) map[string]int {
 	sites := map[string]int{}
+	count := func(owner string, root ast.Node) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "writeExtentUnlocked" {
+				sites[owner]++
+			}
+			return true
+		})
+	}
 	for _, file := range files {
 		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "writeExtentUnlocked" {
-					sites[fn.Name.Name]++
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body != nil {
+					count(funcOwner(d), d.Body)
 				}
-				return true
-			})
+			case *ast.GenDecl:
+				count("<package level>", d)
+			}
 		}
 	}
 	return sites
 }
 
-// Every path that writes the extent is listed, with how it keeps a block
-// written before the chunk layer attaches local, by exact site count: the
-// flusher's drain (held until attach), a BASE (refused while held) and a
-// fetched block (only an attached layer fetches). A new writer, an alias of
-// the writer or a second reference in a listed function fails here until it
-// is classified; writeExtentUnlocked itself refuses while held (backstop).
+// funcOwner is a function's receiver-qualified name.
+func funcOwner(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return fn.Name.Name
+	}
+	t := fn.Recv.List[0].Type
+	star := ""
+	if p, ok := t.(*ast.StarExpr); ok {
+		star, t = "*", p.X
+	}
+	if ix, ok := t.(*ast.IndexExpr); ok {
+		t = ix.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return "(" + star + id.Name + ")." + fn.Name.Name
+	}
+	return fn.Name.Name
+}
+
 func TestExtentWritersAreEnumerated(t *testing.T) {
 	want := map[string]int{
-		"writeExtentIfCurrent": 1, // the flusher's drain; held until attach (flushOnceInternal)
-		"WriteBase":            1, // BASE install; refused while held (BeginBaseInstall)
-		"installFetchedBlock":  1, // a fetched block; only an attached chunk layer fetches
+		"(*WALStore).writeExtentIfCurrent": 1, // the flusher's drain; held until attach (flushOnceInternal)
+		"(*installHandleV3).WriteBase":     1, // BASE install; refused while held (BeginBaseInstall)
+		"(*WALStore).installFetchedBlock":  1, // a fetched block; only an attached chunk layer fetches
 	}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
@@ -201,18 +224,26 @@ func TestExtentWritersAreEnumerated(t *testing.T) {
 		}
 	}
 
-	// Negative controls: an alias and a second reference are both counted.
+	// Negative controls: an alias, a second reference, a method expression,
+	// package-level initializers (a method-expression alias and a closure),
+	// and a same-named method on another receiver are each counted under
+	// their own owner.
 	src := `package storage
+var pkgAlias = (*WALStore).writeExtentUnlocked
+var pkgClosure = func(s *WALStore) error { return s.writeExtentUnlocked(0, nil) }
 func (s *WALStore) aliasWriter() { w := s.writeExtentUnlocked; _ = w(0, nil) }
 func (s *WALStore) twoWrites() { _ = s.writeExtentUnlocked(0, nil); _ = s.writeExtentUnlocked(1, nil) }
 func exprWriter() { _ = (*WALStore).writeExtentUnlocked }
+func (o *other) installFetchedBlock(s *WALStore) { _ = s.writeExtentUnlocked(0, nil) }
 `
 	f, err := parser.ParseFile(token.NewFileSet(), "control.go", src, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := extentWriterSites([]*ast.File{f}); c["aliasWriter"] != 1 || c["twoWrites"] != 2 || c["exprWriter"] != 1 {
-		t.Fatalf("the census missed a control site: %v", c)
+	c := extentWriterSites([]*ast.File{f})
+	if c["<package level>"] != 2 || c["(*WALStore).aliasWriter"] != 1 || c["(*WALStore).twoWrites"] != 2 || c["exprWriter"] != 1 ||
+		c["(*other).installFetchedBlock"] != 1 || c["(*WALStore).installFetchedBlock"] != 0 {
+		t.Fatalf("the census missed or misattributed a control site: %v", c)
 	}
 }
 
@@ -269,18 +300,44 @@ func TestACycleStartedBeforeTheHoldDoesNotDrainTheRecoveredWrite(t *testing.T) {
 	t.Cleanup(func() { closeBounded(t, s2) })
 	s2.DisableAutoFlushForRecoveryTest() // its ticks are replaced by the cycle below
 	entered, release := make(chan struct{}), make(chan struct{})
-	s2.flusher.beforeSnapshotForTest = func() { close(entered); <-release }
+	var enterOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	s2.flusher.beforeSnapshotForTest = func() { enterOnce.Do(func() { close(entered) }); <-release }
 	done := make(chan error, 1)
+	settled := false
+	// On any failure below: release the paused cycle and join it (bounded)
+	// before the store's own cleanup, so no goroutine stays parked.
+	t.Cleanup(func() {
+		unblock()
+		if !settled {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("the paused cycle did not finish after release")
+			}
+		}
+		s2.flusher.beforeSnapshotForTest = nil
+	})
 	go func() { done <- s2.flusher.flushOnce() }() // a cycle that saw no hold
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cycle never reached its snapshot")
+	}
 	s2.HoldExtentDrainUntilChunkLayer()
 	before := s2.CheckpointLSN()
 	if _, err := s2.Recover(); err != nil {
 		t.Fatalf("local recovery: %v", err)
 	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatalf("the paused cycle: %v", err)
+	unblock()
+	select {
+	case err := <-done:
+		settled = true
+		if err != nil {
+			t.Fatalf("the paused cycle: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the paused cycle did not finish after release")
 	}
 	s2.flusher.beforeSnapshotForTest = nil
 	if cp := s2.CheckpointLSN(); cp != before {
