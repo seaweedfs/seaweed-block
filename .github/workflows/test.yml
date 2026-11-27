@@ -119,9 +119,17 @@ jobs:
               fi
             done
           fi
+          # Temp files in memory when the runner can hold them: every package
+          # (the heavy ones too) peaked at 1.22 GB under TMPDIR + GOTMPDIR, so
+          # 3 GiB bounds it; otherwise they stay on the runner disk.
+          base=$(bash .github/scripts/unit-tmpdir.sh $((3 << 30)) "$RUNNER_TEMP")
+          tmp=$(mktemp -d "$base/unit-tmp.XXXXXX")
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir "$tmp/t" "$tmp/g"
           # 20m per package: core/storage alone took 602 s on tp04 on main
           # (2026-11-22), past the old 10m, so any PR touching it failed.
-          go test -p=1 -short -count=1 -timeout 20m $pkgs
+          TMPDIR="$tmp/t" GOTMPDIR="$tmp/g" python3 -I .github/scripts/disk-bytes-written.py \
+            go test -p=1 -short -count=1 -timeout 20m $pkgs
 
       - name: Self-test of the required-tests gate
         if: matrix.suite == 'process' && steps.scope.outputs.docs_only != '1'
