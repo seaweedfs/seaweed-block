@@ -265,7 +265,7 @@ derived from the waits these pages state, and were run with exactly these option
 | Option | Kernel default | Set it to | Why |
 |---|---|---|---|
 | `--ctrl-loss-tmo` | 600 s | 180 | Longer than the longest wait for the same target to serve again: a restarted holder is re-granted at most 65 s after it stopped; a start not granted within 30 s after that barrier ends its wait, and the unit starts it again after `RestartSec=5s` ([after a crash](volume-lifecycle.md#after-a-crash)): 65 + 30 + 5 = about 100 s |
-| `--reconnect-delay` | 10 s | 2 | The controller retries every 2 s; connection setup and the network add to it |
+| `--reconnect-delay` | 10 s | 2 | The controller retries every 2 s; connection setup and the network add to it. Linux bounds the retries by count, not by time: `--ctrl-loss-tmo` / `--reconnect-delay` = 90 attempts |
 | `--fast_io_fail_tmo` | off | leave off | Any value shorter than the wait above fails I/O to the filesystem before the target serves again |
 
 ```bash
@@ -273,10 +273,13 @@ sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n "$NQN" --ctrl-loss-tmo=180 --re
 ```
 
 What the guest sees:
-- **These values:** while the same target is away, I/O waits and continues when it serves again; a target that does
-  not come back fails I/O after 180 s. Measured with exactly these options: the holder killed, a write issued, the
-  holder started again 5 s later (by the test, as the unit would): the write completed after 6.1 s, with no error;
-  the holder kept away: the write failed with `EIO` after 181.5 s.
+- **These values, holder process stopped** (its host up, so a connect attempt is refused at once): I/O waits and
+  continues when the target serves again. Measured with exactly these options: the holder killed, a write issued,
+  the holder started again 5 s later (as the unit would): the write completed after 6.1 s, with no error. Kept away,
+  the write failed with `EIO` after 181.5 s (90 attempts, 2 s apart).
+- **These values, host powered off or unreachable** (nothing answers, so each attempt waits for the connect timeout,
+  about 3 s): the loss is noticed by keep-alive (5 s), then the 90 attempts take about 5 s each. Measured: a pending
+  write failed with `EIO` after 464 s, about kato + 90 × (2 s + the connect timeout).
 - **Kernel defaults** (every connect command shipped today, including the CSI node): a target that does not come
   back holds I/O for up to 10 minutes (a 9-minute blocked read was observed in a fault run), then fails it.
 - **Too short** (`--ctrl-loss-tmo` or `--fast_io_fail_tmo` below the wait): I/O errors reach the filesystem before
@@ -298,6 +301,10 @@ about 30 to 35 s after its host is lost, with default flags (derived from `--fre
 rounds; not yet measured). The guest's I/O on the old controller waits and then fails as above. To continue, run
 the guest on the new primary's host and connect it there: that host's blockvolume logs `adopted as PRIMARY` and its
 `/status?volume=<id>` shows `"AuthorityRole":"primary"`.
+
+The guest's first step after a failover: `nvme disconnect` the controller of the lost primary (for example
+`sudo nvme disconnect -n "$NQN"`). Its pending I/O then fails at once (measured: `EIO` 1.5 s after the disconnect,
+within one connect timeout) instead of after the up to 464 s above. Then connect to the new primary.
 
 **Kubernetes.** The CSI node connects with a plain `nvme connect` and the kernel defaults. A pod whose holder does
 not come back holds I/O for up to 600 s: its reads and writes block (processes in uninterruptible sleep, probes that
