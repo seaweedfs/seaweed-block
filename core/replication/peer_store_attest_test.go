@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
@@ -135,6 +136,15 @@ func TestWipedReplicaAtTheSameGenerationDoesNotCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := v.peers["r2"]
+	// The volume's store learner barriers this peer through its queue; let it
+	// finish before the direct barriers below share the session connection.
+	deadline := time.Now().Add(10 * time.Second)
+	for peer.learningStore() {
+		if time.Now().After(deadline) {
+			t.Fatal("the store learner never finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	for i := 0; i < 2; i++ {
 		if _, err := peer.Barrier(context.Background(), 0); err != nil {
 			t.Fatal(err)
