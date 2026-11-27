@@ -613,24 +613,28 @@ func (h *plannedHandoffHarness) start(t *testing.T, name, binary string, args ..
 	d := &daemon{name: name, log: log.Name(), done: make(chan struct{}), cancel: cancel}
 	started := false
 	t.Cleanup(func() {
+		// The teardown is deferred so it also runs when a beforeStop hook
+		// ends this cleanup with t.Fatal.
+		defer func() {
+			cancel()
+			if started {
+				select {
+				case <-d.done:
+				case <-time.After(10 * time.Second):
+					t.Errorf("%s did not exit after cancellation", name)
+				}
+			}
+			_ = log.Close()
+			if t.Failed() {
+				keepFullLog(t, d)
+				data, _ := os.ReadFile(d.log)
+				if len(data) > 16000 {
+					data = data[len(data)-16000:]
+				}
+				t.Logf("%s log:\n%s", name, data)
+			}
+		}()
 		h.runBeforeStop()
-		cancel()
-		if started {
-			select {
-			case <-d.done:
-			case <-time.After(10 * time.Second):
-				t.Errorf("%s did not exit after cancellation", name)
-			}
-		}
-		_ = log.Close()
-		if t.Failed() {
-			keepFullLog(t, d)
-			data, _ := os.ReadFile(d.log)
-			if len(data) > 16000 {
-				data = data[len(data)-16000:]
-			}
-			t.Logf("%s log:\n%s", name, data)
-		}
 	})
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start %s: %v", name, err)

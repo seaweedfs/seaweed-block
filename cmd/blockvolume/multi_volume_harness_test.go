@@ -350,8 +350,31 @@ func (env *handoffEnv) siblingServing(t *testing.T, w *siblingWriter) bool {
 		t.Errorf("sibling %s: restarted for the read-back: %v", w.volume, err)
 		return false
 	}
-	waitSiblingPrimary(t, w.status, w.volume, e)
+	// Not fatal here: the teardown goes on to the other siblings.
+	if err := siblingPrimaryWithin(w.status, w.volume, e, 60*time.Second); err != nil {
+		t.Errorf("sibling %s: restarted for the read-back: %v", w.volume, err)
+		return false
+	}
 	return true
+}
+
+// siblingPrimaryWithin is waitSiblingPrimary that returns an error.
+func siblingPrimaryWithin(statusAddr, volume string, epoch uint64, timeout time.Duration) error {
+	c := &http.Client{Timeout: 5 * time.Second}
+	end := time.Now().Add(timeout)
+	for {
+		if resp, err := c.Get("http://" + statusAddr + "/status?volume=" + volume); err == nil {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			if statusPrimary(b, epoch) {
+				return nil
+			}
+		}
+		if time.Now().After(end) {
+			return fmt.Errorf("status at %s never showed %s as a healthy primary at epoch %d within %s", statusAddr, volume, epoch, timeout)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // waitLogErr is waitLog that returns an error instead of failing the test.
