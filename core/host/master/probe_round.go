@@ -3,6 +3,9 @@ package master
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -229,7 +232,7 @@ done:
 			// ready as a serving primary, on a valid table.
 			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, Ready: a.GetPrimaryReady(), AwaitingReplicaStoresEpoch: a.GetAwaitingReplicaStoresEpoch(), DurableLSN: a.GetDurableEnd(),
 				LastDataEpoch: a.GetLastDataEpoch(), LastDataFirstLSN: a.GetLastDataFirstLsn(), TableInvalid: a.GetTablePresent() && !a.GetTableValid(), TableValid: a.GetTablePresent() && a.GetTableValid(),
-				StoreID: store, Floor: a.GetFloor()}
+				StoreID: store, Floor: a.GetFloor(), AckProfile: a.GetAckProfile()}
 		} else {
 			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, ProbeAddr: "no answer"}
 		}
@@ -259,11 +262,36 @@ done:
 			TableValid:       a.GetTablePresent() && a.GetTableValid(),
 			StoreID:          store,
 			Floor:            a.GetFloor(),
+			AckProfile:       a.GetAckProfile(),
 			// A promotion target answers as a ready replica, from a store
 			// whose epoch table is present and valid, and whose id is the
 			// store its primary attested (counted toward its write ACKs).
 			Ready: a.GetReplicaReady() && a.GetTablePresent() && a.GetTableValid() && attested,
 		})
 	}
+	result.ProfileMismatch = profileMismatch(p.ackProfile, got)
 	return result, nil
+}
+
+// profileMismatch names the answers whose ack profile is missing or is not
+// the master's (or says the master's own is unknown); "" when all agree.
+func profileMismatch(master string, answers map[string]*control.ProbeAnswer) string {
+	if !isKnownAckProfile(master) {
+		return fmt.Sprintf("master ack profile %q unknown", master)
+	}
+	want := canonicalAckProfile(master)
+	var bad []string
+	for id, a := range answers {
+		if got := canonicalAckProfile(a.GetAckProfile()); got != want {
+			if got == "" {
+				got = "none"
+			}
+			bad = append(bad, id+"="+got)
+		}
+	}
+	if len(bad) == 0 {
+		return ""
+	}
+	sort.Strings(bad)
+	return "master " + want + ", answers " + strings.Join(bad, ",")
 }

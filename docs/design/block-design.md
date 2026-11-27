@@ -152,7 +152,7 @@ The watermarks are `WALStore.checkpointLSN` (persisted as the superblock's `WALC
 stateDiagram-v2
   [*] --> Appended: Write (pwrite, LSN assigned, dirty map)
   Appended --> Synced: covering Sync (group fsync)
-  Synced --> InExtent: flusher writes extent, fsync
+  Synced --> InExtent: flusher writes extent, fsync (a chunk store: only once its chunk layer is attached, held from before Recover; no BASE while held)
   InExtent --> Checkpointed: superblock with checkpoint and released tail fsynced
   Checkpointed --> Reusable: writer may overwrite the released WAL bytes
   Appended --> Lost: crash before Sync (allowed)
@@ -168,6 +168,7 @@ stateDiagram-v2
 | Replay is last writer wins by LSN | `dirty_map.go` `putAtIfNewer` | `TestWALStoreRecoverLastWriterWinsAcrossScanOrder` (`core/storage/walstore_recovery_lww_test.go`) | yes |
 | WAL bytes the on-disk superblock still declares retained are never reused | `wal_writer.go` `spaceUsed`, `durableTail`; `walstore.go` `persistCheckpointReleasing` | `TestWALWriterReuseIsBoundedByTheDurableTail`, `TestWALStoreRecoverBoundsPersistFailureRefusesAppendsUntilRetry` (`core/storage/walstore_persisted_tail_test.go`) | yes |
 | A checkpoint never passes a synced write that is not yet in the extent | `flusher.go` (whole-map snapshot under the publication lock) | `TestFlusherSnapshotCutPreservesSyncedWrites` (`core/storage/flusher_snapshot_cut_test.go`); `TestWALStoreCheckpointSIGKILLCrashWindows` (`core/storage/walstore_checkpoint_crash_linux_test.go`) | yes |
+| A chunk store drains no block to the extent before its chunk layer attaches, so a fetched chunk never installs over a replayed write | `flusher.go` `flushOnceInternal` (under the snapshot lock); `walstore.go` `HoldExtentDrainUntilChunkLayer`, `writeExtentUnlocked` (backstop); `durable/provider.go` | `TestReplayedWriteIsNotDrainedBeforeTheChunkLayerAttaches`, `TestACycleStartedBeforeTheHoldDoesNotDrainTheRecoveredWrite` (`core/storage/chunk_replay_before_attach_test.go`) | no |
 | Synced entries above an intentional LSN gap (a rebuild's frontier jump) are kept | `recovery.go` (replay keyed on the checkpoint, not on a contiguous prefix) | `TestWALStoreRecoverKeepsSyncedEntriesAboveAnUnpersistedFrontierJump` (`core/storage/walstore_recovery_frontier_gap_test.go`) | yes |
 | A failed checkpoint metadata write neither publishes nor recycles | `persistCheckpointReleasing` | `TestFlusherCheckpointMetadataFailureDoesNotPublishOrRecycle` (`core/storage/walstore_checkpoint_safety_test.go`) | — |
 
@@ -255,6 +256,7 @@ stateDiagram-v2
   [*] --> Unbound
   Unbound --> Bound: IntentBind (epoch 1)
   Bound --> Bound: same assignment republished
+  Bound --> Bound: IntentRefreshEndpoint (endpoint version + 1), only on the line it was decided against
   Bound --> Reassigned: IntentReassign (max epoch + 1)
   Reassigned --> Bound: new primary serves at the new epoch
   Bound --> Deleting: deletion reservation (id never reused)

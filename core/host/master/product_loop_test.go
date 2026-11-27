@@ -7,6 +7,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/core/ops"
 )
 
 func TestG9G_ProductLoopPublishesVerifiedExistingReplica(t *testing.T) {
@@ -392,7 +393,10 @@ func TestMountedFailover_ProductLoopRF3UnknownRequiredLSNFallsBackToHighestDurab
 	}
 }
 
-func TestMountedFailover_ProductLoopRF3BestEffortUnknownRequiredLSNCanSelectHighestDurableLSN(t *testing.T) {
+// A best_effort volume is not failed over automatically even when a ready
+// survivor holds the highest durable end: a best_effort write may be on the
+// lost primary alone (the same reason the operator's move refuses it).
+func TestMountedFailover_ProductLoopRF3BestEffortIsHeldDespiteAHighestDurableSurvivor(t *testing.T) {
 	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
 		ExpectedSlotsPerVolume: 3,
 	})
@@ -423,12 +427,14 @@ func TestMountedFailover_ProductLoopRF3BestEffortUnknownRequiredLSNCanSelectHigh
 	if err != nil {
 		t.Fatalf("failover product tick: %v", err)
 	}
-	if result.PromotionProbes != 1 || result.PromotionBlocked != 0 {
-		t.Fatalf("result=%+v want best-effort unknown required LSN to select highest durable survivor", result)
+	if result.PromotionProbes != 1 || result.PromotionBlocked != 1 {
+		t.Fatalf("result=%+v want the best-effort volume's promotion blocked", result)
 	}
-	failover := waitAuthorityReplica(t, h.Publisher(), "vol-rf3", "r3")
-	if failover.Epoch != 2 || failover.EndpointVersion != 1 {
-		t.Fatalf("failover line=%+v want r3@2/1", failover)
+	if line, ok := h.Publisher().VolumeAuthorityLine("vol-rf3"); !ok || line.ReplicaID != "r1" || line.Epoch != initial.Epoch {
+		t.Fatalf("line=%+v ok=%t; want it to stay %s@%d", line, ok, initial.ReplicaID, initial.Epoch)
+	}
+	if !blockedFor(h, "vol-rf3", ops.ReasonBestEffortNoAutomaticFailover) {
+		t.Fatal("the volume does not show why it is not failed over")
 	}
 }
 

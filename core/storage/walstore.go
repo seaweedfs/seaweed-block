@@ -92,6 +92,9 @@ type WALStore struct {
 
 	// chunk is the attached chunk layer's hooks; nil when none.
 	chunk     atomic.Pointer[chunkHooks]
+	// drainHeld (HoldExtentDrainUntilChunkLayer): the flusher drains no
+	// dirty block to the extent until a chunk layer is attached.
+	drainHeld atomic.Bool
 	extentMu  [64]sync.RWMutex
 	closed    bool
 	nextLSN   uint64 // next LSN to assign to a write
@@ -340,6 +343,12 @@ func (s *WALStore) writeExtentIfCurrent(lba, expectedLSN uint64, data []byte) (b
 }
 
 func (s *WALStore) writeExtentUnlocked(lba uint32, data []byte) error {
+	// Backstop for INV-CHUNK-LOCAL-BEFORE-FETCH-001: a store awaiting its
+	// chunk layer writes no extent block, so a writer that escapes the
+	// held drain fails loudly instead of leaving a block not marked local.
+	if s.drainHeld.Load() && s.chunk.Load() == nil {
+		return fmt.Errorf("%w: extent write of LBA %d", ErrDrainHeldForChunkLayer, lba)
+	}
 	off := int64(s.extentBase + uint64(lba)*uint64(s.sb.BlockSize))
 	if _, err := s.fd.WriteAt(data, off); err != nil {
 		return fmt.Errorf("storage: write extent LBA %d: %w", lba, err)
@@ -699,6 +708,20 @@ func (s *WALStore) DisableAutoFlushForRecoveryTest() {
 		s.flusher.Stop()
 	}
 }
+
+// HoldExtentDrainUntilChunkLayer is called by the owner of a store opened
+// for chunk use, before Recover: no dirty block is drained to the extent
+// until a chunk layer is attached. A block drained earlier would not be
+// marked local, and a later fetch of its absent chunk would install the
+// remote block over the acknowledged write.
+func (s *WALStore) HoldExtentDrainUntilChunkLayer() { s.drainHeld.Store(true) }
+
+// ErrDrainHeldForChunkLayer: the store's extent drain waits for its chunk
+// layer, so no path that writes the extent may start.
+var ErrDrainHeldForChunkLayer = errors.New("storage: the extent drain is held until the chunk layer attaches")
+
+// ExtentDrainHeld reports whether the extent drain waits for a chunk layer.
+func (s *WALStore) ExtentDrainHeld() bool { return s.drainHeld.Load() }
 
 func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 	return s.readFromExtentContext(context.Background(), lba)

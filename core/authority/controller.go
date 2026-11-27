@@ -492,7 +492,7 @@ func (c *TopologyController) decideVolume(
 
 	if candidateAcceptable(current, serverIndex) {
 		if endpointStale(current, currentLine) {
-			return refreshAsk(vol.VolumeID, current), "endpoint refresh", true
+			return refreshAsk(vol.VolumeID, current, currentLine), "endpoint refresh", true
 		}
 		if target, ok := chooseRebalanceCandidate(vol, current, serverIndex, currentLoad, projectedLoad, c.config.RebalanceSkew); ok {
 			// A primary change goes out only with the promotion gate's
@@ -520,7 +520,7 @@ func (c *TopologyController) decideVolume(
 	// may be refreshed.
 	if hold, superseded := c.primaryBootGraceLocked(vol.VolumeID, current, candidatePlaceable(current, serverIndex)); hold {
 		if !superseded && endpointStale(current, currentLine) {
-			return refreshAsk(vol.VolumeID, current), "endpoint refresh (primary boot grace)", true
+			return refreshAsk(vol.VolumeID, current, currentLine), "endpoint refresh (primary boot grace)", true
 		}
 		return AssignmentAsk{}, "", false
 	}
@@ -546,7 +546,7 @@ func (c *TopologyController) decideVolume(
 	// when the current replica is still reachable/eligible; this preserves
 	// authority continuity without treating that replica as a failover candidate.
 	if candidatePlaceable(current, serverIndex) && endpointStale(current, currentLine) {
-		return refreshAsk(vol.VolumeID, current), "endpoint refresh", true
+		return refreshAsk(vol.VolumeID, current, currentLine), "endpoint refresh", true
 	}
 	return AssignmentAsk{}, "", false
 }
@@ -561,15 +561,17 @@ func endpointStale(current ReplicaCandidate, line AuthorityBasis) bool {
 }
 
 // refreshAsk re-issues the current primary's line at its reported
-// addresses for its reported incarnation.
-func refreshAsk(volumeID string, current ReplicaCandidate) AssignmentAsk {
+// addresses for its reported incarnation, only while the volume's line is
+// still line (the one the refresh was decided against).
+func refreshAsk(volumeID string, current ReplicaCandidate, line AuthorityBasis) AssignmentAsk {
 	return AssignmentAsk{
-		VolumeID:    volumeID,
-		ReplicaID:   current.ReplicaID,
-		DataAddr:    current.DataAddr,
-		CtrlAddr:    current.CtrlAddr,
-		Intent:      IntentRefreshEndpoint,
-		Incarnation: current.Incarnation,
+		VolumeID:      volumeID,
+		ReplicaID:     current.ReplicaID,
+		DataAddr:      current.DataAddr,
+		CtrlAddr:      current.CtrlAddr,
+		Intent:        IntentRefreshEndpoint,
+		Incarnation:   current.Incarnation,
+		ExpectCurrent: &ExpectedLine{ReplicaID: line.ReplicaID, Epoch: line.Epoch, DataAddr: line.DataAddr, CtrlAddr: line.CtrlAddr},
 	}
 }
 
@@ -754,7 +756,18 @@ func sameAsk(a, b AssignmentAsk) bool {
 		a.DataAddr == b.DataAddr &&
 		a.CtrlAddr == b.CtrlAddr &&
 		a.Intent == b.Intent &&
-		a.Incarnation == b.Incarnation
+		a.Incarnation == b.Incarnation &&
+		sameExpectedLine(a.ExpectCurrent, b.ExpectCurrent)
+}
+
+// sameExpectedLine: two asks conditional on different lines are different
+// asks (one refused because the line moved is asked again against the new
+// line, not suppressed as a duplicate).
+func sameExpectedLine(a, b *ExpectedLine) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // plannedEvidence is a rebalance's evidence: the gate's probe of the target,

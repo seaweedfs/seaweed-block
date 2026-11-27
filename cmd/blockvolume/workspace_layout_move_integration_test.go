@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore"
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
@@ -134,10 +133,7 @@ func TestIntegrationWorkspaceLayoutMove(t *testing.T) {
 	if os.Getenv("CHUNKSTORE_WEED") == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
 	}
-	exe := filepath.Join(t.TempDir(), "blockvolume")
-	if out, err := exec.Command("go", "build", "-race", "-p", "4", "-o", exe, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
-	}
+	exe := blockvolumeUnderTest(t)
 	cluster := startWorkspaceWeed(t)
 	for _, kind := range []string{"clean", "forced"} {
 		t.Run(kind, func(t *testing.T) { layoutMove(t, exe, cluster, kind) })
@@ -170,6 +166,7 @@ func layoutMove(t *testing.T, exe string, cluster *w4WeedCluster, kind string) {
 		defer c()
 		_ = h.Close(ctx)
 	})
+	runProductLoop(t, h)
 	src, dst := newMoveHost(t, "node-a", "nqn.2026-11.test:move-src-"+kind), newMoveHost(t, "node-b", "nqn.2026-11.test:move-dst-"+kind)
 	// The master's create writes VOLUME and the unclaimed HEAD, then marks
 	// the record store-ready; only a store-ready volume gets a placement.
@@ -184,19 +181,14 @@ func layoutMove(t *testing.T, exe string, cluster *w4WeedCluster, kind string) {
 		{VolumeID: "vol-a", ServerID: src.server, ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err = h.ObservationHost().Ingest(authority.Observation{ServerID: src.server, ObservedAt: time.Now().UTC(),
-		Slots: []authority.SlotFact{{VolumeID: "vol-a", ReplicaID: "r1", DataAddr: src.data, CtrlAddr: src.ctrl}}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = h.RunLifecycleProductTick(); err != nil {
-		t.Fatal(err)
-	}
-	leaseBinaryPoll(t, "no initial authority", func() bool { line, ok := h.Publisher().VolumeAuthorityLine("vol-a"); return ok && line.Epoch > 0 })
-	line, _ := h.Publisher().VolumeAuthorityLine("vol-a")
+	earlyLineControl(t, h, src.server, "vol-a", "r1", src.data, src.ctrl)
 	remote := cluster.remote(t, base, ref)
 
-	// The source serves, takes acknowledged writes, cuts.
+	// The source starts, reports its process, gets its line, serves, takes
+	// acknowledged writes, cuts.
 	src.start(t, exe, h.Addr(), cluster.filerGRPC, base, layoutID)
+	tickAfterProcessReports(t, h, src.server, "vol-a", "r1")
+	line, _ := h.Publisher().VolumeAuthorityLine("vol-a")
 	leaseBinaryPoll(t, "source did not serve", func() bool { p, ok := src.projection(); return ok && p.Healthy && p.Epoch == line.Epoch })
 	want, late := bytes.Repeat([]byte{0xD7}, 4096), bytes.Repeat([]byte{0x5A}, 4096)
 	nv := gap1ConnectNVMe(t, src.nvme, src.nqn)

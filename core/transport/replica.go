@@ -178,12 +178,12 @@ func (r *ReplicaListener) raiseFloor(epoch uint64) error {
 // then, if the frame's epoch raises the floor, the durable raise before any
 // effect or ACK (G1). It runs inside the frame's counted section (G2), so a
 // fence waits for it.
-func (r *ReplicaListener) admitMutation(l RecoveryLineage) bool {
+func (r *ReplicaListener) admitMutation(l RecoveryLineage) (bool, string) {
 	r.mu.Lock()
 	prev := r.activeLineage
-	if !r.acceptMutationLineageLocked(l) {
+	if why := r.mutationLineageRefusalLocked(l); why != "" {
 		r.mu.Unlock()
-		return false
+		return false, why
 	}
 	if r.sessionFrames == nil {
 		r.sessionFrames = make(map[uint64]int)
@@ -199,14 +199,14 @@ func (r *ReplicaListener) admitMutation(l RecoveryLineage) bool {
 		r.mu.Unlock()
 		r.endSessionFrame(l.SessionID)
 		log.Printf("replica: refuse mutation at epoch %d: %v", l.Epoch, err)
-		return false
+		return false, "epoch floor not durable: " + err.Error()
 	}
 	r.mu.Lock()
 	if prev.SessionID != l.SessionID {
 		r.markSessionRetiringLocked(prev.SessionID)
 	}
 	r.mu.Unlock()
-	return true
+	return true, ""
 }
 
 // NewReplicaListenerWithApplyHook creates a listener with the
@@ -411,8 +411,11 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 		var replyType byte
 		var reply []byte
 		var admittedSession uint64
+		var refusal string // why the last admit refused (logged by its caller)
 		admit := func(l RecoveryLineage) bool {
-			if !r.admitMutation(l) {
+			ok, why := r.admitMutation(l)
+			if !ok {
+				refusal = why
 				return false
 			}
 			admittedSession = l.SessionID
@@ -427,8 +430,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					return true
 				}
 				if !admit(lineage) {
-					log.Printf("replica: reject stale recovery lane start session=%d epoch=%d endpointVersion=%d",
-						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					log.Printf("replica: reject stale recovery lane start session=%d epoch=%d endpointVersion=%d: %s",
+						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, refusal)
 					return true
 				}
 				// The lane ships history whose epochs arrive only at its
@@ -469,8 +472,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					return true
 				}
 				if !admit(entry.Lineage) {
-					log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d",
-						entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
+					log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d: %s",
+						entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion, refusal)
 					return true
 				}
 				// Live lane: the row first, then the entry, so an entry
@@ -587,8 +590,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					return true
 				}
 				if !admit(lineage) {
-					log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
-						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d: %s",
+						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, refusal)
 					return true
 				}
 				// Rebuild blocks are BASE-lane bytes. They must not enter the
@@ -611,8 +614,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					return true
 				}
 				if !admit(lineage) {
-					log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
-						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d: %s",
+						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, refusal)
 					return true
 				}
 				// Done (DESIGN 8.7): an empty rebuild begins here; the hint must
@@ -679,8 +682,8 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					return true
 				}
 				if !admit(lineage) {
-					log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d",
-						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+					log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d: %s",
+						lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, refusal)
 					return true
 				}
 				frontier, syncErr := r.store.Sync()
@@ -1000,31 +1003,45 @@ func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 }
 
 func (r *ReplicaListener) acceptMutationLineageLocked(incoming RecoveryLineage) bool {
+	return r.mutationLineageRefusalLocked(incoming) == ""
+}
 
+// mutationLineageRefusalLocked admits incoming (taking it as the active
+// lineage when newer) and returns "", or returns why it is refused, one
+// reason per cause, for the caller's log line.
+func (r *ReplicaListener) mutationLineageRefusalLocked(incoming RecoveryLineage) string {
 	if incoming.SessionID == 0 || incoming.Epoch == 0 || incoming.EndpointVersion == 0 {
-		return false
+		return "incomplete lineage"
 	}
 	// G2: a primary applies no inbound replication, and no host applies
 	// any below the epoch it has taken a role at. G1: a production listener
 	// applies nothing before its role is known.
-	if r.primary || incoming.Epoch < r.epochFloor || (r.requireRole && !r.assigned) {
-		return false
+	switch {
+	case r.primary:
+		return "this listener is a primary"
+	case incoming.Epoch < r.epochFloor:
+		return fmt.Sprintf("epoch below the floor %d", r.epochFloor)
+	case r.requireRole && !r.assigned:
+		return "no role assigned yet"
 	}
 
 	active := r.activeLineage
 	if active.SessionID == 0 {
 		r.activeLineage = incoming
-		return true
+		return ""
 	}
 
 	switch compareLineage(incoming, active) {
 	case 1:
 		r.activeLineage = incoming
-		return true
+		return ""
 	case 0:
-		return incoming.EffectiveFrontierHint() == active.EffectiveFrontierHint()
+		if incoming.EffectiveFrontierHint() == active.EffectiveFrontierHint() {
+			return ""
+		}
+		return fmt.Sprintf("same lineage with another frontier hint (%d, held %d)", incoming.EffectiveFrontierHint(), active.EffectiveFrontierHint())
 	default:
-		return false
+		return fmt.Sprintf("below the held lineage session=%d epoch=%d endpointVersion=%d", active.SessionID, active.Epoch, active.EndpointVersion)
 	}
 }
 

@@ -266,8 +266,8 @@ func (p *ReplicaPeer) RefreshLiveShipSessionAfter(completedSessionID, achievedLS
 	p.executor.InvalidateSession(p.target.ReplicaID, oldSessionID, reason)
 	p.sessionID = newSessionID
 	p.lineage = newLineage
-	log.Printf("replication: peer %s refreshed live session old=%d new=%d after recovery=%d",
-		p.target.ReplicaID, oldSessionID, newSessionID, completedSessionID)
+	log.Printf("replication: peer %s refreshed live session old=%d new=%d after session=%d (%s)",
+		p.target.ReplicaID, oldSessionID, newSessionID, completedSessionID, reason)
 	return nil
 }
 

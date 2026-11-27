@@ -25,12 +25,12 @@ var walStoreMethods = map[string]string{
 	"AdvanceWALTail": "replication", "FormatV3": "base", "Recover": "recovery",
 
 	"SetLayoutIdentity": "control", "SetWMode": "control", "SetMultiBlockRecords": "control", "SetRecoveryRetentionLSNs": "control",
-	"SetRecycleFloorSource": "control", "AllowBaseRetirementV3": "control", "DeferBaseRetirementV3": "control",
+	"SetRecycleFloorSource": "control", "AllowBaseRetirementV3": "control", "DeferBaseRetirementV3": "control", "HoldExtentDrainUntilChunkLayer": "control (holds the extent drain until the chunk layer attaches)",
 	"DisableAutoFlushForRecoveryTest": "test control", "ResetFlusherForMeasurement": "test control", "Sync": "control", "Close": "control",
 
 	"AllBlocks": "read", "AppliedLSNs": "read", "CanSeedChunkFrontier": "read (the seed precondition, no write)", "BlockSize": "read", "StoreID": "read (the superblock UUID)", "ChunkBlocks": "read (immutable local map shape)", "Boundaries": "read", "CheckpointLSN": "read",
 	"CheckpointLSNForPOC": "read", "CheckpointPersistence": "read", "ChunkMapStatsV3": "read", "DataSyncPolicy": "read",
-	"DurabilityLatency": "read", "FlushCount": "read", "FlusherInstrumentation": "read", "HolesSuspected": "read",
+	"DurabilityLatency": "read", "ExtentDrainHeld": "read", "FlushCount": "read", "FlusherInstrumentation": "read", "HolesSuspected": "read",
 	"InstalledBaseLSN": "read", "LayoutIdentity": "read", "NextLSN": "read", "NumBlocks": "read",
 	"OwnerChunkAttachDurableV3": "read", "Read": "read", "ReadContext": "read", "RecoveryMode": "read",
 	"RecoveryRetentionLSNs": "read", "RecoveryWarnings": "read", "ScanLBAs": "read", "WALCapacityBytes": "read",

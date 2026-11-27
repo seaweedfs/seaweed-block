@@ -206,9 +206,23 @@ A late upload by a dead holder into a deleted volume can remain; rerun volume-de
 - `ops chunk verify`;
 - restoring a snapshot into a new volume, which reads the chunks it has not made local from that snapshot (fork is not supported in this release).
 
+A volume holds at most 10 snapshots. The next one is refused with `snapshot_limit` (HTTP 409, not retryable;
+`at most 10 per volume; delete a snapshot, or let retention prune`) and nothing changes: no snapshot, no cut, HEAD
+as it was (`TestChunkSnapshotPastTheLimitIsRefusedWithHEADUnchanged`). Delete a snapshot, or let retention prune,
+then take it again. A scheduled snapshot refused this way still publishes the volume's image by an ordinary cut,
+and `GET STATUS/status/durable?volume=<id>` shows `Chunk.ScheduledSnapshot.lastFailure.code: snapshot_limit`, then
+`snapshot_overdue` (`TestScheduledSnapshotAtTheLimitStillPublishes`).
+
 A snapshot can be refused with `host_slot_busy` / `no background slot` (retryable) while every host slot is held by
 other volumes' cuts; retry with the same request id. With many volumes on a host, a snapshot may wait for a slot:
 measured up to 15 s at 32 volumes with the default 3 slots.
+
+A snapshot can answer `head_conflict` (HTTP 409, retryable): another write to the volume's HEAD, such as a snapshot
+delete, landed during its commit. Retry it with the same name. In this release, if that retry answers `internal`
+`snapshot "NAME" of VOL is not in HEAD after its commit`, retry once more. The volume's data is committed either way;
+the snapshot name exists only after a request for it succeeds (check with `sw-block ops chunk snapshots`)
+(`TestKnownDefectSnapshotRetryAfterAGenuineConflictCommitsTheDataUnnamed`). A retry that names the snapshot at once is
+planned for 1.0.1.
 
 ## Add a host
 
@@ -242,9 +256,12 @@ Until the restart, a move to the new host is refused with `move target node "<id
 
 ## When a host is lost
 
-The steps below are for a single-replica volume. A replicated volume whose
-primary's host is lost is not replaced by itself either: power the old node
-off or cut it from its clients, then run `sw-block ops failover` (see
+The steps below are for a single-replica volume. A `sync-quorum` or `sync-all`
+replicated volume under `--cluster-spec` with the lifecycle loop on is failed
+over by blockmaster itself when its primary's heartbeat goes stale and enough
+replicas answer the fencing round; the operator's `sw-block ops failover` is for
+when that round cannot decide, and for a `best-effort` volume, which is never
+failed over by itself (see
 [replicated volumes in this release](standalone-deployment.md)).
 
 1. Make sure the lost host stays down for this volume. The product does not power off an old holder.
@@ -260,6 +277,54 @@ off or cut it from its clients, then run `sw-block ops failover` (see
    - Read it again later with `sw-block ops workspace lost-range`.
 4. Start `blockvolume` on the new node, then reconnect the guest.
 5. Optionally restore an older snapshot into a new volume and verify it with `ops chunk verify --depth data`.
+
+## Host connect settings
+
+The guest's kernel keeps an NVMe/TCP controller whose target went away and keeps reconnecting to the same address.
+Three `nvme connect` options decide how long it waits and what the guest sees meanwhile. The values below are
+derived from the waits these pages state, and were run with exactly these options (below).
+
+| Option | Kernel default | Set it to | Why |
+|---|---|---|---|
+| `--ctrl-loss-tmo` | 600 s | 180 | Longer than the longest wait for the same target to serve again: a restarted holder is re-granted at most 65 s after it stopped; a start not granted within 30 s after that barrier ends its wait, and the unit starts it again after `RestartSec=5s` ([after a crash](volume-lifecycle.md#after-a-crash)): 65 + 30 + 5 = about 100 s |
+| `--reconnect-delay` | 10 s | 2 | The controller retries every 2 s; connection setup and the network add to it |
+| `--fast_io_fail_tmo` | off | leave off | Any value shorter than the wait above fails I/O to the filesystem before the target serves again |
+
+```bash
+sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n "$NQN" --ctrl-loss-tmo=180 --reconnect-delay=2
+```
+
+What the guest sees:
+- **These values:** while the same target is away, I/O waits and continues when it serves again; a target that does
+  not come back fails I/O after 180 s. Measured with exactly these options: the holder killed, a write issued, the
+  holder started again 5 s later (by the test, as the unit would): the write completed after 6.1 s, with no error;
+  the holder kept away: the write failed with `EIO` after 181.5 s.
+- **Kernel defaults** (every connect command shipped today, including the CSI node): a target that does not come
+  back holds I/O for up to 10 minutes (a 9-minute blocked read was observed in a fault run), then fails it.
+- **Too short** (`--ctrl-loss-tmo` or `--fast_io_fail_tmo` below the wait): I/O errors reach the filesystem before
+  the target serves again; ext4 mounted with `errors=remount-ro` turns read-only and must be remounted.
+
+A blockmaster outage longer than the lease stops the holders: a holder keeps serving until its lease ends (up to
+20 s after its last renewal) and serves again at least 50 s after blockmaster is back
+([what a blockmaster restart does to serving volumes](standalone-deployment.md#restoring-a-snapshot-into-a-new-volume)).
+Guest I/O therefore waits at least the rest of the outage plus those 50 s; these pages give no upper bound. An outage
+longer than `--ctrl-loss-tmo` less those 50 s can fail guest I/O. Raise `--ctrl-loss-tmo` if the guest must ride
+through longer outages; I/O waits that long.
+
+**After a failover the guest must connect to the new primary.** These options retry the configured address; they
+never redirect it. A standalone volume's NVMe/TCP target binds loopback only (`--nvme-listen`; a non-loopback bind
+needs `--allow-external-nvme-bind`, unauthenticated, for test gates only), so a guest reaches only the target on its
+own host. Each replica's target reports itself optimized only while it is the healthy primary, but no guest is
+connected to the other replicas' targets. A replicated `sync-quorum` volume gets its new primary on another host
+about 30 to 35 s after its host is lost, with default flags (derived from `--freshness-window` and the two probe
+rounds; not yet measured). The guest's I/O on the old controller waits and then fails as above. To continue, run
+the guest on the new primary's host and connect it there: that host's blockvolume logs `adopted as PRIMARY` and its
+`/status?volume=<id>` shows `"AuthorityRole":"primary"`.
+
+**Kubernetes.** The CSI node connects with a plain `nvme connect` and the kernel defaults. A pod whose holder does
+not come back holds I/O for up to 600 s: its reads and writes block (processes in uninterruptible sleep, probes that
+touch the volume time out), then fail. Recovery is by recreating the pod, which stages the volume again on the
+current primary ([operations](operations-v1.md)). The CSI node passing the settings above is planned for 1.0.1.
 
 ## A volume waiting for blockmaster
 

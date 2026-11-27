@@ -24,13 +24,15 @@ func (s staticPromotionProbe) FencePromotionCandidates(_ string, current authori
 
 func (p *switchProbe) FencePromotionCandidates(_ string, current authority.AuthorityBasis, survivors []PromotionCandidateEvidence) (PromotionProbeResult, error) {
 	p.mu.Lock()
-	silent := p.fenceSilent
+	silent, mismatch := p.fenceSilent, p.fenceMismatch
 	p.fenceCalls++
 	p.mu.Unlock()
 	if silent {
 		return PromotionProbeResult{FencedEpoch: current.Epoch + 1}, nil
 	}
-	return fenceObeyed(current, survivors)
+	r, err := fenceObeyed(current, survivors)
+	r.ProfileMismatch = mismatch
+	return r, err
 }
 
 func (p *swapPromotionProbe) FencePromotionCandidates(_ string, current authority.AuthorityBasis, survivors []PromotionCandidateEvidence) (PromotionProbeResult, error) {

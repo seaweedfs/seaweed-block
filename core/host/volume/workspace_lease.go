@@ -2,6 +2,7 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -11,6 +12,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type WorkspaceLeaseClient interface {
@@ -76,6 +79,22 @@ const stopPendingPoll = 250 * time.Millisecond
 // and for slower disks. A shorter bound lets a slow but successful ACK fail
 // here (the holder exits 75 although the master may have recorded it).
 const WorkspaceAckTimeout = 5 * time.Second
+
+// ackRetryPause separates the attempts of a revocation ACK that got no answer.
+const ackRetryPause = 250 * time.Millisecond
+
+// retryableAckError: the ACK call got no answer (its deadline passed, or the
+// master was unavailable), so whether the master recorded it is unknown.
+func retryableAckError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.DeadlineExceeded, codes.Unavailable:
+		return true
+	}
+	return false
+}
 
 // WorkspaceDrainTimeout is the existing fail-closed lease drain bound.
 // INV-WS-STARTUP-RETRY-001 also bounds the process cleanup by this duration.
@@ -407,10 +426,25 @@ func (g *WorkspaceLeaseGuard) drain(parent context.Context, ack bool) error {
 		}
 		leaseCtx, leaseCancel := context.WithDeadline(parent, until)
 		defer leaseCancel()
-		ctx, cancel := context.WithTimeout(leaseCtx, WorkspaceAckTimeout)
-		defer cancel()
-		_, err := g.client.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: &g.id, HeadGen: g.headGen})
-		return err
+		// An answer lost to a busy master (its call timed out, or the master
+		// was unavailable) is asked again until the lease deadline: the
+		// master answers a repeat of a recorded ACK as recorded
+		// (authority.Publisher.AckWorkspaceRevocation), and records one it
+		// had not. Any other answer is final.
+		for attempt := 1; ; attempt++ {
+			ctx, cancel := context.WithTimeout(leaseCtx, WorkspaceAckTimeout)
+			_, err := g.client.AckWorkspaceRevoked(ctx, &control.WorkspaceRevocationAck{Identity: &g.id, HeadGen: g.headGen})
+			cancel()
+			if err == nil || !retryableAckError(err) || leaseCtx.Err() != nil {
+				return err
+			}
+			log.Printf("workspace lease: revocation ACK attempt %d volume=%s epoch=%d got no answer (%v); asking again until the lease deadline %s", attempt, g.id.VolumeId, g.id.Epoch, err, until.Format(time.RFC3339Nano))
+			select {
+			case <-leaseCtx.Done():
+				return err
+			case <-time.After(ackRetryPause):
+			}
+		}
 	}
 	g.mu.Lock()
 	cause := g.cause

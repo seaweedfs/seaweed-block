@@ -57,15 +57,103 @@ func leaseBinaryPost(addr, op string) (int, []byte, error) {
 	return resp.StatusCode, b, err
 }
 
+// blockvolumeUnderTest is the blockvolume a test starts: a gate run's
+// prebuilt, hashed binary (SWBLOCK_TEST_BINS), or a race-enabled build for a
+// local run.
+func blockvolumeUnderTest(t *testing.T) string {
+	t.Helper()
+	if d := os.Getenv("SWBLOCK_TEST_BINS"); d != "" {
+		exe := filepath.Join(d, "blockvolume")
+		if _, err := os.Stat(exe); err != nil {
+			t.Fatalf("SWBLOCK_TEST_BINS has no blockvolume: %v", err)
+		}
+		return exe
+	}
+	exe := filepath.Join(t.TempDir(), "blockvolume")
+	if out, err := exec.Command("go", "build", "-race", "-p", "4", "-o", exe, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v %s", err, out)
+	}
+	return exe
+}
+
+// runProductLoop runs h's lifecycle product loop for the rest of the test,
+// as blockmaster runs it (--lifecycle-product-loop-interval). The early-line
+// control (SWBLOCK_TEST_EARLY_LINE=1) runs without it, as the fixture did
+// before: a running loop could bind after the holder reported and mask it.
+func runProductLoop(t *testing.T, h *master.Host) {
+	t.Helper()
+	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") == "1" {
+		return
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				_, _ = h.RunLifecycleProductTick()
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-done })
+}
+
+// A primary line is issued for the process at its endpoints: the bind
+// records the process the holder reports, and the holder (blockvolume sets
+// LinesNameTheirProcess) refuses a line that names no process. So, as in
+// production, the first line is minted only after the holder process has
+// reported its slot: tickAfterProcessReports waits for that report, then
+// runs the product tick that binds.
+//
+// SWBLOCK_TEST_EARLY_LINE=1 is the control, the order the fixture used
+// before: earlyLineControl mints the line from a hand-ingested observation
+// before the holder starts, and no product tick runs after the holder
+// starts. The line names no process, the holder refuses it and never
+// serves. A tick after the holder reported would re-issue the line for its
+// process (an unbound placement goes through the controller, which
+// refreshes on a process change), so the control runs none.
+func earlyLineControl(t *testing.T, h *master.Host, server, volume, replica, data, ctrl string) {
+	t.Helper()
+	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") != "1" {
+		return
+	}
+	if err := h.ObservationHost().Ingest(authority.Observation{ServerID: server, ObservedAt: time.Now().UTC(),
+		Slots: []authority.SlotFact{{VolumeID: volume, ReplicaID: replica, DataAddr: data, CtrlAddr: ctrl}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	leaseBinaryPoll(t, "control: no early line", func() bool { line, ok := h.Publisher().VolumeAuthorityLine(volume); return ok && line.Epoch > 0 })
+	if line, _ := h.Publisher().VolumeAuthorityLine(volume); line.Incarnation != "" {
+		t.Fatalf("control: want an early line that names no process, have %+v", line)
+	}
+}
+
+func tickAfterProcessReports(t *testing.T, h *master.Host, server, volume, replica string) {
+	t.Helper()
+	if os.Getenv("SWBLOCK_TEST_EARLY_LINE") == "1" {
+		return
+	}
+	leaseBinaryPoll(t, "the holder never reported its process", func() bool {
+		s, ok := h.ObservationHost().Store().SlotFactOnServer(server, volume, replica)
+		return ok && s.Incarnation != ""
+	})
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatal(err)
+	}
+	leaseBinaryPoll(t, "no initial authority", func() bool { line, ok := h.Publisher().VolumeAuthorityLine(volume); return ok && line.Epoch > 0 })
+}
+
 func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 	if os.Getenv("CHUNKSTORE_WEED") == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
 	}
-	exe := filepath.Join(t.TempDir(), "blockvolume")
-	build := exec.Command("go", "build", "-race", "-p", "4", "-o", exe, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
-	}
+	exe := blockvolumeUnderTest(t)
 	cluster := startWorkspaceWeed(t)
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("workspace-rpc-%v", enabled), func(t *testing.T) {
@@ -93,6 +181,7 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 				defer c()
 				_ = h.Close(ctx)
 			})
+			runProductLoop(t, h)
 			dataAddr, ctrlAddr, statusAddr, nvmeAddr := leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t), leaseBinaryAddress(t)
 			// The master's create writes VOLUME and the unclaimed HEAD, then
 			// marks the record store-ready; only a store-ready volume gets a placement.
@@ -103,14 +192,7 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 			if _, err = h.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{VolumeID: "vol-a", DesiredRF: 1, Candidates: []lifecycle.PlacementCandidate{{VolumeID: "vol-a", ServerID: "node-a", ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica}}}); err != nil {
 				t.Fatal(err)
 			}
-			if err = h.ObservationHost().Ingest(authority.Observation{ServerID: "node-a", ObservedAt: time.Now().UTC(), Slots: []authority.SlotFact{{VolumeID: "vol-a", ReplicaID: "r1", DataAddr: dataAddr, CtrlAddr: ctrlAddr}}}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err = h.RunLifecycleProductTick(); err != nil {
-				t.Fatal(err)
-			}
-			leaseBinaryPoll(t, "no initial authority", func() bool { line, ok := h.Publisher().VolumeAuthorityLine("vol-a"); return ok && line.Epoch > 0 })
-			line, _ := h.Publisher().VolumeAuthorityLine("vol-a")
+			earlyLineControl(t, h, "node-a", "vol-a", "r1", dataAddr, ctrlAddr)
 			logPath := filepath.Join(t.TempDir(), "volume.log")
 			log, err := os.Create(logPath)
 			if err != nil {
@@ -143,6 +225,8 @@ func TestBinaryWorkspaceLeaseOptInOwnsCLEANShutdown(t *testing.T) {
 					t.Logf("volume log: %s", b)
 				}
 			})
+			tickAfterProcessReports(t, h, "node-a", "vol-a", "r1")
+			line, _ := h.Publisher().VolumeAuthorityLine("vol-a")
 			client := &http.Client{Timeout: time.Second}
 			projection := func() (frontend.Projection, bool) {
 				resp, e := client.Get("http://" + statusAddr + "/status?volume=vol-a")
