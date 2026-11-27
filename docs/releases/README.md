@@ -4,6 +4,7 @@ Seaweed Block release notes use narrow product claims. Each alpha version names
 what a user or reviewer can actually run, what QA evidence backs it, and what
 is still outside the supported boundary.
 
+- [v1.0.0](v1.0.0.md)
 - [Holder identity and pre-release upgrades](holder-identity.md)
 - [One live process per volume per host](one-process-per-volume.md)
 - [Local disk headroom at volume create](local-disk-headroom.md)
