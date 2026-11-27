@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/testback"
+	"github.com/seaweedfs/seaweed-block/core/replication"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"syscall"
 	"testing"
@@ -36,6 +38,10 @@ func TestBackendRetryClassClearsWireDNR(t *testing.T) {
 		{"deadline-not-ready", errors.Join(context.DeadlineExceeded, frontend.ErrNotReady), false},
 		{"deadline-busy-physical", errors.Join(context.DeadlineExceeded, frontend.ErrBackendBusy, syscall.EIO), true},
 		{"deadline-not-ready-physical", errors.Join(context.DeadlineExceeded, frontend.ErrNotReady, syscall.EIO), true},
+		// A replication durability shortfall is transient: the guest retries.
+		{"sync-quorum-shortfall", fmt.Errorf("%w: %w: acknowledgements 1/2", durable.ErrReplicationAckUnavailable, replication.ErrDurabilityQuorumLost), false},
+		{"sync-all-shortfall", fmt.Errorf("%w: sync target LSN 9 acknowledgements 2/3", replication.ErrDurabilityBarrierFailed), false},
+		{"shortfall-with-media-error", errors.Join(replication.ErrDurabilityQuorumLost, syscall.EIO), true},
 	} {
 		for _, op := range []uint8{ioRead, ioWrite, ioFlush} {
 			t.Run(tc.name+string(rune('0'+op)), func(t *testing.T) {

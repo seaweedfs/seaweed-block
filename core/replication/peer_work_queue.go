@@ -2,22 +2,44 @@ package replication
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
 var (
-	ErrPeerQueueSaturated    = errors.New("replication: peer work queue saturated")
-	ErrPeerQueueClosed       = errors.New("replication: peer work queue closed")
-	ErrBarrierBelowTargetLSN = errors.New("replication: barrier acknowledgement below target LSN")
+	ErrPeerQueueSaturated    error = transientError("replication: peer work queue saturated", frontend.ErrBackendBusy)
+	ErrPeerQueueClosed       error = transientError("replication: peer work queue closed", frontend.ErrNotReady)
+	ErrBarrierBelowTargetLSN error = transientError("replication: barrier acknowledgement below target LSN", frontend.ErrNotReady)
 	// ErrPeerNotInSync: a peer that is not healthy (degraded, catching up,
 	// or holding a divergent tail) never counts toward a sync, whatever
 	// length its barrier reports.
-	ErrPeerNotInSync = errors.New("replication: peer is not in sync")
+	ErrPeerNotInSync error = transientError("replication: peer is not in sync", frontend.ErrNotReady)
+	// ErrMembershipUpdating: a write or sync arrived while the replica set
+	// was being replaced; it may be asked again once the update ends.
+	ErrMembershipUpdating error = transientError("replication: membership transition in progress", frontend.ErrNotReady)
+	// ErrVolumeClosed: the replication volume was closed under the I/O.
+	ErrVolumeClosed error = transientError("replication: volume closed", frontend.ErrBackendClosed)
 )
+
+// replicationError is a replication refusal that carries its frontend retry
+// class (INV-FE-ERROR-RETRY-CLASS-001): errors.Is finds both the value itself
+// and its class marker, and its text stays the replication message. None of
+// these refusals is a media fault: a permanent storage cause joined beside
+// one still decides first in the frontend classifier.
+type replicationError struct {
+	msg   string
+	class error
+}
+
+func transientError(msg string, class error) *replicationError {
+	return &replicationError{msg: msg, class: class}
+}
+
+func (e *replicationError) Error() string { return e.msg }
+func (e *replicationError) Unwrap() error { return e.class }
 
 type peerWorkKind uint8
 

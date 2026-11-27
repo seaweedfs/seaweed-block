@@ -2,10 +2,11 @@ package replication
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"sync"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
 // DurabilityMode selects the per-volume durability semantic applied
@@ -49,12 +50,12 @@ func (m DurabilityMode) String() string {
 // ErrDurabilityBarrierFailed is returned by SyncLocalAndReplicas in
 // DurabilitySyncAll mode when any peer barrier fails. Mirrors V2
 // blockerr.ErrDurabilityBarrierFailed.
-var ErrDurabilityBarrierFailed = errors.New("replication: sync_all durability barrier failed")
+var ErrDurabilityBarrierFailed error = transientError("replication: sync_all durability barrier failed", frontend.ErrNotReady)
 
 // ErrDurabilityQuorumLost is returned by SyncLocalAndReplicas in
 // DurabilitySyncQuorum mode when fewer than quorum nodes are
 // durable. Mirrors V2 blockerr.ErrDurabilityQuorumLost.
-var ErrDurabilityQuorumLost = errors.New("replication: sync_quorum quorum not met")
+var ErrDurabilityQuorumLost error = transientError("replication: sync_quorum quorum not met", frontend.ErrNotReady)
 
 // DurabilityResult is the per-Sync outcome reported by
 // SyncLocalAndReplicas. DurableNodes counts the primary (1 iff local
