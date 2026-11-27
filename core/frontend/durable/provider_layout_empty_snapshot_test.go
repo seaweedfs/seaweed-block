@@ -84,7 +84,29 @@ func TestLayoutProviderSnapshotAfterAnEmptySnapshotAndAnOutsideWrite(t *testing.
 	if !ok || hd.Current == nil || sn.Root != *hd.Current || sn.Position == 0 {
 		t.Fatalf("snapshot with-data: %+v (HEAD current %v); want it naming the image with the write", sn, hd.Current)
 	}
-	if got, err := ws.Read(1); err != nil || !bytes.Equal(got, data) {
-		t.Fatalf("block 1 after the snapshot: %v", err)
+	// The snapshot's own root, read from the store (root, segment, chunk;
+	// not the holder's cache), holds the write at block 1 and zeros at block
+	// 2, the unwritten block next to it in the same chunk.
+	st, err := cat.Store(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := layout.NewReader("/layout-test", v.Dir(), st.Fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := r.Open(ctx, sn.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := img.Chunk(ctx, 0) // blocks 0-3: ChunkBlocks 4
+	if err != nil || c.Zero || len(c.Data) != 4*4096 {
+		t.Fatalf("chunk 0 of snapshot with-data: zero %t, %d bytes, %v", c.Zero, len(c.Data), err)
+	}
+	if !bytes.Equal(c.Data[4096:8192], data) {
+		t.Fatalf("block 1 in snapshot with-data's stored image is not the write")
+	}
+	if !bytes.Equal(c.Data[8192:12288], make([]byte, 4096)) {
+		t.Fatalf("block 2 in snapshot with-data's stored image is not zero")
 	}
 }
