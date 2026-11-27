@@ -1,0 +1,47 @@
+# Seconds each process-level test took on the CI runner (main 032eb197, run 45972669823),
+# used only to balance the parallel shards (.github/scripts/shard-named-tests.py). A test
+# missing here counts as 60 s; a stale time unbalances the shards but never skips a test.
+TestAVolumeThatServedBeforeItsFirstGateTickFailsOver 31.4
+TestClaimedTargetAfterAMasterRestartIsNotNeverStarted 18.7
+TestCutoverCreateFromSnapshot 25.4
+TestCutoverWriteSnapshotKillRestartRestore 34.1
+TestDoubleFailoverReadsBackEveryAckedWrite 10.2
+TestFencingRoundHealContinuesThePrimary 13.4
+TestFencingRoundSurvivorRejoins 17.0
+TestKnownZeroAcceptance 27.1
+TestKnownZeroTargetReservesBeforeHarness 0.0
+TestNeverAttachedRestoreTargetIsDeletable 16.5
+TestNeverStartedDeleteAfterAMasterRestart 166.8
+TestNeverStartedDeleteFencesALateStart 53.6
+TestNeverStartedDeleteRacesAStart 42.4
+TestNeverStartedLineDeleteFencesALateStart 240.3
+TestNeverStartedLineDeleteRacesAStart 458.9
+TestNeverStartedLineIsDeletableWithoutARevoke 335.1
+TestProcedureDeleteAVolume 79.1
+TestProcedureDeleteAfterASignalStop 116.1
+TestProcedureForcedMoveWithTheOldHostReturning 100.2
+TestProcedureMasterKilledAfterMoveBeforeTargetStarts 23.2
+TestProcedureMasterUnreachableFencesBeforeForcedMove 159.4
+TestProcedurePlannedHandoffToAnotherHost 16.8
+TestProcedureReturnAfterALapsedLease 81.4
+TestProcedureRevokeWithoutACKThenForcedMove 79.6
+TestProcedureSameHostCrashRestartInsideTheLease 17.5
+TestProcedureSameHostRestartInsideTheLease 17.5
+TestProcedureStartInsideTheBarrierWaitIsReGranted 80.0
+TestSnapshotLadderA1OneBlockOneSnapshot 18.8
+TestSnapshotLadderA2IncrementalSnapshot 20.9
+TestSnapshotLadderA3WritesDuringASnapshot 26.1
+TestSnapshotLadderA4ContentReturnsToAnOldValue 23.6
+TestSnapshotLadderB1SnapshotQuery 19.1
+TestSnapshotLadderC1FullRestore 18.8
+TestSnapshotLadderC2IncrementalRestore 21.3
+TestSnapshotLadderC3KilledHydrating 35.6
+TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt 21.3
+TestSnapshotLadderD1DeleteTheNewest 21.4
+TestSnapshotLadderD2DeleteAMiddleOne 23.9
+TestSnapshotLadderD3DeleteWhenContentRecurs 21.3
+TestSnapshotLadderD4DeleteAllButOneThenCollect 19.4
+TestSnapshotLadderE1CrashDuringASnapshot 31.1
+TestSnapshotLadderF1VolumesOneHost 528.4
+TestStandaloneCleanMoveWithoutTheACKIsRefused 16.6
+TestStandalonePlannedHandoffToTheSameHost 17.7
