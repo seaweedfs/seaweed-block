@@ -524,8 +524,11 @@ func (l *LayoutRemote) CommitPendingSnapshot(ctx context.Context) error {
 	}
 	// The image is the one the engine already holds (same root and
 	// position): an own write that leaves the engine's view where it is.
+	// On a volume never cut it is HEAD's first root (the empty image): seen
+	// takes it too, so a later write by anyone else that leaves this image
+	// in place does not move visible under the engine's base.
 	l.session, l.pending, l.lastCommit = "", nil, got
-	l.ownGen = got.Gen
+	l.ownGen, l.seen = got.Gen, imageOf(got)
 	return nil
 }
 
