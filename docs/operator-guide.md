@@ -239,6 +239,13 @@ Replicated volumes (`replication_factor` above 1) are a preview in v1.0. In the 
 the writes acknowledged last in a failover. Under a writing guest a single fault can stop writes until an operator
 acts. The limits, as they show on a running system:
 
+- **No snapshots, restore, moves or object-store copy.** v1.0 has two designs: the single-replica volume with the
+  object store (`--durable-impl walstore-chunk`: snapshots, restore, moves) and replicated volumes on local stores
+  without any of those. `walstore-chunk` refuses replication at start
+  (`--durable-impl=walstore-chunk is single-replica: --replication-ack="sync-quorum" needs replica peers (...)`) and
+  refuses any assignment with replica slots, because a chunk snapshot takes its position from the local log, which
+  the replicas may not hold.
+
 - **A replica that misses writes is not caught up by itself.** While the guest writes, the primary keeps only a few
   write-ahead-log entries beyond its last checkpoint. A replica that falls behind them (it was restarted, or a
   failover fenced it) needs a rebuild, and a rebuild onto the data it already has is refused
