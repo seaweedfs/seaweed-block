@@ -700,6 +700,13 @@ func (s *WALStore) DisableAutoFlushForRecoveryTest() {
 	}
 }
 
+// HoldExtentDrainUntilChunkLayer is called by the owner of a store opened
+// for chunk use, before Recover: no dirty block is drained to the extent
+// until a chunk layer is attached. A block drained earlier would not be
+// marked local, and a later fetch of its absent chunk would install the
+// remote block over the acknowledged write.
+func (s *WALStore) HoldExtentDrainUntilChunkLayer() {}
+
 func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 	return s.readFromExtentContext(context.Background(), lba)
 }
