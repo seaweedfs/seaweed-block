@@ -37,7 +37,7 @@ jobs:
     # capped at 8 cores / 8 GiB). Fork PRs never reach it: they stay on a
     # GitHub-hosted runner.
     runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'tp04-seaweed-block' || 'ubuntu-latest' }}
-    # process: 44 tests in sequence, 15 to 550 s each (about 55 min in all).
+    # process: 44 tests in 4 parallel shards of about 13 min each (55 min in sequence).
     timeout-minutes: ${{ matrix.suite == 'unit' && 40 || 90 }}
     env:
       # Pure-Go build: no package in the default build needs cgo, and the
@@ -131,6 +131,7 @@ jobs:
         run: |
           python3 -I .github/scripts/required-tests-check-test.py
           bash .github/scripts/run-named-tests-test.sh
+          python3 -I .github/scripts/shard-named-tests-test.py
 
       - name: Pinned SeaweedFS
         if: matrix.suite == 'process' && steps.scope.outputs.docs_only != '1'
@@ -185,8 +186,25 @@ jobs:
           TEST_TIMEOUT: 15m
         run: |
           set -euo pipefail
+          # SHARDS parallel shards, balanced by their last measured times
+          # (.github/process-level-seconds.txt). Each shard is its own sequence
+          # of test processes with its own slice of the test port ranges
+          # (SWBLOCK_TEST_PORT_SHARD) and its own TMPDIR; the gate judges every
+          # named test from all the shards together.
           names=.github/process-level-tests.txt
-          bash .github/scripts/run-named-tests.sh "$SWBLOCK_TEST_BINS/blockvolume.test" "$names" \
-            "$RUNNER_TEMP/process-level.json" "$RUNNER_TEMP/process-level.status" "$TEST_TIMEOUT" cmd/blockvolume
+          shards=4
+          python3 -I .github/scripts/shard-named-tests.py "$names" .github/process-level-seconds.txt "$shards" "$RUNNER_TEMP/shard"
+          pids=()
+          for k in $(seq 1 "$shards"); do
+            mkdir -p "$RUNNER_TEMP/tmp-$k"
+            SWBLOCK_TEST_PORT_SHARD=$k SWBLOCK_TEST_PORT_SHARDS=$shards TMPDIR="$RUNNER_TEMP/tmp-$k" \
+              bash .github/scripts/run-named-tests.sh "$SWBLOCK_TEST_BINS/blockvolume.test" "$RUNNER_TEMP/shard/$k.txt" \
+              "$RUNNER_TEMP/process-level-$k.json" "$RUNNER_TEMP/process-level-$k.status" "$TEST_TIMEOUT" cmd/blockvolume \
+              >"$RUNNER_TEMP/process-level-$k.log" 2>&1 &
+            pids+=($!)
+          done
+          for p in "${pids[@]}"; do wait "$p" || true; done
+          for k in $(seq 1 "$shards"); do sed "s/^/[shard $k] /" "$RUNNER_TEMP/process-level-$k.log"; done
+          cat "$RUNNER_TEMP"/process-level-*.status >"$RUNNER_TEMP/process-level.status"
           python3 -I .github/scripts/required-tests-check.py --status "$RUNNER_TEMP/process-level.status" \
-            "$names" "$RUNNER_TEMP/process-level.json"
+            "$names" "$RUNNER_TEMP"/process-level-*.json
