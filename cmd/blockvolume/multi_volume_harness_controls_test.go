@@ -133,7 +133,8 @@ func TestSiblingEarlyFailures(t *testing.T) {
 	}{
 		{"no failure", nil, at(10), at(8), true, 0},
 		{"all after the fence", []time.Time{at(8), at(9)}, at(12), at(8), true, 0},
-		{"within the stamp second", []time.Time{at(7).Add(500 * time.Millisecond)}, at(12), at(8), true, 0},
+		{"in the second before the stamp", []time.Time{at(7).Add(500 * time.Millisecond)}, at(12), at(8), true, 1},
+		{"at the stamp", []time.Time{at(8)}, at(12), at(8), true, 0},
 		{"one before the fence", []time.Time{at(5), at(9)}, at(12), at(8), true, 1},
 		{"no fence line: from the exit", []time.Time{at(5), at(13)}, at(12), time.Time{}, false, 1},
 		{"neither known: all early", []time.Time{at(5)}, time.Time{}, time.Time{}, false, 1},

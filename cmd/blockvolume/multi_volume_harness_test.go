@@ -37,6 +37,10 @@ const (
 	siblingDefaultBytes = 100 << 20
 	siblingWriteEvery   = 200 * time.Millisecond
 	siblingRedialAfter  = 40 * time.Second
+	// siblingJoinWithin covers a writer's worst case after stop: a dial in
+	// progress (two queues, each a 5 s dial plus its 60 s deadline) and the
+	// write on it, which that deadline also bounds.
+	siblingJoinWithin = 2*(5*time.Second+60*time.Second) + 10*time.Second
 )
 
 // siblingVolumes returns the sibling names for SWBLOCK_TEST_VOLUMES (none
@@ -225,8 +229,8 @@ func (env *handoffEnv) siblingTeardown(t testing.TB, writers []*siblingWriter, a
 		select {
 		case <-w.done:
 			joined[i] = true
-		case <-time.After(90 * time.Second):
-			t.Errorf("sibling %s: the writer did not stop within 90 s", w.volume)
+		case <-time.After(siblingJoinWithin):
+			t.Errorf("sibling %s: the writer did not stop within %s", w.volume, siblingJoinWithin)
 		}
 	}
 	if !admitted {
@@ -265,13 +269,13 @@ func siblingFencedAt(d *daemon) (time.Time, bool) {
 
 // siblingEarlyFailures counts the failed writes that came before the
 // sibling became unavailable on purpose: writes may fail from the moment its
-// lease fenced (a whole-second log stamp, so from one second earlier) or its
-// process exited, whichever is earlier, never before. With neither known,
+// lease fenced (the stamp truncates to the second, so the fence is at or
+// after it) or its process exited, whichever is earlier, never before. With neither known,
 // every failure is early.
 func siblingEarlyFailures(failedAt []time.Time, exitedAt, fencedAt time.Time, fenced bool) int {
 	from := exitedAt
-	if fenced && (from.IsZero() || fencedAt.Add(-time.Second).Before(from)) {
-		from = fencedAt.Add(-time.Second)
+	if fenced && (from.IsZero() || fencedAt.Before(from)) {
+		from = fencedAt
 	}
 	early := 0
 	for _, f := range failedAt {
