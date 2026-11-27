@@ -25,11 +25,11 @@ func TestSessionReadNotReadyIsRetryable(t *testing.T) {
 		dnr     bool
 	}{
 		{"attach-pending", fmt.Errorf("awaiting HEAD attach: %w", frontend.ErrNotReady), SCTGeneric, SCNamespaceNotReady, false},
-		{"not-ready-closed", errors.Join(frontend.ErrNotReady, frontend.ErrBackendClosed), SCTPathRelated, SCPathAsymAccessInaccessible, true},
-		{"not-ready-stale", errors.Join(frontend.ErrNotReady, frontend.ErrStalePrimary), SCTPathRelated, SCPathAsymAccessTransition, true},
+		{"not-ready-closed", errors.Join(frontend.ErrNotReady, frontend.ErrBackendClosed), SCTPathRelated, SCPathAsymAccessInaccessible, false},
+		{"not-ready-stale", errors.Join(frontend.ErrNotReady, frontend.ErrStalePrimary), SCTPathRelated, SCPathAsymAccessTransition, false},
 		{"physical-fault", errors.New("physical read failure"), SCTGeneric, SCInternalError, true},
-		{"closed", frontend.ErrBackendClosed, SCTPathRelated, SCPathAsymAccessInaccessible, true},
-		{"stale", frontend.ErrStalePrimary, SCTPathRelated, SCPathAsymAccessTransition, true},
+		{"closed", frontend.ErrBackendClosed, SCTPathRelated, SCPathAsymAccessInaccessible, false},
+		{"stale", frontend.ErrStalePrimary, SCTPathRelated, SCPathAsymAccessTransition, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &readyReadBackend{Backend: testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1"}), err: tc.err}
