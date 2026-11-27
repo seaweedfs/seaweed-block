@@ -23,9 +23,9 @@ import (
 // adopts v1 and reads back v1's block. No sibling write failed at any point,
 // and every acknowledged sibling write reads back (the harness read-back).
 func TestCellNewHostFromTheClusterSpec(t *testing.T) {
-	if v := os.Getenv(testVolumesEnv); v == "" || v == "1" {
-		t.Setenv(testVolumesEnv, "3") // the other volumes are what must keep serving
-	}
+	// The other volumes are what must keep serving, and the test needs two of
+	// them: it runs at 3 volumes in every cell (1, 2 and 3 all mean 3 here).
+	t.Setenv(testVolumesEnv, "3")
 	env := startHandoffEnv(t, 1)
 	must, mustU := fatalOn(t)
 	h := env.h
@@ -68,10 +68,15 @@ func TestCellNewHostFromTheClusterSpec(t *testing.T) {
 	env.masterProcess.term(t, 30*time.Second)
 	env.masterProcess = h.start(t, "blockmaster-with-s2", h.master, env.masterArgs...)
 	env.masterProcess.waitLog(t, 30*time.Second, "blockmaster: lock acquired, reloaded=")
-	down := time.Since(start)
-	t.Logf("blockmaster restarted with s2 in the cluster spec in %v", down.Round(time.Millisecond))
-	if down > 10*time.Second {
-		t.Fatalf("blockmaster took %v to restart; the siblings' workspace lease is about 20 s", down)
+	// The lock line comes before the cluster-spec import: the restart ends
+	// when blockmaster answers for v1's record again.
+	down, ok := servingWithin(start, 30*time.Second, func() bool {
+		_, _, code := h.run(t, env.show...)
+		return code == 0
+	})
+	t.Logf("blockmaster restarted with s2 in the cluster spec and answered in %v", down.Round(time.Millisecond))
+	if !ok || down > 10*time.Second {
+		t.Fatalf("blockmaster took %v to restart and answer (answered: %v); the siblings' workspace lease is about 20 s", down, ok)
 	}
 
 	// Every sibling kept serving: a new write on each reads back.
@@ -80,16 +85,8 @@ func TestCellNewHostFromTheClusterSpec(t *testing.T) {
 		t.Fatalf("%d sibling volumes; this test needs other volumes serving", len(names))
 	}
 	for i, v := range names {
-		c := dialNVMe(t, env.hosts["n-"+v].nvme, plannedHandoffNQN)
-		lba := siblingVolumeBytes(t)/4096 - 1 - uint64(i) // the writer fills from block 0 up; this one stays unwritten
-		data := pattern(fmt.Sprintf("after-restart-%02d", i))
-		c.write(t, lba, data)
-		c.flush(t)
-		if !bytes.Equal(c.read(t, lba, 4096), data) {
-			c.close()
-			t.Fatalf("sibling %s: a write after the restart does not read back", v)
-		}
-		c.close()
+		writeReadSibling(t, env.hosts["n-"+v].nvme, v, siblingVolumeBytes(t)/4096-1-uint64(i), // the writer fills from block 0 up; this one stays unwritten
+			pattern(fmt.Sprintf("after-restart-%02d", i)))
 	}
 
 	// The same move now succeeds; s2 starts and serves v1.
@@ -112,5 +109,49 @@ func TestCellNewHostFromTheClusterSpec(t *testing.T) {
 		if n != 0 {
 			t.Errorf("sibling %s: %d writes failed during the test; want every write acknowledged", v, n)
 		}
+	}
+}
+
+// writeReadSibling writes one block on a sibling and reads it back on the
+// same connection, which is closed on every path (a failed write, flush or
+// read included).
+func writeReadSibling(t *testing.T, addr, volume string, lba uint64, data []byte) {
+	t.Helper()
+	c := dialNVMe(t, addr, plannedHandoffNQN)
+	defer c.close()
+	c.write(t, lba, data)
+	c.flush(t)
+	if !bytes.Equal(c.read(t, lba, 4096), data) {
+		t.Fatalf("sibling %s: a write after the restart does not read back", volume)
+	}
+}
+
+// servingWithin is the time from start until ready first holds (polled), and
+// whether it held within the limit.
+func servingWithin(start time.Time, limit time.Duration, ready func() bool) (time.Duration, bool) {
+	for {
+		if ready() {
+			return time.Since(start), true
+		}
+		if time.Since(start) > limit {
+			return time.Since(start), false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestServingWithinCountsTheWaitForReadiness: a restart whose log line comes
+// at once but which serves only later is measured to the serving, not to the
+// log.
+func TestServingWithinCountsTheWaitForReadiness(t *testing.T) {
+	start := time.Now()
+	logged := start // the lock line, at once
+	servesAt := start.Add(700 * time.Millisecond)
+	down, ok := servingWithin(start, 5*time.Second, func() bool { return !time.Now().Before(servesAt) })
+	if !ok || down < 700*time.Millisecond {
+		t.Fatalf("measured %v (ok %v); want at least the 700 ms until serving, not the %v until the log", down, ok, logged.Sub(start))
+	}
+	if _, ok := servingWithin(start, 300*time.Millisecond, func() bool { return false }); ok {
+		t.Fatal("a restart that never serves was measured as within the limit")
 	}
 }

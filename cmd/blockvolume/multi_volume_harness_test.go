@@ -215,6 +215,7 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 		go w.run(t)
 	}
 	siblingWritersOf.Store(env, writers)
+	t.Cleanup(func() { siblingWritersOf.Delete(env) })
 	admitted = true
 }
 
