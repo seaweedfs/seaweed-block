@@ -265,6 +265,12 @@ func (s *WALStore) beginBaseInstallV3(baseLSN uint64, id [16]byte) (*installHand
 // the section 8.1 begin; a v2 store keeps its pre-seam behaviour behind the
 // legacy handle (it had no begin step).
 func (s *WALStore) BeginBaseInstall(baseLSN uint64, installID [16]byte) (InstallHandle, error) {
+	// A store awaiting its chunk layer takes no BASE: a BASE writes the
+	// extent and its install drains through the held flusher. (A chunk
+	// store takes no replication, the only BASE source.)
+	if s.drainHeld.Load() {
+		return nil, ErrDrainHeldForChunkLayer
+	}
 	if s.v3 == nil {
 		return NewLegacyInstallHandle(s, baseLSN), nil
 	}
