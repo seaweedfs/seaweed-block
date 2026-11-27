@@ -518,7 +518,8 @@ func handoffAddress(t *testing.T) string {
 		handoffPorts.used = map[int]bool{}
 	}
 	for i := 0; i < 500; i++ {
-		p := 10000 + rand.Intn(10000)
+		lo, hi := testPortSpan(10000, 20000)
+		p := lo + rand.Intn(hi-lo)
 		if handoffPorts.used[p] {
 			continue
 		}

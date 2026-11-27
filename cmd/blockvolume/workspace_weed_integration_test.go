@@ -55,8 +55,15 @@ func ephemeralPorts() (int, int) {
 func w4FreePortPair(t *testing.T, used map[int]bool) int {
 	t.Helper()
 	lo, hi := ephemeralPorts()
+	// The pair's gRPC port p+10000 stays below the ephemeral range; a CI
+	// shard draws from its own slice of what is left.
+	top := 40000
+	if lo-10000 < top && lo-10000 > 20000 {
+		top = lo - 10000
+	}
+	sLo, sHi := testPortSpan(20000, top)
 	for i := 0; i < 200; i++ {
-		p := 20000 + rand.Intn(20000)
+		p := sLo + rand.Intn(sHi-sLo)
 		if used[p] || used[p+10000] {
 			continue
 		}
