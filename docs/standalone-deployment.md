@@ -143,6 +143,9 @@ Do these steps before you start blockvolume:
      - creating a replicated volume is refused (`create volume: v1 has
        replication factor 3 but --lifecycle-product-loop-interval is 0
        (off): ...`).
+     - a volume created at run time (`CreateVolume`) and not placed in the
+       cluster spec is served only with the loop on; the shipped Kubernetes
+       stacks set it. A refusal at create is planned for 1.0.1.
    - `--failback-runtime-rpc`: the operator's failover (`sw-block ops
      failover`, below) calls it. Without it there is no manual failover.
 
@@ -155,7 +158,14 @@ Do these steps before you start blockvolume:
    Set `--launcher-replication-ack` to the same mode as every replicated
    volume's blockvolume `--replication-ack`; the examples use `sync-quorum`.
    Both default to `best-effort`, which acknowledges a write with no replica
-   (see Failover below).
+   (see Failover below). blockmaster refuses to start with any other value
+   (`--launcher-replication-ack="x" invalid; want best-effort, sync-quorum,
+   or sync-all`). Change the profile (blockmaster's
+   `--launcher-replication-ack` and every replicated volume's
+   `--replication-ack`) only with the replicated volumes stopped: a primary
+   whose line is assigned under another profile than its own does not serve
+   and logs `ack profile mismatch: this volume runs --replication-ack X, its
+   replicated line is assigned under Y; restart it with the master's profile`.
 
    ```bash
    blockmaster --authority-store /var/lib/sw-block-master/authority \
@@ -185,8 +195,9 @@ Do these steps before you start blockvolume:
        start: one volume with another slot count stops assignment for all of
        them, and shows only as a controller error on every tick.
    - **Failover.** Under `--cluster-spec` with the lifecycle loop on,
-     blockmaster replaces a lost primary by itself
-     (`core/host/master/product_loop.go`, `applyPromotionEvidenceGate`).
+     blockmaster replaces a lost primary of a `sync-quorum` or `sync-all`
+     volume by itself (`core/host/master/product_loop.go`,
+     `applyPromotionEvidenceGate`).
      - A primary whose heartbeat is stale (its host is off, or blockmaster
        cannot reach it), or that answers that it is not ready, is replaced
        through a fencing round. blockmaster fences the other replicas at the
@@ -194,12 +205,19 @@ Do these steps before you start blockvolume:
        `--replication-ack` `sync-quorum` or `sync-all`, the new primary holds
        every write the old one acknowledged.
      - With `best-effort` (the default of `--replication-ack`) a write is
-       acknowledged after the primary's own sync, with no replica. An
-       automatic failover can then lose the writes acknowledged last, and an
-       old primary that is only partitioned keeps accepting writes that the
-       new primary never sees. Do not use it for a replicated volume whose
-       acknowledged writes must survive a failover: set `--replication-ack`
-       to `sync-quorum` (or `sync-all`).
+       acknowledged after the primary's own sync, with no replica, so
+       blockmaster does not replace a lost primary by itself: the volume
+       waits and is shown as `best_effort_no_automatic_failover`. Only the
+       operator's failover changes its primary, and it can lose the writes
+       acknowledged last; an old primary that is only partitioned keeps
+       accepting writes that the new primary never sees. For a replicated
+       volume whose acknowledged writes must survive a failover, set
+       `--replication-ack` to `sync-quorum` (or `sync-all`).
+     - A volume whose replicas answer with no profile, or with another one
+       than blockmaster's `--launcher-replication-ack`, is not replaced by
+       itself either: it waits and is shown as `ack_profile_mismatch`, and
+       the round names each answer (`master sync_quorum, answers
+       r2=best_effort`).
      - A primary whose heartbeat is fresh but that does not answer the probe
        is unknown, not failed: it is not replaced by itself. Nor is a
        restarted primary inside its start grace.
