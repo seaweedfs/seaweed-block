@@ -232,6 +232,30 @@ planned for 1.0.1.
 - the forced move when a host is lost, with the lost range;
 - which of these procedures run end to end, and which do not.
 
+## Replicated volumes (preview)
+
+Replicated volumes (`replication_factor` above 1) are a preview in v1.0: they keep acknowledged data, but under a
+writing guest a single fault can stop writes until an operator acts. The limits, as they show on a running system:
+
+- **A replica that misses writes is not caught up by itself.** While the guest writes, the primary keeps only a few
+  write-ahead-log entries beyond its last checkpoint. A replica that falls behind them (it was restarted, or a
+  failover fenced it) needs a rebuild, and a rebuild onto the data it already has is refused
+  (`re-add with a retained base is not supported in v1`). The replica stays out (`degraded`) until you wipe its data
+  directory and add it again.
+- **A durability shortfall is an immediate I/O error, not a wait.** When the replicas that must acknowledge a write
+  cannot (`sync-quorum`: a quorum; `sync-all`: every replica), the write fails at once and the guest gets `EIO`.
+  With three replicas and `sync-quorum`, one replica left out as above plus one more fault loses the quorum; a
+  single failover can already leave too few replicas, depending on timing.
+- **`sync-all` refuses every write while any replica is down.** It needs every replica for each write.
+- **No path failover in the guest.** A guest connects to one target, and a target that is no longer the primary
+  answers with a status the guest does not retry: its I/O fails with `EIO` instead of moving to another path. There is
+  no multipath for replicated volumes in v1.0; after a failover the guest is started on the new primary's host (see
+  [host connect settings](#host-connect-settings)).
+- **The same holds on Kubernetes** for RF3 volumes.
+
+Acknowledged writes were read back intact in every run that found these limits. What the release supports without
+these limits is the single-replica volume.
+
 ## When a host is lost
 
 The steps below are for a single-replica volume. A `sync-quorum` or `sync-all`
