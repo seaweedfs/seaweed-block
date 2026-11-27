@@ -218,6 +218,8 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 		writers = append(writers, w)
 		go w.run(t)
 	}
+	siblingWritersOf.Store(env, writers)
+	t.Cleanup(func() { siblingWritersOf.Delete(env) })
 	admitted = true
 }
 
@@ -369,6 +371,25 @@ func (env *handoffEnv) siblingServing(t *testing.T, w *siblingWriter) bool {
 		return false
 	}
 	return true
+}
+
+// siblingWritersOf maps an env to its siblings' writers, for a test that
+// checks the siblings kept serving while it did something else.
+var siblingWritersOf sync.Map // *handoffEnv -> []*siblingWriter
+
+// siblingWriteFailures is the number of sibling writes that failed so far,
+// per sibling volume, and the volumes' names in order.
+func (env *handoffEnv) siblingWriteFailures() (map[string]int, []string) {
+	v, _ := siblingWritersOf.Load(env)
+	ws, _ := v.([]*siblingWriter)
+	out, names := map[string]int{}, []string(nil)
+	for _, w := range ws {
+		w.mu.Lock()
+		out[w.volume] = w.unknown
+		w.mu.Unlock()
+		names = append(names, w.volume)
+	}
+	return out, names
 }
 
 // siblingPrimaryWithin is waitSiblingPrimary that returns an error.
