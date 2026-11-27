@@ -235,8 +235,10 @@ planned for 1.0.1.
 ## Replicated volumes (preview)
 
 Replicated volumes (`replication_factor` above 1) are a preview in v1.0. In the acknowledging modes (`sync-quorum`,
-`sync-all`) they keep acknowledged data; the default `best-effort` acknowledges a write with no replica and can lose
-the writes acknowledged last in a failover. Under a writing guest a single fault can stop writes until an operator
+`sync-all`) they keep acknowledged data. The default `best-effort` acknowledges a write with no replica, and a
+`best-effort` volume is not failed over automatically: blockmaster holds it, and only the operator's forced failover
+(`sw-block ops failover`) moves it, which may lose the writes acknowledged last.
+Under a writing guest a single fault can stop writes until an operator
 acts. The limits, as they show on a running system:
 
 - **No snapshots, restore, moves or object-store copy.** v1.0 has two designs: the single-replica volume with the

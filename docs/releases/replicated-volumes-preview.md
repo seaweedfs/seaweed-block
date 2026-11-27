@@ -2,8 +2,10 @@
 
 Replicated volumes (`replication_factor` above 1, standalone and Kubernetes RF3) ship in v1.0 as a preview. The
 single-replica volume is the supported configuration. In the acknowledging modes (`sync-quorum`, `sync-all`),
-acknowledged writes read back intact in every run behind this note; the default `best-effort` can lose the writes
-acknowledged last in a failover. v1.0 is two designs: the single-replica volume with the object store (`walstore-chunk`: snapshots, restore,
+acknowledged writes read back intact in every run behind this note. A volume in the default `best-effort` is not
+failed over automatically: blockmaster holds it, and only the operator's forced failover (`sw-block ops failover`)
+moves it, which may lose the writes acknowledged last.
+v1.0 is two designs: the single-replica volume with the object store (`walstore-chunk`: snapshots, restore,
 moves, object-store copy), and replicated volumes on local stores, which have none of those (`walstore-chunk`
 refuses replication at start and on any assignment with replica slots). The limits are about availability under a
 writing guest:
