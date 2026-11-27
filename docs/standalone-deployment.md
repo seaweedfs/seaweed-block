@@ -143,6 +143,9 @@ Do these steps before you start blockvolume:
      - creating a replicated volume is refused (`create volume: v1 has
        replication factor 3 but --lifecycle-product-loop-interval is 0
        (off): ...`).
+     - a volume created at run time (`CreateVolume`) and not placed in the
+       cluster spec is served only with the loop on; the shipped Kubernetes
+       stacks set it. A refusal at create is planned for 1.0.1.
    - `--failback-runtime-rpc`: the operator's failover (`sw-block ops
      failover`, below) calls it. Without it there is no manual failover.
 
@@ -152,11 +155,26 @@ Do these steps before you start blockvolume:
    [Authenticate the control API](operator-guide.md#authenticate-the-control-api)).
    The single-replica start above needs none of these.
 
+   Set `--launcher-replication-ack` to the same mode as every replicated
+   volume's blockvolume `--replication-ack`; the examples use `sync-quorum`.
+   Both default to `best-effort`, which acknowledges a write with no replica
+   (see Failover below). blockmaster refuses to start with any other value
+   (`--launcher-replication-ack="x" invalid; want best-effort, sync-quorum,
+   or sync-all`). Change the profile (blockmaster's
+   `--launcher-replication-ack` and every replicated volume's
+   `--replication-ack`) only with the replicated volumes stopped: a primary
+   whose line is assigned under another profile than its own does not serve
+   and logs `ack profile mismatch: this volume runs --replication-ack X, its
+   replicated line is assigned under Y; restart it with the master's profile`.
+   The order: stop every replicated volume, change both flags, restart
+   blockmaster, then start the volumes.
+
    ```bash
    blockmaster --authority-store /var/lib/sw-block-master/authority \
      --lifecycle-store /var/lib/sw-block-master/lifecycle \
      --cluster-spec /etc/sw-block/cluster-spec.yaml --expected-slots-per-volume 3 \
      --lifecycle-product-loop-interval 100ms --failback-runtime-rpc \
+     --launcher-replication-ack sync-quorum \
      --tls-cert /etc/sw-block/tls/master.crt --tls-key /etc/sw-block/tls/master.key \
      --tls-client-ca /etc/sw-block/tls/ca.crt --role-file /etc/sw-block/tls/roles \
      --audit-log /var/lib/sw-block-master/audit.log \
@@ -178,18 +196,55 @@ Do these steps before you start blockvolume:
      - A static `--topology` holds one factor only, and is not checked at
        start: one volume with another slot count stops assignment for all of
        them, and shows only as a controller error on every tick.
-   - **Failover.** blockmaster replaces a primary by itself only when that
-     primary answers that it is not ready.
-     - A primary whose host is off or unreachable does not answer. It is shown
-       as unreachable and is not replaced, at every replica count, with the
-       loop on or off.
-     - Then the operator powers the old node off or cuts it from its clients,
-       and runs `sw-block ops failover` with `--confirm-old-node-off`.
-     - The failover needs blockmaster started with `--failback-runtime-rpc`
-       and an admin client certificate (`SW_BLOCK_TLS_CERT`,
-       `SW_BLOCK_TLS_KEY`, `SW_BLOCK_TLS_CA`).
-     - If its fencing round is refused, run the command again.
+   - **Failover.** Under `--cluster-spec` with the lifecycle loop on,
+     blockmaster replaces a lost primary of a `sync-quorum` or `sync-all`
+     volume by itself.
+     - A primary whose heartbeat is stale (its host is off, or blockmaster
+       cannot reach it), or that answers that it is not ready, is replaced
+       through a fencing round. blockmaster fences the other replicas at the
+       next epoch and promotes one only when enough of them answer. With
+       `--replication-ack` `sync-quorum` or `sync-all`, the new primary holds
+       every write the old one acknowledged. With default flags the new
+       primary is assigned about 30 to 35 s after the old host is lost: its
+       heartbeat counts as stale after `--freshness-window` (30 s), then the
+       probe round and the fencing round wait at most 2 s each, on the
+       lifecycle loop's next tick. The guest's I/O waits for that time plus
+       its own reconnect to the new primary.
+     - With `best-effort` (the default of `--replication-ack`) a write is
+       acknowledged after the primary's own sync, with no replica, so
+       blockmaster does not replace a lost primary by itself: the volume
+       waits and is shown as `best_effort_no_automatic_failover`. Only the
+       operator's failover changes its primary, and it can lose the writes
+       acknowledged last; an old primary that is only partitioned keeps
+       accepting writes that the new primary never sees. For a replicated
+       volume whose acknowledged writes must survive a failover, set
+       `--replication-ack` to `sync-quorum` (or `sync-all`).
+     - A volume whose replicas answer with no profile, or with another one
+       than blockmaster's `--launcher-replication-ack`, is not replaced by
+       itself either: it waits and is shown as `ack_profile_mismatch`, and
+       the round names each answer (`master sync_quorum, answers
+       r2=best_effort`).
+     - A primary whose heartbeat is fresh but that does not answer the probe
+       is unknown, not failed: it is not replaced by itself. Nor is a
+       restarted primary inside its start grace.
+     - When the round cannot decide (too few replicas answer), the volume
+       waits and is shown as `fence_round_incomplete`. The operator then
+       powers the old node off or cuts it from its clients, and runs
+       `sw-block ops failover` with `--confirm-old-node-off`.
+     - On a static `--topology` nothing is replaced by itself: the operator's
+       failover is the only way.
+     - The operator's failover needs blockmaster started with
+       `--failback-runtime-rpc` and an admin client certificate
+       (`SW_BLOCK_TLS_CERT`, `SW_BLOCK_TLS_KEY`, `SW_BLOCK_TLS_CA`). If its
+       fencing round is refused, run the command again.
        `sw-block ops failover -h` describes the round and its exit codes.
+   - **Reads during a partition.** An old primary cut off from blockmaster
+     but still reachable by its clients can serve reads of its old data until
+     the partition ends. With `sync-quorum` or `sync-all` its writes are
+     refused, because the replicas it replicates to are fenced at the new
+     epoch; with `best-effort` it keeps accepting them (above). The same holds
+     after the operator's failover. Power the old node off or cut it from its clients to
+     end this window.
 
 3. **Start blockvolume with the identity of one slot.** `--volume-id`,
    `--replica-id` and `--server-id` (`SWB_VOLUME_ID`, `SWB_REPLICA_ID`,

@@ -227,9 +227,12 @@ measured up to 15 s at 32 volumes with the default 3 slots.
 
 ## When a host is lost
 
-The steps below are for a single-replica volume. A replicated volume whose
-primary's host is lost is not replaced by itself either: power the old node
-off or cut it from its clients, then run `sw-block ops failover` (see
+The steps below are for a single-replica volume. A `sync-quorum` or `sync-all`
+replicated volume under `--cluster-spec` with the lifecycle loop on is failed
+over by blockmaster itself when its primary's heartbeat goes stale and enough
+replicas answer the fencing round; the operator's `sw-block ops failover` is for
+when that round cannot decide, and for a `best-effort` volume, which is never
+failed over by itself (see
 [replicated volumes in this release](standalone-deployment.md)).
 
 1. Make sure the lost host stays down for this volume. The product does not power off an old holder.

@@ -502,8 +502,7 @@ follow from that order:
   `sw-block ops chunk snapshots` shows only published snapshots. If a snapshot request
   was interrupted after it took its name (the process crashed, or the caller gave up),
   the name does not appear in the list, yet another request for that name is refused
-  with `snapshot_exists`, and deleting the volume is refused with `volume v1 has
-  snapshots (NAME); delete them first`. Free it with
+  with `snapshot_exists`. Free it with
   `sw-block ops chunk snapshot-delete --master MASTER --volume v1 --chunk-filer FILER --name NAME`,
   or finish it by repeating the request with the same `--request-id`.
 - **After `outcome_unknown`, repeat the request with the same `--request-id` within
@@ -524,15 +523,15 @@ follow from that order:
 | `sw-block ops chunk detach: plain_detach_busy: durable: plain detach requires idle frontend I/O` | I/O was in flight; nothing changed | Stop the writer, retry step 3 |
 | detach answers `detach_aborted` | Nothing was published; the volume serves here again | Retry step 3 |
 | detach answers `outcome_unknown` | The seal may have landed; I/O stays stopped | Retry step 3: it settles the outcome |
-| volume-delete: `volume_in_use: ... live authority requires clean revocation ACK` | The volume was sealed (or only stopped) but never revoked and acknowledged; nothing was deleted | "Delete a volume", step 2 |
-| volume-delete: `volume v1 has snapshots (s1); delete them first` | Snapshots still exist, or a name is held by an unfinished request (such a name is not in the list); nothing was deleted | "Delete a volume", step 3; for a name that is not listed, "Snapshot names and retries" |
+| volume-delete: `not_admitted: ... workspace: deletion refused before persistence: workspace delete: live until <time>: ...` | The volume's lease is still live: it was not revoked and acknowledged, or its lease horizon has not passed; nothing was persisted | "Delete a volume", step 2, then run it again after the horizon |
+| volume-delete: `snapshot_has_dependents: ... layout: a snapshot has dependents: snapshot "s1" has 1` | A restored volume still depends on that snapshot (ordinary snapshots never refuse a delete: they are deleted with the volume). The delete had already reserved the volume: it does not serve again (`ops workspace show` answers `workspace: volume is being deleted`, exit 1), and nothing was deleted yet (`TestOpsChunkVolumeDeleteRefusedByDependentsLeavesTheVolumeReserved`) | Delete the restored volume, or release its dependence, then run the same volume-delete again with the same `--request-id` ("Delete a volume", step 3) |
 | snapshot: `snapshot_exists ... this request's attempt was aborted; delete the name to reuse it` | An earlier attempt of this request did not finish and was swept | `snapshot-delete` the name, then take the snapshot again |
 | snapshot: `snapshot_deleting ... is being deleted; wait for the delete to finish, then reuse the name` | The request was repeated while its snapshot is being deleted | Wait for the delete to finish; take the snapshot again if it is still wanted |
 | revoke: `workspace revoke: no matching lease` | `--replica`/`--epoch` are not the current holder | Read them again with `show` |
 | move: `workspace clean move needs detached HEAD and matching revocation ACK` | No ACK yet, or its generation differs from HEAD | Wait for the ACK line (step 5); compare `G` with `ops chunk show` |
 | move: `move target node "S2" is not registered` | `S2` is not under `nodes` | Add it to the cluster spec, restart blockmaster |
 | move: `move target endpoints ... are not registered (...)` | The addresses are not on the node's host | Use addresses on that host |
-| move: `move target "s1" is the current source host` | A forced move named its own host | Choose another node |
+| A forced move names the volume's own host | blockmaster has no same-host refusal: the move is checked like any forced move (barrier, registered endpoints) | To bring the volume back on the same host, follow "Same host" instead |
 | old holder logs `blockvolume: workspace lease closeout: workspace lease expired before clean ACK` | Revoked, but no ACK | Only a forced move to another node remains (HEAD is sealed: if step 3 succeeded, nothing is lost) |
 | renewal fails with `workspace lease: revocation or move pending` | The volume was revoked or moved | The process cannot serve again; continue the hand-over |
 | renewal fails with `workspace lease: stale authority` | A move gave the volume a newer epoch | This process is the old holder: stop it, do not restart it |
