@@ -52,6 +52,24 @@ jobs:
           # step can see which packages the PR touches.
           fetch-depth: 2
 
+      - name: Docs-only pull request
+        id: scope
+        if: matrix.suite == 'process' && github.event_name == 'pull_request'
+        # A pull request that changes only files under docs/ runs no product
+        # code the process-level tests could exercise, so they are skipped and
+        # the job still reports success. HEAD is the merge commit, HEAD^1 its
+        # base parent (fetch-depth 2 above). Pushes to main always run them.
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only --no-renames HEAD^1 HEAD)
+          n=$(printf '%s\n' "$changed" | grep -c . || true)
+          if [ "$n" -gt 0 ] && ! printf '%s\n' "$changed" | grep -qv '^docs/'; then
+            echo "skipped: docs only ($n files under docs/); the process-level tests run on the merge to main"
+            echo "docs_only=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "process-level tests run: $n changed files, not all under docs/"
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -102,7 +120,7 @@ jobs:
           go test -p=1 -short -count=1 -timeout 20m $pkgs
 
       - name: Self-test of the required-tests gate
-        if: matrix.suite == 'process'
+        if: matrix.suite == 'process' && steps.scope.outputs.docs_only != '1'
         # The gate must fail on a skip, a failure, a test that never ran, one
         # cut off mid-run, and one that reports PASS and then exits nonzero or
         # hangs; this proves it before it judges the real run.
@@ -111,7 +129,7 @@ jobs:
           bash .github/scripts/run-named-tests-test.sh
 
       - name: Pinned SeaweedFS
-        if: matrix.suite == 'process'
+        if: matrix.suite == 'process' && steps.scope.outputs.docs_only != '1'
         # The release archive is checked against its sha256 before every use,
         # also when taken from the runner's cache; a mismatch fails the step.
         # Nothing else is fetched.
@@ -135,7 +153,7 @@ jobs:
           echo "CHUNKSTORE_WEED=$bin/weed" >>"$GITHUB_ENV"
 
       - name: Build the binaries and the test binary once
-        if: matrix.suite == 'process'
+        if: matrix.suite == 'process' && steps.scope.outputs.docs_only != '1'
         run: |
           set -euo pipefail
           bins="$RUNNER_TEMP/swblock-bins"
@@ -149,7 +167,7 @@ jobs:
           echo "KZ_HOLD_BIN=$RUNNER_TEMP/blockvolume-kzhold" >>"$GITHUB_ENV"
 
       - name: Run the named process-level tests
-        if: matrix.suite == 'process'
+        if: matrix.suite == 'process' && steps.scope.outputs.docs_only != '1'
         # Each named test in its own process of the one test binary, in
         # sequence, so a panic or a hang in one cannot hide the others; each
         # is bounded (TEST_TIMEOUT, then killed) and its exit status is kept:
