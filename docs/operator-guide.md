@@ -303,13 +303,9 @@ needs `--allow-external-nvme-bind`, unauthenticated, for test gates only), so a 
 own host. Each replica's target reports itself optimized only while it is the healthy primary, but no guest is
 connected to the other replicas' targets. A replicated `sync-quorum` volume gets its new primary on another host
 about 30 to 35 s after its host is lost, with default flags (derived from `--freshness-window` and the two probe
-rounds; not yet measured). The guest's I/O on the old controller waits and then fails as above. To continue, run
-the guest on the new primary's host and connect it there: that host's blockvolume logs `adopted as PRIMARY` and its
-`/status?volume=<id>` shows `"AuthorityRole":"primary"`.
-
-The guest's first step after a failover, in a standalone deployment: `nvme disconnect` the controller of the lost
-primary (for example `sudo nvme disconnect -n "$NQN"`). Its pending I/O then fails at once (measured: `EIO` 1.5 s after the disconnect,
-within one connect timeout) instead of after the up to 464 s above. Then connect to the new primary.
+rounds; not yet measured). In a standalone deployment the guest runs on the volume's primary host, so it goes down with that host; after a
+failover, start the guest on the new primary's host and connect it there: that host's blockvolume logs `adopted as
+PRIMARY` and its `/status?volume=<id>` shows `"AuthorityRole":"primary"`.
 
 **Kubernetes.** The CSI node connects with a plain `nvme connect` and the kernel defaults. A pod whose holder does
 not come back holds I/O for about 600 s when the holder's node is up, and some 13 minutes when the node is powered
