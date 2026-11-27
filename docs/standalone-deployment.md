@@ -166,6 +166,8 @@ Do these steps before you start blockvolume:
    whose line is assigned under another profile than its own does not serve
    and logs `ack profile mismatch: this volume runs --replication-ack X, its
    replicated line is assigned under Y; restart it with the master's profile`.
+   The order: stop every replicated volume, change both flags, restart
+   blockmaster, then start the volumes.
 
    ```bash
    blockmaster --authority-store /var/lib/sw-block-master/authority \
@@ -196,14 +198,18 @@ Do these steps before you start blockvolume:
        them, and shows only as a controller error on every tick.
    - **Failover.** Under `--cluster-spec` with the lifecycle loop on,
      blockmaster replaces a lost primary of a `sync-quorum` or `sync-all`
-     volume by itself (`core/host/master/product_loop.go`,
-     `applyPromotionEvidenceGate`).
+     volume by itself.
      - A primary whose heartbeat is stale (its host is off, or blockmaster
        cannot reach it), or that answers that it is not ready, is replaced
        through a fencing round. blockmaster fences the other replicas at the
        next epoch and promotes one only when enough of them answer. With
        `--replication-ack` `sync-quorum` or `sync-all`, the new primary holds
-       every write the old one acknowledged.
+       every write the old one acknowledged. With default flags the new
+       primary is assigned about 30 to 35 s after the old host is lost: its
+       heartbeat counts as stale after `--freshness-window` (30 s), then the
+       probe round and the fencing round wait at most 2 s each, on the
+       lifecycle loop's next tick. The guest's I/O waits for that time plus
+       its own reconnect to the new primary.
      - With `best-effort` (the default of `--replication-ack`) a write is
        acknowledged after the primary's own sync, with no replica, so
        blockmaster does not replace a lost primary by itself: the volume
