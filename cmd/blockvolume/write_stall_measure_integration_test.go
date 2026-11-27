@@ -85,6 +85,25 @@ type stallWriter struct {
 	fails   []time.Time
 	errs    map[string]int
 	redials int
+	slow    []stallSlowOp
+}
+
+// stallSlowOp is one dial or write+flush that took over 100 ms, or the first
+// write after the pause control.
+type stallSlowOp struct {
+	Kind       string
+	At         time.Time
+	DurS       float64
+	OK         bool
+	AfterPause bool
+}
+
+func (w *stallWriter) timed(kind string, t0 time.Time, ok, afterPause bool) {
+	if d := time.Since(t0); d > 100*time.Millisecond || afterPause {
+		w.mu.Lock()
+		w.slow = append(w.slow, stallSlowOp{kind, t0, d.Seconds(), ok, afterPause})
+		w.mu.Unlock()
+	}
 }
 
 func stallBlock(seed, lba uint64) []byte {
@@ -125,7 +144,7 @@ func (w *stallWriter) run() {
 			c.close()
 		}
 	}()
-	start, paused, bad := time.Now(), false, false
+	start, paused, bad, afterPause := time.Now(), false, false, false
 	for n := uint64(0); ; {
 		select {
 		case <-w.stop:
@@ -133,7 +152,7 @@ func (w *stallWriter) run() {
 		case <-time.After(stallPace):
 		}
 		if w.control == "pause" && !paused && time.Since(start) > 10*time.Second {
-			paused = true
+			paused, afterPause = true, true
 			time.Sleep(3 * time.Second)
 		}
 		if c == nil {
@@ -142,7 +161,10 @@ func (w *stallWriter) run() {
 				continue
 			}
 			var err error
-			if c, err = stallDial(addr); err != nil {
+			t0 := time.Now()
+			c, err = stallDial(addr)
+			w.timed("dial", t0, err == nil, false)
+			if err != nil {
 				w.fail(err)
 				c = nil
 				continue
@@ -154,7 +176,11 @@ func (w *stallWriter) run() {
 		lba := n % stallBlocks
 		n++
 		data := stallBlock(w.seed, lba)
-		if err := stallWriteFlush(c, lba, data); err != nil {
+		t0 := time.Now()
+		err := stallWriteFlush(c, lba, data)
+		w.timed("write", t0, err == nil, afterPause)
+		afterPause = false
+		if err != nil {
 			w.fail(err)
 			c.close()
 			c = nil
@@ -449,12 +475,20 @@ type stallEventRecord struct {
 	GapStartS  float64
 }
 
+type stallSlowRecord struct {
+	Kind       string
+	AtS, DurS  float64
+	OK         bool
+	AfterPause bool
+}
+
 type stallRecord struct {
 	Test, Ack, Control string
 	Acked, Unknown     int
 	Mismatched         int
 	ReadBack           int
 	Redials            int
+	SlowOps            []stallSlowRecord
 	BaselineP50S       float64
 	MaxGapS            float64
 	Events             []stallEventRecord
@@ -474,6 +508,12 @@ func (e *stallEnv) finish() {
 	}
 	rec.Started = w.acks[0]
 	since := func(x time.Time) float64 { return x.Sub(w.acks[0]).Seconds() }
+	for _, s := range w.slow {
+		rec.SlowOps = append(rec.SlowOps, stallSlowRecord{s.Kind, since(s.At), s.DurS, s.OK, s.AfterPause})
+		if s.AfterPause {
+			t.Logf("STALL %s first write after the pause: %.3fs ok=%v", t.Name(), s.DurS, s.OK)
+		}
+	}
 	gaps := make([]float64, 0, len(w.acks))
 	for i := 1; i < len(w.acks); i++ {
 		g := w.acks[i].Sub(w.acks[i-1]).Seconds()
