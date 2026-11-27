@@ -323,6 +323,10 @@ type stallEnv struct {
 	w      *stallWriter
 	events []stallEvent
 	out    string
+	// retention is --wal-retention-lsns on every blockvolume (0: the flag
+	// is not passed); downS holds the first killed host down before restart.
+	retention uint64
+	downS     int
 }
 
 func (e *stallEnv) mark(name string) { e.events = append(e.events, stallEvent{name, time.Now()}) }
@@ -346,6 +350,16 @@ func startStallEnv(t *testing.T) *stallEnv {
 		t.Fatalf("SWBLOCK_STALL_ACK=%q; want sync-quorum or sync-all", ack)
 	}
 	e := &stallEnv{t: t, ack: ack, out: out, bins: buildG54Binaries(t)}
+	if v := os.Getenv("SWBLOCK_STALL_WAL_RETENTION"); v != "" {
+		if _, err := fmt.Sscan(v, &e.retention); err != nil {
+			t.Fatalf("SWBLOCK_STALL_WAL_RETENTION=%q: %v", v, err)
+		}
+	}
+	if v := os.Getenv("SWBLOCK_STALL_DOWN_S"); v != "" {
+		if _, err := fmt.Sscan(v, &e.downS); err != nil {
+			t.Fatalf("SWBLOCK_STALL_DOWN_S=%q: %v", v, err)
+		}
+	}
 	e.h = &plannedHandoffHarness{dir: t.TempDir(), t: t}
 	e.h.masterAddr = handoffAddress(t)
 	// Registered before any daemon starts, so it runs after every daemon has
@@ -379,6 +393,9 @@ func startStallEnv(t *testing.T) *stallEnv {
 			"--durable-root", b.root, "--durable-impl", "walstore", "--durable-blocks", "65536", "--durable-blocksize", "4096",
 			"--heartbeat-interval", "200ms", "--t1-readiness", "--replication-ack", ack,
 			"--nvme-listen", b.nvme, "--nvme-subsysnqn", plannedHandoffNQN}
+		if e.retention > 0 {
+			b.args = append(b.args, "--wal-retention-lsns", fmt.Sprint(e.retention))
+		}
 		e.startHost(b, "")
 	}
 	r1 := e.hosts[0]
@@ -503,6 +520,9 @@ type stallSlowRecord struct {
 
 type stallRecord struct {
 	Test, Ack, Control string
+	Retention          uint64
+	DownS              int
+	RootBytes          map[string]int64
 	Acked, Unknown     int
 	Mismatched         int
 	ReadBack           int
@@ -521,7 +541,16 @@ func (e *stallEnv) finish() {
 	t := e.t
 	e.stopWriter()
 	w := e.w
-	rec := stallRecord{Test: t.Name(), Ack: e.ack, Control: w.control, Acked: len(w.acks), Unknown: len(w.fails), Redials: w.redials, Errors: w.errs}
+	rec := stallRecord{Test: t.Name(), Ack: e.ack, Control: w.control, Retention: e.retention, DownS: e.downS, RootBytes: map[string]int64{},
+		Acked: len(w.acks), Unknown: len(w.fails), Redials: w.redials, Errors: w.errs}
+	for _, b := range e.hosts {
+		_ = filepath.Walk(b.root, func(_ string, fi os.FileInfo, err error) error {
+			if err == nil && fi.Mode().IsRegular() {
+				rec.RootBytes[b.rid] += fi.Size()
+			}
+			return nil
+		})
+	}
 	if len(w.acks) == 0 {
 		t.Fatal("no write was acknowledged")
 	}
@@ -610,7 +639,7 @@ func (e *stallEnv) finish() {
 	t.Logf("STALL %s ack=%s acked=%d unknown=%d read_back=%d mismatched=%d baseline_p50=%.3fs max_gap=%.3fs redials=%d",
 		t.Name(), e.ack, rec.Acked, rec.Unknown, rec.ReadBack, rec.Mismatched, rec.BaselineP50S, rec.MaxGapS, rec.Redials)
 	body, _ := json.MarshalIndent(rec, "", "  ")
-	name := fmt.Sprintf("%s-%s-%s.json", strings.ReplaceAll(t.Name(), "/", "_"), e.ack, time.Now().UTC().Format("20060102T150405.000Z"))
+	name := fmt.Sprintf("%s-%s-ret%d-down%d-%s.json", strings.ReplaceAll(t.Name(), "/", "_"), e.ack, e.retention, e.downS, time.Now().UTC().Format("20060102T150405.000Z"))
 	if err := os.WriteFile(filepath.Join(e.out, name), body, 0o644); err != nil {
 		t.Errorf("record: %v", err)
 	}
@@ -676,6 +705,7 @@ func TestStallMeasureFenceHeal(t *testing.T) {
 	}
 	e.mark("floor-healed")
 	e.settle(100, 120*time.Second)
+	e.markPeersHealthy(180 * time.Second)
 	e.finish()
 }
 
@@ -693,9 +723,17 @@ func TestStallMeasureDoubleFailover(t *testing.T) {
 	}
 	e.mark("promoted-" + p2.rid)
 	e.settle(100, 60*time.Second)
+	if e.downS > 0 {
+		time.Sleep(time.Until(e.events[0].At.Add(time.Duration(e.downS) * time.Second)))
+	}
 	e.startHost(p1, "-restart")
 	e.mark("restart-" + p1.rid)
-	waitPeersHealthyAt(t, p2.status, 2, p1.rid)
+	if !stallPeerHealthy(p2.status, 2, p1.rid, 180*time.Second) {
+		// Recorded, not fatal: the run reports what it saw; no second kill.
+		e.mark("no-rejoin-within-180s-" + p1.rid)
+		e.finish()
+		return
+	}
 	e.mark("rejoined-" + p1.rid)
 	e.gateSawReady(p2)
 	e.settle(100, 60*time.Second)
@@ -708,4 +746,51 @@ func TestStallMeasureDoubleFailover(t *testing.T) {
 	e.mark("promoted-" + p3.rid)
 	e.settle(100, 60*time.Second)
 	e.finish()
+}
+
+// markPeersHealthy marks "healthy-<rid>" as each other replica is listed
+// healthy behind the current primary, or "not-healthy-<rid>" at the end.
+func (e *stallEnv) markPeersHealthy(within time.Duration) {
+	p := e.primaryFrom(1, 30*time.Second, e.hosts...)
+	if p == nil {
+		e.mark("no-primary-for-the-peer-check")
+		return
+	}
+	ep, _ := stallStatus(p.status)
+	end := time.Now().Add(within)
+	for _, o := range e.others(p) {
+		if stallPeerHealthy(p.status, ep, o.rid, time.Until(end)) {
+			e.mark("healthy-" + o.rid)
+		} else {
+			e.mark("not-healthy-" + o.rid)
+		}
+	}
+}
+
+// stallPeerHealthy reports whether the primary's /status/peers lists rid
+// healthy at epoch within the time given.
+func stallPeerHealthy(statusAddr string, epoch uint64, rid string, within time.Duration) bool {
+	c := &http.Client{Timeout: 2 * time.Second}
+	end := time.Now().Add(within)
+	for time.Now().Before(end) {
+		if resp, err := c.Get("http://" + statusAddr + "/status/peers?volume=v1"); err == nil {
+			var st struct {
+				Peers []struct {
+					ReplicaID, State string
+					Epoch            uint64
+				}
+			}
+			err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st)
+			resp.Body.Close()
+			if err == nil {
+				for _, p := range st.Peers {
+					if p.ReplicaID == rid && p.State == "healthy" && p.Epoch == epoch {
+						return true
+					}
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
 }
