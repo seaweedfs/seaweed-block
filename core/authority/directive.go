@@ -79,17 +79,33 @@ type AssignmentAsk struct {
 	// differs from the line's is a restarted primary: a new endpoint version
 	// even at the same addresses.
 	Incarnation string
-	// ExpectCurrent, when set, makes a reassign conditional on the volume's
-	// line being exactly this replica at this epoch when the publisher mints
+	// ExpectCurrent, when set, makes a reassign or an endpoint refresh
+	// conditional on the volume's line being exactly this replica at this
+	// epoch (and, when given, at these addresses) when the publisher mints
 	// (under its lock): an operator's move never lands on a line it did not
-	// see.
+	// see, and a refresh decided against a line never rewrites the line a
+	// move put in its place.
 	ExpectCurrent *ExpectedLine
 }
 
-// ExpectedLine is the line a conditional reassign was decided against.
+// ExpectedLine is the line a conditional reassign or refresh was decided
+// against. DataAddr and CtrlAddr are checked only when set.
 type ExpectedLine struct {
 	ReplicaID string
 	Epoch     uint64
+	DataAddr  string
+	CtrlAddr  string
+}
+
+// expectedLineMoved reports why cur is not the line exp names ("" when it is).
+func expectedLineMoved(exp *ExpectedLine, cur AuthorityBasis, ok bool) string {
+	switch {
+	case !ok || cur.ReplicaID != exp.ReplicaID || cur.Epoch != exp.Epoch:
+		return fmt.Sprintf("expected %s@%d, the line is %s@%d", exp.ReplicaID, exp.Epoch, cur.ReplicaID, cur.Epoch)
+	case exp.DataAddr != "" && cur.DataAddr != exp.DataAddr, exp.CtrlAddr != "" && cur.CtrlAddr != exp.CtrlAddr:
+		return fmt.Sprintf("expected %s@%d at %s/%s, the line is at %s/%s", exp.ReplicaID, exp.Epoch, exp.DataAddr, exp.CtrlAddr, cur.DataAddr, cur.CtrlAddr)
+	}
+	return ""
 }
 
 // ErrExpectedLineMoved: a conditional reassign found the volume's line no

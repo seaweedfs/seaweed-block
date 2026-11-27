@@ -54,7 +54,9 @@ one live blockvolume per volume ([one process per volume](releases/one-process-p
 ## Authenticate the control API
 
 `blockmaster` authenticates every gRPC call with mutual TLS when it starts with all four of `--tls-cert`,
-`--tls-key`, `--tls-client-ca` and `--role-file`. Without them it is in development mode: plaintext, loopback only,
+`--tls-key`, `--tls-client-ca` and `--role-file`. With them `--audit-log <path>` is required: without it blockmaster
+refuses to start (`authentication needs --audit-log: every changing call is recorded before it runs, and is refused
+when it cannot be`). Without the four it is in development mode: plaintext, loopback only,
 and it logs `UNAUTHENTICATED CONTROL API on <addr> (development mode)` once a minute. **Upgrading:** `--insecure-external-bind`
 is refused at start; drop it, and give a blockmaster that listens off-host the four mutual-TLS flags.
 
@@ -62,7 +64,7 @@ is refused at start; drop it, and give a blockmaster that listens off-host the f
 `viewer`, `operator`, `admin` (people and tools; each includes the one before it) or `node` (a volume host; its id is
 its `--server-id`). A certificate's CN must equal its line's id. A node may act only for its own server id. Two lines with one node id are two keys of one server (for a rotation: add the new line, move the host to the new certificate, remove the old line), never two hosts: one server id names one host. A forced
 move needs `admin`. `kill -HUP` reloads the file. A removed line is refused from the next call, and its open streams
-end at the reload. A malformed file keeps the previous table and says so in the log. `--audit-log <path>` appends
+end at the reload. A malformed file keeps the previous table and says so in the log. The audit log appends
 one JSON line per person's call, per role-file reload and per refused node call (at most once a minute per
 certificate and method). A changing call (create, delete, place, revoke, move, register a binding, failback) is
 written as an attempt before it runs: if the line cannot be written within 2 s the call is refused as "audit
@@ -117,8 +119,8 @@ named like an admin client's or blockmaster's, but it cannot see a certificate's
   or recreate the record, then start it.
   A wrong-size local store left by an earlier release's first start is different: its log repeats `chunk attach check:
   chunkstore: geometry_mismatch` and it exits; waiting or restarting with the right flags does not help. In one sitting: stop the unit first; then check that the volume never served:
-  `sw-block ops chunk show --master <master> --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"epoch":0` and
-  `"holder":""` in its head; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
+  `sw-block ops chunk show --master <master> --volume <vol> --chunk-filer <filer> --chunk-path <path>` prints `"Epoch":0` and
+  `"Holder":""` in its `head` object; only then remove `<vol>.bin`, `<vol>.bin.chunkfresh`, `<vol>.bin.chunkmap` and
   `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. If the head shows an epoch above 0 or
   a holder, do not remove these files; if the volume served before, its local store has its original size: correct the
   flag and start it again (not run as a test in this release).
@@ -204,6 +206,13 @@ A late upload by a dead holder into a deleted volume can remain; rerun volume-de
 - `ops chunk verify`;
 - restoring a snapshot into a new volume, which reads the chunks it has not made local from that snapshot (fork is not supported in this release).
 
+A volume holds at most 10 snapshots. The next one is refused with `snapshot_limit` (HTTP 409, not retryable;
+`at most 10 per volume; delete a snapshot, or let retention prune`) and nothing changes: no snapshot, no cut, HEAD
+as it was (`TestChunkSnapshotPastTheLimitIsRefusedWithHEADUnchanged`). Delete a snapshot, or let retention prune,
+then take it again. A scheduled snapshot refused this way still publishes the volume's image by an ordinary cut,
+and `GET STATUS/status/durable?volume=<id>` shows `Chunk.ScheduledSnapshot.lastFailure.code: snapshot_limit`, then
+`snapshot_overdue` (`TestScheduledSnapshotAtTheLimitStillPublishes`).
+
 A snapshot can be refused with `host_slot_busy` / `no background slot` (retryable) while every host slot is held by
 other volumes' cuts; retry with the same request id. With many volumes on a host, a snapshot may wait for a slot:
 measured up to 15 s at 32 volumes with the default 3 slots.
@@ -218,12 +227,18 @@ measured up to 15 s at 32 volumes with the default 3 slots.
 
 ## When a host is lost
 
+The steps below are for a single-replica volume. A `sync-quorum` or `sync-all`
+replicated volume under `--cluster-spec` with the lifecycle loop on is failed
+over by blockmaster itself when its primary's heartbeat goes stale and enough
+replicas answer the fencing round; the operator's `sw-block ops failover` is for
+when that round cannot decide, and for a `best-effort` volume, which is never
+failed over by itself (see
+[replicated volumes in this release](standalone-deployment.md)).
+
 1. Make sure the lost host stays down for this volume. The product does not power off an old holder.
-   - If it comes back after the move, its blockvolume gets no assignment, does not serve, and exits with status 75.
-   - The example unit starts it again about every 35 s (30 s of waiting, then `RestartSec=5s`), until its start
-     limit (10 starts in 600 s), and then shows it as failed (`start-limit-hit`).
-   - A process that was already waiting on its old assignment when the move was issued exits with status 78
-     (`reason=moved`) instead, and the unit does not start it again.
+   - If it comes back after the move, blockmaster refuses its lease: it does not serve, logs `exiting status=78
+     reason=moved` and exits 78, and the example unit does not start it again
+     (`TestProcedureForcedMoveWithTheOldHostReturning`).
    - Stop and disable that unit on the old host. Run `systemctl reset-failed` only after you have dealt with its
      local root ([do not](volume-lifecycle.md#do-not)).
 2. Run the forced move to another registered node: `--dry-run` first, then the move. See
@@ -277,6 +292,7 @@ Every command on the pages above, and the test that runs it.
 | Command | Test | Kind |
 |---|---|---|
 | `blockmaster ... --cluster-spec ... --lifecycle-store ... --workspace-rpc ...` | `TestStandalonePlannedHandoffToTheSameHost` (`cmd/blockvolume`) | binary |
+| `blockmaster ... --cluster-spec ... --expected-slots-per-volume 3 --lifecycle-product-loop-interval ...` (a replicated volume) | `TestDoubleFailoverReadsBackEveryAckedWrite`, `TestFencingRoundHealContinuesThePrimary` (`cmd/blockvolume`, run with `200ms`) | binary |
 | `blockvolume ... --durable-impl walstore-chunk ... --workspace-lease ...` | same | binary |
 | `sw-block ops workspace show`, `revoke --sealed-gen`, `move --clean` | same | binary |
 | `sw-block ops chunk detach --plain`, `chunk show`, `chunk cut` | same; `TestProcedureForcedMoveWithTheOldHostReturning` | binary |
@@ -290,7 +306,7 @@ Every command on the pages above, and the test that runs it.
 | `blockvolume` under systemd: exit 75 after an expired start, restart, re-grant | `TestSystemdExpiredStartupExits75ThenRegrantServes` (`cmd/blockvolume`, a real systemd manager, tag `systemd_integration`) | binary |
 | The shipped units' start limits (`StartLimitIntervalSec=600`, `StartLimitBurst=10`, `RestartPreventExitStatus=78`) | `TestBlockvolumeUnitsBoundStartupRetries` (`internal/testops`, reads the unit files) | unit files |
 | `systemctl enable`, `stop`, `disable`, `reset-failed`, `systemd-tmpfiles --create` as written on these pages | not run: the tests above start transient units, not the installed ones | not run |
-| Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesRestoreTargetsThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetSurvivesItsSourceDeleteAndGC` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
+| Headroom refusal at create, and both ways out (free space; `--durable-root` on a file system with room) | `TestHeadroomRefusesRestoreTargetsThenServesThem`, `TestHeadroomRefusedTargetBlastRadiusAndAnotherRoot`, `TestHeadroomRefusedRestoreTargetKeepsItsSourceSnapshot` (`cmd/blockvolume`, root, loop-mounted file systems) | binary |
 | A snapshot refused with `host_slot_busy` / `no background slot` while every host slot is held, retried with the same request id | `TestSnapshotLadderF1VolumesOneHost` (`cmd/blockvolume`, `F1_RUN=1`, `F1_HOST_LIMIT_DIR` set, 3 slots; `F1_SLOT_RETRY_SECONDS=0` is its negative control) | binary |
 | Full local disk; full `--host-limit-dir` | `TestProcedureLocalDiskFull` (`cmd/blockvolume`, root, `testdata/diskfull.sh`); what a Linux guest sees: `TestProcedureLocalDiskFullKernelInitiator` (kernel NVMe/TCP host) | binary |
 | A first start with the wrong `--durable-blocks`: refused before any local store is created (exit 78) | `TestWrongGeometryFlagIsRefusedBeforeTheStoreIsCreated` (`cmd/blockvolume`) | binary |

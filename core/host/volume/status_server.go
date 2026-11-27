@@ -552,11 +552,16 @@ func (s *StatusServer) statusProjection() StatusProjection {
 		}
 	}
 	leaseNotHeld := s.view.workspaceLeaseNotHeld()
-	if backendReason != "" || leaseNotHeld {
+	// Read once: the refusal is the cause of the backend's refusal too, so
+	// it is named before the backend's generic reason.
+	profileRefusal := s.view.ackProfileRefusal()
+	if backendReason != "" || leaseNotHeld || profileRefusal != "" {
 		p.FrontendPrimaryReady = false
 	}
 	if !p.FrontendPrimaryReady {
 		switch {
+		case profileRefusal != "":
+			p.NotReadyReason = profileRefusal
 		case leaseNotHeld:
 			p.NotReadyReason = NotReadyLeaseNotHeld
 			if masterWait != nil {
