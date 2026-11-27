@@ -343,6 +343,12 @@ func (s *WALStore) writeExtentIfCurrent(lba, expectedLSN uint64, data []byte) (b
 }
 
 func (s *WALStore) writeExtentUnlocked(lba uint32, data []byte) error {
+	// Backstop for INV-CHUNK-LOCAL-BEFORE-FETCH-001: a store awaiting its
+	// chunk layer writes no extent block, so a writer that escapes the
+	// held drain fails loudly instead of leaving a block not marked local.
+	if s.drainHeld.Load() && s.chunk.Load() == nil {
+		return fmt.Errorf("%w: extent write of LBA %d", ErrDrainHeldForChunkLayer, lba)
+	}
 	off := int64(s.extentBase + uint64(lba)*uint64(s.sb.BlockSize))
 	if _, err := s.fd.WriteAt(data, off); err != nil {
 		return fmt.Errorf("storage: write extent LBA %d: %w", lba, err)
