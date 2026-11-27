@@ -24,6 +24,16 @@ const (
 	// A fencing round ended without a publication and the line's primary
 	// did not answer ready to continue: the volume waits for either.
 	ReasonFenceRoundIncomplete = "fence_round_incomplete"
+	// The volume's ack profile is best_effort: a write may be acknowledged
+	// by the primary alone, so no replica is promoted in its place
+	// automatically; only the operator's forced move (its lost range
+	// reported) can change the primary.
+	ReasonBestEffortNoAutomaticFailover = "best_effort_no_automatic_failover"
+	// A replica of the volume answered the promotion probe with no ack
+	// profile, or with another than the master's (or the master's own is
+	// unknown): every frontier rule is read from that profile, so no replica
+	// is promoted automatically until they agree.
+	ReasonAckProfileMismatch = "ack_profile_mismatch"
 	// The highest end of a fencing round is held only by a replica that is
 	// not ready for primary: the volume waits for it (or for a ready one to
 	// catch up from it).

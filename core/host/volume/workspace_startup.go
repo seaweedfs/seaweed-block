@@ -2,6 +2,7 @@ package volume
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
@@ -80,4 +81,41 @@ func (h *Host) IsCurrentReplicaSuperseded() bool {
 	h.ownAssignmentMu.RLock()
 	defer h.ownAssignmentMu.RUnlock()
 	return h.IsSuperseded(h.cfg.ReplicaID, h.ownAssignmentEpoch, h.ownAssignmentEV)
+}
+
+// noteAckProfile records whether this primary fact's line may be served: a
+// replicated line (one with peers) is served only when its assignment names
+// this volume's own ack profile. A later failover reads the writes this
+// primary acknowledged by the master's profile, and the primary may not
+// answer then; so a primary in another profile never acknowledges at all.
+func (h *Host) noteAckProfile(f *control.AssignmentFact) {
+	reason := ""
+	if len(f.GetPeers()) > 0 {
+		want, own := canonicalAckProfile(f.GetAckProfile()), canonicalAckProfile(h.cfg.AckProfile)
+		if want != own {
+			reason = fmt.Sprintf("ack profile mismatch: this volume runs --replication-ack %s, its replicated line is assigned under %s; restart it with the master's profile", profileName(own), profileName(want))
+		}
+	}
+	if prev, _ := h.ackProfileRefusal.Load().(string); prev != reason && reason != "" {
+		h.log.Printf("blockvolume: volume %s primary at epoch=%d does not serve: %s", h.cfg.VolumeID, f.GetEpoch(), reason)
+	}
+	h.ackProfileRefusal.Store(reason)
+}
+
+// AckProfileRefusal is why this primary serves nothing under its current
+// line's ack profile, or "".
+func (h *Host) AckProfileRefusal() string {
+	reason, _ := h.ackProfileRefusal.Load().(string)
+	return reason
+}
+
+func canonicalAckProfile(p string) string {
+	return strings.ToLower(strings.ReplaceAll(p, "-", "_"))
+}
+
+func profileName(p string) string {
+	if p == "" {
+		return "(none)"
+	}
+	return p
 }

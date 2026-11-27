@@ -107,7 +107,7 @@ func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, 
 	p := v.projector.Projection()
 	healthy := p.Mode == engine.ModeHealthy
 	superseded := healthy && v.isSupersededLine(p.Epoch, p.EndpointVersion)
-	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) || v.roleAdmissionFailed() || v.replicaStoresAwaited() != "" {
+	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) || v.roleAdmissionFailed() || v.replicaStoresAwaited() != "" || v.ackProfileRefusal() != "" {
 		healthy = false
 	}
 	result := frontend.Projection{
@@ -165,6 +165,20 @@ func (v *AdapterProjectionView) replicaStoresAwaited() string {
 		return ""
 	}
 	return probe.ReplicaStoresAwaited()
+}
+
+// ackProfileRefusal: a primary of a replicated line assigned under another
+// ack profile than its own serves nothing (Host.AckProfileRefusal); "" when
+// it may serve.
+func (v *AdapterProjectionView) ackProfileRefusal() string {
+	if v == nil || v.probe == nil {
+		return ""
+	}
+	probe, ok := v.probe.(interface{ AckProfileRefusal() string })
+	if !ok {
+		return ""
+	}
+	return probe.AckProfileRefusal()
 }
 
 // roleAdmissionFailed is the G1 admission latch from the volume host: a role

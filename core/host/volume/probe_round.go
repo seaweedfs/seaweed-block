@@ -128,7 +128,7 @@ func (h *Host) roundNamesThisStore(round *control.ProbeRound) bool {
 
 // probeAnswer is this replica's evidence now, for round.
 func (h *Host) probeAnswer(round uint64) *control.ProbeAnswer {
-	a := &control.ProbeAnswer{ServerId: h.cfg.ServerID, VolumeId: h.cfg.VolumeID, ReplicaId: h.cfg.ReplicaID, RoundId: round}
+	a := &control.ProbeAnswer{ServerId: h.cfg.ServerID, VolumeId: h.cfg.VolumeID, ReplicaId: h.cfg.ReplicaID, RoundId: round, AckProfile: h.cfg.AckProfile}
 	if src, ok := h.getReplication().(primaryEvidenceSource); ok && src != nil {
 		if st, end, err := src.LocalPrimaryEvidence(); err == nil {
 			a.DurableEnd = end

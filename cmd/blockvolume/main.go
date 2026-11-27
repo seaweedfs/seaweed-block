@@ -1686,6 +1686,7 @@ func hostConfig(f flags, readyCh chan<- adapter.AssignmentInfo) volume.Config {
 	}
 	return volume.Config{
 		MasterAddr:            f.masterAddr,
+		AckProfile:            strings.ReplaceAll(f.replicationAck, "-", "_"),
 		LinesNameTheirProcess: true,
 		ServerID:              f.serverID,
 		VolumeID:              f.volumeID,

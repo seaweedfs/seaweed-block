@@ -1,0 +1,68 @@
+# Process-level tests (cmd/blockvolume, build tags subprocess and
+# chunkstore_integration, linux) named as release evidence. CI runs them
+# against real blockmaster, blockvolume and sw-block binaries and the pinned
+# SeaweedFS release. Every name here must PASS: a skip, a failure or a test
+# that never ran fails the job (.github/scripts/required-tests-check.py).
+#
+# Not here, and why: the three headroom tests (TestHeadroom*), the power-loss
+# replay (TestPowerLossReplayChunkVolume, a dm-log-writes harness) and the
+# tests tagged systemd_integration need root, a loop or mapped device, or
+# systemd; the CI runners have none of these. They run as root outside CI,
+# and their counts are recorded there.
+
+# Known-zero acceptance, small shape in CI (KZ_RUN=1 KZ_SIZE=1G, user-space
+# client, no device); the 1 TiB run is lab only.
+TestKnownZeroAcceptance
+TestKnownZeroTargetReservesBeforeHarness
+
+# The procedure gate, delete and master loss.
+TestProcedurePlannedHandoffToAnotherHost
+TestProcedureSameHostRestartInsideTheLease
+TestProcedureSameHostCrashRestartInsideTheLease
+TestProcedureReturnAfterALapsedLease
+TestProcedureForcedMoveWithTheOldHostReturning
+TestProcedureRevokeWithoutACKThenForcedMove
+TestProcedureStartInsideTheBarrierWaitIsReGranted
+TestProcedureDeleteAVolume
+TestProcedureDeleteAfterASignalStop
+TestProcedureMasterKilledAfterMoveBeforeTargetStarts
+TestProcedureMasterUnreachableFencesBeforeForcedMove
+TestStandalonePlannedHandoffToTheSameHost
+TestStandaloneCleanMoveWithoutTheACKIsRefused
+
+# Failover and the fencing round.
+TestDoubleFailoverReadsBackEveryAckedWrite
+TestFencingRoundHealContinuesThePrimary
+TestFencingRoundSurvivorRejoins
+TestAVolumeThatServedBeforeItsFirstGateTickFailsOver
+
+# Many volumes on one host (F1_RUN=1).
+TestSnapshotLadderF1VolumesOneHost
+
+# Never-started delete.
+TestNeverAttachedRestoreTargetIsDeletable
+TestNeverStartedDeleteFencesALateStart
+TestNeverStartedDeleteRacesAStart
+TestNeverStartedLineIsDeletableWithoutARevoke
+TestNeverStartedLineDeleteFencesALateStart
+TestNeverStartedLineDeleteRacesAStart
+TestNeverStartedDeleteAfterAMasterRestart
+TestClaimedTargetAfterAMasterRestartIsNotNeverStarted
+
+# Snapshot ladders and cutover.
+TestSnapshotLadderA1OneBlockOneSnapshot
+TestSnapshotLadderA2IncrementalSnapshot
+TestSnapshotLadderA3WritesDuringASnapshot
+TestSnapshotLadderA4ContentReturnsToAnOldValue
+TestSnapshotLadderB1SnapshotQuery
+TestSnapshotLadderC1FullRestore
+TestSnapshotLadderC2IncrementalRestore
+TestSnapshotLadderC3RestoreThenWriteThenSnapshotIt
+TestSnapshotLadderC3KilledHydrating
+TestSnapshotLadderD1DeleteTheNewest
+TestSnapshotLadderD2DeleteAMiddleOne
+TestSnapshotLadderD3DeleteWhenContentRecurs
+TestSnapshotLadderD4DeleteAllButOneThenCollect
+TestSnapshotLadderE1CrashDuringASnapshot
+TestCutoverCreateFromSnapshot
+TestCutoverWriteSnapshotKillRestartRestore
