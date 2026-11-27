@@ -273,6 +273,16 @@ acts. The limits, as they show on a running system:
 In the acknowledging modes, acknowledged writes were read back intact in every run that found these limits. What the
 release supports without these limits is the single-replica volume.
 
+**Planned for v1.0.1.** Two replicated configurations are planned to become supported:
+- **RF3 `sync-quorum`, installed on hosts:** writes continue through one replica's fault, and that replica returns
+  by itself.
+- **RF2 `sync-quorum`, with its limit:** no acknowledged write is lost and failover is automatic, but writes stop
+  while either replica is out.
+
+`sync-all` and Kubernetes RF3 stay a preview. In every replicated configuration, an old primary cut off from
+blockmaster by a partition may keep serving reads of older data until its lease ends.
+
+
 ## When a host is lost
 
 The steps below are for a single-replica volume. A `sync-quorum` or `sync-all`

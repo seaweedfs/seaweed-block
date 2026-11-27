@@ -20,6 +20,12 @@ writing guest:
 4. **No path failover.** A target that is no longer the primary answers with a status the guest does not retry, so
    there is no multipath failover in v1.0; the guest is started again on the new primary.
 
+**Planned for v1.0.1.** Supported: RF3 `sync-quorum` installed on hosts (writes continue through one replica's
+fault, and that replica returns by itself), and RF2 `sync-quorum` with its limit (no acknowledged write is lost and
+failover is automatic, but writes stop while either replica is out). `sync-all` and Kubernetes RF3 stay a preview. In
+every replicated configuration, an old primary cut off from blockmaster by a partition may keep serving reads of
+older data until its lease ends.
+
 **Carrying over.** No change to the store format is planned for the release that lifts the preview, so a replicated
 volume created under it is expected to carry over without re-creating it. That release's design is still under
 review, so this is a plan, not a guarantee.
