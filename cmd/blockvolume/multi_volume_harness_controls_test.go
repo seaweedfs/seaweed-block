@@ -3,8 +3,12 @@
 package main_test
 
 import (
+	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -132,15 +136,55 @@ func TestSiblingEarlyFailures(t *testing.T) {
 		want     int
 	}{
 		{"no failure", nil, at(10), at(8), true, 0},
-		{"all after the fence", []time.Time{at(8), at(9)}, at(12), at(8), true, 0},
+		{"all after the stamp's second", []time.Time{at(9), at(10)}, at(12), at(8), true, 0},
 		{"in the second before the stamp", []time.Time{at(7).Add(500 * time.Millisecond)}, at(12), at(8), true, 1},
-		{"at the stamp", []time.Time{at(8)}, at(12), at(8), true, 0},
+		{"at the stamp", []time.Time{at(8)}, at(12), at(8), true, 1},
+		{"in the stamp's second, before an actual fence at 8.9", []time.Time{at(8).Add(100 * time.Millisecond)}, at(12), at(8), true, 1},
 		{"one before the fence", []time.Time{at(5), at(9)}, at(12), at(8), true, 1},
+		{"exit inside the stamp's second", []time.Time{at(8).Add(600 * time.Millisecond)}, at(8).Add(500 * time.Millisecond), at(8), true, 0},
 		{"no fence line: from the exit", []time.Time{at(5), at(13)}, at(12), time.Time{}, false, 1},
 		{"neither known: all early", []time.Time{at(5)}, time.Time{}, time.Time{}, false, 1},
 	} {
 		if got := siblingEarlyFailures(c.failed, c.exited, c.fenced, c.isFenced); got != c.want {
 			t.Errorf("%s: %d early; want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestSiblingTeardownRegisteredBeforeStart drives startSiblings itself: the
+// second sibling's start fails (t.Fatalf, so in a child test process), and
+// the first sibling's writer must still be stopped and joined by the
+// harness's teardown, which runs from the daemon cleanup registered before
+// any sibling. Registering the teardown after the start loop fails this.
+func TestSiblingTeardownRegisteredBeforeStart(t *testing.T) {
+	if os.Getenv("SWBLOCK_PARTIAL_START_CHILD") == "1" {
+		h := &plannedHandoffHarness{dir: t.TempDir(), t: t}
+		env := &handoffEnv{h: h}
+		t.Cleanup(h.runBeforeStop) // the daemon cleanup, registered before the siblings
+		siblingStartForTest = func(t *testing.T, v string) *siblingWriter {
+			if v == "v1s3" {
+				t.Fatalf("injected start failure of %s", v)
+			}
+			w := &siblingWriter{volume: v, stop: make(chan struct{}), done: make(chan struct{})}
+			go func() {
+				<-w.stop
+				fmt.Println("FAKE-WRITER-JOINED", v)
+				close(w.done)
+			}()
+			return w
+		}
+		env.startSiblings(t, []string{"v1s2", "v1s3"})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestSiblingTeardownRegisteredBeforeStart$", "-test.v", "-test.count=1")
+	cmd.Env = append(os.Environ(), "SWBLOCK_PARTIAL_START_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the child passed; want its injected start failure:\n%s", out)
+	}
+	for _, want := range []string{"injected start failure of v1s3", "FAKE-WRITER-JOINED v1s2", "SIBLING-TEARDOWN 1 writer(s) stopped"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("the child's output lacks %q:\n%s", want, out)
 		}
 	}
 }

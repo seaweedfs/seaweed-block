@@ -198,6 +198,10 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 		env.siblingTeardown(t, writers, admitted, env.judgeSibling)
 	})
 	for _, v := range names {
+		if siblingStartForTest != nil {
+			writers = append(writers, siblingStartForTest(t, v))
+			continue
+		}
 		b := env.hosts["n-"+v]
 		args := append(env.volArgsFor(b), "--durable-blocks", fmt.Sprint(bytes/4096))
 		d := env.h.start(t, "blockvolume-"+v, env.h.volume, args...)
@@ -218,6 +222,10 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 	t.Cleanup(func() { siblingWritersOf.Delete(env) })
 	admitted = true
 }
+
+// siblingStartForTest replaces one sibling's start in a control (nil
+// otherwise): the registration and teardown around it stay the harness's.
+var siblingStartForTest func(t *testing.T, volume string) *siblingWriter
 
 // siblingTeardown stops and joins every writer started so far; only when
 // every sibling started (admitted) is each one judged and read back.
@@ -271,13 +279,14 @@ func siblingFencedAt(d *daemon) (time.Time, bool) {
 
 // siblingEarlyFailures counts the failed writes that came before the
 // sibling became unavailable on purpose: writes may fail from the moment its
-// lease fenced (the stamp truncates to the second, so the fence is at or
-// after it) or its process exited, whichever is earlier, never before. With neither known,
-// every failure is early.
+// lease fenced or its process exited, whichever is earlier, never before.
+// The fence stamp has whole seconds, so a failure inside the stamp's second
+// may precede the actual fence: it counts as early (conservative). With
+// neither known, every failure is early.
 func siblingEarlyFailures(failedAt []time.Time, exitedAt, fencedAt time.Time, fenced bool) int {
 	from := exitedAt
-	if fenced && (from.IsZero() || fencedAt.Before(from)) {
-		from = fencedAt
+	if after := fencedAt.Add(time.Second); fenced && (from.IsZero() || after.Before(from)) {
+		from = after
 	}
 	early := 0
 	for _, f := range failedAt {
