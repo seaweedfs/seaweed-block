@@ -979,6 +979,9 @@ func (p *DurableProvider) openExisting(volumeID, path string, impl ImplName) (*v
 		// Defer before Recover can publish a completed BASE away.
 		if impl == ImplWALStoreChunk {
 			ws.DeferBaseRetirementV3()
+			// Before Recover: a replayed write reaches the extent only
+			// after the chunk layer attaches, so it is marked local.
+			ws.HoldExtentDrainUntilChunkLayer()
 		}
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
@@ -1039,6 +1042,9 @@ func (p *DurableProvider) createFresh(volumeID, path string, impl ImplName) (*vo
 		// Defer before Recover can publish a completed BASE away.
 		if impl == ImplWALStoreChunk {
 			ws.DeferBaseRetirementV3()
+			// Before Recover: a replayed write reaches the extent only
+			// after the chunk layer attaches, so it is marked local.
+			ws.HoldExtentDrainUntilChunkLayer()
 		}
 		if p.cfg.WALRetentionLSNs > 0 {
 			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)

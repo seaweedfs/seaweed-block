@@ -92,6 +92,9 @@ type WALStore struct {
 
 	// chunk is the attached chunk layer's hooks; nil when none.
 	chunk     atomic.Pointer[chunkHooks]
+	// drainHeld (HoldExtentDrainUntilChunkLayer): the flusher drains no
+	// dirty block to the extent until a chunk layer is attached.
+	drainHeld atomic.Bool
 	extentMu  [64]sync.RWMutex
 	closed    bool
 	nextLSN   uint64 // next LSN to assign to a write
@@ -705,7 +708,14 @@ func (s *WALStore) DisableAutoFlushForRecoveryTest() {
 // until a chunk layer is attached. A block drained earlier would not be
 // marked local, and a later fetch of its absent chunk would install the
 // remote block over the acknowledged write.
-func (s *WALStore) HoldExtentDrainUntilChunkLayer() {}
+func (s *WALStore) HoldExtentDrainUntilChunkLayer() { s.drainHeld.Store(true) }
+
+// ErrDrainHeldForChunkLayer: the store's extent drain waits for its chunk
+// layer, so no path that writes the extent may start.
+var ErrDrainHeldForChunkLayer = errors.New("storage: the extent drain is held until the chunk layer attaches")
+
+// ExtentDrainHeld reports whether the extent drain waits for a chunk layer.
+func (s *WALStore) ExtentDrainHeld() bool { return s.drainHeld.Load() }
 
 func (s *WALStore) readFromExtent(lba uint32) ([]byte, error) {
 	return s.readFromExtentContext(context.Background(), lba)

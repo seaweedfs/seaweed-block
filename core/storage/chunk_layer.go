@@ -303,6 +303,11 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		l.cancel()
 		return nil, err
 	}
+	// Every later drain reaches OnExtentWrite: release a held drain.
+	s.drainHeld.Store(false)
+	if s.flusher != nil {
+		s.flusher.Notify()
+	}
 
 	return l, nil
 }

@@ -159,6 +159,14 @@ func (f *flusher) flushOnceAllowClosed() error {
 func (f *flusher) flushOnceInternal(allowClosed bool) (err error) {
 	cycleStart := time.Now()
 	store := f.store
+	// A store opened for chunk use drains nothing before its chunk layer
+	// attaches: the dirty blocks stay in the WAL (replayed again after a
+	// crash) and are served from the dirty map; the first drain after
+	// attach marks them local (OnExtentWrite). This includes the final
+	// flush of a stop.
+	if store.drainHeld.Load() {
+		return nil
+	}
 	if err := store.stickyIOFault(); err != nil {
 		return err // no checkpoint advance after a failed fsync
 	}
