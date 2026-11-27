@@ -104,11 +104,28 @@ func (p *PeerCommandExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	})
 }
 
-// SetOnFenceComplete delegates verbatim to the inner executor.
-// Fence completion does not directly drive peer state; it advances
-// engine Reachability.FencedEpoch which is the ack-gate for Healthy.
+// SetOnFenceComplete wraps the adapter-supplied callback so a completed
+// fence first re-draws the peer's live session above the fence's, then
+// lets the engine advance Reachability.FencedEpoch (the ack-gate for
+// Healthy). A fence mints its own session from the peer's one session
+// order, and the replica holds the fence's lineage once it acknowledges
+// it: the live session, drawn earlier, would be below it, and every later
+// barrier or ship on it refused as stale. The re-draw runs only after the
+// fence's own barrier was acknowledged (this callback), so the replica
+// never holds a live lineage above an in-flight fence.
 func (p *PeerCommandExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
-	p.inner.SetOnFenceComplete(fn)
+	p.inner.SetOnFenceComplete(func(r adapter.FenceResult) {
+		if r.Success {
+			if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, 0, "fence completed"); err != nil {
+				r.Success = false
+				r.FailReason = err.Error()
+				p.peer.Invalidate("live session refresh after fence failed: " + err.Error())
+			}
+		}
+		if fn != nil {
+			fn(r)
+		}
+	})
 }
 
 // --- Wire-level command delegation (verbatim to inner) ---
