@@ -19,6 +19,9 @@ writing guest:
 3. **`sync-all` refuses writes while any replica is down.**
 4. **No path failover.** A target that is no longer the primary answers with a status the guest does not retry, so
    there is no multipath failover in v1.0; the guest is started again on the new primary.
+5. **Under `best-effort`, a replica can fall behind while it shows `healthy`.** A `best-effort` write waits for no
+   replica, so a replica whose connection dropped can keep showing `healthy` while it misses writes. Use `sync-quorum`
+   when the replicas must hold the data.
 
 **Planned for v1.0.1.** Supported: RF3 `sync-quorum` installed on hosts (writes continue through one replica's
 fault, and that replica returns by itself), and RF2 `sync-quorum` with its limit (no acknowledged write is lost and

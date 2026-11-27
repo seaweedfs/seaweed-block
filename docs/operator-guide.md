@@ -263,6 +263,9 @@ acts. The limits, as they show on a running system:
   With three replicas and `sync-quorum`, one replica left out as above plus one more fault loses the quorum; a
   single failover can already leave too few replicas, depending on timing.
 - **`sync-all` refuses every write while any replica is down.** It needs every replica for each write.
+- **Under `best-effort` (the default), a replica can fall behind while it shows `healthy`.** A `best-effort` write
+  waits for no replica, so a replica whose connection dropped can keep showing `healthy` in the primary's status
+  while it misses writes. Use `sync-quorum` when the replicas must hold the data.
 - **No path failover in the guest.** A guest connects to one target, and a target that is no longer the primary
   answers with a status the guest does not retry: its I/O fails with `EIO` instead of moving to another path. There is
   no multipath for replicated volumes in v1.0; after a failover the guest is started on the new primary's host (see
