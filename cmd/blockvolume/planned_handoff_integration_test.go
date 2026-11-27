@@ -814,11 +814,24 @@ func dialNVMe(t testing.TB, addr, subNQN string) *nvmeInitiator {
 	c := &nvmeInitiator{}
 	cd := nvme.ConnectData{HostID: [16]byte{0x5e, 0xa1}, SubNQN: subNQN, HostNQN: "nqn.2026-11.io.seaweedfs:handoff-test"}
 	var cntlID uint16
+	// The caller owns the connections only once both queues are connected:
+	// a failure part-way (t.Fatalf, or a recovered softTB panic) closes every
+	// socket opened so far.
+	var opened []net.Conn
+	owned := false
+	defer func() {
+		if !owned {
+			for _, conn := range opened {
+				_ = conn.Close()
+			}
+		}
+	}()
 	for qid := uint32(0); qid <= 1; qid++ {
 		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 		if err != nil {
 			t.Fatalf("nvme dial %s: %v", addr, err)
 		}
+		opened = append(opened, conn)
 		_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 		r, w := nvme.NewReader(conn), nvme.NewWriter(conn)
 		if err := w.SendHeaderOnly(0x0, &nvme.ICRequest{PDUMaxR2T: 1}, 120); err != nil {
@@ -852,6 +865,7 @@ func dialNVMe(t testing.TB, addr, subNQN string) *nvmeInitiator {
 			c.io, c.r, c.w = conn, r, w
 		}
 	}
+	owned = true
 	return c
 }
 

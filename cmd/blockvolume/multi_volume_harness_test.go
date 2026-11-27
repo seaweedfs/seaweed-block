@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -117,10 +118,12 @@ type siblingWriter struct {
 	d    *daemon
 	args []string
 
-	mu      sync.Mutex
-	acked   map[uint64][32]byte
-	unknown int
-	lastErr string
+	mu       sync.Mutex
+	acked    map[uint64][32]byte
+	unknown  int
+	failedAt []time.Time // when each write that did not complete failed
+	exitedAt time.Time   // when the sibling's process exited, if it did
+	lastErr  string
 }
 
 func (w *siblingWriter) run(t testing.TB) {
@@ -158,6 +161,7 @@ func (w *siblingWriter) run(t testing.TB) {
 			w.acked[lba] = sha256.Sum256(data)
 		} else {
 			w.unknown++
+			w.failedAt = append(w.failedAt, time.Now())
 			w.lastErr = err.Error()
 		}
 		w.mu.Unlock()
@@ -169,8 +173,11 @@ func (w *siblingWriter) run(t testing.TB) {
 }
 
 // startSiblings starts each sibling's blockvolume, waits until it serves as
-// primary, starts its writer, and registers the read-back as a harness
-// beforeStop hook, which runs before any harness process is stopped.
+// primary and starts its writer. The teardown is registered before the
+// first writer starts (a later sibling's start can fail the test, and every
+// writer already running must still be stopped and joined), as a harness
+// beforeStop hook, which runs before any harness process is stopped. The
+// siblings are judged and read back only when every one of them started.
 func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 	t.Helper()
 	if len(names) == 0 {
@@ -179,6 +186,13 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 	bytes := siblingVolumeBytes(t)
 	_, mustU := fatalOn(t)
 	var writers []*siblingWriter
+	admitted := false
+	// Not an ordinary cleanup: a process the test starts after the siblings
+	// (a restarted master) registers its cleanup later, so it would stop
+	// first and the siblings, their master gone, would fence before being read.
+	env.h.beforeStop = append(env.h.beforeStop, func() {
+		env.siblingTeardown(t, writers, admitted, env.judgeSibling)
+	})
 	for _, v := range names {
 		b := env.hosts["n-"+v]
 		args := append(env.volArgsFor(b), "--durable-blocks", fmt.Sprint(bytes/4096))
@@ -187,38 +201,132 @@ func (env *handoffEnv) startSiblings(t *testing.T, names []string) {
 		waitSiblingPrimary(t, b.status, v, e)
 		w := &siblingWriter{volume: v, nvme: b.nvme, status: b.status, blocks: bytes / 4096, stop: make(chan struct{}), done: make(chan struct{}),
 			d: d, args: args, acked: map[uint64][32]byte{}}
+		go func() {
+			<-d.done
+			w.mu.Lock()
+			w.exitedAt = time.Now()
+			w.mu.Unlock()
+		}()
 		writers = append(writers, w)
 		go w.run(t)
 	}
-	// The read-back runs before any harness process stops (beforeStop), not
-	// as an ordinary cleanup: a process the test starts after the siblings (a
-	// restarted master) registers its cleanup later, so it would stop first
-	// and the siblings, their master gone, would fence before being read.
-	env.h.beforeStop = append(env.h.beforeStop, func() {
-		for _, w := range writers {
-			close(w.stop)
-		}
-		for _, w := range writers {
-			select {
-			case <-w.done:
-			case <-time.After(90 * time.Second):
-				t.Errorf("sibling %s: the writer did not stop within 90 s", w.volume)
-				continue
-			}
-			if !env.siblingServing(t, w) {
-				continue
-			}
-			env.readBackSibling(t, w)
-		}
-	})
+	admitted = true
 }
 
-// siblingServing makes sure the sibling serves before its read-back. A
-// sibling whose process exited during the test (a test that keeps the master
-// away past the lease fences every volume, which then exits by design) is
-// restarted with the same command and local root and must come back as
-// primary; its acknowledged writes are then read through the restarted
-// process. Reports false (with an error) when it cannot serve.
+// siblingTeardown stops and joins every writer started so far; only when
+// every sibling started (admitted) is each one judged and read back.
+func (env *handoffEnv) siblingTeardown(t testing.TB, writers []*siblingWriter, admitted bool, judge func(testing.TB, *siblingWriter)) {
+	t.Helper()
+	for _, w := range writers {
+		close(w.stop)
+	}
+	joined := make([]bool, len(writers))
+	for i, w := range writers {
+		select {
+		case <-w.done:
+			joined[i] = true
+		case <-time.After(90 * time.Second):
+			t.Errorf("sibling %s: the writer did not stop within 90 s", w.volume)
+		}
+	}
+	if !admitted {
+		t.Logf("SIBLING-TEARDOWN %d writer(s) stopped; the sibling start did not complete, so nothing is read back", len(writers))
+		return
+	}
+	for i, w := range writers {
+		if joined[i] {
+			judge(t, w)
+		}
+	}
+}
+
+// expectedSiblingExit: the only exits a test may cause for a sibling on
+// purpose. A test that keeps the master away past the lease fences every
+// volume, which then exits 75 with lease_expired (or revoke_ack_unconfirmed
+// when the fence was a revocation it could not acknowledge). Any other exit,
+// a crash, a panic or another reason, is a failure of the cell.
+func expectedSiblingExit(exitLine string) bool {
+	if !strings.Contains(exitLine, "status=75") {
+		return false
+	}
+	return strings.Contains(exitLine, "reason=lease_expired") || strings.Contains(exitLine, "reason=revoke_ack_unconfirmed")
+}
+
+// siblingFencedAt is when the sibling's log says its lease fenced (the
+// standard log timestamp, local time, whole seconds), or false.
+func siblingFencedAt(d *daemon) (time.Time, bool) {
+	l := d.line("workspace lease: fenced")
+	if len(l) < 19 {
+		return time.Time{}, false
+	}
+	at, err := time.ParseInLocation("2006/01/02 15:04:05", l[:19], time.Local)
+	return at, err == nil
+}
+
+// siblingEarlyFailures counts the failed writes that came before the
+// sibling became unavailable on purpose: writes may fail from the moment its
+// lease fenced (a whole-second log stamp, so from one second earlier) or its
+// process exited, whichever is earlier, never before. With neither known,
+// every failure is early.
+func siblingEarlyFailures(failedAt []time.Time, exitedAt, fencedAt time.Time, fenced bool) int {
+	from := exitedAt
+	if fenced && (from.IsZero() || fencedAt.Add(-time.Second).Before(from)) {
+		from = fencedAt.Add(-time.Second)
+	}
+	early := 0
+	for _, f := range failedAt {
+		if from.IsZero() || f.Before(from) {
+			early++
+		}
+	}
+	return early
+}
+
+// judgeSibling fails the cell when the sibling was unavailable for a reason
+// the test did not cause, then restarts an expectedly exited sibling and
+// reads back every acknowledged write.
+func (env *handoffEnv) judgeSibling(tb testing.TB, w *siblingWriter) {
+	t := tb.(*testing.T)
+	t.Helper()
+	w.mu.Lock()
+	failedAt, exitedAt, lastErr := append([]time.Time(nil), w.failedAt...), w.exitedAt, w.lastErr
+	w.mu.Unlock()
+	exited := false
+	select {
+	case <-w.d.done:
+		exited = true
+	default:
+	}
+	if !exited {
+		if len(failedAt) > 0 {
+			t.Errorf("sibling %s: %d writes failed while it kept running (first at %s; last error %s)", w.volume, len(failedAt), failedAt[0].Format(time.RFC3339), lastErr)
+		}
+		env.readBackSibling(t, w)
+		return
+	}
+	why := "exit " + fmt.Sprint(w.d.err)
+	if l := w.d.line("blockvolume: exiting"); l != "" {
+		why = l
+	}
+	if !expectedSiblingExit(why) {
+		t.Errorf("sibling %s: exited during the test for a reason no test causes (%s); not restarted", w.volume, why)
+		return
+	}
+	fencedAt, fenced := siblingFencedAt(w.d)
+	if early := siblingEarlyFailures(failedAt, exitedAt, fencedAt, fenced); early > 0 {
+		t.Errorf("sibling %s: %d of %d failed writes came before its lease fenced or it exited (%s; last error %s)", w.volume, early, len(failedAt), why, lastErr)
+	}
+	if !env.siblingServing(t, w) {
+		return
+	}
+	env.readBackSibling(t, w)
+}
+
+// siblingServing restarts a sibling whose process exited during the test
+// (expectedly: judgeSibling decides) with the same command and local root;
+// it must come back as primary, and its acknowledged writes are then read
+// through the restarted process. Reports false (with an error) when it
+// cannot serve.
 func (env *handoffEnv) siblingServing(t *testing.T, w *siblingWriter) bool {
 	t.Helper()
 	select {
