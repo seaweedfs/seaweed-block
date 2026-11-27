@@ -249,6 +249,54 @@ failed over by itself (see
 4. Start `blockvolume` on the new node, then reconnect the guest.
 5. Optionally restore an older snapshot into a new volume and verify it with `ops chunk verify --depth data`.
 
+## Host connect settings
+
+The guest's kernel keeps an NVMe/TCP controller whose target went away and keeps reconnecting to the same address.
+Three `nvme connect` options decide how long it waits and what the guest sees meanwhile. The values below are
+derived from the waits these pages state, and were run with exactly these options (below).
+
+| Option | Kernel default | Set it to | Why |
+|---|---|---|---|
+| `--ctrl-loss-tmo` | 600 s | 180 | Longer than the longest wait for the same target to serve again: a restarted holder is re-granted at most 65 s after it stopped; a start not granted within 30 s after that barrier ends its wait, and the unit starts it again after `RestartSec=5s` ([after a crash](volume-lifecycle.md#after-a-crash)): 65 + 30 + 5 = about 100 s |
+| `--reconnect-delay` | 10 s | 2 | The controller retries every 2 s; connection setup and the network add to it |
+| `--fast_io_fail_tmo` | off | leave off | Any value shorter than the wait above fails I/O to the filesystem before the target serves again |
+
+```bash
+sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n "$NQN" --ctrl-loss-tmo=180 --reconnect-delay=2
+```
+
+What the guest sees:
+- **These values:** while the same target is away, I/O waits and continues when it serves again; a target that does
+  not come back fails I/O after 180 s. Measured with exactly these options: the holder killed, a write issued, the
+  holder started again 5 s later (by the test, as the unit would): the write completed after 6.1 s, with no error;
+  the holder kept away: the write failed with `EIO` after 181.5 s.
+- **Kernel defaults** (every connect command shipped today, including the CSI node): a target that does not come
+  back holds I/O for up to 10 minutes (a 9-minute blocked read was observed in a fault run), then fails it.
+- **Too short** (`--ctrl-loss-tmo` or `--fast_io_fail_tmo` below the wait): I/O errors reach the filesystem before
+  the target serves again; ext4 mounted with `errors=remount-ro` turns read-only and must be remounted.
+
+A blockmaster outage longer than the lease stops the holders: a holder keeps serving until its lease ends (up to
+20 s after its last renewal) and serves again at least 50 s after blockmaster is back
+([what a blockmaster restart does to serving volumes](standalone-deployment.md#restoring-a-snapshot-into-a-new-volume)).
+Guest I/O therefore waits at least the rest of the outage plus those 50 s; these pages give no upper bound. An outage
+longer than `--ctrl-loss-tmo` less those 50 s can fail guest I/O. Raise `--ctrl-loss-tmo` if the guest must ride
+through longer outages; I/O waits that long.
+
+**After a failover the guest must connect to the new primary.** These options retry the configured address; they
+never redirect it. A standalone volume's NVMe/TCP target binds loopback only (`--nvme-listen`; a non-loopback bind
+needs `--allow-external-nvme-bind`, unauthenticated, for test gates only), so a guest reaches only the target on its
+own host. Each replica's target reports itself optimized only while it is the healthy primary, but no guest is
+connected to the other replicas' targets. A replicated `sync-quorum` volume gets its new primary on another host
+about 30 to 35 s after its host is lost, with default flags (derived from `--freshness-window` and the two probe
+rounds; not yet measured). The guest's I/O on the old controller waits and then fails as above. To continue, run
+the guest on the new primary's host and connect it there: that host's blockvolume logs `adopted as PRIMARY` and its
+`/status?volume=<id>` shows `"AuthorityRole":"primary"`.
+
+**Kubernetes.** The CSI node connects with a plain `nvme connect` and the kernel defaults. A pod whose holder does
+not come back holds I/O for up to 600 s: its reads and writes block (processes in uninterruptible sleep, probes that
+touch the volume time out), then fail. Recovery is by recreating the pod, which stages the volume again on the
+current primary ([operations](operations-v1.md)). The CSI node passing the settings above is planned for 1.0.1.
+
 ## A volume waiting for blockmaster
 
 A `blockvolume` that cannot get its lease from blockmaster waits inside its process: the unit stays **active**

@@ -460,7 +460,8 @@ swb_start() {
   done
   swb_alive "$MPID" && swb_alive "$VPID" && swb_owns 9180 "$MPID" && swb_owns 4420 "$VPID" ||
     { echo "startup failed"; tail -n 20 master.log volume.log; swb_stop; return 1; }
-  sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n "$NQN" ||
+  # --ctrl-loss-tmo/--reconnect-delay: operator-guide.md, Host connect settings
+  sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 -n "$NQN" --ctrl-loss-tmo=180 --reconnect-delay=2 ||
     { echo "nvme connect failed"; swb_stop; return 1; }
 }
 swb_show() {   # read-only: the namespace under our NQN, then the volume status
