@@ -239,9 +239,10 @@ func parseFlags(args []string) (flags, error) {
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
 	fs.BoolVar(&f.durableWALMultiBlockRecords, "durable-wal-multiblock-records", false, "enable experimental walstore multi-block WAL records; default false; requires --durable-impl=walstore")
 	fs.BoolVar(&f.durableWALRecoveryTestDisableFlusher, "durable-wal-recovery-test-disable-flusher", false, "test-only: stop walstore's automatic WAL checkpoint flusher so recovery gates can prove WAL replay; default false; requires --durable-root and --durable-impl=walstore")
-	fs.Uint64Var(&f.walRetentionLSNs, "wal-retention-lsns", 0,
-		"WAL retention window past checkpoint LSN (walstore only). "+
-			"Zero (default) preserves strict checkpoint-driven recycle. "+
+	fs.Uint64Var(&f.walRetentionLSNs, "wal-retention-lsns", defaultWALRetentionLSNs,
+		"WAL retention window past checkpoint LSN (walstore only; default 10000, "+
+			"capped at a quarter of the WAL in block-sized records). "+
+			"Zero restores strict checkpoint-driven recycle. "+
 			"Non-zero relaxes the recovery-scan recycle gate so a replica lagging "+
 			"within the configured envelope still has a catch-up scan path; once a "+
 			"replica falls past this window the engine escalates to rebuild. "+
@@ -1718,3 +1719,8 @@ func replicaFloorPath(f flags) string {
 	}
 	return filepath.Join(f.durableRoot, f.volumeID+".replica-floor")
 }
+
+// defaultWALRetentionLSNs keeps a replica a few thousand writes behind (a
+// restart, a fence of a healthy peer) on the catch-up path instead of a
+// rebuild. The store caps it to what its WAL can hold.
+const defaultWALRetentionLSNs = 10000

@@ -890,10 +890,52 @@ func (s *WALStore) syncWithPhases(phases *SyncPhaseStats) (uint64, error) {
 
 // Boundaries returns the current R/S/H boundaries — what is durable,
 // what the WAL still retains, what's the newest write.
+//
+// S is the oldest LSN a catch-up can still be served from: the same floor
+// the catch-up scan applies (catchUpFloorV3), so a probe classifies a
+// replica inside the retention window as catch-up, not rebuild. With no
+// retention it is the checkpoint-driven tail, as before.
 func (s *WALStore) Boundaries() (R, S, H uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.syncedLSN, s.walTail, s.walHead
+	return s.syncedLSN, s.catchUpTailLocked(), s.walHead
+}
+
+// catchUpRetentionLocked is the retention window in force: the configured
+// --wal-retention-lsns, capped so the retained entries can never fill the
+// WAL (at most a quarter of its bytes in block-sized records, leaving room
+// for record overhead and the writes in flight). Caller holds s.mu.
+func (s *WALStore) catchUpRetentionLocked(d descriptorV3) uint64 {
+	n := s.recoveryRetentionLSNs
+	if d.BlockSize > 0 {
+		n = min(n, d.WALSize/(4*uint64(d.BlockSize)))
+	}
+	return n
+}
+
+// catchUpFloorV3: a catch-up from fromLSN <= floor is refused as recycled.
+func catchUpFloorV3(checkpointLSN, retention uint64) uint64 {
+	if checkpointLSN > retention {
+		return checkpointLSN - retention
+	}
+	return 0
+}
+
+// catchUpTailLocked is the S boundary. Caller holds s.mu.
+func (s *WALStore) catchUpTailLocked() uint64 {
+	if s.v3 == nil {
+		return s.walTail
+	}
+	d := s.v3.pub.current()
+	retention := s.catchUpRetentionLocked(d)
+	if retention == 0 || d.CheckpointLSN == 0 {
+		return s.walTail
+	}
+	tail := catchUpFloorV3(d.CheckpointLSN, retention) + 1
+	if d.BaseState == BaseInstalled && tail <= d.BaseLSN {
+		tail = d.BaseLSN + 1 // a completed BASE replaces its prefix
+	}
+	return tail
 }
 
 // NextLSN returns the LSN that the next Write will receive.

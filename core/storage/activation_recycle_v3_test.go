@@ -51,17 +51,26 @@ func TestWALStoreV3RecycleFloorCompatibilityMatrix(t *testing.T) {
 }
 
 func TestWALStoreV3RetentionCompatibilityMatrix(t *testing.T) {
-	for _, tc := range []struct{ retain, tail uint64 }{{0, 20830}, {1, 16664}, {10, 0}} {
+	tailWith := func(retain uint64) uint64 {
 		s, _ := newMappedCheckpointStoreV3(t)
-		s.SetRecoveryRetentionLSNs(tc.retain)
+		s.SetRecoveryRetentionLSNs(retain)
 		for i := 1; i <= 5; i++ {
 			writeSynced(t, s, uint32(i), uint32(i))
 		}
 		if err := s.flusher.flushOnce(); err != nil {
 			t.Fatal(err)
 		}
-		if got := s.v3.pub.current().RetainedTail; got != tc.tail {
+		return s.v3.pub.current().RetainedTail
+	}
+	for _, tc := range []struct{ retain, tail uint64 }{{0, 20830}, {1, 16664}, {4, 4166}} {
+		if got := tailWith(tc.retain); got != tc.tail {
 			t.Fatalf("retention%d: tail=%d want %d", tc.retain, got, tc.tail)
 		}
+	}
+	// The window is capped at a quarter of the WAL in block-sized records
+	// (64 KiB / (4 x 4 KiB) = 4 here): a larger setting retains exactly
+	// what the cap retains, so retention can never fill the WAL.
+	if capped, atCap := tailWith(10), tailWith(v3TestWAL/(4*v3TestBlock)); capped != atCap {
+		t.Fatalf("retention 10 on a %d-byte WAL: tail=%d, want the cap's tail %d", v3TestWAL, capped, atCap)
 	}
 }

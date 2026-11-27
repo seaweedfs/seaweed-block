@@ -85,7 +85,7 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 		installEpoch := v.installEpoch
 		d := v.pub.current()
 		headLSN := s.nextLSN
-		checkpointLSN, retentionLSNs := d.CheckpointLSN, s.recoveryRetentionLSNs
+		checkpointLSN, retentionLSNs := d.CheckpointLSN, s.catchUpRetentionLocked(d)
 		s.mu.RUnlock()
 		if d.BaseState == BaseInstalling {
 			return fmt.Errorf("%w: catch-up from an installing source", ErrBaseInstalling)
@@ -100,10 +100,7 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 			return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
 				"fromLSN=%d is covered by installed BaseLSN=%d", fromLSN, d.BaseLSN))
 		}
-		floor := uint64(0)
-		if checkpointLSN > retentionLSNs {
-			floor = checkpointLSN - retentionLSNs
-		}
+		floor := catchUpFloorV3(checkpointLSN, retentionLSNs)
 		if checkpointLSN > 0 && fromLSN <= floor {
 			return NewWALRecycledFailure(ErrWALRecycled, fmt.Sprintf(
 				"fromLSN=%d checkpointLSN=%d headLSN=%d retentionLSNs=%d floor=%d",
@@ -128,7 +125,7 @@ func (s *WALStore) scanLBAsV3(fromLSN uint64, fn func(RecoveryEntry) error) erro
 			now.Nonce == d.Nonce && now.BaseState == d.BaseState &&
 			now.BaseInstallID == d.BaseInstallID && now.BaseCursor == d.BaseCursor &&
 			now.RetainedTail == d.RetainedTail && now.CheckpointLSN == d.CheckpointLSN &&
-			s.recoveryRetentionLSNs == retentionLSNs
+			s.catchUpRetentionLocked(now) == retentionLSNs
 		s.mu.RUnlock()
 		if !stable {
 			if now.BaseState == BaseInstalling {

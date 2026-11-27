@@ -133,12 +133,9 @@ func (s *WALStore) publishCheckpointV3(cp uint64, seed bool, recoveryGen uint64)
 		return descriptorV3{}, mapCoverageRefusal("checkpoint_above_wack")
 	}
 	s.mu.RLock()
-	retention := s.recoveryRetentionLSNs
+	retention := s.catchUpRetentionLocked(v.pub.current())
 	s.mu.RUnlock()
-	releaseLSN := uint64(0)
-	if cp > retention {
-		releaseLSN = cp - retention
-	}
+	releaseLSN := catchUpFloorV3(cp, retention)
 	tail := v.w.reclaimThroughV3(releaseLSN)
 	current := v.pub.current()
 	if current.BaseState == BaseInstalling {
