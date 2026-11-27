@@ -181,7 +181,11 @@ Do these steps before you start blockvolume:
      --listen 192.0.2.10:9180
    ```
 
-   **Replicated volumes in this release:**
+   **Replicated volumes in this release** are a preview: under a writing guest
+   a replica that misses writes is not caught up by itself, a durability
+   shortfall is an immediate I/O error, and `sync-all` refuses writes while any
+   replica is down (see
+   [replicated volumes (preview)](operator-guide.md#replicated-volumes-preview)).
    - **One replicated factor per cluster.** `--expected-slots-per-volume` is one
      number for the whole cluster, and blockmaster decides only replicated
      volumes of that factor.

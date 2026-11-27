@@ -232,6 +232,63 @@ planned for 1.0.1.
 - the forced move when a host is lost, with the lost range;
 - which of these procedures run end to end, and which do not.
 
+## Replicated volumes (preview)
+
+Replicated volumes (`replication_factor` above 1) are a preview in v1.0. In the acknowledging modes (`sync-quorum`,
+`sync-all`) they keep acknowledged data. The default `best-effort` acknowledges a write with no replica, and a
+`best-effort` volume is not failed over automatically: blockmaster holds it, and only the operator's forced failover
+(`sw-block ops failover`) moves it, which may lose the writes acknowledged last.
+Under a writing guest a single fault can stop writes until an operator
+acts. The limits, as they show on a running system:
+
+- **No snapshots, restore, moves or object-store copy.** v1.0 has two designs: the single-replica volume with the
+  object store (`--durable-impl walstore-chunk`: snapshots, restore, moves) and replicated volumes on local stores
+  without any of those. `walstore-chunk` refuses replication at start
+  (`--durable-impl=walstore-chunk is single-replica: --replication-ack="sync-quorum" needs replica peers (...)`) and
+  refuses any assignment with replica slots, because a chunk snapshot takes its position from the local log, which
+  the replicas may not hold.
+
+- **A replica that misses writes is not caught up by itself.** While the guest writes, the primary keeps only a few
+  write-ahead-log entries beyond its last checkpoint. A replica that falls behind them (it was restarted, or a
+  failover fenced it) needs a rebuild, and a rebuild onto the data it already has is refused
+  (`re-add with a retained base is not supported in v1`). The replica stays out (`degraded`) until it is wiped and
+  added again. `--wal-retention-lsns` does not help in this release: with it set, a lagging replica still always
+  needed a rebuild.
+  - **Wipe and add again (not a tested procedure in this preview):** first confirm from the primary's status which
+    server is the left-out replica; never run this on the primary's host. On the replica's host, stop its `blockvolume`
+    unit, remove everything under its `--durable-root`, and start the unit again with the same flags. It then
+    starts empty and takes a full rebuild from the primary; until that ends, the primary's status lists it as not
+    healthy, and the volume keeps serving while the remaining replicas meet the ack mode.
+  - **If the re-add stops midway** (the rebuild is interrupted), the replica refuses every later rebuild: wipe it
+    and add it again.
+- **A durability shortfall is an immediate I/O error, not a wait.** When the replicas that must acknowledge a write
+  cannot (`sync-quorum`: a quorum; `sync-all`: every replica), the write fails at once and the guest gets `EIO`.
+  With three replicas and `sync-quorum`, one replica left out as above plus one more fault loses the quorum; a
+  single failover can already leave too few replicas, depending on timing.
+- **`sync-all` refuses every write while any replica is down.** It needs every replica for each write.
+- **Under `best-effort` (the default), a replica can fall behind while it shows `healthy`.** A `best-effort` write
+  waits for no replica, so a replica whose connection dropped can keep showing `healthy` in the primary's status
+  while it misses writes. Use `sync-quorum` when the replicas must hold the data.
+- **No path failover in the guest.** A guest connects to one target, and a target that is no longer the primary
+  answers with a status the guest does not retry: its I/O fails with `EIO` instead of moving to another path. There is
+  no multipath for replicated volumes in v1.0; after a failover the guest is started on the new primary's host (see
+  [host connect settings](#host-connect-settings)).
+- **The same holds on Kubernetes** for RF3 volumes. This preview has no remedy for a pod-backed replica that is
+  left out: it stays out, and the volume serves while the remaining replicas meet the ack mode.
+
+In the acknowledging modes, acknowledged writes were read back intact in every run that found these limits. What the
+release supports without these limits is the single-replica volume.
+
+**Planned for v1.0.1.** Two replicated configurations are planned to become supported:
+- **RF3 `sync-quorum`, installed on hosts:** writes continue through one replica's fault, and that replica returns
+  by itself.
+- **RF2 `sync-quorum`, with its limit:** no acknowledged write is lost and failover is automatic, but writes stop
+  while either replica is out.
+
+`sync-all` and Kubernetes RF3 stay a preview. In every replicated configuration, an old primary cut off from
+blockmaster by a partition may keep serving reads of older data until its lease ends.
+
+
 ## When a host is lost
 
 The steps below are for a single-replica volume. A `sync-quorum` or `sync-all`
