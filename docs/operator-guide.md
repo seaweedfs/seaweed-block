@@ -224,6 +224,28 @@ the snapshot name exists only after a request for it succeeds (check with `sw-bl
 (`TestKnownDefectSnapshotRetryAfterAGenuineConflictCommitsTheDataUnnamed`). A retry that names the snapshot at once is
 planned for 1.0.1.
 
+## Add a host
+
+blockmaster registers nodes from the cluster spec only when it starts. Adding a host is a cluster-spec edit and a
+blockmaster restart; registering a host online, without a restart, is planned for 1.1.
+
+1. Add the host under `nodes` in the cluster spec, with the address it connects to blockmaster from (never loopback
+   in a multi-host cluster; see [the volume record](volume-lifecycle.md#setup)). To create new volumes on it, add
+   them under `volumes` with `placements` on its `server_id` in the same edit. Leave the placements of existing
+   volumes as they are: they reach the new host by a move (step 4).
+2. Restart blockmaster with the same flags. Volumes already serving keep serving if blockmaster answers again within
+   about 10 s. A longer restart pauses them: a holder whose lease ends (about 20 s after its last renewal, with
+   default flags) stops I/O, exits 75 and waits, and serves again once blockmaster is back and its barrier has
+   passed. See [what a restart does to serving volumes](standalone-deployment.md#restoring-a-snapshot-into-a-new-volume).
+3. Start the `blockvolume` unit of each new volume placed on the host, with `--server-id` equal to the host's
+   `server_id`.
+4. Move existing volumes onto it with the planned hand-over (or the forced move when their host is lost), naming the
+   new host as `--target-host`, then start the volume's unit there: see [moving a volume](volume-lifecycle.md).
+
+Until the restart, a move to the new host is refused with `move target node "<id>" is not registered`
+(`TestCellNewHostFromTheClusterSpec`: the move is refused, the host is added and blockmaster restarts in about 5 to
+7 s while three other volumes keep taking writes, then the same move succeeds and the new host serves the volume).
+
 ## Moving a volume, and returning it
 
 [Volume lifecycle](volume-lifecycle.md):
@@ -316,7 +338,8 @@ and the volume does not serve. A monitor that only watches for failed units does
 - `identity refused: unregistered` or `wrong_host`: blockmaster does not know the unit's `--server-id`, or the
   node calls from another address than the one registered for it in the cluster spec. The check compares the
   address exactly: an address change, another outgoing interface, IPv4 against IPv6, or a host name in the cluster
-  spec all refuse the right host. Fix the cluster spec or the unit; the next call passes without a restart.
+  spec all refuse the right host. Fix the unit (the next call passes without a restart), or fix the cluster
+  spec and restart blockmaster, which reads it only at start (see [add a host](#add-a-host)).
 
 ## Limits
 
@@ -352,6 +375,7 @@ Every command on the pages above, and the test that runs it.
 | `sw-block ops workspace show`, `revoke --sealed-gen`, `move --clean` | same | binary |
 | `sw-block ops chunk detach --plain`, `chunk show`, `chunk cut` | same; `TestProcedureForcedMoveWithTheOldHostReturning` | binary |
 | `sw-block ops workspace force-move [--dry-run]`, `lost-range` | `TestProcedureForcedMoveWithTheOldHostReturning`, `TestProcedureRevokeWithoutACKThenForcedMove` | binary |
+| Add a host: cluster-spec `nodes` entry, blockmaster restart, `move --clean` to it | `TestCellNewHostFromTheClusterSpec` (`cmd/blockvolume`) | binary |
 | `sw-block ops volume-unheld --path` | `cmd/sw-block/volume_unheld_test.go` | CLI |
 | `sw-block ops chunk snapshot`, `snapshots`, `snapshot-delete` | `cmd/sw-block/chunk_test.go` | CLI |
 | `sw-block ops chunk verify --depth data [--orphans]` | `cmd/sw-block/chunk_verify_test.go` | CLI |
