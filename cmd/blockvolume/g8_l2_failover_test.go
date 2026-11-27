@@ -73,6 +73,7 @@ func readMasterReadyLine(t *testing.T, stdout interface{ Read([]byte) (int, erro
 }
 
 func TestG8B_L2PrimaryKill_ReassignsAuthorityToReplica(t *testing.T) {
+	t.Skip("asserts pre-#652 automatic failover of a best_effort static-topology volume; v1 holds it by design (operator-guide, replicated volumes); rewrite to --cluster-spec + loop + sync-quorum after GO")
 	if testing.Short() {
 		t.Skip("L2 subprocess failover test; -short skip")
 	}
@@ -135,6 +136,7 @@ func TestG8B_L2PrimaryKill_ReassignsAuthorityToReplica(t *testing.T) {
 }
 
 func TestG8B_L2PrimaryKill_NewPrimaryReadsAcknowledgedISCSIWrite(t *testing.T) {
+	t.Skip("asserts pre-#652 automatic failover of a best_effort static-topology volume; v1 holds it by design (operator-guide, replicated volumes); rewrite to --cluster-spec + loop + sync-quorum after GO")
 	if testing.Short() {
 		t.Skip("L2 subprocess failover data-continuity test; -short skip")
 	}
@@ -206,6 +208,7 @@ func TestG8B_L2PrimaryKill_NewPrimaryReadsAcknowledgedISCSIWrite(t *testing.T) {
 }
 
 func TestG8C_L2OldPrimaryReturn_RemainsStaleAfterFailover(t *testing.T) {
+	t.Skip("asserts pre-#652 automatic failover of a best_effort static-topology volume; v1 holds it by design (operator-guide, replicated volumes); rewrite to --cluster-spec + loop + sync-quorum after GO")
 	if testing.Short() {
 		t.Skip("L2 subprocess failover test; -short skip")
 	}
