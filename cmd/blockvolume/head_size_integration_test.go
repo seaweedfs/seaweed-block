@@ -268,7 +268,8 @@ func headSzLoopbackAddr(t *testing.T) string {
 		handoffPorts.used = map[int]bool{}
 	}
 	for i := 0; i < 500; i++ {
-		p := 10000 + rand.Intn(10000)
+		lo, hi := testPortSpan(10000, 20000)
+		p := lo + rand.Intn(hi-lo)
 		if handoffPorts.used[p] {
 			continue
 		}
@@ -293,7 +294,8 @@ func headSzRemoteAddr(t *testing.T, host string) string {
 		handoffPorts.used = map[int]bool{}
 	}
 	for i := 0; i < 500; i++ {
-		p := 10000 + rand.Intn(10000)
+		lo, hi := testPortSpan(10000, 20000)
+		p := lo + rand.Intn(hi-lo)
 		if !handoffPorts.used[p] {
 			handoffPorts.used[p] = true
 			return fmt.Sprintf("%s:%d", host, p)

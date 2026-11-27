@@ -55,8 +55,11 @@ func ephemeralPorts() (int, int) {
 func w4FreePortPair(t *testing.T, used map[int]bool) int {
 	t.Helper()
 	lo, hi := ephemeralPorts()
+	// A CI shard draws its HTTP ports from its own slice of weedPairRange;
+	// their gRPC ports (+10000) then never meet another shard's.
+	sLo, sHi := testPortSpan(weedPairRange(lo))
 	for i := 0; i < 200; i++ {
-		p := 20000 + rand.Intn(20000)
+		p := sLo + rand.Intn(sHi-sLo)
 		if used[p] || used[p+10000] {
 			continue
 		}
@@ -94,6 +97,10 @@ func w4WaitTCP(t *testing.T, addr string, d time.Duration) {
 	t.Fatalf("%s not listening after %v", addr, d)
 }
 
+// w4PickPortPair picks each weed server's port pair (HTTP p, gRPC p+10000);
+// a test replaces it to make a start collide with another listener.
+var w4PickPortPair = func(t *testing.T, used map[int]bool, _ string) int { return w4FreePortPair(t, used) }
+
 func startWorkspaceWeed(t *testing.T) *w4WeedCluster {
 	t.Helper()
 	return startWorkspaceWeedAt(t, t.TempDir())
@@ -116,17 +123,65 @@ type w4WeedOpts struct {
 	FilerFront func(*w4WeedCluster)
 }
 
+// weedStarts is how many times a cluster that never accepts a write is
+// started again on fresh ports. A port pair is checked free and then
+// released before weed binds it; another process on the host (a concurrent
+// job on a shared runner) can take it in between, and the master then
+// cannot reach the volume server's gRPC port.
+var weedStarts = 3
+
 func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedCluster {
 	t.Helper()
 	weed := os.Getenv("CHUNKSTORE_WEED")
 	if weed == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
 	}
+	starts := weedStarts
+	if o.FilerFront != nil {
+		starts = 1 // a fault-injection front is wired to one cluster only
+	}
+	for attempt := 1; ; attempt++ {
+		at := dir
+		if attempt > 1 {
+			at = filepath.Join(dir, fmt.Sprintf("start-%d", attempt))
+		}
+		c, err := startWorkspaceWeedOnce(t, at, weed, o)
+		if err == nil {
+			return c
+		}
+		if attempt >= starts {
+			t.Fatalf("cluster never accepted a write (start %d of %d): %v", attempt, starts, err)
+		}
+		t.Logf("weed start %d never accepted a write (%v): master %s, filer %s; starting again on fresh ports", attempt, err, c.master, c.filerGRPC)
+		c.discard(t)
+	}
+}
+
+// discard stops a cluster that failed its start and logs each process's
+// log tail; its own cleanups then find the processes already gone.
+func (c *w4WeedCluster) discard(t *testing.T) {
+	t.Helper()
+	for name, p := range c.procs {
+		if !c.stopProcWithin(name, 5*time.Second) {
+			t.Errorf("weed %s did not exit after kill", name)
+		}
+		b, _ := os.ReadFile(p.log.Name())
+		if len(b) > 4000 {
+			b = b[len(b)-4000:]
+		}
+		t.Logf("---- discarded start: %s log tail ----\n%s", name, b)
+	}
+}
+
+// startWorkspaceWeedOnce starts one cluster on freshly checked ports in dir
+// and returns the probe's error when it never accepts a write.
+func startWorkspaceWeedOnce(t *testing.T, dir, weed string, o w4WeedOpts) (*w4WeedCluster, error) {
+	t.Helper()
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	used := map[int]bool{}
-	mp, vp, fp := w4FreePortPair(t, used), w4FreePortPair(t, used), w4FreePortPair(t, used)
+	mp, vp, fp := w4PickPortPair(t, used, "master"), w4PickPortPair(t, used, "volume"), w4PickPortPair(t, used, "filer")
 	c := &w4WeedCluster{
 		master:    fmt.Sprintf("%s:%d", testListenHost(), mp),
 		filerHTTP: fmt.Sprintf("%s:%d", testListenHost(), fp),
@@ -183,11 +238,11 @@ func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedClust
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("cluster never accepted a write: %v", err)
+			return c, err
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return c
+	return c, nil
 }
 
 // w4WeedProc is one weed process; a restart replaces it under the same name,
