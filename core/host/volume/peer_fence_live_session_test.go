@@ -1,7 +1,12 @@
 package volume
 
 import (
+	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -131,5 +136,95 @@ func TestTheLiveSessionMovesOnlyAfterTheFenceIsAcknowledged(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the fence did not complete")
+	}
+}
+
+// The lost acknowledgement: the replica admits a session (it holds that
+// lineage from then on) but the sender sees the exchange fail, its reply
+// lost. The live session is re-drawn above it all the same, so the next
+// live frame is not refused as stale. Both cases are driven here: a fence
+// the replica admitted whose result is a failure, and a recovery session
+// (standing in: the replica holds its lineage) whose close failed.
+func TestAnAdmittedSessionWhoseReplyIsLostStillMovesTheLiveSession(t *testing.T) {
+	for _, kind := range []string{"fence", "recovery session"} {
+		t.Run(kind, func(t *testing.T) {
+			peer, exec := fencePeerRig(t)
+			sid := exec.SessionIDs().Next()
+			// The replica admits a barrier at sid: it now holds sid's lineage.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := peer.Fence(ctx, transport.RecoveryLineage{SessionID: sid, Epoch: 2, EndpointVersion: 1, TargetLSN: 1}); err != nil {
+				t.Fatalf("fixture: the replica did not admit the session: %v", err)
+			}
+			// The sender saw it fail (the reply lost).
+			if kind == "fence" {
+				exec.afterFence(adapter.FenceResult{ReplicaID: "r2", SessionID: sid, Epoch: 2, EndpointVersion: 1, Success: false, FailReason: "reply lost"})
+			} else {
+				exec.afterSessionClose(adapter.SessionCloseResult{ReplicaID: "r2", SessionID: sid, Success: false, FailReason: "final ack lost"})
+			}
+			exec.PublishHealthy("r2")
+			if s := peer.State(); s != replication.ReplicaHealthy {
+				t.Fatalf("peer %s after the healthy verdict; want healthy: the live session must be above the admitted %d", s, sid)
+			}
+		})
+	}
+}
+
+// Every command kind for which the adapter draws a session from the peer's
+// order is listed with what keeps the live session above it: recovery
+// sessions re-draw at their close and fences at their completion, both on
+// any outcome; a probe does not move the replica's held lineage. A new
+// drawing kind fails here until it is classified.
+func TestEverySessionDrawIsFollowedByALiveRedraw(t *testing.T) {
+	want := map[string]string{
+		"StartCatchUp":  "recovery session: afterSessionClose re-draws",
+		"StartRebuild":  "recovery session: afterSessionClose re-draws",
+		"StartRecovery": "recovery session: afterSessionClose re-draws",
+		"FenceAtEpoch":  "fence: afterFence re-draws",
+		"ProbeReplica":  "non-moving: the replica validates a probe without taking its lineage",
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join("..", "..", "adapter", "adapter.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		cc, ok := n.(*ast.CaseClause)
+		if !ok {
+			return true
+		}
+		draws := false
+		for _, st := range cc.Body {
+			ast.Inspect(st, func(m ast.Node) bool {
+				if call, ok := m.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Next" || sel.Sel.Name == "NextAfter") {
+						if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "sessionIDs" {
+							draws = true
+						}
+					}
+				}
+				return true
+			})
+		}
+		if !draws {
+			return true
+		}
+		for _, e := range cc.List {
+			if sel, ok := e.(*ast.SelectorExpr); ok {
+				got[sel.Sel.Name] = true
+			}
+		}
+		return true
+	})
+	for kind := range got {
+		if _, ok := want[kind]; !ok {
+			t.Errorf("the adapter draws a session for %s, which is not classified: re-draw the live session above it, or declare it non-moving", kind)
+		}
+	}
+	for kind, why := range want {
+		if !got[kind] {
+			t.Errorf("listed drawing kind %s (%s) no longer draws a session; update the list", kind, why)
+		}
 	}
 }
