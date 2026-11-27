@@ -217,6 +217,13 @@ A snapshot can be refused with `host_slot_busy` / `no background slot` (retryabl
 other volumes' cuts; retry with the same request id. With many volumes on a host, a snapshot may wait for a slot:
 measured up to 15 s at 32 volumes with the default 3 slots.
 
+A snapshot can answer `head_conflict` (HTTP 409, retryable): another write to the volume's HEAD, such as a snapshot
+delete, landed during its commit. Retry it with the same name. In this release, if that retry answers `internal`
+`snapshot "NAME" of VOL is not in HEAD after its commit`, retry once more. The volume's data is committed either way;
+the snapshot name exists only after a request for it succeeds (check with `sw-block ops chunk snapshots`)
+(`TestKnownDefectSnapshotRetryAfterAGenuineConflictCommitsTheDataUnnamed`). A retry that names the snapshot at once is
+planned for 1.0.1.
+
 ## Moving a volume, and returning it
 
 [Volume lifecycle](volume-lifecycle.md):
