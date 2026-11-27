@@ -265,11 +265,12 @@ What the guest sees:
 - **Too short** (`--ctrl-loss-tmo` or `--fast_io_fail_tmo` below the wait): I/O errors reach the filesystem before
   the target serves again; ext4 mounted with `errors=remount-ro` turns read-only and must be remounted.
 
-A blockmaster outage longer than the lease stops the holders: a holder may serve until 20 s after its last renewal,
-and serves again at least 50 s after blockmaster is back
+A blockmaster outage longer than the lease stops the holders: a holder keeps serving until its lease ends (up to
+20 s after its last renewal) and serves again at least 50 s after blockmaster is back
 ([what a blockmaster restart does to serving volumes](standalone-deployment.md#restoring-a-snapshot-into-a-new-volume)).
-The guest's wait is then up to 20 s + the outage + 50 s, so an outage of more than about 110 s outlasts 180 s.
-Raise `--ctrl-loss-tmo` if the guest must ride through longer outages; I/O waits that long.
+Guest I/O therefore waits at least the rest of the outage plus those 50 s; these pages give no upper bound. An outage
+longer than `--ctrl-loss-tmo` less those 50 s can fail guest I/O. Raise `--ctrl-loss-tmo` if the guest must ride
+through longer outages; I/O waits that long.
 
 **After a failover the guest must connect to the new primary.** These options retry the configured address; they
 never redirect it. A standalone volume's NVMe/TCP target binds loopback only (`--nvme-listen`; a non-loopback bind
