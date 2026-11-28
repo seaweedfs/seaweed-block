@@ -145,7 +145,7 @@ Do these steps before you start blockvolume:
        (off): ...`).
      - a volume created at run time (`CreateVolume`) and not placed in the
        cluster spec is served only with the loop on; the shipped Kubernetes
-       stacks set it. A refusal at create is planned for 1.0.1.
+       stacks set it. A refusal at create is planned for a later release.
    - `--failback-runtime-rpc`: the operator's failover (`sw-block ops
      failover`, below) calls it. Without it there is no manual failover.
 
