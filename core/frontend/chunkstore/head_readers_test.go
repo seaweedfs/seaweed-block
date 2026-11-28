@@ -48,6 +48,7 @@ var headReaders = map[string]string{
 	"core/frontend/chunkstore/layout_remote.go AbortOpenSession -> ReadHead":                     "refuses ErrHeadAbsent, aborts nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go CommitPendingSnapshot -> ReadHead":                "refuses ErrHeadAbsent, commits nothing (probe LayoutRemote)",
 	"core/frontend/durable/provider_layout_snapshot.go SnapshotVolume -> ReadHead":               "the layout remote's HEAD read: refuses ErrHeadAbsent, names nothing (probe LayoutRemote)",
+	"core/frontend/chunkstore/layout_remote.go prepareCommitLocked -> ReadHead":                  "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote: CASHead, CheckCommit)",
 	"core/frontend/chunkstore/layout_remote.go CASHead -> ReadHead":                              "refuses ErrHeadAbsent, writes nothing (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go ReadHead -> ReadHead":                             "refuses ErrHeadAbsent (probe LayoutRemote)",
 	"core/frontend/chunkstore/layout_remote.go rollBackLocked -> ReadHead":                       "refuses ErrHeadAbsent before any Begin or upload (probe LayoutRemote)",
@@ -216,6 +217,9 @@ func TestHeadReaders_AbsentHeadProbes(t *testing.T) {
 		}
 		if _, err := r.CASHead(ctx, storage.ChunkHeadVersion{Gen: 0, Epoch: 1}, storage.ChunkHead{Epoch: 1}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
 			t.Fatalf("engine commit over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
+		}
+		if err := r.CheckCommit(ctx, storage.ChunkHeadVersion{Gen: 0, Epoch: 1}, storage.ChunkHead{Epoch: 1}); !errors.Is(err, layout.ErrHeadAbsent) || len(f.written) != 0 {
+			t.Fatalf("engine commit check over an absent HEAD: %v (%d writes); want ErrHeadAbsent and none", err, len(f.written))
 		}
 	})
 	t.Run("LayoutCreate", func(t *testing.T) {

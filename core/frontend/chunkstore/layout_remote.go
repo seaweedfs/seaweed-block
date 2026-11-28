@@ -58,7 +58,14 @@ type LayoutRemote struct {
 	// abandoned is set by the engine when a cut ends without a commit
 	// (Abort): the next call drops the session and the pending name.
 	abandoned atomic.Bool
-	pending   *pendingSnapshot
+	// checked is the (session, root) whose commit's object check passed
+	// (CheckCommit), in that open session: CASHead skips the lookups only for
+	// exactly that pair. A new session has a new id, so it never matches.
+	checked struct {
+		session string
+		root    layout.RootName
+	}
+	pending *pendingSnapshot
 	// snapErr is why the last commit could not name its snapshot (the cut
 	// itself committed unnamed); TakeSnapshotErr hands it to the request.
 	snapErr error
@@ -291,38 +298,81 @@ func (l *LayoutRemote) manifest(ctx context.Context, rn layout.RootName) (map[ui
 // snapshot name. It uses the engine view from before this session's Begin.
 // A concurrent operator-only HEAD update is rebased with a bounded retry;
 // a foreign claim or detached/deleted state remains a final refusal.
-func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+// prepareCommitLocked reads HEAD and builds next's commit request in the
+// open session, its root and segments written (CASHead and CheckCommit).
+func (l *LayoutRemote) prepareCommitLocked(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (layout.Head, layout.CommitRequest, error) {
 	l.takeAbandonLocked()
 	if expected.Epoch != l.me.Epoch || next.Epoch != l.me.Epoch {
-		return 0, storage.ErrChunkHeadPrecondition
+		return layout.Head{}, layout.CommitRequest{}, storage.ErrChunkHeadPrecondition
 	}
 	h, found, err := l.st.ReadHead(ctx)
 	if err != nil {
-		return 0, err
+		return layout.Head{}, layout.CommitRequest{}, err
 	}
 	if !found {
-		return 0, layout.ErrHeadAbsent
+		return layout.Head{}, layout.CommitRequest{}, layout.ErrHeadAbsent
 	}
 	l.viewLocked(h)
 	if expected.Gen != l.visible {
-		return 0, storage.ErrChunkHeadPrecondition
+		return layout.Head{}, layout.CommitRequest{}, storage.ErrChunkHeadPrecondition
 	}
 	prev, nextM, err := l.manifests(ctx, h, next)
 	if err != nil {
-		return 0, err
+		return layout.Head{}, layout.CommitRequest{}, err
 	}
 	if err := l.openSessionLocked(ctx); err != nil {
-		return 0, err
+		return layout.Head{}, layout.CommitRequest{}, err
 	}
 	if err := l.writeRootLocked(ctx, nextM); err != nil {
-		return 0, err
+		return layout.Head{}, layout.CommitRequest{}, err
 	}
 	req := layout.CommitRequest{Session: l.session, Prev: prev, Next: nextM, Position: next.RemoteLSN, State: layout.StateLive}
 	if next.State == "detached" {
 		req.State = layout.StateDetached
 	}
+	return h, req, nil
+}
+
+// CheckCommit runs the object check of next's commit (every new chunk,
+// segment and root written by this session and unmarked) with ctx, the
+// cut's budget, before the bounded HEAD update. It runs after the cut's
+// last upload, in the same open session; it writes no HEAD. On success
+// CASHead skips those lookups for this (session, root). A failed check
+// leaves the session open for a retry.
+func (l *LayoutRemote) CheckCommit(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.checked.session, l.checked.root = "", layout.RootName{}
+	h, req, err := l.prepareCommitLocked(ctx, expected, next)
+	if err != nil {
+		return err
+	}
+	root, err := layout.CommitRoot(req.Next)
+	if err != nil {
+		return err
+	}
+	if err := layout.CheckCommitObjects(ctx, h, l.st, l.vol.Name, l.me, req); err != nil {
+		if errors.Is(err, layout.ErrNotPrepared) {
+			l.forceView = true // as CASHead: the re-read drops what the ended session staged
+			return fmt.Errorf("%w: %w", storage.ErrChunkHeadPrecondition, err)
+		}
+		return layoutRemoteErr(err)
+	}
+	l.checked.session, l.checked.root = req.Session, root
+	return nil
+}
+
+func (l *LayoutRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	h, req, err := l.prepareCommitLocked(ctx, expected, next)
+	if err != nil {
+		return 0, err
+	}
+	if root, rerr := layout.CommitRoot(req.Next); rerr == nil && l.checked.session != "" && l.checked.session == req.Session && l.checked.root == root {
+		req.ObjectsChecked = true
+	}
+	l.checked.session, l.checked.root = "", layout.RootName{}
 	if l.pending != nil {
 		if err := layout.CheckSnapshot(l.pending.name, l.pending.meta); err != nil {
 			// A name or facts the commit would refuse: the cut commits

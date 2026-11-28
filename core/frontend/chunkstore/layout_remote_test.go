@@ -24,12 +24,14 @@ type layoutHost struct {
 	v   VolumeRef
 	me  layout.HolderID
 	dir string
+	ff  *fakeFiler
 }
 
 func newLayoutHost(t *testing.T) *layoutHost {
 	t.Helper()
 	ctx := context.Background()
-	cat, err := NewBCatalog(newFakeFiler(), newFakeBlobs(), "/blocks")
+	ff := newFakeFiler()
+	cat, err := NewBCatalog(ff, newFakeBlobs(), "/blocks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +44,7 @@ func newLayoutHost(t *testing.T) *layoutHost {
 	if _, err := layout.Start(ctx, s, okClaimLease{}, layout.HolderID{Epoch: 1, Holder: "a"}, layout.LocalRoot{Geometry: layout.Geometry{SizeBytes: 64 * 4096, BlockSize: 4096, ChunkBytes: 8 * 4096}, ClaimID: "k-a", Fresh: true, CanStartFrom: anyStart}); err != nil {
 		t.Fatal(err)
 	}
-	return &layoutHost{t: t, cat: cat, v: v, me: me, dir: t.TempDir()}
+	return &layoutHost{t: t, cat: cat, v: v, me: me, dir: t.TempDir(), ff: ff}
 }
 
 // attach opens (create: a new local store) the store named name over a new
