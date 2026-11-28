@@ -65,9 +65,26 @@ func DialSWFS(cfg SWFSConfig) (*SWFS, error) {
 		cfg:      cfg,
 		conn:     conn,
 		fc:       filerpb.NewSeaweedFilerClient(conn),
-		http:     &http.Client{Timeout: cfg.HTTPTimeout},
+		http:     newBlobHTTPClient(cfg.HTTPTimeout),
 		vidCache: map[string][]string{},
 	}, nil
+}
+
+// blobIdleConnsPerHost is how many idle connections the blob client keeps
+// per volume server: at least as many as it runs requests at once (uploads,
+// hydration fetches and deletes, each at most 64), so a finished request's
+// connection is reused instead of closed and replaced by a new one.
+const blobIdleConnsPerHost = 64
+
+// newBlobHTTPClient is the needle client's own transport. Go's shared
+// default keeps only two idle connections per host: every request past two
+// in flight to one volume server opened a new TCP connection and left a
+// TIME_WAIT behind, enough to exhaust ephemeral ports at a high rate.
+func newBlobHTTPClient(timeout time.Duration) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConnsPerHost = blobIdleConnsPerHost
+	tr.MaxIdleConns = 4 * blobIdleConnsPerHost
+	return &http.Client{Timeout: timeout, Transport: tr}
 }
 
 // Close releases the gRPC connection.
@@ -369,6 +386,8 @@ func (c *SWFS) DeleteBlob(ctx context.Context, fid string) error {
 		if err != nil {
 			return err
 		}
+		// Drain before close so the connection is reused.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusBadRequest {
 			return fmt.Errorf("%w: delete %s: http %d", ErrBlobDeleteRejected, fid, resp.StatusCode)
