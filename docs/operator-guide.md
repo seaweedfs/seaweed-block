@@ -95,7 +95,8 @@ echo "sha256:$(openssl x509 -in node-a.crt -outform DER | sha256sum | cut -d' ' 
 when its certificate's CN differs from `--server-id`. **sw-block** reads `SW_BLOCK_TLS_CERT`, `SW_BLOCK_TLS_KEY` and
 `SW_BLOCK_TLS_CA`. **blockcsi** takes `--master-tls-cert`, `--master-tls-key` and `--master-ca`. Certificate and key
 files are read at every new connection, so a rotated file takes effect without a restart. blockmaster closes each
-client connection after 24 hours, so a rotated or removed certificate is seen within a day even on an idle link.
+client connection after about 24 hours (gRPC adds up to 10% jitter, plus a 30 s grace), so a rotated or removed
+certificate is seen within about 26.5 hours even on an idle link. A role-file change applies at once.
 The volume's own HTTP routes (`/status`, chunk routes) are not authenticated and stay on loopback.
 
 **In Kubernetes** each in-cluster client has its own certificate and Secret, with the least role its calls need:
@@ -129,12 +130,14 @@ are its only SeaweedFS flags. Run SeaweedFS on a trusted network; mTLS covers th
   `<vol>.replica-floor` from `--durable-root`, and start it with the right flags. If the head shows an epoch above 0 or
   a holder, do not remove these files; if the volume served before, its local store has its original size: correct the
   flag and start it again (not run as a test in this release).
-- **Memory:** plan for about 32-36 MiB per running volume. That was measured with 150-200 volumes on one host.
-- **Measured throughput on one host** (16 cores, 23.7 GB RAM, one consumer NVMe drive, fsync on every volume):
+- **Memory:** plan for about 32-36 MiB per running volume. This is a planning figure: with 150-200 volumes on one host
+  the sampled peaks were 32.6-37.3 MiB per process.
+- **Measured throughput on one host** (three runs; 16 cores, 23.2 GiB RAM, one consumer NVMe drive, fsync on every
+  volume):
 
   | Volumes | Aggregate IOPS, qd1 4k + fsync | Aggregate IOPS, 4k qd32 |
   |---|---|---|
-  | 100 | about 14,000 | 47,000-49,000 |
+  | 100 | 4,400-14,300 | 45,000-49,000 |
   | 150 | 5,300-9,100 | 37,000-39,000 |
   | 200 | about 4,300 | about 32,000 |
 
@@ -155,8 +158,8 @@ are its only SeaweedFS flags. Run SeaweedFS on a trusted network; mTLS covers th
   the catalog but cannot start, and it can be neither deleted nor moved until it has started once: a delete wants
   it sealed, revoked and acknowledged, and a forced move is refused because the master knows no holder of it. To
   recover it, free space on that file system, or start it again on the same host with `--durable-root` on a local
-  file system with room; then delete it with the usual steps if it is not wanted. A refused target does not block
-  its source: the source's snapshot and the source volume can still be deleted, and the target keeps its data.
+  file system with room; then delete it with the usual steps if it is not wanted. The refused target still depends on
+  its source snapshot: that snapshot and the source volume cannot be deleted until the target is deleted.
 
   Alert on local free space. On a full local disk, a Linux guest's writes fail after about 75 s with an I/O error
   (EREMOTEIO), and the guest file system may then go read-only. Once space is freed, new writes succeed without a
@@ -164,7 +167,7 @@ are its only SeaweedFS flags. Run SeaweedFS on a trusted network; mTLS covers th
 - **`--host-limit-dir`:** keep it on a local file system with free space. When it cannot be written, background cuts
   are refused (they fail closed); the seal at stop still runs.
 - **SeaweedFS space:** every cut and snapshot stores the chunks that changed since the previous one. Space comes
-  back only by GC and then a SeaweedFS vacuum (below). An upload interrupted before its filer entry is
+  back only by the holder's cleaning and then a SeaweedFS vacuum (below). An upload interrupted before its filer entry is
   created can leave an unreferenced needle; include this crash-window overhead in space accounting.
   Do not run volume.fsck with real deletion on a block cluster.
 
@@ -178,7 +181,10 @@ default) can expire the host's slots; keep host clocks synchronized.
 - **A stopped volume** keeps everything it acknowledged, on its host.
 - **A lost host:** the volume comes back from its last cut, the last point published to SeaweedFS.
   - Default: no periodic capture. One scheduled snapshot a day (`--chunk-snapshot-schedule=daily:7`).
-  - So with defaults a host loss can lose up to a day of acknowledged writes.
+  - So with defaults a host loss loses what was written since the last successful snapshot, normally up to about a
+    day. The schedule is an attempt, not a bound: a failed attempt is retried (after 1 minute, doubling to 1 hour),
+    each start of the holder places the next daily attempt again (it can be up to a day away), and a restored volume
+    still fetching its chunks skips it.
 - **For a newer recovery point:** set `--chunk-capture-interval` (at least 5 minutes), or take a snapshot before
   risky work.
 - **What does not publish:** a stop, a lease revocation and a lease expiry publish nothing. Only a cut, a snapshot or
@@ -210,17 +216,17 @@ delete means this case; retrying the delete alone does not help. Until the relea
 
 Deleting a restore target: its first cut compares every restored chunk locally (about 1.4 GiB/s measured). The
 default `--timeout` of 120 s covers up to about 84 GiB; above that, pass `--timeout 5m` (the server's limit for one
-request). At the 256 GiB maximum the first cut takes about 3 min. On an `outcome_unknown` answer, retry with
-`--timeout 5m` if you used less; if it still answers `outcome_unknown` at 5m, the target is above this release's
-limit (its filled size must be at most about 4 min x your disk's read rate). The volume keeps serving and nothing is
-lost. On disks slower than NVMe the 256 GiB figure does not hold; see the v1.0.0 Known limits.
+request). At the 256 GiB maximum the first cut takes about 3 min. An `outcome_unknown` answer there means the volume
+has stopped I/O while its holder settles the outcome in the background; it resumes serving when that settles (the
+holder logs it), and nothing acknowledged is lost. Then retry the delete with `--timeout 5m`. A restore target's
+filled size must be at most about 4 min x your disk's read rate for its first cut to finish. On disks slower than NVMe the 256 GiB figure does not hold; see the v1.0.0 Known limits.
 
 
 [Standalone deployment: snapshots, restore and space](standalone-deployment.md#snapshots-restore-and-space-walstore-chunk):
 - scheduled and manual snapshots;
 - deleting snapshots, and getting space back:
-  - GC deletes the chunks after the grace (`--grace`, 1 hour by default), so a deleted snapshot's space is
-    reclaimed about 2 hours after the delete unless still referenced by a snapshot or a restore target;
+  - the holder's cleaning removes the chunks that no snapshot, restore target or current image names, right after
+    the snapshot delete and every `--chunk-maintenance-interval` (1 hour by default);
   - then the asynchronous SeaweedFS vacuum compacts the volume files;
 - `ops chunk verify`;
 - restoring a snapshot into a new volume, which reads the chunks it has not made local from that snapshot (fork is not supported in this release).
@@ -252,7 +258,10 @@ publishes it; the volume's data is unchanged and stays queued for the next cut.
 After `outcome_unknown`, the commit may have landed with the name.
 Rerun the snapshot with the same name and a larger `--timeout`: a name already in HEAD is answered with the
 snapshot it names, so a rerun never takes a second one. A rerun keeps what a timed-out request already
-uploaded: it finds those chunks and sends only the rest. A longer or derived default is planned for a later release.
+uploaded: it finds those chunks and sends only the rest. More than about 150 GiB changed needs more than one 5-minute
+request: at the 256 GiB maximum a snapshot published on its second request, after about 9 minutes in all, so rerun
+until it answers. A scheduled snapshot retries by itself (after 1 minute, doubling to 1 hour). A longer or derived
+default is planned for a later release.
 
 With `--host-limit-dir` set (it is off by default), uploads are paced at `--host-limit-upload-bytes-sec` (64 MiB/s by
 default) shared by the host's 4 slots, about 16 MiB/s per volume, and the pacing is charged for chunks already
@@ -292,7 +301,9 @@ acts. The limits, as they show on a running system:
   needed a rebuild.
   - **Wipe and add again (not a tested procedure in this preview):** first confirm from the primary's status which
     server is the left-out replica; never run this on the primary's host. On the replica's host, stop its `blockvolume`
-    unit, remove everything under its `--durable-root`, and start the unit again with the same flags. It then
+    unit, remove only that volume's own files from its `--durable-root` (`<vol>.bin`, every `<vol>.bin.*`,
+  `<vol>.replica-floor` and `<vol>.epoch-table`, where `<vol>` is the volume id; other files there may belong to other
+  volumes), and start the unit again with the same flags. It then
     starts empty and takes a full rebuild from the primary; until that ends, the primary's status lists it as not
     healthy, and the volume keeps serving while the remaining replicas meet the ack mode.
   - **If the re-add stops midway** (the rebuild is interrupted), the replica refuses every later rebuild: wipe it
@@ -401,8 +412,8 @@ with it; if only its holder stopped, the guest's I/O waits and then fails as abo
 restarts first). Either way, after a failover start the guest on the new primary's host and connect it there: that host's blockvolume logs `adopted as
 PRIMARY` and its `/status?volume=<id>` shows `"AuthorityRole":"primary"`.
 
-**Kubernetes.** The CSI node connects with a plain `nvme connect` and the kernel defaults. A pod whose holder does
-not come back holds I/O for about 600 s when the holder's node is up, and some 13 minutes when the node is powered
+**Kubernetes.** The CSI node stages iSCSI by default (`protocol: iscsi`). With `protocol: nvme` it connects with a
+plain `nvme connect` and the kernel defaults, and then (NVMe/TCP only) a pod whose holder does not come back holds I/O for about 600 s when the holder's node is up, and some 13 minutes when the node is powered
 off or unreachable (derived as above): its reads and writes block (processes in uninterruptible sleep, probes that
 touch the volume time out), then fail. Recovery is by recreating the pod, which stages the volume again on the
 current primary ([operations](operations-v1.md)). The CSI node passing the settings above is planned for a later release.
@@ -419,7 +430,9 @@ and the volume does not serve. A monitor that only watches for failed units does
 - `identity refused: unregistered` or `wrong_host`: blockmaster does not know the unit's `--server-id`, or the
   node calls from another address than the one registered for it in the cluster spec. The check compares the
   address exactly: an address change, another outgoing interface, IPv4 against IPv6, or a host name in the cluster
-  spec all refuse the right host. Fix the cluster spec or the unit; the next call passes without a restart.
+  spec all refuse the right host. Fix the address: a cluster-spec edit takes effect after a blockmaster restart, and a change to the unit's flags
+  after that unit restarts. Once the master's records match, the waiting unit's next call passes without a restart of
+  its own.
 
 ## Limits
 
@@ -458,7 +471,9 @@ Every command on the pages above, and the test that runs it.
 | `sw-block ops volume-unheld --path` | `cmd/sw-block/volume_unheld_test.go` | CLI |
 | `sw-block ops chunk snapshot`, `snapshots`, `snapshot-delete` | `cmd/sw-block/chunk_test.go` | CLI |
 | `sw-block ops chunk verify --depth data [--orphans]` | `cmd/sw-block/chunk_verify_test.go` | CLI |
-| `sw-block ops chunk restore --source --snapshot --target`, `--volume ... [--status]` | `cmd/sw-block/chunk_restore_test.go` | CLI |
+| `sw-block ops chunk restore --source --snapshot --target [--request-id]` | `cmd/sw-block/chunk_b_test.go` | CLI |
+| `sw-block ops failover` | `cmd/sw-block/failover_test.go` | CLI |
+| Certificate issuance and rotation (`openssl` above) | not run in 1.0 as written | not run |
 | `curl STATUS/status?volume=v1` | the status checks in the binary tests above | binary |
 | `nvme connect`, `nvme list`, `nvme disconnect` | not run here: the binary tests use an NVMe/TCP host inside the test | not run |
 | `blockvolume` under systemd: exit 75 after an expired start, restart, re-grant | `TestSystemdExpiredStartupExits75ThenRegrantServes` (`cmd/blockvolume`, a real systemd manager, tag `systemd_integration`) | binary |
@@ -476,5 +491,6 @@ Every command on the pages above, and the test that runs it.
 | [First volume (read-only check)](standalone-deployment.md#first-volume-read-only-check): `swb_start`, `swb_show`, `swb_stop` | not run in 1.0 (needs `sudo` and the kernel NVMe/TCP host) | not run |
 | [Write test](standalone-deployment.md#write-test-scratch-host-only): `scripts/run-nvme-os-smoke.sh` | not run in 1.0 | not run |
 | [Upgrade order](standalone-deployment.md#upgrade-order): `blockmaster` first, then `blockvolume` | not run in 1.0 (no mixed-version run) | not run |
-| Scheduled snapshots (`--chunk-snapshot-schedule`) and periodic capture (`--chunk-capture-interval`) on a running volume | not run in 1.0 as written: the schedule is tested with a fake clock in `core/host/volume`, the interval only as a flag; the binary tests cut and snapshot on demand | not run |
-| SeaweedFS vacuum (`/vol/vacuum`, `volume.vacuum`) | not run in 1.0: a SeaweedFS command; the tests check that GC deletes the chunks, not that SeaweedFS compacts its files | not run |
+| Scheduled snapshots (`--chunk-snapshot-schedule`) on a running volume with a real clock | not run in 1.0 as written: the schedule is tested with a fake clock (`core/frontend/durable/chunk_snapshot_schedule_test.go`) | not run |
+| Periodic capture (`--chunk-capture-interval`) on a running volume | a lab run on the release candidate: automatic cuts while the guest wrote, every acknowledged write read back | lab |
+| SeaweedFS vacuum (`/vol/vacuum`, `volume.vacuum`) | not run in 1.0: a SeaweedFS command; the tests check that the cleaning deletes the chunks, not that SeaweedFS compacts its files | not run |
