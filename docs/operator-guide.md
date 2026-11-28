@@ -105,6 +105,11 @@ node's certificate must have the viewer role; check the role file (the chart ref
 named like an admin client's or blockmaster's, but it cannot see a certificate's role).
 `scripts/k8s-alpha-certs.sh` issues all four for a trial.
 
+**SeaweedFS is not authenticated.** sw-block reaches the filer over gRPC without TLS and the volume servers over
+plain HTTP, with no SeaweedFS credentials of its own (it only passes on the write token the filer returns with each
+assignment, when SeaweedFS signs them); `--chunk-filer`, `--chunk-path`, `--chunk-collection` and `--chunk-replication`
+are its only SeaweedFS flags. Run SeaweedFS on a trusted network; mTLS covers the blockmaster control API only.
+
 ## Size a host
 
 - **Geometry:** a volume's size is `--durable-blocks` x `--durable-blocksize` on `blockvolume`. It must equal
