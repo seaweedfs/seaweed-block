@@ -155,6 +155,43 @@ func TestFirstCutOfARestoreTargetKeepsItsHydrationPath(t *testing.T) {
 	}
 }
 
+// TestARestoreTargetThatOnlyReadCutsNothing: a restore target whose reads
+// filled HEAD's chunks holds HEAD's bytes in them, so its next cut (the final
+// cut of a detach included) compares nothing. Comparing every filled chunk
+// makes the detach of a fully read target as long as reading the target.
+func TestARestoreTargetThatOnlyReadCutsNothing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	fixture := testutil.NewLayoutFixture(t, "v1", pcBlocks, pcChunkBlocks)
+	first := fcutProvider(t, t.TempDir(), fixture, v1View())
+	fcutOpen(t, ctx, first)
+	fcutWrite(t, ctx, first, pcChunkBlocks*3, 0x33)
+	fcutWrite(t, ctx, first, pcChunkBlocks*7, 0x37)
+	if _, err := first.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p := fcutProvider(t, t.TempDir(), fixture, viewAs("rB", 4))
+	fcutOpen(t, ctx, p)
+	got := make([]byte, 4096)
+	for _, lba := range []int{pcChunkBlocks * 3, pcChunkBlocks * 7} {
+		if _, err := p.Backend("v1").Read(ctx, int64(lba)*4096, got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s := fcutStats(t, p); s.AbsentChunks != 0 {
+		t.Fatalf("setup: %d chunks still absent after reading both HEAD-named chunks", s.AbsentChunks)
+	}
+	if _, err := p.CaptureVolume(ctx, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := fcutStats(t, p).LastCut.CandidateChunks; got != 0 {
+		t.Errorf("the cut after reads only: %d candidate chunks; want 0 (the filled chunks are HEAD's bytes)", got)
+	}
+}
+
 // TestExplicitWALStoreRefusesAFreshChunkRoot: a root carrying chunk metadata
 // (here the fresh marker of a store that never attached) is refused by an
 // explicitly configured plain walstore as by auto, so no write can reach a
