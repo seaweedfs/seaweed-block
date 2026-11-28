@@ -241,7 +241,7 @@ delete, landed during its commit. Retry it with the same name. In this release, 
 `snapshot "NAME" of VOL is not in HEAD after its commit`, retry once more. The volume's data is committed either way;
 the snapshot name exists only after a request for it succeeds (check with `sw-block ops chunk snapshots`)
 (`TestKnownDefectSnapshotRetryAfterAGenuineConflictCommitsTheDataUnnamed`). A retry that names the snapshot at once is
-planned for 1.0.1.
+planned for a later release.
 
 A snapshot's time grows with the data changed since the volume's last cut: 64 GiB changed took 122 s (about 2 s
 per GiB). `sw-block ops chunk snapshot` waits 60 s by default, so pass `--timeout` above the expected time; the
@@ -252,13 +252,13 @@ publishes it; the volume's data is unchanged and stays queued for the next cut.
 After `outcome_unknown`, the commit may have landed with the name.
 Rerun the snapshot with the same name and a larger `--timeout`: a name already in HEAD is answered with the
 snapshot it names, so a rerun never takes a second one. A rerun keeps what a timed-out request already
-uploaded: it finds those chunks and sends only the rest. A longer or derived default is planned for 1.0.1.
+uploaded: it finds those chunks and sends only the rest. A longer or derived default is planned for a later release.
 
 With `--host-limit-dir` set (it is off by default), uploads are paced at `--host-limit-upload-bytes-sec` (64 MiB/s by
 default) shared by the host's 4 slots, about 16 MiB/s per volume, and the pacing is charged for chunks already
 uploaded too. A cut or snapshot with more than about 4.7 GiB changed then cannot finish within the 5 minutes, and a
 rerun does not help: the volume is stuck. Do not use `--host-limit-dir` in 1.0.0 for volumes that change more than
-about 4 GiB between snapshots. A fix is planned for 1.0.1.
+about 4 GiB between snapshots. A fix is planned for a later release.
 
 ## Moving a volume, and returning it
 
@@ -405,7 +405,7 @@ PRIMARY` and its `/status?volume=<id>` shows `"AuthorityRole":"primary"`.
 not come back holds I/O for about 600 s when the holder's node is up, and some 13 minutes when the node is powered
 off or unreachable (derived as above): its reads and writes block (processes in uninterruptible sleep, probes that
 touch the volume time out), then fail. Recovery is by recreating the pod, which stages the volume again on the
-current primary ([operations](operations-v1.md)). The CSI node passing the settings above is planned for 1.0.1.
+current primary ([operations](operations-v1.md)). The CSI node passing the settings above is planned for a later release.
 
 ## A volume waiting for blockmaster
 
