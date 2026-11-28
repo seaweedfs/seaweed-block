@@ -207,6 +207,14 @@ func runChunkWithin(t *testing.T, limit time.Duration, args ...string) (int, str
 	case r := <-done:
 		return r.code, r.out, r.err
 	case <-time.After(limit):
+		// join the command (bounded) before the earlier cleanups restore the package globals it reads; cleanups run
+		// last-registered first
+		t.Cleanup(func() {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+			}
+		})
 		t.Fatalf("the command did not return within %v: the loop does not end at its --timeout", limit)
 		return 0, "", ""
 	}

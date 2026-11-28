@@ -105,7 +105,8 @@ func chunkPostLoop(name, statusAddr, route string, timeout time.Duration, body m
 		}
 		sent := time.Now()
 		var out, errb bytes.Buffer
-		code := chunkPostUntil(name, statusAddr, route, per, sent.Add(per+cushion), body, &out, &errb)
+		// the client's wait never reaches past the deadline, however late after computing per the request is sent
+		code := chunkPostUntil(name, statusAddr, route, per, minTime(deadline, sent.Add(per+cushion)), body, &out, &errb)
 		var e chunkErrBody
 		// repeated only after a retryable or outcome_unknown answer (INV-CLI-CHUNK-LOOP-001)
 		retry := code != ops.VolumeStatusExitOK && json.Unmarshal(out.Bytes(), &e) == nil && e.Code != "" &&
