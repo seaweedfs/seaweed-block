@@ -884,7 +884,11 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		s = pol.after(s, start, time.Now(), err, layer.Stats().CutSeq)
 		wait.record(s)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
-			log.Printf("durable: %s chunk cut for volume=%s: %v (retry in %s)", reason, volumeID, err, s.backoff)
+			if note, stuck := capturePendingNote(err); stuck {
+				log.Printf("durable: %s chunk cut for volume=%s REFUSED: %s (retry in %s)", reason, volumeID, note, s.backoff)
+			} else {
+				log.Printf("durable: %s chunk cut for volume=%s: %v (retry in %s)", reason, volumeID, err, s.backoff)
+			}
 		}
 	}
 }
