@@ -196,10 +196,12 @@ refuses the next step. Resolve snapshot dependents and rerun with the same reque
 the command asks blockmaster for a fresh no-live-lease proof before the HEAD compare-and-swap.
 A late upload by a dead holder into a deleted volume can remain; rerun volume-delete to sweep it.
 
-Deleting a restore target: its first cut compares every restored chunk locally (about 1.5 GB/s measured). The
+Deleting a restore target: its first cut compares every restored chunk locally (about 1.4 GiB/s measured). The
 default `--timeout` of 120 s covers up to about 84 GiB; above that, pass `--timeout 5m` (the server's limit for one
-request). At the 256 GiB maximum the first cut takes about 3 min. An `outcome_unknown` answer there means retry with
-a larger `--timeout`; the volume keeps serving and nothing is lost.
+request). At the 256 GiB maximum the first cut takes about 3 min. On an `outcome_unknown` answer, retry with
+`--timeout 5m` if you used less; if it still answers `outcome_unknown` at 5m, the target is above this release's
+limit (its filled size must be at most about 4 min x your disk's read rate). The volume keeps serving and nothing is
+lost.
 
 
 [Standalone deployment: snapshots, restore and space](standalone-deployment.md#snapshots-restore-and-space-walstore-chunk):
