@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 )
 
 // Commit refusals.
@@ -208,17 +209,52 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 			rels = append(rels, n.Path())
 		}
 		rels = append(rels, root.Path())
-		for _, rel := range rels {
-			ok, err := ownedBySession(ctx, os, rel, req.Session)
-			if err != nil {
-				return Head{}, false, fmt.Errorf("layout: look up %s: %w", rel, err)
-			}
-			if !ok {
-				return Head{}, false, fmt.Errorf("%w: %s (absent, written by another session, or marked)", ErrNotPrepared, rel)
-			}
+		if err := allOwnedBySession(ctx, os, rels, req.Session); err != nil {
+			return Head{}, false, err
 		}
 		return h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State)
 	})
+}
+
+// commitVerifyParallel bounds the object lookups one commit runs at once.
+// A first snapshot of a large volume names one new chunk per 4 MiB (about
+// 262k for 1 TiB); checked one round trip at a time that outlasts the cut's
+// whole budget, on every retry.
+const commitVerifyParallel = 32
+
+// allOwnedBySession checks that every rel exists, is written by session and
+// is unmarked, with at most commitVerifyParallel lookups in flight. It is
+// all-or-nothing, like a serial check: the first failing rel in rels order
+// decides the error (a lookup error before a "not prepared"), so the result
+// does not depend on which lookup finished first.
+func allOwnedBySession(ctx context.Context, os ObjectStore, rels []string, session string) error {
+	type outcome struct {
+		ok  bool
+		err error
+	}
+	got := make([]outcome, len(rels))
+	sem := make(chan struct{}, commitVerifyParallel)
+	var wg sync.WaitGroup
+	for i, rel := range rels {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int, rel string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			ok, err := ownedBySession(ctx, os, rel, session)
+			got[i] = outcome{ok: ok, err: err}
+		}(i, rel)
+	}
+	wg.Wait()
+	for i, rel := range rels {
+		if got[i].err != nil {
+			return fmt.Errorf("layout: look up %s: %w", rel, got[i].err)
+		}
+		if !got[i].ok {
+			return fmt.Errorf("%w: %s (absent, written by another session, or marked)", ErrNotPrepared, rel)
+		}
+	}
+	return nil
 }
 
 func (m SnapshotMeta) clone() SnapshotMeta {
