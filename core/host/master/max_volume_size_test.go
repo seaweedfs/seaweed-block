@@ -17,8 +17,9 @@ import (
 )
 
 // CreateVolume, through the master's gRPC service as production serves it,
-// creates a volume of exactly MaxNewVolumeBytes and refuses one chunk more
-// with InvalidArgument naming the maximum; the refused id gets no record.
+// creates a volume of exactly MaxNewVolumeBytes and refuses one block (4 KiB)
+// or one chunk (4 MiB) more with InvalidArgument naming the maximum; a
+// refused id gets no record.
 func TestCreateVolumeRefusesAVolumeAboveTheMaximum(t *testing.T) {
 	m, err := New(Config{Listen: "127.0.0.1:0", AuthorityStoreDir: t.TempDir(), LifecycleStoreDir: t.TempDir(), WorkspaceRPC: true, LayoutCreateVolume: testLayoutCreateVolume,
 		WorkspaceHeadReader: func(context.Context, string) (authority.WorkspaceHead, error) { return authority.WorkspaceHead{}, nil }})
@@ -39,14 +40,20 @@ func TestCreateVolumeRefusesAVolumeAboveTheMaximum(t *testing.T) {
 	if _, err := lc.CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "at-max", SizeBytes: geometry.MaxNewVolumeBytes, ReplicationFactor: 1}); err != nil {
 		t.Fatalf("a volume of exactly the maximum (%d bytes) is refused: %v", geometry.MaxNewVolumeBytes, err)
 	}
-	_, err = lc.CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: "over-max", SizeBytes: geometry.MaxNewVolumeBytes + 4<<20, ReplicationFactor: 1})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("one chunk above the maximum: got %v, want InvalidArgument", err)
-	}
-	if msg := status.Convert(err).Message(); !strings.Contains(msg, geometry.ErrVolumeTooLarge.Error()) || !strings.Contains(msg, strconv.FormatUint(geometry.MaxNewVolumeBytes, 10)) {
-		t.Fatalf("refusal does not name the maximum: %q", msg)
-	}
-	if _, ok := m.Lifecycle().Volumes.GetVolume("over-max"); ok {
-		t.Fatal("a refused volume has a lifecycle record")
+	for _, over := range []struct {
+		name string
+		by   uint64
+	}{{"one block", 4096}, {"one chunk", 4 << 20}} {
+		id := "over-max-" + strconv.FormatUint(over.by, 10)
+		_, err = lc.CreateVolume(ctx, &control.CreateVolumeRequest{VolumeId: id, SizeBytes: geometry.MaxNewVolumeBytes + over.by, ReplicationFactor: 1})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("%s above the maximum: got %v, want InvalidArgument", over.name, err)
+		}
+		if msg := status.Convert(err).Message(); !strings.Contains(msg, geometry.ErrVolumeTooLarge.Error()) || !strings.Contains(msg, strconv.FormatUint(geometry.MaxNewVolumeBytes, 10)) {
+			t.Fatalf("%s above: refusal does not name the maximum: %q", over.name, msg)
+		}
+		if _, ok := m.Lifecycle().Volumes.GetVolume(id); ok {
+			t.Fatalf("%s above: a refused volume has a lifecycle record", over.name)
+		}
 	}
 }

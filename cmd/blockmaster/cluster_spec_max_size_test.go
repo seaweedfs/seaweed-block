@@ -12,7 +12,7 @@ import (
 )
 
 // The cluster spec is read before blockmaster starts serving: a volume of
-// exactly MaxNewVolumeBytes is imported, one chunk more refuses the start
+// exactly MaxNewVolumeBytes is imported, one block or one chunk more refuses the start
 // with an error naming the volume and the maximum.
 func TestClusterSpecRefusesAVolumeAboveTheMaximum(t *testing.T) {
 	for _, c := range []struct {
@@ -21,6 +21,7 @@ func TestClusterSpecRefusesAVolumeAboveTheMaximum(t *testing.T) {
 		ok   bool
 	}{
 		{"at the maximum", geometry.MaxNewVolumeBytes, true},
+		{"one block above", geometry.MaxNewVolumeBytes + 4096, false},
 		{"one chunk above", geometry.MaxNewVolumeBytes + 4<<20, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
