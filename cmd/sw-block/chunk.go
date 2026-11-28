@@ -138,6 +138,12 @@ var chunkRequestBound = chunkstore.DefaultOpDeadline
 // chunkPost sends one /chunk/* request and relays the outcome. The server
 // bounds the operation by timeoutMs; the client waits a little longer.
 func chunkPost(name, statusAddr, route string, timeout time.Duration, body map[string]any, stdout, stderr io.Writer) int {
+	return chunkPostUntil(name, statusAddr, route, timeout, time.Now().Add(timeout+5*time.Second), body, stdout, stderr)
+}
+
+// chunkPostUntil is chunkPost with the client's wait for the answer ending at
+// waitUntil (chunkPostLoop keeps it inside the command's own --timeout).
+func chunkPostUntil(name, statusAddr, route string, timeout time.Duration, waitUntil time.Time, body map[string]any, stdout, stderr io.Writer) int {
 	base := statusAddr
 	if !strings.Contains(base, "://") {
 		base = "http://" + base
@@ -147,14 +153,14 @@ func chunkPost(name, statusAddr, route string, timeout time.Duration, body map[s
 	if err != nil {
 		return chunkFail(name, stdout, stderr, chunkExitFailed, codeInternalCLI, err.Error(), false)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+5*time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), waitUntil)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+route, bytes.NewReader(data))
 	if err != nil {
 		return chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, err.Error(), false)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := chunkHTTPClient.Do(req)
 	if err != nil {
 		return chunkFail(name, stdout, stderr, chunkExitFailed, codeUnavailableCLI, "blockvolume not reachable: "+err.Error(), true)
 	}
@@ -268,7 +274,7 @@ func chunkDetach(args []string, stdout, stderr io.Writer) int {
 	)
 	fs.StringVar(&volumeID, "volume", "", "volume id")
 	fs.StringVar(&statusAddr, "status-addr", "", "blockvolume status address or URL (with --chunk-control-endpoint)")
-	fs.DurationVar(&timeout, "timeout", 120*time.Second, chunkTimeoutHelp)
+	fs.DurationVar(&timeout, "timeout", 120*time.Second, chunkDetachTimeoutHelp)
 	fs.BoolVar(&plain, "plain", false, "seal an idle volume without pre-copy; prints JSON headGen as sealed HEAD generation on stderr")
 	fs.BoolVar(&frozen, "frozen", false, "not supported in this release: the server refuses a frozen detach (frozen_detach_unsupported)")
 	fs.Int64Var(&freezeStartedAtNs, "freeze-started-at-ns", 0, "not supported in this release; only valid with --frozen")
