@@ -264,3 +264,75 @@ func TestUnadmittedAttemptsDoNotDiscardStaging(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestStagingBreaksBackgroundStallStreak(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		layer := &yieldingLayer{}
+		p := &DurableProvider{cfg: ProviderConfig{ChunkCaptureInterval: time.Millisecond, ChunkMaintenanceInterval: time.Hour, ChunkMaintenance: func(context.Context, string) error { return nil }}}
+		go p.chunkBackground(ctx, cancel, "request-progress", layer, done, func() bool { return true }, nil, nil, make(chan struct{}, 1))
+		defer func() { cancel(); <-done }()
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if layer.calls.Load() != 2 {
+			t.Fatalf("want K-1 background stalls, got %d", layer.calls.Load())
+		}
+		layer.staged.Add(1) // an interposed request stages a new chunk and fails
+		time.Sleep(1500 * time.Millisecond)
+		synctest.Wait()
+		if layer.calls.Load() != 3 || layer.discarded.Load() != 0 {
+			t.Fatalf("calls=%d discarded=%d: request progress must reset the streak", layer.calls.Load(), layer.discarded.Load())
+		}
+	})
+}
+
+type timedProgressLayer struct {
+	progressLoopLayer
+	times chan time.Time
+}
+
+func (l *timedProgressLayer) Cut(context.Context) (storage.ChunkCutResult, error) {
+	if l.calls.Add(1) == 1 {
+		l.staged.Add(1)
+	}
+	l.times <- time.Now()
+	return storage.ChunkCutResult{}, context.DeadlineExceeded
+}
+func TestProgressThenTwoStallsKeepDoublingWaits(t *testing.T) {
+	for _, scheduled := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			layer := &timedProgressLayer{times: make(chan time.Time, 16)}
+			p := &DurableProvider{cfg: ProviderConfig{ChunkCaptureInterval: time.Millisecond}}
+			duration, unit := 3500*time.Millisecond, time.Second
+			if scheduled {
+				unit = time.Minute
+				duration = 3*time.Minute + time.Second
+				p.cfg.ChunkScheduledSnapshot = func(ctx context.Context, _ string, _ time.Time, _ func(context.Context) (storage.ChunkHead, error)) error {
+					_, err := layer.Cut(ctx)
+					return err
+				}
+				slot := &snapshotSlot{s: newSnapshotSchedule("waits", 24*time.Hour, time.Now())}
+				slot.s.next = time.Now()
+				go func() {
+					defer close(done)
+					p.chunkSnapshotLoop(ctx, "waits", layer, func() bool { return true }, slot, nil)
+				}()
+			} else {
+				go p.chunkLoop(ctx, "waits", layer, done, nil, nil)
+			}
+			defer func() { cancel(); <-done }()
+			time.Sleep(duration)
+			synctest.Wait()
+			if len(layer.times) != 4 {
+				t.Fatalf("got %d attempts, want four", len(layer.times))
+			}
+			ts := []time.Time{<-layer.times, <-layer.times, <-layer.times, <-layer.times}
+			if ts[1].Sub(ts[0]) > chunkSchedulePoll || ts[2].Sub(ts[1]) != unit || ts[3].Sub(ts[2]) != 2*unit {
+				t.Fatalf("retry gaps=%v,%v,%v; want immediate,%v,%v", ts[1].Sub(ts[0]), ts[2].Sub(ts[1]), ts[3].Sub(ts[2]), unit, 2*unit)
+			}
+		})
+	}
+}

@@ -681,7 +681,8 @@ const (
 //   - the dirty-chunk count never triggers a cut;
 //   - automatic cuts are at least minSpacing apart (explicit ones are not
 //     subject to it);
-//   - a failed automatic cut resets nothing and is retried after a backoff
+//   - a failed cut with new staging retries at the next poll; without
+//     progress it resets nothing and is retried after a backoff
 //     doubling from backoffMin to backoffMax; any later successful cut (a
 //     no-op cut and an explicit cut included) clears the backoff and
 //     restarts the timer;
@@ -929,9 +930,21 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 		firstAttempt = &maintenanceStart{attempts: cutAttempts(initial), deadline: time.Now().Add(p.cfg.ChunkMaintenanceInterval)}
 	}
 	zeroProgress := 0
+	lastStaged, lastSeq := initial.StagedChunks, initial.CutSeq
 	attempted := func(before, after storage.ChunkLayerStats, err error) {
 		attemptMu.Lock()
 		defer attemptMu.Unlock()
+		// Requests do not run this callback. Their intervening progress must
+		// still break the streak, even if this background attempt staged nothing.
+		intervened := before.StagedChunks != lastStaged || before.CutSeq != lastSeq
+		lastStaged = max(lastStaged, before.StagedChunks, after.StagedChunks)
+		lastSeq = max(lastSeq, before.CutSeq, after.CutSeq)
+		if intervened {
+			zeroProgress = 0
+		}
+		if after.StagedChunks < lastStaged || after.CutSeq < lastSeq {
+			return
+		}
 		if err == nil || after.StagedChunks > before.StagedChunks || after.CutSeq != before.CutSeq {
 			zeroProgress = 0
 			return
@@ -945,6 +958,7 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 			return
 		}
 		if drop, ok := layer.(storage.ChunkStagedDiscarder); ok && drop.DiscardStagedIfUnchanged(after.StagedChunks, after.CutSeq) {
+			log.Printf("durable: maintenance volume=%s: yielding staged session after %d zero-progress attempts", volumeID, zeroProgress)
 			zeroProgress = 0
 			select {
 			case kick <- struct{}{}:
@@ -1063,6 +1077,9 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 		if firstAttempt != nil {
 			// The engine counters cover request cuts too, not just these workers.
 			// One interval bounds this scheduling wait; HEAD still decides safety.
+			if cutAttempts(layer.Stats()) == firstAttempt.attempts && time.Now().Before(firstAttempt.deadline) {
+				log.Printf("durable: maintenance volume=%s: waiting for first cut attempt (startup interval remaining %s)", volumeID, time.Until(firstAttempt.deadline))
+			}
 			for cutAttempts(layer.Stats()) == firstAttempt.attempts && time.Now().Before(firstAttempt.deadline) && !layer.Fenced() && current() {
 				pause := time.NewTimer(min(chunkSchedulePoll, time.Until(firstAttempt.deadline)))
 				select {
