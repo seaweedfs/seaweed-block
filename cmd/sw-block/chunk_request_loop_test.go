@@ -23,6 +23,10 @@ func scriptedChunkServer(t *testing.T, replies ...scriptedReply) (*httptest.Serv
 	var mu sync.Mutex
 	var got []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r) // progress reads (GET /status/durable) are not part of the script
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		var m map[string]any
 		_ = json.Unmarshal(b, &m)
@@ -30,10 +34,6 @@ func scriptedChunkServer(t *testing.T, replies ...scriptedReply) (*httptest.Serv
 		i := len(got)
 		got = append(got, m)
 		mu.Unlock()
-		if r.Method != http.MethodPost {
-			http.NotFound(w, r) // progress reads (GET /status/durable) are not part of the script
-			return
-		}
 		rep := replies[len(replies)-1]
 		if i < len(replies) {
 			rep = replies[i]
@@ -46,13 +46,7 @@ func scriptedChunkServer(t *testing.T, replies ...scriptedReply) (*httptest.Serv
 	return srv, func() []map[string]any {
 		mu.Lock()
 		defer mu.Unlock()
-		var posts []map[string]any
-		for _, m := range got {
-			if m != nil {
-				posts = append(posts, m)
-			}
-		}
-		return posts
+		return append([]map[string]any(nil), got...)
 	}
 }
 
@@ -139,8 +133,9 @@ func TestChunkLoopEndsAtTheTimeout(t *testing.T) {
 	if took > 2*time.Second {
 		t.Fatalf("took %v for --timeout 500ms", took)
 	}
-	if n := len(posts()); n < 2 || n > 20 {
-		t.Fatalf("%d requests for 500 ms of 100 ms requests", n)
+	// the store answers at once, so each request is followed by a pause (no busy loop): a handful, not dozens
+	if n := len(posts()); n < 2 || n > 7 {
+		t.Fatalf("%d requests in 500 ms against a store that refuses at once: want 2..7 (paused, not a busy loop)", n)
 	}
 	if !strings.Contains(errs, "--timeout 500ms passed") {
 		t.Fatalf("stderr %q: want the end of the loop named", errs)
