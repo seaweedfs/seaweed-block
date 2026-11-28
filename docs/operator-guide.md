@@ -196,6 +196,13 @@ refuses the next step. Resolve snapshot dependents and rerun with the same reque
 the command asks blockmaster for a fresh no-live-lease proof before the HEAD compare-and-swap.
 A late upload by a dead holder into a deleted volume can remain; rerun volume-delete to sweep it.
 
+After a refused restore (`not_admitted`), its target name is half created: run
+`sw-block ops chunk release --master MASTER --source S --target T --chunk-filer FILER`, then the delete of a volume
+that never served (step 4 of
+[deleting a volume](volume-lifecycle.md#delete-a-volume)). A `volume_not_found: layout: HEAD absent` answer on that
+delete means this case; retrying the delete alone does not help. Until the release, the source's delete answers
+`snapshot_has_dependents` ("has 1").
+
 Deleting a restore target: its first cut compares every restored chunk locally (about 1.4 GiB/s measured). The
 default `--timeout` of 120 s covers up to about 84 GiB; above that, pass `--timeout 5m` (the server's limit for one
 request). At the 256 GiB maximum the first cut takes about 3 min. On an `outcome_unknown` answer, retry with
