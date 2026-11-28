@@ -3,6 +3,7 @@ package durable
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -10,6 +11,17 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+// capturePendingNote names a capture refused because an earlier HEAD commit's
+// outcome is unresolved (Stats.PendingUnresolved): until it settles every
+// cut, snapshot and detach of the volume is refused, so the logs say so, with
+// the cause and the cure, once per attempt (never per write).
+func capturePendingNote(err error) (string, bool) {
+	if !errors.Is(err, storage.ErrChunkCASOutcomeUnknown) {
+		return "", false
+	}
+	return fmt.Sprintf("PendingUnresolved: an earlier HEAD commit's outcome is unresolved, so every cut, snapshot and detach of this volume is refused until it settles; cause: %v; it is retried at every capture; cure: restart the blockvolume process (acknowledged writes are kept locally; detach is refused in this state): a restart cures a store fault that has ended; if this line returns after a restart, the change set is too large for one commit: see the volume size limit", err), true
+}
 
 const (
 	// snapshotRetryMin and snapshotRetryMax bound the backoff after a
@@ -241,7 +253,12 @@ func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string
 		}
 		slot.record(time.Now(), err)
 		if err != nil {
-			log.Printf("durable: scheduled snapshot volume=%s: %v (next attempt in %s)", volumeID, err, time.Until(slot.due()).Round(time.Second))
+			next := time.Until(slot.due()).Round(time.Second)
+			if note, stuck := capturePendingNote(err); stuck {
+				log.Printf("durable: scheduled snapshot volume=%s REFUSED: %s (next attempt in %s)", volumeID, note, next)
+			} else {
+				log.Printf("durable: scheduled snapshot volume=%s: %v (next attempt in %s)", volumeID, err, next)
+			}
 		}
 		timer.Reset(time.Until(slot.due()))
 	}
