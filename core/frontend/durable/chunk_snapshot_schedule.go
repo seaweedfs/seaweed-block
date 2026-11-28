@@ -20,7 +20,7 @@ func capturePendingNote(err error) (string, bool) {
 	if !errors.Is(err, storage.ErrChunkCASOutcomeUnknown) {
 		return "", false
 	}
-	return fmt.Sprintf("PendingUnresolved: an earlier HEAD commit's outcome is unresolved, so every cut, snapshot and detach of this volume is refused until it settles; cause: %v; it is retried at every capture; if it persists, check the filer, then restart the volume (the next holder settles it)", err), true
+	return fmt.Sprintf("PendingUnresolved: an earlier HEAD commit's outcome is unresolved, so every cut, snapshot and detach of this volume is refused until it settles; cause: %v; it is retried at every capture; cure: restart the blockvolume process (acknowledged writes are kept locally; detach is refused in this state): a restart cures a store fault that has ended; if this line returns after a restart, the change set is too large for one commit: see the volume size limit", err), true
 }
 
 const (

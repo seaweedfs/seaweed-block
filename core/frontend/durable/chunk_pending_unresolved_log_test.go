@@ -75,7 +75,7 @@ func TestAScheduledSnapshotRefusedAsPendingUnresolvedIsLoud(t *testing.T) {
 				if !strings.Contains(l, tc.cause) {
 					t.Fatalf("line %q does not carry the cause %q", l, tc.cause)
 				}
-				loud := strings.Contains(l, "REFUSED: PendingUnresolved") && strings.Contains(l, "every cut, snapshot and detach") && strings.Contains(l, "restart the volume")
+				loud := strings.Contains(l, "REFUSED: PendingUnresolved") && strings.Contains(l, "every cut, snapshot and detach") && strings.Contains(l, "restart the blockvolume process") && strings.Contains(l, "see the volume size limit")
 				if loud != tc.loud {
 					t.Fatalf("line %q: loud=%t, want %t", l, loud, tc.loud)
 				}
