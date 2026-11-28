@@ -28,22 +28,8 @@ func objectsCheckedWriters(t *testing.T, file, src string) []string {
 		t.Fatalf("parse %s: %v", file, err)
 	}
 	var sites []string
-	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		owner := fn.Name.Name
-		if fn.Recv != nil && len(fn.Recv.List) == 1 {
-			typ := fn.Recv.List[0].Type
-			if star, ok := typ.(*ast.StarExpr); ok {
-				typ = star.X
-			}
-			if id, ok := typ.(*ast.Ident); ok {
-				owner = "(" + id.Name + ")." + fn.Name.Name
-			}
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
+	writes := func(owner string, n ast.Node) {
+		ast.Inspect(n, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.AssignStmt:
 				for _, lhs := range x.Lhs {
@@ -58,6 +44,27 @@ func objectsCheckedWriters(t *testing.T, file, src string) []string {
 			}
 			return true
 		})
+	}
+	for _, d := range f.Decls {
+		if gen, ok := d.(*ast.GenDecl); ok {
+			writes("package", gen) // var and const initializers outside any function
+			continue
+		}
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		owner := fn.Name.Name
+		if fn.Recv != nil && len(fn.Recv.List) == 1 {
+			typ := fn.Recv.List[0].Type
+			if star, ok := typ.(*ast.StarExpr); ok {
+				typ = star.X
+			}
+			if id, ok := typ.(*ast.Ident); ok {
+				owner = "(" + id.Name + ")." + fn.Name.Name
+			}
+		}
+		writes(owner, fn.Body)
 	}
 	return sites
 }
@@ -118,6 +125,10 @@ func TestObjectsCheckedIsWrittenOnlyByCASHead(t *testing.T) {
 			"package other\nfunc build() { _ = layout.CommitRequest{Session: \"s\", ObjectsChecked: true} }\n",
 			"x.go build",
 		},
+		"a package-level literal": {
+			"package chunkstore\nvar unchecked = layout.CommitRequest{ObjectsChecked: true}\n",
+			"x.go package",
+		},
 		"a multiple assignment": {
 			"package chunkstore\nfunc (l *LayoutRemote) CASHead2(req *CommitRequest) { var n int; req.ObjectsChecked, n = true, 1; _ = n }\n",
 			"x.go (LayoutRemote).CASHead2",
@@ -161,18 +172,25 @@ func TestCommitPendingSnapshotLooksUpTheRootAndSegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var segRoot atomic.Int64
+	var segs, roots atomic.Int64
 	lh.ff.afterLookup = func(p string) {
-		if strings.Contains(p, "/seg/") || strings.Contains(p, "/root/") {
-			segRoot.Add(1)
+		switch {
+		case strings.Contains(p, "/seg/"):
+			segs.Add(1)
+		case strings.Contains(p, "/root/"):
+			roots.Add(1)
 		}
 	}
 	w.LayoutRemote.SetSnapshot("s1", layout.SnapshotMeta{})
 	if err := w.LayoutRemote.CommitPendingSnapshot(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if segRoot.Load() == 0 {
-		t.Fatal("CommitPendingSnapshot looked up no segment or root")
+	if err := requireRootAndSegments(segs.Load(), roots.Load()); err != nil {
+		t.Fatalf("CommitPendingSnapshot: %v", err)
+	}
+	// Controls: the check fails when either kind of lookup is missing.
+	if requireRootAndSegments(0, roots.Load()) == nil || requireRootAndSegments(segs.Load(), 0) == nil {
+		t.Fatal("requireRootAndSegments passes with one kind of lookup missing")
 	}
 	if _, ok := lh.head().Snapshots["s1"]; !ok {
 		t.Fatal("snapshot s1 not in HEAD")
@@ -225,4 +243,18 @@ func TestMetadataRetryLooksUpOnlyWithoutAPassedCheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requireRootAndSegments refuses a commit check that looked up no segment
+// or no root.
+func requireRootAndSegments(segs, roots int64) error {
+	switch {
+	case segs == 0 && roots == 0:
+		return fmt.Errorf("looked up no segment and no root")
+	case segs == 0:
+		return fmt.Errorf("looked up %d roots but no segment", roots)
+	case roots == 0:
+		return fmt.Errorf("looked up %d segments but no root", segs)
+	}
+	return nil
 }
