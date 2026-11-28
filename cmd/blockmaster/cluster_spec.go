@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/seaweedfs/seaweed-block/core/geometry"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"gopkg.in/yaml.v3"
 )
@@ -102,6 +103,9 @@ func clusterSpecToImports(spec clusterSpecFile) (clusterSpecImport, error) {
 		}
 		// Placement-only legacy specifications cannot supply a capacity. They
 		// retain the explicit CreateVolume prerequisite rather than inventing one.
+		if err := geometry.ValidateNewVolumeSize(vol.SizeBytes); err != nil {
+			return clusterSpecImport{}, fmt.Errorf("cluster spec: volume %q: %w", vol.ID, err)
+		}
 		if vol.SizeBytes > 0 {
 			out.Volumes = append(out.Volumes, lifecycle.VolumeSpec{VolumeID: vol.ID, SizeBytes: vol.SizeBytes, ReplicationFactor: vol.ReplicationFactor})
 		}
