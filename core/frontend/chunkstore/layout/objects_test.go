@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path"
+	"sync"
 	"testing"
 )
 
@@ -17,6 +18,7 @@ type memObject struct {
 // root, with an optional failing path, a record of every Stat, and a kill
 // point counted over its writes (Create, Reuse, Mark, DeleteMarked).
 type memObjects struct {
+	statMu sync.Mutex // RunCommit looks objects up concurrently
 	root   string
 	volume VolumeID // stamped on every entry the store creates
 	objs   map[string]*memObject
@@ -39,6 +41,18 @@ func newMemObjects(root string) *memObjects {
 func (m *memObjects) full(rel string) string { return path.Join(m.root, rel) }
 
 func (m *memObjects) Stat(_ context.Context, rel string) (ObjectMeta, bool, error) {
+	meta, found, err := m.statLocked(rel)
+	if err == nil && m.afterStat != nil {
+		m.afterStat(rel) // outside the lock: a hook may write to the store
+	}
+	return meta, found, err
+}
+
+// statLocked is Stat's lookup, under statMu: RunCommit looks objects up
+// concurrently.
+func (m *memObjects) statLocked(rel string) (ObjectMeta, bool, error) {
+	m.statMu.Lock()
+	defer m.statMu.Unlock()
 	if m.dead {
 		return ObjectMeta{}, false, errKilled
 	}
@@ -48,9 +62,6 @@ func (m *memObjects) Stat(_ context.Context, rel string) (ObjectMeta, bool, erro
 		return ObjectMeta{}, false, errors.New("filer unavailable")
 	}
 	o, ok := m.objs[p]
-	if m.afterStat != nil {
-		defer m.afterStat(rel)
-	}
 	if !ok {
 		return ObjectMeta{}, false, nil
 	}
