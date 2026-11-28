@@ -808,6 +808,18 @@ func (pol cutPolicy) after(s cutSchedule, start, end time.Time, err error, seq u
 	return s
 }
 
+// afterStaging retries at the next poll when a failed attempt completed new
+// staging. Minimum spacing and exponential backoff apply only without progress.
+func (pol cutPolicy) afterStaging(s cutSchedule, start, end time.Time, err error, seq, staged uint64) cutSchedule {
+	s = pol.after(s, start, end, err, seq)
+	if err != nil && staged > 0 {
+		s.lastAuto = time.Time{}
+		s.backoff = 0
+		s.retryAt = end
+	}
+	return s
+}
+
 // initialCutSchedule starts a fresh schedule at now; seq is the layer's
 // CutSeq at start, so a cut already made is not taken in as new.
 func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, stagger bool, seq uint64) cutSchedule {
@@ -881,7 +893,8 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 			}
 		}
 		cancel()
-		s = pol.after(s, start, time.Now(), err, layer.Stats().CutSeq)
+		after := layer.Stats()
+		s = pol.afterStaging(s, start, time.Now(), err, after.CutSeq, after.StagedChunks-ls.StagedChunks)
 		wait.record(s)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
 			if note, stuck := capturePendingNote(err); stuck {
