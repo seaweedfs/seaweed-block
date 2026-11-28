@@ -923,23 +923,23 @@ func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.Ca
 	// Both background publishers share this in-process stall count. The layer
 	// rechecks its counters under its capture lock before discarding anything.
 	var attemptMu sync.Mutex
-	var first sync.Once
-	firstAttempt := make(chan struct{})
-	zeroProgress := 0
-	if p.cfg.ChunkCaptureInterval <= 0 || layer.Stats().DirtyChunks == 0 {
-		first.Do(func() { close(firstAttempt) })
+	var firstAttempt *maintenanceStart
+	initial := layer.Stats()
+	if initial.DirtyChunks > 0 {
+		firstAttempt = &maintenanceStart{attempts: cutAttempts(initial), deadline: time.Now().Add(p.cfg.ChunkMaintenanceInterval)}
 	}
+	zeroProgress := 0
 	attempted := func(before, after storage.ChunkLayerStats, err error) {
 		attemptMu.Lock()
 		defer attemptMu.Unlock()
-		first.Do(func() { close(firstAttempt) })
 		if err == nil || after.StagedChunks > before.StagedChunks || after.CutSeq != before.CutSeq {
 			zeroProgress = 0
 			return
 		}
-		if errors.Is(err, hostlimit.ErrSlotsHeld) {
-			return
-		} // no attempt ran
+		var skip *SnapshotSkip
+		if errors.Is(err, hostlimit.ErrSlotsHeld) || errors.Is(err, storage.ErrChunkCaptureRefused) || errors.As(err, &skip) {
+			return // no attempt against the store ran
+		}
 		zeroProgress++
 		if zeroProgress < chunkZeroProgressLimit || p.cfg.ChunkMaintenance == nil {
 			return
@@ -1022,7 +1022,22 @@ func (p *DurableProvider) KickMaintenance(volumeID string) bool {
 	return true
 }
 
-func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, kick <-chan struct{}, firstAttempt <-chan struct{}) {
+// maintenanceStart bounds only the first cleaning of an initially dirty layer.
+// Completion counters include periodic, scheduled, and operator-request cuts.
+type maintenanceStart struct {
+	attempts uint64
+	deadline time.Time
+}
+
+func cutAttempts(st storage.ChunkLayerStats) uint64 {
+	n := st.CutsOK + st.CutsNoop + st.CutsFailed
+	for _, refused := range st.CutsRefused {
+		n += refused
+	}
+	return n
+}
+
+func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, kick <-chan struct{}, firstAttempt *maintenanceStart) {
 	interval := p.cfg.ChunkMaintenanceInterval
 	due := time.Now().Add(interval)
 	if p.cfg.ChunkStagger {
@@ -1046,10 +1061,16 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 			}
 		}
 		if firstAttempt != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-firstAttempt:
+			// The engine counters cover request cuts too, not just these workers.
+			// One interval bounds this scheduling wait; HEAD still decides safety.
+			for cutAttempts(layer.Stats()) == firstAttempt.attempts && time.Now().Before(firstAttempt.deadline) && !layer.Fenced() && current() {
+				pause := time.NewTimer(min(chunkSchedulePoll, time.Until(firstAttempt.deadline)))
+				select {
+				case <-ctx.Done():
+					pause.Stop()
+					return
+				case <-pause.C:
+				}
 			}
 			firstAttempt = nil
 		}

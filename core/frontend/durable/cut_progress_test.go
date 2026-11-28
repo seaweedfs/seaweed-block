@@ -78,7 +78,7 @@ type firstAttemptLayer struct {
 }
 
 func (l *firstAttemptLayer) Stats() storage.ChunkLayerStats {
-	return storage.ChunkLayerStats{DirtyChunks: 1}
+	return storage.ChunkLayerStats{DirtyChunks: 1, CutsFailed: uint64(l.calls.Load())}
 }
 func (l *firstAttemptLayer) Cut(ctx context.Context) (storage.ChunkCutResult, error) {
 	select {
@@ -89,6 +89,7 @@ func (l *firstAttemptLayer) Cut(ctx context.Context) (storage.ChunkCutResult, er
 	case <-l.release:
 	case <-ctx.Done():
 	}
+	l.calls.Add(1)
 	return storage.ChunkCutResult{}, context.DeadlineExceeded
 }
 func TestDirtyStartCleaningWaitsForFirstCutAttempt(t *testing.T) {
@@ -97,8 +98,10 @@ func TestDirtyStartCleaningWaitsForFirstCutAttempt(t *testing.T) {
 		done := make(chan struct{})
 		layer := &firstAttemptLayer{entered: make(chan struct{}, 1), release: make(chan struct{})}
 		var cleaned atomic.Int32
-		p := &DurableProvider{cfg: ProviderConfig{ChunkCaptureInterval: time.Millisecond, ChunkMaintenanceInterval: time.Millisecond, ChunkMaintenance: func(context.Context, string) error { cleaned.Add(1); return nil }}}
-		go p.chunkBackground(ctx, cancel, "dirty", layer, done, func() bool { return true }, nil, nil, nil)
+		p := &DurableProvider{cfg: ProviderConfig{ChunkCaptureInterval: time.Millisecond, ChunkMaintenanceInterval: time.Hour, ChunkMaintenance: func(context.Context, string) error { cleaned.Add(1); return nil }}}
+		kick := make(chan struct{}, 1)
+		kick <- struct{}{}
+		go p.chunkBackground(ctx, cancel, "dirty", layer, done, func() bool { return true }, nil, nil, kick)
 		defer func() { cancel(); <-done }()
 		time.Sleep(500 * time.Millisecond)
 		synctest.Wait()
@@ -111,7 +114,7 @@ func TestDirtyStartCleaningWaitsForFirstCutAttempt(t *testing.T) {
 			t.Fatalf("%d cleaning passes ran before the dirty start's first cut returned", n)
 		}
 		close(layer.release)
-		time.Sleep(time.Millisecond)
+		time.Sleep(2 * chunkSchedulePoll)
 		synctest.Wait()
 		if cleaned.Load() == 0 {
 			t.Fatal("cleaning never ran after the first cut attempt")
@@ -122,15 +125,20 @@ func TestDirtyStartCleaningWaitsForFirstCutAttempt(t *testing.T) {
 type yieldingLayer struct {
 	progressLoopLayer
 	progressAt int32
+	absent     int
+	err        error
 	discarded  atomic.Int32
 }
 
 func (l *yieldingLayer) Stats() storage.ChunkLayerStats {
-	return storage.ChunkLayerStats{DirtyChunks: 1, StagedChunks: l.staged.Load()}
+	return storage.ChunkLayerStats{DirtyChunks: 1, StagedChunks: l.staged.Load(), CutsFailed: uint64(l.calls.Load()), AbsentChunks: l.absent}
 }
 func (l *yieldingLayer) Cut(context.Context) (storage.ChunkCutResult, error) {
 	if l.calls.Add(1) == l.progressAt {
 		l.staged.Add(1)
+	}
+	if l.err != nil {
+		return storage.ChunkCutResult{}, l.err
 	}
 	return storage.ChunkCutResult{}, context.DeadlineExceeded
 }
@@ -173,26 +181,85 @@ func TestStalledCutYieldsSessionToCleaning(t *testing.T) {
 	}
 }
 
-func TestCleaningNotDelayedForCleanOrAutomaticCutsDisabled(t *testing.T) {
-	for _, automatic := range []bool{false, true} {
+func TestDirtyStartWithPeriodicCutsOffWaitsForRequestOrInterval(t *testing.T) {
+	for _, request := range []bool{false, true} {
 		synctest.Test(t, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
-			var layer storage.ChunkLayer = &progressLoopLayer{} // clean start
-			if !automatic {
-				layer = &yieldingLayer{}
-			} // dirty, but no automatic cut configured
+			layer := &firstAttemptLayer{entered: make(chan struct{}, 1), release: make(chan struct{})}
 			var cleaned atomic.Int32
-			p := &DurableProvider{cfg: ProviderConfig{ChunkMaintenanceInterval: time.Millisecond, ChunkMaintenance: func(context.Context, string) error { cleaned.Add(1); return nil }}}
-			if automatic {
-				p.cfg.ChunkCaptureInterval = time.Hour
-			}
-			go p.chunkBackground(ctx, cancel, "ordinary", layer, done, func() bool { return true }, nil, nil, nil)
+			p := &DurableProvider{cfg: ProviderConfig{ChunkMaintenanceInterval: time.Second, ChunkMaintenance: func(context.Context, string) error { cleaned.Add(1); return nil }}}
+			kick := make(chan struct{}, 1)
+			kick <- struct{}{}
+			go p.chunkBackground(ctx, cancel, "request", layer, done, func() bool { return true }, nil, nil, kick)
 			defer func() { cancel(); <-done }()
-			time.Sleep(2 * time.Millisecond)
 			synctest.Wait()
-			if cleaned.Load() == 0 {
-				t.Fatal("ordinary cleaning schedule was delayed")
+			if request {
+				go layer.Cut(ctx)
+			}
+			time.Sleep(400 * time.Millisecond)
+			synctest.Wait()
+			if cleaned.Load() != 0 {
+				t.Fatal("cleaning ran before any request cut finished or the interval elapsed")
+			}
+			if request {
+				close(layer.release)
+			}
+			time.Sleep(2 * chunkSchedulePoll)
+			synctest.Wait()
+			if request && cleaned.Load() != 1 {
+				t.Fatal("cleaning did not observe the request cut's completion")
+			}
+			if !request {
+				if cleaned.Load() != 0 {
+					t.Fatal("no-attempt fallback ran before the interval")
+				}
+				time.Sleep(500 * time.Millisecond)
+				synctest.Wait()
+				if cleaned.Load() != 1 {
+					t.Fatal("no-attempt fallback did not run after one interval")
+				}
+			}
+		})
+	}
+}
+
+func TestUnadmittedAttemptsDoNotDiscardStaging(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			layer := &yieldingLayer{err: storage.ErrChunkCaptureRefused}
+			p := &DurableProvider{cfg: ProviderConfig{ChunkCaptureInterval: time.Millisecond, ChunkMaintenanceInterval: 30 * 24 * time.Hour, ChunkMaintenance: func(context.Context, string) error { return nil }}}
+			var snapshots *snapshotSlot
+			wait := 8 * time.Second
+			if skip {
+				p.cfg.ChunkCaptureInterval = 0
+				layer.absent = 1
+				wait = 4 * time.Hour
+				p.cfg.ChunkScheduledSnapshot = func(context.Context, string, time.Time, func(context.Context) (storage.ChunkHead, error)) error {
+					t.Error("restoring snapshot reached store")
+					return nil
+				}
+				snapshots = &snapshotSlot{s: newSnapshotSchedule("skip", 24*time.Hour, time.Now())}
+				snapshots.s.next = time.Now()
+			}
+			go p.chunkBackground(ctx, cancel, "unadmitted", layer, done, func() bool { return true }, snapshots, nil, make(chan struct{}, 1))
+			defer func() { cancel(); <-done }()
+			time.Sleep(wait)
+			synctest.Wait()
+			if skip {
+				snapshots.mu.Lock()
+				n := snapshots.s.skipped[SnapshotSkipRestoring]
+				snapshots.mu.Unlock()
+				if n < 3 {
+					t.Fatal("did not exercise three snapshot skips")
+				}
+			} else if layer.calls.Load() < 3 {
+				t.Fatal("did not exercise three capture refusals")
+			}
+			if layer.discarded.Load() != 0 {
+				t.Fatal("unadmitted attempts discarded an unfinished session")
 			}
 		})
 	}
