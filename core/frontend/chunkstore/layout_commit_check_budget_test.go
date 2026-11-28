@@ -57,6 +57,7 @@ type c1Remote struct {
 	check  func(ctx context.Context, e storage.ChunkHeadVersion, n storage.ChunkHead) error
 	inCAS  atomic.Bool
 	casGot atomic.Int64
+	ff     *fakeFiler
 }
 
 func (w *c1Remote) CheckCommit(ctx context.Context, e storage.ChunkHeadVersion, n storage.ChunkHead) error {
@@ -88,7 +89,7 @@ func c1Cut(t *testing.T, check func(w *c1Remote) func(context.Context, storage.C
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &c1Remote{LayoutRemote: r}
+	w := &c1Remote{LayoutRemote: r, ff: lh.ff}
 	if check != nil {
 		w.check = check(w)
 	}
@@ -219,5 +220,38 @@ func TestObjectsCheckedIsSetOnlyByCASHead(t *testing.T) {
 	}
 	if len(sites) != 1 || !strings.HasPrefix(sites[0], "layout_remote.go:") {
 		t.Fatalf("ObjectsChecked is set at %v; want exactly one site, in LayoutRemote.CASHead", sites)
+	}
+}
+
+// A pre-check that finds a chunk missing (here one uploaded chunk is gone
+// from the filer) ends the cut as a refusal: the CAS that follows answers it
+// from HEAD and looks up no chunk, and HEAD keeps its root.
+func TestAPreCheckThatFindsAChunkMissingEndsWithNoLookupInTheCAS(t *testing.T) {
+	var lost string
+	lh, w, err := c1Cut(t, func(w *c1Remote) func(context.Context, storage.ChunkHeadVersion, storage.ChunkHead) error {
+		return func(ctx context.Context, e storage.ChunkHeadVersion, n storage.ChunkHead) error {
+			w.ff.mu.Lock()
+			for p := range w.ff.entries {
+				if strings.Contains(p, "/pool/") {
+					lost = p
+					delete(w.ff.entries, p)
+					break
+				}
+			}
+			w.ff.mu.Unlock()
+			return w.LayoutRemote.CheckCommit(ctx, e, n)
+		}
+	})
+	if lost == "" {
+		t.Fatal("no uploaded chunk to remove")
+	}
+	if err == nil {
+		t.Fatalf("cut committed with %s missing", lost)
+	}
+	if n := w.casGot.Load(); n != 0 {
+		t.Fatalf("CAS after a failed pre-check looked up %d chunks", n)
+	}
+	if h := lh.head(); h.Current != nil {
+		t.Fatalf("HEAD moved to %v after a refused commit", h.Current)
 	}
 }

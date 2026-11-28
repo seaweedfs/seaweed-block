@@ -646,6 +646,18 @@ func (r *closeBoundRemote) CASHead(ctx context.Context, expected storage.ChunkHe
 	return r.ChunkRemote.CASHead(c, expected, next)
 }
 
+// CheckCommit forwards the commit's object check (storage.ChunkCommitChecker)
+// with the same binding as CASHead. A remote without it passes: its CAS then
+// runs the check itself.
+func (r *closeBoundRemote) CheckCommit(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) error {
+	c, end := r.bind(ctx)
+	defer end()
+	if checker, ok := r.ChunkRemote.(storage.ChunkCommitChecker); ok {
+		return checker.CheckCommit(c, expected, next)
+	}
+	return nil
+}
+
 func (r *closeBoundRemote) Delete(ctx context.Context, key string) error {
 	c, end := r.bind(ctx)
 	defer end()
