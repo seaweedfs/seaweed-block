@@ -14,7 +14,7 @@ import (
 // unchanged; the separate human readout identifies the seal to the operator.
 func chunkPlainDetachPost(addr, volume string, timeout time.Duration, body map[string]any, stdout, stderr io.Writer) int {
 	var out bytes.Buffer
-	code := chunkPost("detach", addr, "/chunk/detach", timeout, body, &out, stderr)
+	code := chunkPostLoop("detach", addr, "/chunk/detach", timeout, body, &out, stderr)
 	if code != ops.VolumeStatusExitOK {
 		if err := writeAll(stdout, out.Bytes()); err != nil {
 			fmt.Fprintf(stderr, "sw-block ops chunk detach: write result: %v\n", err)
