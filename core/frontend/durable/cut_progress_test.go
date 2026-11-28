@@ -7,6 +7,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/hostlimit"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -335,4 +336,64 @@ func TestProgressThenTwoStallsKeepDoublingWaits(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Refusals change the engine's refusal counters without completing a store cut.
+type refusedFirstAttemptLayer struct {
+	firstAttemptLayer
+	requests atomic.Int32
+}
+
+func (l *refusedFirstAttemptLayer) Stats() storage.ChunkLayerStats {
+	st := l.firstAttemptLayer.Stats()
+	st.CutsRefused = map[string]uint64{"admission": uint64(min(l.requests.Load(), 2))}
+	return st
+}
+
+func (l *refusedFirstAttemptLayer) Cut(ctx context.Context) (storage.ChunkCutResult, error) {
+	if l.requests.Add(1) <= 2 {
+		return storage.ChunkCutResult{}, storage.ErrChunkCaptureRefused
+	}
+	return l.firstAttemptLayer.Cut(ctx)
+}
+
+func TestDirtyStartCaptureRefusalsDoNotReleaseCleaning(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		layer := &refusedFirstAttemptLayer{firstAttemptLayer: firstAttemptLayer{entered: make(chan struct{}, 1), release: make(chan struct{})}}
+		var cleaned atomic.Int32
+		const volume = "refused-first-cut"
+		const interval = time.Hour
+		p := &DurableProvider{cfg: ProviderConfig{ChunkStagger: true, ChunkMaintenanceInterval: interval, ChunkMaintenance: func(context.Context, string) error { cleaned.Add(1); return nil }}}
+		go p.chunkBackground(ctx, cancel, volume, layer, done, func() bool { return true }, nil, nil, nil)
+		defer func() { cancel(); <-done }()
+		synctest.Wait()
+		for range 2 {
+			if _, err := layer.Cut(ctx); err != storage.ErrChunkCaptureRefused {
+				t.Fatalf("expected capture refusal, got %v", err)
+			}
+		}
+		// Pass the ordinary staggered cleaning time, before the fallback bound.
+		due := hostlimit.Phase(volume+":maintenance", interval)
+		if due+4*chunkSchedulePoll >= interval {
+			t.Fatal("fixture needs room before the no-attempt fallback")
+		}
+		time.Sleep(due + 2*chunkSchedulePoll)
+		synctest.Wait()
+		if cleaned.Load() != 0 {
+			t.Fatal("two capture refusals released first cleaning without a store attempt")
+		}
+		go layer.Cut(ctx)
+		synctest.Wait()
+		if cleaned.Load() != 0 {
+			t.Fatal("cleaning ran while the first real attempt was still in flight")
+		}
+		close(layer.release)
+		time.Sleep(2 * chunkSchedulePoll)
+		synctest.Wait()
+		if cleaned.Load() != 1 {
+			t.Fatal("first completed store attempt did not release cleaning")
+		}
+	})
 }

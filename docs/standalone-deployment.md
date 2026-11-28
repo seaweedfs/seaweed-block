@@ -693,9 +693,10 @@ keeps the ordinary doubling backoff. The per-attempt deadline is unchanged; retr
 progress is in-process, and a restart recovers objects by their content names.
 
 When the layer starts dirty, its first cleaning pass waits for the first cut
-attempt of any kind (periodic, scheduled or requested) to return, or for one
+attempt that reached the store (periodic, scheduled or requested) to return, or for one
 maintenance interval from startup, whichever comes first. This also applies when
-periodic cuts are disabled; it does not enable them. Clean starts are unchanged. After three consecutive failed background
+periodic cuts are disabled; it does not enable them. Refused cuts do not end this
+wait because they did not reach the store. Clean starts are unchanged. After three consecutive failed background
 attempts without staging progress, the holder drops its reusable staging session
 and kicks cleaning. Capture refusals, restoring-snapshot skips and host-slot refusals do not count:
 no store attempt ran. Progress or a successful cut resets the count. K counts

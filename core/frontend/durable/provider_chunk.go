@@ -1037,18 +1037,15 @@ func (p *DurableProvider) KickMaintenance(volumeID string) bool {
 }
 
 // maintenanceStart bounds only the first cleaning of an initially dirty layer.
-// Completion counters include periodic, scheduled, and operator-request cuts.
+// Store-attempt counters include periodic, scheduled, and operator-request cuts.
+// Refusals did not attempt the store and cannot release this startup wait.
 type maintenanceStart struct {
 	attempts uint64
 	deadline time.Time
 }
 
 func cutAttempts(st storage.ChunkLayerStats) uint64 {
-	n := st.CutsOK + st.CutsNoop + st.CutsFailed
-	for _, refused := range st.CutsRefused {
-		n += refused
-	}
-	return n
+	return st.CutsOK + st.CutsNoop + st.CutsFailed
 }
 
 func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, kick <-chan struct{}, firstAttempt *maintenanceStart) {
