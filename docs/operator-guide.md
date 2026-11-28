@@ -227,8 +227,9 @@ filled size must be at most about 4 min x your disk's read rate for its first cu
 [Standalone deployment: snapshots, restore and space](standalone-deployment.md#snapshots-restore-and-space-walstore-chunk):
 - scheduled and manual snapshots;
 - deleting snapshots, and getting space back:
-  - the holder's cleaning removes the chunks that no snapshot, restore target or current image names, right after
-    the snapshot delete and every `--chunk-maintenance-interval` (1 hour by default);
+  - the holder's cleaning removes the chunks that no snapshot, restore target or current image names, right after a
+    snapshot delete made by the holder itself (the schedule's retention) and every `--chunk-maintenance-interval`
+    (1 hour by default); a snapshot deleted with `ops chunk snapshot-delete` is cleaned at the next pass;
   - then the asynchronous SeaweedFS vacuum compacts the volume files;
 - `ops chunk verify`;
 - restoring a snapshot into a new volume, which reads the chunks it has not made local from that snapshot (fork is not supported in this release).
@@ -451,8 +452,10 @@ and the volume does not serve. A monitor that only watches for failed units does
 - **One live process per volume per host.** The host lock keeps two processes for one volume apart only on one host;
   two hosts are kept apart by the assignment and the lease. A container needs the host's `/run/sw-block/locks`
   ([one process per volume](releases/one-process-per-volume.md)).
-- **Cleaning is on by default.** The holder removes chunks no root names after each snapshot delete and every
-  `--chunk-maintenance-interval` (hourly by default); `--chunk-maintenance-gc=false` turns it off, and then nothing
+- **Cleaning is on by default.** The holder removes chunks no root names right after a snapshot delete made by the
+  holder itself (the schedule's retention) and every `--chunk-maintenance-interval` (default 1 h). A snapshot deleted
+  with `ops chunk snapshot-delete` is cleaned at the next pass, so its space can take up to that interval to return;
+  when freeing space on a full store, allow for it. `--chunk-maintenance-gc=false` turns it off, and then nothing
   removes them. The disk space returns when SeaweedFS vacuums its volumes.
 - **Node reattach events under mutual TLS.** Node reattach events are not recorded in the cluster event log under
   mutual TLS: a CSI node's certificate is `viewer`, so blockmaster refuses the event and the node logs one line per
