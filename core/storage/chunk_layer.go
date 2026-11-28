@@ -154,6 +154,12 @@ type chunkLayerImpl struct {
 	absent       map[uint64]bool
 	absentGen    map[uint64]uint64 // bumped on every eviction; binds a fill to its generation
 	localBlocks  map[uint64]bool
+	// filledClean: chunks a fill wrote entirely from HEAD, with no local
+	// block and no mutation during the fill, at that chunk's version and
+	// HEAD ref. While both are unchanged the local bytes are that HEAD's, so
+	// an UNKNOWN map entry alone does not make the chunk a cut candidate.
+	// Memory only: after a restart the next cut compares them once.
+	filledClean  map[uint64]filledMark
 	presenceVer  uint64
 	savedPresVer uint64
 	dirtyVer     uint64
@@ -236,6 +242,7 @@ func attachChunkLayerImpl(s *WALStore, remote chunkRemote, cfg chunkLayerConfig)
 		absent:      map[uint64]bool{},
 		absentGen:   map[uint64]uint64{},
 		localBlocks: map[uint64]bool{},
+		filledClean: map[uint64]filledMark{},
 		closeDone:   make(chan struct{}),
 		syncDirFn:   syncDir,
 	}
@@ -415,12 +422,18 @@ func (l *chunkLayerImpl) captureCandidates() map[uint64]bool {
 				absent[idx] = true
 			}
 		}
+		filled := map[uint64]bool{}
+		for idx, m := range l.filledClean {
+			if l.chunkVersion(idx) == m.version && l.head.Chunks[idx] == m.ref {
+				filled[idx] = true
+			}
+		}
 		l.addOwnCandidatesLocked(out)
 		l.stMu.Unlock()
 		l.s.mu.RLock()
 		for idx, e := range l.s.v3.mapEntries {
 			i := uint64(idx)
-			if !absent[i] && (e.Unknown || e.LSN > base) {
+			if !absent[i] && ((e.Unknown && !filled[i]) || e.LSN > base) {
 				out[i] = true
 			}
 		}
@@ -428,6 +441,13 @@ func (l *chunkLayerImpl) captureCandidates() map[uint64]bool {
 	}
 
 	return out
+}
+
+// filledMark is a clean fill: the chunk's version and the HEAD ref it was
+// filled from.
+type filledMark struct {
+	version uint64
+	ref     chunkRef
 }
 
 // chunkVersion is chunk idx's mutation count.
@@ -446,6 +466,7 @@ func (l *chunkLayerImpl) BeforeCheckpointAdvance(lsn uint64) error {
 		l.stMu.Lock()
 		l.absent = map[uint64]bool{}
 		l.localBlocks = map[uint64]bool{}
+		l.filledClean = map[uint64]filledMark{}
 		l.presenceVer++
 		l.stMu.Unlock()
 	}
@@ -478,6 +499,11 @@ func (l *chunkLayerImpl) fillOnce(ctx context.Context, idx, gen uint64, ref chun
 	current := func() bool {
 		return l.absent[idx] && l.absentGen[idx] == gen && l.head.Chunks[idx] == ref
 	}
+	// Read with the end check's lock: a mutation bumps the version after its
+	// dirty-map insert, so one that lands during the fill changes it.
+	l.stMu.Lock()
+	version := l.chunkVersion(idx)
+	l.stMu.Unlock()
 	data, err := l.remote.Get(ctx, ref.Key)
 	if err != nil {
 		return false, fmt.Errorf("storage: chunk %d fetch: %w", idx, err)
@@ -504,6 +530,9 @@ func (l *chunkLayerImpl) fillOnce(ctx context.Context, idx, gen uint64, ref chun
 	defer l.stMu.Unlock()
 	if !current() {
 		return false, nil
+	}
+	if !l.chunkHasLocalLocked(idx) && l.chunkVersion(idx) == version {
+		l.filledClean[idx] = filledMark{version: version, ref: ref}
 	}
 	delete(l.absent, idx)
 	for i := uint64(0); i < l.chunkBlocks; i++ {
