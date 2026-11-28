@@ -131,6 +131,10 @@ func chunkFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	return fs
 }
 
+// chunkRequestBound is the server's bound on one /chunk/* request
+// (chunkstore.DefaultOpDeadline). A var only so tests can shorten it.
+var chunkRequestBound = chunkstore.DefaultOpDeadline
+
 // chunkPost sends one /chunk/* request and relays the outcome. The server
 // bounds the operation by timeoutMs; the client waits a little longer.
 func chunkPost(name, statusAddr, route string, timeout time.Duration, body map[string]any, stdout, stderr io.Writer) int {
