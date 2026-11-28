@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,8 @@ func TestRunCommit_LooksUpOnlyWhatIsNew(t *testing.T) {
 		}
 	}
 	want := []string{req.Next[3].Chunk.String(), req.Next[10004].Chunk.String()}
+	sort.Strings(pool) // the commit's lookups run concurrently: compare the set
+	sort.Strings(want)
 	if strings.Join(pool, ",") != strings.Join(want, ",") {
 		t.Fatalf("pool lookups %v; want only the new own chunks %v (not the unchanged chunk 0, not the foreign chunk 7)", pool, want)
 	}
