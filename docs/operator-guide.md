@@ -190,8 +190,10 @@ default) can expire the host's slots; keep host clocks synchronized.
 - **What does not publish:** a stop, a lease revocation and a lease expiry publish nothing. Only a cut, a snapshot or
   a seal (`ops chunk detach --plain`) does.
 - **When SeaweedFS is unavailable** (the filer or a volume server is down):
-  - Guest I/O continues from the local disk; in the tests no guest command failed and the slowest answered in about 2 s.
-  - A cut in progress answers `remote_unavailable` (retryable) after about 30 s; no write the guest flushed is lost.
+  - Guest I/O continues from the local disk; in the tests no guest command failed, and every answer came within the
+    test's 20 s bound (about 2 s at the slowest in the one measured run; that run's record was not kept).
+  - A cut in progress answers `remote_unavailable` (retryable) after about 30 s, the deadline of each chunk upload; no
+    write the guest flushed is lost.
   - The next cut after the store returns commits normally and publishes everything written meanwhile.
   - A cut holds copy-on-write data on the local disk up to at most half of `--host-limit-cow-bytes` (1 GiB by
     default). A larger dirty set is uploaded before the cut point is fixed, so during a store outage such a cut fails
@@ -301,9 +303,11 @@ acts. The limits, as they show on a running system:
   needed a rebuild.
   - **Wipe and add again (not a tested procedure in this preview):** first confirm from the primary's status which
     server is the left-out replica; never run this on the primary's host. On the replica's host, stop its `blockvolume`
-    unit, remove only that volume's own files from its `--durable-root` (`<vol>.bin`, every `<vol>.bin.*`,
-  `<vol>.replica-floor` and `<vol>.epoch-table`, where `<vol>` is the volume id; other files there may belong to other
-  volumes), and start the unit again with the same flags. It then
+    unit, and remove that volume's data files from its `--durable-root`: `<vol>.bin`, every `<vol>.bin.*` and
+  `<vol>.epoch-table`, where `<vol>` is the volume id. This needs a `--durable-root` that holds this volume only (a
+  dedicated directory per replica): in a shared root those names can match another volume's files, so do not use
+  this repair there. Keep `<vol>.replica-floor` (an authority fence; keeping it only refuses more). Then start the
+  unit again with the same flags. It then
     starts empty and takes a full rebuild from the primary; until that ends, the primary's status lists it as not
     healthy, and the volume keeps serving while the remaining replicas meet the ack mode.
   - **If the re-add stops midway** (the rebuild is interrupted), the replica refuses every later rebuild: wipe it
@@ -388,7 +392,7 @@ What the guest sees:
   after 464 s, about kato + 90 × (2 s + the connect timeout).
 - **Kernel defaults** (`ctrl_loss_tmo` 600 s, `reconnect_delay` 10 s: 60 attempts; every connect command shipped
   today, including the CSI node): a target that does not come back holds I/O for about 600 s when its host refuses
-  the connection (a 9-minute blocked read was observed in a fault run), and for about 60 × (10 s + 3 s), some 13
+  the connection (in one fault run two reads blocked for 552 s and 614 s, about 9 and 10 minutes, then failed with `EIO`), and for about 60 × (10 s + 3 s), some 13
   minutes, when its host is unreachable (derived from the attempt count and the per-attempt connect timeout
   measured above; not run).
 - **Too short** (`--ctrl-loss-tmo` or `--fast_io_fail_tmo` below the wait): I/O errors reach the filesystem before
