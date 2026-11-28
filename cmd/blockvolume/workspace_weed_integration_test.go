@@ -135,8 +135,14 @@ type w4WeedOpts struct {
 // fresh ports. A port pair is checked free and then released before weed
 // binds it; another process on the host (a concurrent job on a shared
 // runner) can take it in between, and a server then cannot reach another's
-// gRPC port.
+// gRPC port. Each server's pair is picked just before that server starts,
+// which keeps that window short.
 var weedStarts = 3
+
+// w4ServerStarted, when set, runs after each weed server of a start is
+// launched (role "master", "volume", "filer"); a test uses it to act
+// between two servers' starts.
+var w4ServerStarted func(role string)
 
 func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedCluster {
 	t.Helper()
@@ -144,10 +150,9 @@ func startWorkspaceWeedWith(t *testing.T, dir string, o w4WeedOpts) *w4WeedClust
 	if weed == "" {
 		t.Skip("CHUNKSTORE_WEED not set")
 	}
+	// A fault-injection front is built again for each start, on that
+	// start's ports (o.FilerFront runs once the filer listens).
 	starts := weedStarts
-	if o.FilerFront != nil {
-		starts = 1 // a fault-injection front is wired to one cluster only
-	}
 	for attempt := 1; ; attempt++ {
 		at := dir
 		if attempt > 1 {
@@ -190,17 +195,18 @@ func startWorkspaceWeedOnce(t *testing.T, dir, weed string, o w4WeedOpts) (*w4We
 		t.Fatal(err)
 	}
 	used := map[int]bool{}
-	mp, vp, fp := w4PickPortPair(t, used, "master"), w4PickPortPair(t, used, "volume"), w4PickPortPair(t, used, "filer")
+	mp := w4PickPortPair(t, used, "master")
 	c := &w4WeedCluster{
-		master:    fmt.Sprintf("%s:%d", testListenHost(), mp),
-		filerHTTP: fmt.Sprintf("%s:%d", testListenHost(), fp),
-		filerGRPC: fmt.Sprintf("%s:%d", testListenHost(), fp+10000),
-		dir:       dir,
-		weed:      weed,
+		master: fmt.Sprintf("%s:%d", testListenHost(), mp),
+		dir:    dir,
+		weed:   weed,
 	}
 	c.procs = map[string]*w4WeedProc{}
 	run := func(name string, args ...string) {
 		c.startProc(t, name, args...)
+		if w4ServerStarted != nil {
+			defer w4ServerStarted(name)
+		}
 		t.Cleanup(func() {
 			p := c.procs[name]
 			if !c.stopProcWithin(name, 5*time.Second) {
@@ -225,7 +231,11 @@ func startWorkspaceWeedOnce(t *testing.T, dir, weed string, o w4WeedOpts) (*w4We
 	if err := w4ListeningWithin(c.master, 20*time.Second); err != nil {
 		return c, err
 	}
+	vp := w4PickPortPair(t, used, "volume")
 	run("volume", "volume", "-ip="+testListenHost(), fmt.Sprintf("-port=%d", vp), "-dir="+filepath.Join(dir, "v"), "-master="+c.master, fmt.Sprintf("-max=%d", o.VolumeMax))
+	fp := w4PickPortPair(t, used, "filer")
+	c.filerHTTP = fmt.Sprintf("%s:%d", testListenHost(), fp)
+	c.filerGRPC = fmt.Sprintf("%s:%d", testListenHost(), fp+10000)
 	filerArgs := []string{"filer", "-ip=" + testListenHost(), fmt.Sprintf("-port=%d", fp), "-master=" + c.master, "-defaultStoreDir=" + filepath.Join(dir, "f")}
 	if o.FilerBind != "" {
 		filerArgs = append(filerArgs, "-ip.bind="+o.FilerBind)
