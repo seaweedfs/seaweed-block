@@ -405,6 +405,39 @@ func TestChunkDetachStillUnknownAtTheTimeoutSaysTheVolumeIsStopped(t *testing.T)
 	}
 }
 
+// INV-CLI-CHUNK-LOOP-001: an outcome_unknown answer is repeated even when it is not marked retryable.
+func TestChunkLoopRepeatsAnOutcomeUnknownNotMarkedRetryable(t *testing.T) {
+	shortLoop(t, 200*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond)
+	unknown := `{"code":"outcome_unknown","message":"storage: chunk HEAD CAS outcome unknown","retryable":false}`
+	s := &scripted{replies: []scriptedReply{{503, unknown}, {200, published}}}
+	srv := s.start(t)
+	code, out, errs := runChunk("snapshot", "--volume", "v1", "--status-addr", srv.URL, "--name", "s1", "--request-id", "rid-1", "--timeout", "5s")
+	if code != 0 || out != published || len(s.recorded()) != 2 {
+		t.Fatalf("exit %d stdout %q stderr %q, %d requests: want the unknown answer repeated and the second answer relayed", code, out, errs, len(s.recorded()))
+	}
+}
+
+// INV-CLI-CHUNK-LOOP-001: a non-positive --timeout is refused before any request, for snapshot, cut and detach.
+func TestChunkNonPositiveTimeoutIsRefused(t *testing.T) {
+	s := &scripted{replies: []scriptedReply{{200, published}}}
+	srv := s.start(t)
+	for _, cmd := range [][]string{
+		{"snapshot", "--volume", "v1", "--status-addr", srv.URL, "--name", "s1", "--request-id", "rid-1"},
+		{"cut", "--volume", "v1", "--status-addr", srv.URL},
+		{"detach", "--volume", "v1", "--status-addr", srv.URL},
+	} {
+		for _, tmo := range []string{"0s", "-1s"} {
+			code, out, _ := runChunk(append(cmd, "--timeout", tmo)...)
+			if code == 0 || !strings.Contains(out, `"code":"bad_request"`) {
+				t.Fatalf("%s --timeout %s: exit %d stdout %q, want a bad_request refusal", cmd[0], tmo, code, out)
+			}
+		}
+	}
+	if n := len(s.recorded()); n != 0 {
+		t.Fatalf("%d requests sent for a non-positive --timeout, want none", n)
+	}
+}
+
 // The detach's --timeout help says a long bound can mean a long guest stop.
 func TestChunkDetachTimeoutHelpNamesTheGuestStop(t *testing.T) {
 	_, _, errs := runChunk("detach", "-h")

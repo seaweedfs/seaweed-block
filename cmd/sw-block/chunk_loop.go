@@ -66,6 +66,9 @@ func chunkReadBound() time.Duration { return min(2*time.Second, chunkRequestBoun
 // says so, and a repeat answers from the settled HEAD. A timeout within the
 // bound sends exactly one request, as before.
 func chunkPostLoop(name, statusAddr, route string, timeout time.Duration, body map[string]any, stdout, stderr io.Writer) int {
+	if timeout <= 0 { // INV-CLI-CHUNK-LOOP-001: a non-positive --timeout is refused, never sent as the server's default
+		return chunkFail(name, stdout, stderr, ops.VolumeStatusExitInvalid, codeBadRequestCLI, "--timeout must be positive", false)
+	}
 	if timeout <= chunkRequestBound {
 		return chunkPost(name, statusAddr, route, timeout, body, stdout, stderr)
 	}
@@ -104,7 +107,9 @@ func chunkPostLoop(name, statusAddr, route string, timeout time.Duration, body m
 		var out, errb bytes.Buffer
 		code := chunkPostUntil(name, statusAddr, route, per, sent.Add(per+cushion), body, &out, &errb)
 		var e chunkErrBody
-		retry := code != ops.VolumeStatusExitOK && json.Unmarshal(out.Bytes(), &e) == nil && e.Code != "" && e.Retryable
+		// repeated only after a retryable or outcome_unknown answer (INV-CLI-CHUNK-LOOP-001)
+		retry := code != ops.VolumeStatusExitOK && json.Unmarshal(out.Bytes(), &e) == nil && e.Code != "" &&
+			(e.Retryable || e.Code == chunkstore.CodeOutcomeUnknown)
 		if !retry {
 			return relay(code, &out, &errb) // an answer, or a refusal a repeat cannot change
 		}
