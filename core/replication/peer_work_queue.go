@@ -65,6 +65,10 @@ type peerWorkQueue struct {
 	mu          sync.Mutex
 	closed      bool
 	terminalErr error
+	// lastWriteLSN is the highest LSN this queue has taken for shipping;
+	// lagPending marks a lag check in flight (at most one per queue).
+	lastWriteLSN uint64
+	lagPending   bool
 }
 
 func newPeerWorkQueue(peer *ReplicaPeer, depth int) *peerWorkQueue {
@@ -143,6 +147,37 @@ func (q *peerWorkQueue) tryLearnStore(result chan<- peerWorkResult) bool {
 	}
 }
 
+// tryLagCheck queues, without blocking and only when there is room, a
+// barrier at the highest LSN this queue has taken for shipping. The queue's
+// one worker runs it after every earlier write, so a replica that answers
+// below it really missed entries, and the barrier op degrades the peer
+// (ErrBarrierBelowTargetLSN); a barrier with no answer at all (a connection
+// that died silently) fails at the transport's receive deadline and
+// degrades it too. Either way the existing probe and catch-up path takes
+// over. At most one check per queue is in flight; nothing to compare
+// (no write yet) or a full or closed queue skips it.
+func (q *peerWorkQueue) tryLagCheck() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed || q.lagPending || q.lastWriteLSN == 0 {
+		return false
+	}
+	result := make(chan peerWorkResult, 1)
+	select {
+	case q.jobs <- peerWork{kind: peerWorkBarrier, targetLSN: q.lastWriteLSN, result: result}:
+	default:
+		return false
+	}
+	q.lagPending = true
+	go func() {
+		<-result // completed by the worker, or failed when the queue closes
+		q.mu.Lock()
+		q.lagPending = false
+		q.mu.Unlock()
+	}()
+	return true
+}
+
 func (q *peerWorkQueue) enqueue(work peerWork) (int, error) {
 	q.mu.Lock()
 	if q.closed {
@@ -152,6 +187,9 @@ func (q *peerWorkQueue) enqueue(work peerWork) (int, error) {
 	}
 	select {
 	case q.jobs <- work:
+		if work.kind == peerWorkWrite && work.write.LSN > q.lastWriteLSN {
+			q.lastWriteLSN = work.write.LSN
+		}
 		depth := len(q.jobs)
 		q.mu.Unlock()
 		return depth, nil

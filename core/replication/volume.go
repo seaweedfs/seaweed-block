@@ -146,6 +146,10 @@ type ReplicationVolume struct {
 	probeLoop   *ProbeLoop
 	probeCfg    ProbeLoopConfig // remembered for SetProbeCooldownConfig push-down on UpdateReplicaSet
 	probeCfgSet bool            // true after ConfigureProbeLoop succeeds
+	// The healthy-peer lag check runs beside the probe loop, on its
+	// interval: started by StartProbeLoop, stopped with it in Close.
+	lagStop chan struct{}
+	lagDone chan struct{}
 
 	// Peer-lifecycle hook. Optional pair of callbacks invoked from
 	// UpdateReplicaSet on peer add / remove (including the
@@ -1087,6 +1091,7 @@ func (v *ReplicationVolume) Close() error {
 	if loop != nil {
 		loop.Stop()
 	}
+	v.stopLagCheck()
 
 	v.mu.Lock()
 	if v.closed {
@@ -1452,7 +1457,71 @@ func (v *ReplicationVolume) StartProbeLoop() error {
 	if loop == nil {
 		return fmt.Errorf("replication: StartProbeLoop: volume %s probe loop not configured", v.volumeID)
 	}
-	return loop.Start()
+	if err := loop.Start(); err != nil {
+		return err
+	}
+	v.startLagCheck()
+	return nil
+}
+
+// startLagCheck starts the healthy-peer lag check once, on the probe
+// interval. The probe loop works only on peers that are not healthy; a
+// healthy peer whose connection died silently is otherwise noticed only by
+// a later write that fails, and best-effort runs no barrier per write.
+func (v *ReplicationVolume) startLagCheck() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed || v.lagStop != nil || v.probeCfg.Interval <= 0 {
+		return
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	v.lagStop, v.lagDone = stop, done
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(v.probeCfg.Interval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				v.checkHealthyPeersLag()
+			}
+		}
+	}()
+}
+
+// checkHealthyPeersLag asks every healthy peer, through its own queue and
+// without blocking any writer, whether it holds what was shipped to it
+// (peerWorkQueue.tryLagCheck); a gap or no answer degrades the peer.
+func (v *ReplicationVolume) checkHealthyPeersLag() {
+	v.mu.Lock()
+	if v.closed {
+		v.mu.Unlock()
+		return
+	}
+	queues := make([]*peerWorkQueue, 0, len(v.peers))
+	for id, p := range v.peers {
+		if q := v.peerQueues[id]; q != nil && p.State() == ReplicaHealthy {
+			queues = append(queues, q)
+		}
+	}
+	v.mu.Unlock()
+	for _, q := range queues {
+		q.tryLagCheck()
+	}
+}
+
+// stopLagCheck stops the lag check and waits for it (Close, before peers go).
+func (v *ReplicationVolume) stopLagCheck() {
+	v.mu.Lock()
+	stop, done := v.lagStop, v.lagDone
+	v.lagStop = nil
+	v.mu.Unlock()
+	if stop != nil {
+		close(stop)
+		<-done
+	}
 }
 
 // ConfigurePeerLifecycleHook registers callbacks invoked from

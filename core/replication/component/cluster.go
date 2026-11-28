@@ -101,17 +101,18 @@ type PrimaryStorageWrap func(inner storage.LogicalStorage) storage.LogicalStorag
 // Authored as a builder: NewCluster → WithReplicas → Start →
 // scenario primitives → assertions → t.Cleanup handles teardown.
 type Cluster struct {
-	t              *testing.T
-	dir            string
-	factory        SubstrateFactory
-	blocks         uint32
-	blockSize      int
-	replicaN       int
-	primaryWrap    PrimaryStorageWrap // optional substrate wrap; nil = no wrap
-	withLiveShip   bool               // if true, primary spins up StorageBackend + ReplicationVolume
-	engineRecovery bool               // engine-driven recovery hook; see WithEngineDrivenRecovery
-	withApplyGate  bool               // install replication.ReplicaApplyGate on each replica's listener
-	dualLane       bool               // route StartRebuild via core/recovery PrimaryBridge
+	t               *testing.T
+	dir             string
+	factory         SubstrateFactory
+	blocks          uint32
+	blockSize       int
+	replicaN        int
+	primaryWrap     PrimaryStorageWrap // optional substrate wrap; nil = no wrap
+	withLiveShip    bool               // if true, primary spins up StorageBackend + ReplicationVolume
+	engineRecovery  bool               // engine-driven recovery hook; see WithEngineDrivenRecovery
+	withApplyGate   bool               // install replication.ReplicaApplyGate on each replica's listener
+	withSilentProxy bool               // put a SilentProxy between the primary and each replica
+	dualLane        bool               // route StartRebuild via core/recovery PrimaryBridge
 
 	// Per-volume coordinator + per-replica dual-lane listeners
 	// populated by Start() when dualLane=true. Tests can inspect
@@ -171,6 +172,10 @@ type ReplicaNode struct {
 
 	// ApplyGate is non-nil iff cluster was built WithApplyGate.
 	ApplyGate *replication.ReplicaApplyGate
+
+	// Proxy is non-nil iff the cluster was built WithSilentProxy: the
+	// primary reaches this replica only through it (Addr is its address).
+	Proxy *SilentProxy
 
 	cleanup func()
 }
@@ -239,6 +244,13 @@ func (c *Cluster) WithLiveShip() *Cluster {
 // (preserves the simpler scenario behavior).
 func (c *Cluster) WithApplyGate() *Cluster {
 	c.withApplyGate = true
+	return c
+}
+
+// WithSilentProxy routes the primary to each replica through a SilentProxy,
+// so a test can make a live connection die without FIN or RST.
+func (c *Cluster) WithSilentProxy() *Cluster {
+	c.withSilentProxy = true
 	return c
 }
 
@@ -424,6 +436,15 @@ func (c *Cluster) Start() *Cluster {
 			DualLaneAddr: dualLaneAddr,
 			ApplyGate:    gate,
 			cleanup:      nodeCleanup,
+		}
+		if c.withSilentProxy {
+			proxy, perr := NewSilentProxy(listener.Addr())
+			if perr != nil {
+				nodeCleanup()
+				c.t.Fatalf("%s: silent proxy: %v", label, perr)
+			}
+			node.Proxy, node.Addr = proxy, proxy.Addr()
+			node.cleanup = func() { proxy.Close(); nodeCleanup() }
 		}
 		// Register replica cleanup FIRST so it runs LAST in LIFO.
 		c.t.Cleanup(node.cleanup)
