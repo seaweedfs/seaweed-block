@@ -81,3 +81,25 @@ func TestCommitRefusesWhenOneOfManyNewChunksIsNotPrepared(t *testing.T) {
 		t.Fatalf("HEAD changed by a refused commit: %+v", *st.h)
 	}
 }
+
+// A detach publishes through the same commit: its detaching commit of a
+// large proposal must also land inside the cut's budget, or the volume can
+// be neither detached nor sealed for delete. Same scale as above, with the
+// commit carrying the detached state.
+func TestADetachingCommitOfManyNewChunksCompletesWithinTheBudget(t *testing.T) {
+	f, st, req := firstCommitOf(t, 6000, "s1")
+	req.State, req.Snapshot = StateDetached, ""
+	slow := &slowObjects{memObjects: f, delay: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	got, err := RunCommit(ctx, st, slow, "v1", me, req)
+	if err != nil {
+		t.Fatalf("detaching commit of 6000 new chunks: %v", err)
+	}
+	if got.State != StateDetached || got.Activity.Kind != ActIdle || got.Current == nil || got.Position != req.Position {
+		t.Fatalf("HEAD after the detaching commit: %+v; want detached, idle, at position %d", got, req.Position)
+	}
+	if slow.stats < 6000 {
+		t.Fatalf("only %d lookups for 6000 new chunks", slow.stats)
+	}
+}
