@@ -172,3 +172,28 @@ func TestStalledCutYieldsSessionToCleaning(t *testing.T) {
 		})
 	}
 }
+
+func TestCleaningNotDelayedForCleanOrAutomaticCutsDisabled(t *testing.T) {
+	for _, automatic := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			var layer storage.ChunkLayer = &progressLoopLayer{} // clean start
+			if !automatic {
+				layer = &yieldingLayer{}
+			} // dirty, but no automatic cut configured
+			var cleaned atomic.Int32
+			p := &DurableProvider{cfg: ProviderConfig{ChunkMaintenanceInterval: time.Millisecond, ChunkMaintenance: func(context.Context, string) error { cleaned.Add(1); return nil }}}
+			if automatic {
+				p.cfg.ChunkCaptureInterval = time.Hour
+			}
+			go p.chunkBackground(ctx, cancel, "ordinary", layer, done, func() bool { return true }, nil, nil, nil)
+			defer func() { cancel(); <-done }()
+			time.Sleep(2 * time.Millisecond)
+			synctest.Wait()
+			if cleaned.Load() == 0 {
+				t.Fatal("ordinary cleaning schedule was delayed")
+			}
+		})
+	}
+}
