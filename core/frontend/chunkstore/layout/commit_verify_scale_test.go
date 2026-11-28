@@ -44,8 +44,9 @@ func firstCommitOf(t *testing.T, n int, session string) (*memObjects, *memHead, 
 }
 
 // A commit's check that every new chunk is this session's must not grow
-// with the volume in serial filer round trips: a 1 TiB first snapshot names
-// about 262k chunks, and one lookup each, one at a time, outlasted the
+// with the changed data in serial filer round trips: a 1 TiB volume's
+// snapshot named about 17k changed chunks, and one lookup each, one at a
+// time, outlasted the
 // cut's whole budget, on every retry. Here 6000 chunks at 1 ms a lookup
 // take 6 s in series and must commit within a 2 s context.
 func TestCommitVerifiesManyNewChunksWithinTheBudget(t *testing.T) {
