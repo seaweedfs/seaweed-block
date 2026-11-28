@@ -196,6 +196,10 @@ refuses the next step. Resolve snapshot dependents and rerun with the same reque
 the command asks blockmaster for a fresh no-live-lease proof before the HEAD compare-and-swap.
 A late upload by a dead holder into a deleted volume can remain; rerun volume-delete to sweep it.
 
+Deleting a restore target: its first cut compares every restored chunk locally (about 1.5 GB/s measured), so pass
+`--timeout` of at least 2 x (size / 1.5 GB/s), e.g. 6m for 256 GiB; the default 120 s covers up to about 84 GiB.
+An `outcome_unknown` answer there means retry with a larger `--timeout`; the volume keeps serving and nothing is lost.
+
 
 [Standalone deployment: snapshots, restore and space](standalone-deployment.md#snapshots-restore-and-space-walstore-chunk):
 - scheduled and manual snapshots;
