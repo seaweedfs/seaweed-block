@@ -664,11 +664,12 @@ func (r *closeBoundRemote) Abort() { r.ChunkRemote.Abort() }
 
 // Cut scheduler constants (B9 W3 ruling).
 const (
-	chunkSchedulePoll  = 100 * time.Millisecond
-	chunkCutMinSpacing = time.Second
-	chunkCutBackoffMin = time.Second
-	chunkCutBackoffMax = 30 * time.Second
-	chunkSlotDelayMax  = 200 * time.Millisecond
+	chunkSchedulePoll      = 100 * time.Millisecond
+	chunkCutMinSpacing     = time.Second
+	chunkCutBackoffMin     = time.Second
+	chunkCutBackoffMax     = 30 * time.Second
+	chunkSlotDelayMax      = 200 * time.Millisecond
+	chunkZeroProgressLimit = 3 // yield an unfinished session to cleaning after this many stalled attempts
 )
 
 // cutPolicy decides when an automatic cut is due. The remote holds
@@ -836,7 +837,7 @@ func initialCutSchedule(volumeID string, interval time.Duration, now time.Time, 
 // cut (not a healthy primary of this lineage, BASE install) is expected
 // and logged only when it is something else. A fenced layer can never
 // publish again: the loop ends.
-func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, done chan struct{}, wait *cutWaitSlot) {
+func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, done chan struct{}, wait *cutWaitSlot, attempted func(storage.ChunkLayerStats, storage.ChunkLayerStats, error)) {
 	defer close(done)
 	pol := cutPolicy{
 		interval:   p.cfg.ChunkCaptureInterval,
@@ -883,6 +884,9 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 				trace("cut", ls.LastCutNs, skipped)
 			}
 			if skipped {
+				if attempted != nil {
+					attempted(ls, layer.Stats(), nil)
+				}
 				cancel()
 				continue
 			}
@@ -894,6 +898,9 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 		}
 		cancel()
 		after := layer.Stats()
+		if attempted != nil {
+			attempted(ls, after, err)
+		}
 		s = pol.afterStaging(s, start, time.Now(), err, after.CutSeq, after.StagedChunks-ls.StagedChunks)
 		wait.record(s)
 		if err != nil && !errors.Is(err, storage.ErrChunkCaptureRefused) && ctx.Err() == nil {
@@ -909,25 +916,60 @@ func (p *DurableProvider) chunkLoop(ctx context.Context, volumeID string, layer 
 // chunkBackground owns both workers and their cancellation. A fence is observed
 // even while either worker is waiting on a cooperative remote call. INV-MAINT-JOIN:
 // done closes only after every admitted worker has returned.
-func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool, snapshots *snapshotSlot, cutWait *cutWaitSlot, kick <-chan struct{}) {
+func (p *DurableProvider) chunkBackground(ctx context.Context, cancel context.CancelFunc, volumeID string, layer storage.ChunkLayer, done chan struct{}, current func() bool, snapshots *snapshotSlot, cutWait *cutWaitSlot, kick chan struct{}) {
 	defer close(done)
 	defer cancel()
 	var workers sync.WaitGroup
+	// Both background publishers share this in-process stall count. The layer
+	// rechecks its counters under its capture lock before discarding anything.
+	var attemptMu sync.Mutex
+	var first sync.Once
+	firstAttempt := make(chan struct{})
+	zeroProgress := 0
+	if p.cfg.ChunkCaptureInterval <= 0 || layer.Stats().DirtyChunks == 0 {
+		first.Do(func() { close(firstAttempt) })
+	}
+	attempted := func(before, after storage.ChunkLayerStats, err error) {
+		attemptMu.Lock()
+		defer attemptMu.Unlock()
+		first.Do(func() { close(firstAttempt) })
+		if err == nil || after.StagedChunks > before.StagedChunks || after.CutSeq != before.CutSeq {
+			zeroProgress = 0
+			return
+		}
+		if errors.Is(err, hostlimit.ErrSlotsHeld) {
+			return
+		} // no attempt ran
+		zeroProgress++
+		if zeroProgress < chunkZeroProgressLimit || p.cfg.ChunkMaintenance == nil {
+			return
+		}
+		if drop, ok := layer.(storage.ChunkStagedDiscarder); ok && drop.DiscardStagedIfUnchanged(after.StagedChunks, after.CutSeq) {
+			zeroProgress = 0
+			select {
+			case kick <- struct{}{}:
+			default:
+			}
+		}
+	}
 	if p.cfg.ChunkCaptureInterval > 0 {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			cutDone := make(chan struct{})
-			p.chunkLoop(ctx, volumeID, layer, cutDone, cutWait)
+			p.chunkLoop(ctx, volumeID, layer, cutDone, cutWait, attempted)
 		}()
 	}
 	if p.cfg.ChunkMaintenanceInterval > 0 && p.cfg.ChunkMaintenance != nil {
 		workers.Add(1)
-		go func() { defer workers.Done(); p.chunkMaintenanceLoop(ctx, volumeID, layer, current, kick) }()
+		go func() {
+			defer workers.Done()
+			p.chunkMaintenanceLoop(ctx, volumeID, layer, current, kick, firstAttempt)
+		}()
 	}
 	if snapshots != nil {
 		workers.Add(1)
-		go func() { defer workers.Done(); p.chunkSnapshotLoop(ctx, volumeID, layer, current, snapshots) }()
+		go func() { defer workers.Done(); p.chunkSnapshotLoop(ctx, volumeID, layer, current, snapshots, attempted) }()
 	}
 	timer := time.NewTicker(chunkSchedulePoll)
 	defer timer.Stop()
@@ -980,7 +1022,7 @@ func (p *DurableProvider) KickMaintenance(volumeID string) bool {
 	return true
 }
 
-func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, kick <-chan struct{}) {
+func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, kick <-chan struct{}, firstAttempt <-chan struct{}) {
 	interval := p.cfg.ChunkMaintenanceInterval
 	due := time.Now().Add(interval)
 	if p.cfg.ChunkStagger {
@@ -1002,6 +1044,14 @@ func (p *DurableProvider) chunkMaintenanceLoop(ctx context.Context, volumeID str
 				default:
 				}
 			}
+		}
+		if firstAttempt != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-firstAttempt:
+			}
+			firstAttempt = nil
 		}
 		if ctx.Err() != nil || layer.Fenced() {
 			return

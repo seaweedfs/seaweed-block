@@ -61,7 +61,7 @@ func runLoop(t *testing.T, p *DurableProvider, kick chan struct{}) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		p.chunkMaintenanceLoop(ctx, "v1", maintenanceStubLayer{}, func() bool { return true }, kick)
+		p.chunkMaintenanceLoop(ctx, "v1", maintenanceStubLayer{}, func() bool { return true }, kick, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
