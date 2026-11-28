@@ -5,21 +5,22 @@ package storage
 // contract types single-sourced in chunk_seam.go.
 
 type (
-	ChunkRemote       = chunkRemote
-	ChunkHead         = chunkHead
-	ChunkHeadVersion  = chunkHeadVersion
-	ChunkRef          = chunkRef
-	ChunkBitmapStore  = chunkBitmapStore
-	ChunkBitmapHeader = chunkBitmapHeader
-	ChunkBaseState    = chunkBaseState
-	ChunkDelta        = chunkDelta
-	ChunkLayerConfig  = chunkLayerConfig
-	ChunkLayer        = chunkLayer
-	ChunkCutResult    = chunkCutResult
-	ChunkCutStats     = chunkCutStats
-	ChunkLayerStats   = chunkLayerStats
-	ChunkDetachedBy   = chunkDetachedBy
-	DetachSettlement  = detachSettlement
+	ChunkRemote        = chunkRemote
+	ChunkCommitChecker = chunkCommitChecker
+	ChunkHead          = chunkHead
+	ChunkHeadVersion   = chunkHeadVersion
+	ChunkRef           = chunkRef
+	ChunkBitmapStore   = chunkBitmapStore
+	ChunkBitmapHeader  = chunkBitmapHeader
+	ChunkBaseState     = chunkBaseState
+	ChunkDelta         = chunkDelta
+	ChunkLayerConfig   = chunkLayerConfig
+	ChunkLayer         = chunkLayer
+	ChunkCutResult     = chunkCutResult
+	ChunkCutStats      = chunkCutStats
+	ChunkLayerStats    = chunkLayerStats
+	ChunkDetachedBy    = chunkDetachedBy
+	DetachSettlement   = detachSettlement
 )
 
 // How a failed Detach ended (ChunkLayer.SettleDetach).

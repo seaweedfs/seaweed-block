@@ -1051,6 +1051,18 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		persistCapturedMap(capturedVersions)
 		return chunkCutResult{H: h, Head: copyHead(cur), Noop: true, FullHash: all}, nil
 	}
+	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
+	// The commit's object check runs here, with the cut's budget: inside the
+	// CAS it would share the 2 s HEAD update. A lookup failure writes nothing
+	// and leaves the session open; the dirty set returns for the next cut. A
+	// precondition or fence goes on to the CAS, which answers it from HEAD
+	// (before any lookup) and resolves it as without the check.
+	if c, ok := l.remote.(chunkCommitChecker); ok {
+		if err := c.CheckCommit(ctx, expected, next); err != nil && !errors.Is(err, errChunkHeadPrecondition) && !errors.Is(err, errChunkLayerFenced) {
+			l.requeueCut(all)
+			return chunkCutResult{}, fmt.Errorf("storage: commit check: %w: %w", errChunkRemoteUnavailable, err)
+		}
+	}
 	if err := l.admit(); err != nil { // admission re-checked right before the CAS
 		l.requeueCut(all)
 		return chunkCutResult{}, err
@@ -1063,7 +1075,6 @@ func (l *chunkLayerImpl) captureLocked(ctx context.Context, detach bool) (res ch
 		l.abortCOW(errChunkLayerFenced)
 		return chunkCutResult{}, errChunkLayerFenced
 	}
-	expected := chunkHeadVersion{Gen: baseHead.Gen, Epoch: baseHead.Epoch}
 	casStart := time.Now()
 	gen, casErr := casAndConfirmChunkHeadMeasured(ctx, l.remote, expected, next, &st)
 	st.CASNs = time.Since(casStart).Nanoseconds()

@@ -47,6 +47,16 @@ type CommitRequest struct {
 	Snapshot string       // "" = no named snapshot
 	Meta     SnapshotMeta // the new snapshot's retention facts
 	State    string       // StateLive, or StateDetached for the final synced image
+	// ObjectsChecked says CheckCommitObjects passed for this request's
+	// session and root, in the same open session: RunCommit then skips the
+	// object lookups. The caller keys it to exactly (session, root).
+	ObjectsChecked bool
+}
+
+// CommitRoot is the root a commit of next names.
+func CommitRoot(next map[uint64]Ref) (RootName, error) {
+	root, _, err := rootOf(next)
+	return root, err
 }
 
 // rootOf names the root of a manifest.
@@ -168,53 +178,75 @@ func RunCommit(ctx context.Context, st HeadStore, os ObjectStore, vol string, me
 		return Head{}, err
 	}
 	return runTransition(ctx, st, func(h Head) (Head, bool, error) {
-		if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State); err != nil || !changed {
-			return next, changed, err // refused, or already applied: no lookups
+		return commitChecked(ctx, h, os, vol, me, req, root, segs, !req.ObjectsChecked)
+	})
+}
+
+// CheckCommitObjects runs RunCommit's checks of req against h, the object
+// lookups included, without the update. It is run in the open session after
+// its last upload, with the caller's budget rather than the HEAD update's:
+// no cleaning can begin while the session is open, so what it found holds
+// until that session's commit. A commit already applied passes.
+func CheckCommitObjects(ctx context.Context, h Head, os ObjectStore, vol string, me HolderID, req CommitRequest) error {
+	root, segs, err := rootOf(req.Next)
+	if err != nil {
+		return err
+	}
+	_, _, err = commitChecked(ctx, h, os, vol, me, req, root, segs, true)
+	return err
+}
+
+// commitChecked is the commit of req against h after its checks; lookups
+// says whether the object lookups run.
+func commitChecked(ctx context.Context, h Head, os ObjectStore, vol string, me HolderID, req CommitRequest, root RootName, segs map[SegName][]byte, lookups bool) (Head, bool, error) {
+	if next, changed, err := h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State); err != nil || !changed {
+		return next, changed, err // refused, or already applied: no lookups
+	}
+	// The base is HEAD's current root. Before any commit there is none
+	// and the previous manifest must be empty; after one (even of an
+	// empty image, which is a real root) the previous manifest must
+	// build to it.
+	if h.Current == nil {
+		if len(req.Prev) > 0 {
+			return Head{}, false, ErrStaleBase
 		}
-		// The base is HEAD's current root. Before any commit there is none
-		// and the previous manifest must be empty; after one (even of an
-		// empty image, which is a real root) the previous manifest must
-		// build to it.
-		if h.Current == nil {
-			if len(req.Prev) > 0 {
-				return Head{}, false, ErrStaleBase
-			}
-		} else {
-			base, _, err := rootOf(req.Prev)
-			if err != nil {
-				return Head{}, false, err
-			}
-			if base != *h.Current {
-				return Head{}, false, ErrStaleBase
-			}
+	} else {
+		base, _, err := rootOf(req.Prev)
+		if err != nil {
+			return Head{}, false, err
 		}
-		if i, ok := addedForeign(vol, h.VolumeID, req.Prev, req.Next); ok {
-			return Head{}, false, fmt.Errorf("%w: index %d names %s's chunk", ErrForeignRefAdded, i, req.Next[i].Owner)
+		if base != *h.Current {
+			return Head{}, false, ErrStaleBase
 		}
-		var rels []string
-		chunks := newOwn(vol, req.Prev, req.Next)
-		idx := make([]uint64, 0, len(chunks))
-		for i := range chunks {
-			idx = append(idx, i)
-		}
-		sort.Slice(idx, func(a, b int) bool { return idx[a] < idx[b] })
-		for _, i := range idx {
-			rels = append(rels, chunks[i].Chunk.Path())
-		}
-		names := make([]SegName, 0, len(segs))
-		for n := range segs {
-			names = append(names, n)
-		}
-		sort.Slice(names, func(a, b int) bool { return names[a].Shard < names[b].Shard })
-		for _, n := range names {
-			rels = append(rels, n.Path())
-		}
-		rels = append(rels, root.Path())
+	}
+	if i, ok := addedForeign(vol, h.VolumeID, req.Prev, req.Next); ok {
+		return Head{}, false, fmt.Errorf("%w: index %d names %s's chunk", ErrForeignRefAdded, i, req.Next[i].Owner)
+	}
+	var rels []string
+	chunks := newOwn(vol, req.Prev, req.Next)
+	idx := make([]uint64, 0, len(chunks))
+	for i := range chunks {
+		idx = append(idx, i)
+	}
+	sort.Slice(idx, func(a, b int) bool { return idx[a] < idx[b] })
+	for _, i := range idx {
+		rels = append(rels, chunks[i].Chunk.Path())
+	}
+	names := make([]SegName, 0, len(segs))
+	for n := range segs {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(a, b int) bool { return names[a].Shard < names[b].Shard })
+	for _, n := range names {
+		rels = append(rels, n.Path())
+	}
+	rels = append(rels, root.Path())
+	if lookups {
 		if err := allOwnedBySession(ctx, os, rels, req.Session); err != nil {
 			return Head{}, false, err
 		}
-		return h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State)
-	})
+	}
+	return h.Commit(me, req.Session, root, req.Position, req.Snapshot, req.Meta, req.State)
 }
 
 // commitVerifyParallel bounds the object lookups one commit runs at once.

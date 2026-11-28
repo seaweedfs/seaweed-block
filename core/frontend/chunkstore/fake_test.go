@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -58,16 +59,28 @@ type fakeFiler struct {
 	stallCreate func(p string) bool
 	// afterLookup, if set, runs under the lock after a lookup of p has read
 	// its result: a change it makes is seen by the next read only.
-	afterLookup     func(p string)
+	afterLookup func(p string)
+	// slowLookup, if set, gives a lookup of p a latency, outside the lock
+	// (lookups overlap) and bounded by ctx, as a remote filer's.
+	slowLookup      func(p string) time.Duration
 	deferredCreates []deferredCreate
 }
 
 func newFakeFiler() *fakeFiler { return &fakeFiler{entries: map[string]*filerpb.Entry{}} }
 
-func (f *fakeFiler) LookupEntry(_ context.Context, dir, name string) (*filerpb.Entry, error) {
+func (f *fakeFiler) LookupEntry(ctx context.Context, dir, name string) (*filerpb.Entry, error) {
+	p := path.Join(dir, name)
+	if slow := f.slowLookup; slow != nil {
+		if d := slow(p); d > 0 {
+			select {
+			case <-time.After(d):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	p := path.Join(dir, name)
 	if f.failLookup != nil {
 		if err := f.failLookup(p); err != nil {
 			return nil, err

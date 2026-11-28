@@ -244,6 +244,14 @@ type chunkRemote interface {
 	Abort()
 }
 
+// chunkCommitChecker is a chunkRemote that checks a commit's objects (every
+// new chunk, segment and root written by this holder's session) before the
+// bounded HEAD update: CheckCommit with the cut's budget, then CASHead for
+// the same next skips that check.
+type chunkCommitChecker interface {
+	CheckCommit(ctx context.Context, expected chunkHeadVersion, next chunkHead) error
+}
+
 // validChunkKey is the chunk key domain: a non-empty, valid UTF-8 string.
 // Every remote refuses any other key at Put, before it persists anything (an
 // encoding that replaced invalid bytes would store another key than the

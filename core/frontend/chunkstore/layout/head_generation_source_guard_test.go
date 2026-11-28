@@ -36,7 +36,7 @@ func headGenerationComparisons(name string, src []byte) ([]generationSite, error
 		if name == "core/frontend/chunkstore/layout_store.go" && fn.Name.Name == "UpdateHead" {
 			continue
 		}
-		if name == "core/frontend/chunkstore/layout_remote.go" && fn.Name.Name == "CASHead" {
+		if name == "core/frontend/chunkstore/layout_remote.go" && (fn.Name.Name == "CASHead" || fn.Name.Name == "prepareCommitLocked") {
 			continue
 		}
 		aliases := map[*ast.Object]bool{}

@@ -20,9 +20,12 @@ import (
 func TestTransitions_RefuseAStaleHolder(t *testing.T) {
 	rn := RootName{Hash: Sum([]byte("r"))}
 	steps := map[string]func(Head, HolderID) error{
-		"Begin":      func(h Head, c HolderID) error { _, _, err := h.Begin(c, "s"); return err },
-		"Abort":      func(h Head, c HolderID) error { _, _, err := h.Abort(c, "s"); return err },
-		"Commit":     func(h Head, c HolderID) error { _, _, err := h.Commit(c, "s", rn, 1, "", SnapshotMeta{}, StateLive); return err },
+		"Begin": func(h Head, c HolderID) error { _, _, err := h.Begin(c, "s"); return err },
+		"Abort": func(h Head, c HolderID) error { _, _, err := h.Abort(c, "s"); return err },
+		"Commit": func(h Head, c HolderID) error {
+			_, _, err := h.Commit(c, "s", rn, 1, "", SnapshotMeta{}, StateLive)
+			return err
+		},
 		"BeginClean": func(h Head, c HolderID) error { _, _, err := h.BeginClean(c, "c"); return err },
 		"EndClean":   func(h Head, c HolderID) error { _, _, err := h.EndClean(c, "c"); return err },
 		"Claim":      func(h Head, c HolderID) error { _, _, err := h.Claim(c); return err },
@@ -97,7 +100,16 @@ func TestHolderFunctions_RefuseAStaleHolder(t *testing.T) {
 			t.Errorf("DetachedBy accepted %s", who)
 		}
 	}
-	covered := map[string]bool{"RemoveUnreachable": true, "Start": true, "startCheck": true, "DetachedBy": true}
+	// CheckCommitObjects runs commitChecked (RunCommit's body): Head.Commit
+	// refuses a stale caller before any lookup (no object store is given).
+	for who, c := range callers {
+		h := Head{Gen: 2, State: StateLive, Epoch: me.Epoch, Holder: me.Holder, ClaimID: me.ClaimID}
+		h.Activity = Activity{Kind: ActSnap, Session: "s"}
+		if err := CheckCommitObjects(context.Background(), h, nil, "v1", c, CommitRequest{Session: "s", Next: map[uint64]Ref{}, State: StateLive}); err == nil {
+			t.Errorf("CheckCommitObjects by %s over a snap(s) HEAD held by %s passed", who, me.Holder)
+		}
+	}
+	covered := map[string]bool{"RemoveUnreachable": true, "Start": true, "startCheck": true, "DetachedBy": true, "CheckCommitObjects": true, "commitChecked": true}
 	var missing []string
 	for fname, src := range packageSources(t, false) {
 		file, err := parser.ParseFile(token.NewFileSet(), fname, src, 0)
