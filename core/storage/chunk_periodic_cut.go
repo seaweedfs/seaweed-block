@@ -29,3 +29,24 @@ func (l *chunkLayerImpl) CutUnlessCutSince(ctx context.Context, seq uint64) (chu
 	r, err := l.captureLocked(ctx, false)
 	return r, false, err
 }
+
+// ChunkStagedDiscarder yields stalled uploads to cleaning. A pending publication
+// is never discarded, and progress made by another cut invalidates the request.
+type ChunkStagedDiscarder interface {
+	DiscardStagedIfUnchanged(staged, seq uint64) bool
+}
+
+func (l *chunkLayerImpl) DiscardStagedIfUnchanged(staged, seq uint64) bool {
+	if !l.capMu.TryLock() {
+		return false
+	}
+	defer l.unlockCap()
+	l.stMu.Lock()
+	safe := !l.closed && l.pending == nil && !l.fenced && l.detached == nil && l.stats.StagedChunks == staged && l.stats.CutSeq == seq
+	l.stMu.Unlock()
+	if !safe {
+		return false
+	}
+	l.discardStaged()
+	return true
+}

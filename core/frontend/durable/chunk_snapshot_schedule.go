@@ -100,6 +100,7 @@ type snapshotSchedule struct {
 	next     time.Time
 	failure  *ScheduledSnapshotFailure
 	attempts int
+	stalled  int // consecutive failed attempts without new staging
 	skipped  map[string]int64
 }
 
@@ -130,15 +131,16 @@ func (s *snapshotSchedule) record(now time.Time, err error) {
 	var skip *SnapshotSkip
 	switch {
 	case err == nil:
-		s.lastOK, s.failure, s.attempts = now, nil, 0
+		s.lastOK, s.failure, s.attempts, s.stalled = now, nil, 0, 0
 		s.next = s.slotAfter(now)
 	case errors.As(err, &skip):
 		s.skipped[skip.Reason]++
 		s.next = earlier(now.Add(snapshotRetryMax), s.slotAfter(now))
 	default:
 		s.attempts++
+		s.stalled++
 		s.failure = &ScheduledSnapshotFailure{Code: snapshotFailureCode(err), AtNs: now.UnixNano()}
-		backoff := snapshotRetryMin << min(s.attempts-1, 30)
+		backoff := snapshotRetryMin << min(s.stalled-1, 30)
 		if backoff > snapshotRetryMax || backoff <= 0 {
 			backoff = snapshotRetryMax
 		}
@@ -218,7 +220,7 @@ func (sl *snapshotSlot) record(now time.Time, err error) {
 // the snapshot record. An attempt cut short by the loop's own end is not
 // recorded. chunkBackground joins it with its other workers
 // (INV-MAINT-JOIN).
-func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, slot *snapshotSlot) {
+func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string, layer storage.ChunkLayer, current func() bool, slot *snapshotSlot, attempted func(storage.ChunkLayerStats, storage.ChunkLayerStats, error)) {
 	timer := time.NewTimer(time.Until(slot.due()))
 	defer timer.Stop()
 	timeout := 2 * p.cfg.ChunkCutTimeout
@@ -239,6 +241,7 @@ func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string
 			return
 		}
 		at := time.Now()
+		before := layer.Stats()
 		var err error
 		if layer.Stats().AbsentChunks > 0 {
 			// Restoring: HEAD names chunks this volume has not fetched yet.
@@ -251,7 +254,17 @@ func (p *DurableProvider) chunkSnapshotLoop(ctx context.Context, volumeID string
 		if ctx.Err() != nil {
 			return
 		}
+		after := layer.Stats()
+		if attempted != nil {
+			attempted(before, after, err)
+		}
 		slot.record(time.Now(), err)
+		if err != nil && after.StagedChunks > before.StagedChunks {
+			slot.mu.Lock()
+			slot.s.next = time.Now()
+			slot.s.stalled = 0 // progress breaks the backoff, not the reported attempt count
+			slot.mu.Unlock()
+		}
 		if err != nil {
 			next := time.Until(slot.due()).Round(time.Second)
 			if note, stuck := capturePendingNote(err); stuck {

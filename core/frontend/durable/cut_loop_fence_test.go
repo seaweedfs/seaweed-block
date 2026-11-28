@@ -31,7 +31,7 @@ func TestChunkLoop_EndsWhenTheLayerIsFenced(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go p.chunkLoop(ctx, "v1", layer, done, nil)
+	go p.chunkLoop(ctx, "v1", layer, done, nil, nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for layer.cuts.Load() == 0 {
 		if time.Now().After(deadline) {

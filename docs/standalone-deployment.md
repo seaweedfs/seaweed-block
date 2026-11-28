@@ -685,6 +685,28 @@ Check the data afterwards. `--depth data` reads every chunk once.
 sw-block ops chunk verify --volume v1 --chunk-filer FILER --all-snapshots --depth data --timeout 30m
 ```
 
+### Cut retries and cleaning after a dirty start
+
+Automatic cuts and scheduled snapshots retry at the next scheduling opportunity
+when a failed attempt finished staging new chunks. An attempt with no new staging
+keeps the ordinary doubling backoff. The per-attempt deadline is unchanged; retry
+progress is in-process, and a restart recovers objects by their content names.
+
+When the layer starts dirty, its first cleaning pass waits for the first cut
+attempt that reached the store (periodic, scheduled or requested) to return, or for one
+maintenance interval from startup, whichever comes first. This also applies when
+periodic cuts are disabled; it does not enable them. Refused cuts do not end this
+wait because they did not reach the store. Clean starts are unchanged. After three consecutive failed background
+attempts without staging progress, the holder drops its reusable staging session
+and kicks cleaning. Capture refusals, restoring-snapshot skips and host-slot refusals do not count:
+no store attempt ran. Progress or a successful cut resets the count. K counts
+attempts, not elapsed time: the first two zero-progress waits are 1 and 2 seconds
+for automatic cuts, or 1 and 2 minutes for scheduled snapshots, plus the time spent
+in each attempt. Discard permits cleaning to remove unreferenced uploads; the next
+cut reuses only content-named chunks that cleaning left behind. A running cut,
+a newer completed cut or staging counter, and an unresolved commit prevent that
+discard. The kernel's session exclusion and conditional removal remain authoritative.
+
 ### SeaweedFS maintenance commands that destroy chunk volumes
 
 A walstore-chunk volume keeps its data in SeaweedFS as needles that **no file's chunk list names**: the volume's

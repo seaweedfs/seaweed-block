@@ -43,7 +43,7 @@ func TestMaintenanceRejectsForeignLineageBeforeAdmission(t *testing.T) {
 			p.cfg.ChunkMaintenance = func(context.Context, string) error { calls++; return nil }
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			p.chunkMaintenanceLoop(ctx, "v1", layer, func() bool { return p.maintenanceCurrent("v1", h, layer, lin) }, nil)
+			p.chunkMaintenanceLoop(ctx, "v1", layer, func() bool { return p.maintenanceCurrent("v1", h, layer, lin) }, nil, nil)
 			if calls != 0 {
 				t.Fatalf("foreign attachment admitted %d passes", calls)
 			}
@@ -117,7 +117,7 @@ func TestMaintenanceRefusalReachesTheLayer(t *testing.T) {
 	}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	go p.chunkMaintenanceLoop(ctx, "v1", layer, func() bool { return true }, nil)
+	go p.chunkMaintenanceLoop(ctx, "v1", layer, func() bool { return true }, nil, nil)
 	select {
 	case err := <-layer.seen:
 		if !errors.Is(err, storage.ErrChunkLayerFenced) {
