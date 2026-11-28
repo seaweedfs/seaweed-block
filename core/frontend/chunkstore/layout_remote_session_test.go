@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/chunkstore/layout"
@@ -114,12 +115,16 @@ func TestLayoutRemote_AbortedSessionEndsAtTheNextCleaningTick(t *testing.T) {
 // refuses as not prepared (uploads of an ended session).
 type countingRemote struct {
 	*LayoutRemote
+	// mu guards the counts: the chunk layer calls Put from parallel upload
+	// workers.
+	mu                sync.Mutex
 	puts, notPrepared int
 	again             []string // keys uploaded more than once
 	seen              map[string]bool
 }
 
 func (c *countingRemote) Put(ctx context.Context, key string, data []byte) error {
+	c.mu.Lock()
 	c.puts++
 	if c.seen == nil {
 		c.seen = map[string]bool{}
@@ -128,13 +133,23 @@ func (c *countingRemote) Put(ctx context.Context, key string, data []byte) error
 		c.again = append(c.again, key)
 	}
 	c.seen[key] = true
+	c.mu.Unlock()
 	return c.LayoutRemote.Put(ctx, key, data)
+}
+
+// uploads is the number of Puts so far.
+func (c *countingRemote) uploads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.puts
 }
 
 func (c *countingRemote) CASHead(ctx context.Context, expected storage.ChunkHeadVersion, next storage.ChunkHead) (uint64, error) {
 	gen, err := c.LayoutRemote.CASHead(ctx, expected, next)
 	if errors.Is(err, layout.ErrNotPrepared) {
+		c.mu.Lock()
 		c.notPrepared++
+		c.mu.Unlock()
 	}
 	return gen, err
 }
@@ -161,7 +176,7 @@ func TestLayoutRemote_AdmissionRefusalKeepsTheSessionSoTheRetryConverges(t *test
 	refuse := true
 	l, err := storage.AttachChunkLayer(s, r, storage.ChunkLayerConfig{ChunkBlocks: lrChunkBlocks, Epoch: lh.me.Epoch, Holder: lh.me.Holder, FreshFromHead: true,
 		CaptureAllowed: func() error {
-			if refuse && r.puts > 0 { // refused after the uploads, before the commit
+			if refuse && r.uploads() > 0 { // refused after the uploads, before the commit
 				return errors.New("demoted")
 			}
 			return nil
