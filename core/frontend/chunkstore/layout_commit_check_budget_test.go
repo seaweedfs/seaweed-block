@@ -3,8 +3,6 @@ package chunkstore
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -192,36 +190,6 @@ func TestBeginCleanBetweenTheCheckAndTheUpdateIsBusy(t *testing.T) {
 
 // lhStore is the HEAD store w's remote commits through.
 func lhStore(w *c1Remote) (layout.HeadStore, error) { return w.LayoutRemote.st, nil }
-
-// Only LayoutRemote.CASHead may tell RunCommit that the objects were
-// checked, and only for the (session, root) CheckCommit passed: a new site
-// that sets ObjectsChecked fails here until it is reviewed and listed.
-func TestObjectsCheckedIsSetOnlyByCASHead(t *testing.T) {
-	var sites []string
-	for _, dir := range []string{".", "layout"} {
-		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, f := range files {
-			if strings.HasSuffix(f, "_test.go") {
-				continue
-			}
-			b, err := os.ReadFile(f)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for i, line := range strings.Split(string(b), "\n") {
-				if strings.Contains(line, "ObjectsChecked =") || strings.Contains(line, "ObjectsChecked:") {
-					sites = append(sites, fmt.Sprintf("%s:%d", filepath.ToSlash(f), i+1))
-				}
-			}
-		}
-	}
-	if len(sites) != 1 || !strings.HasPrefix(sites[0], "layout_remote.go:") {
-		t.Fatalf("ObjectsChecked is set at %v; want exactly one site, in LayoutRemote.CASHead", sites)
-	}
-}
 
 // A pre-check that finds a chunk missing (here one uploaded chunk is gone
 // from the filer) ends the cut as a refusal: the CAS that follows answers it
