@@ -1293,7 +1293,13 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 		}
 		casAtFreeze = countCAS()
 		if plain { // M5 PlainStop -> Quiesce: no live frontend, caller owns the bound.
+			// The settlement keeps a reserve inside that bound: a cut run to
+			// the caller's deadline would leave it no time to say what happened.
 			settleDeadline, _ = ctx.Deadline()
+			if !settleDeadline.IsZero() {
+				remaining := max(time.Duration(0), time.Until(settleDeadline))
+				timer = time.AfterFunc(remaining-min(plainSettleReserve, remaining/4), func() { cancel(context.DeadlineExceeded) })
+			}
 			return
 		}
 		operationStart := start
@@ -1427,7 +1433,7 @@ func (p *DurableProvider) detachVolume(ctx context.Context, volumeID string, pla
 	// fenced layer must never resume serving. The settlement keeps the rest
 	// of the freeze budget even when the caller's context is gone.
 	sctx, scancel := context.WithCancel(cutCtx)
-	if !plain { // Live detach retains its reserved settlement budget.
+	if !plain || !settleDeadline.IsZero() { // the reserved settlement budget
 		scancel()
 		sctx, scancel = context.WithDeadline(context.WithoutCancel(cutCtx), settleDeadline)
 	}
@@ -1559,6 +1565,10 @@ func (p *DurableProvider) retryUnknownDetach(volumeID string, h *volHandle, laye
 const (
 	defaultDetachFreezeTimeout = 20 * time.Second
 	detachFreezeTarget         = 5 * time.Second
+	// plainSettleReserve: a plain detach's settlement (a conditional abort
+	// and a HEAD read, each a 2 s HEAD operation), kept inside the caller's
+	// bound, at most a quarter of it.
+	plainSettleReserve = 4 * time.Second
 )
 
 // resumeAfterDetach undoes a detach that provably did not happen: the
