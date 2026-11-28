@@ -159,7 +159,7 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 		}
 		return existing, nil
 	}
-	if err := geometry.ValidateVolumeSize(spec.SizeBytes); err != nil {
+	if err := geometry.ValidateNewVolumeSize(spec.SizeBytes); err != nil {
 		return VolumeRecord{}, fmt.Errorf("%w: %w", ErrInvalidVolumeSpec, err)
 	}
 	if err := validateSpec(spec); err != nil {
